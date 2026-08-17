@@ -36,7 +36,7 @@ covered by test-only actions in US18: ING-013 (`TestSanitize_MTLSAndForwarded`),
 
 ---
 
-## US1 — [ ] Fail-fast config validation & overflow-safe size/bitrate parsing
+## US1 — [x] Fail-fast config validation & overflow-safe size/bitrate parsing
 
 **Why:** Several documented-critical config values pass `Validate()` today and then either panic the
 replica at runtime or silently break the whole service; the size/bitrate parsers wrap on overflow and
@@ -44,13 +44,13 @@ return a negative value with no error. `docs/ARCHITECTURE.md` §9 promises `Vali
 every cross-field invariant."
 
 **Acceptance criteria:**
-- [ ] `--ping-interval`, `--limit-request-timeout`, `--ban-poll`, `--cert-validity` each reject `≤ 0` in `Validate()` (OPS-001..004).
-- [ ] Every parsed byte-size limit and the bandwidth floor reject `0` / degenerate values (OPS-005).
-- [ ] `ParseByteSize`/`ParseBitrate` reject inputs whose multiplication overflows `int64` instead of returning a wrapped value (OPS-006).
-- [ ] All new rejections are covered by unit tests (added in US18).
+- [x] `--ping-interval`, `--limit-request-timeout`, `--ban-poll`, `--cert-validity` each reject `≤ 0` in `Validate()` (OPS-001..004).
+- [x] Every parsed byte-size limit and the bandwidth floor reject `0` / degenerate values (OPS-005).
+- [x] `ParseByteSize`/`ParseBitrate` reject inputs whose multiplication overflows `int64` instead of returning a wrapped value (OPS-006).
+- [x] All new rejections are covered by unit tests (added in US18).
 
-### Task 1.1 — [ ] Duration lower bounds in `Validate()`
-- [ ] **Action** — modify `internal/config/config.go`, in `Validate()`, add lower-bound checks (place the ping-interval check next to the existing `> 90s` upper bound; add the others beside the existing `RouteTTL`/`ConnectAuthTimeout`/`ShutdownGrace` block):
+### Task 1.1 — [x] Duration lower bounds in `Validate()`
+- [x] **Action** — modify `internal/config/config.go`, in `Validate()`, add lower-bound checks (place the ping-interval check next to the existing `> 90s` upper bound; add the others beside the existing `RouteTTL`/`ConnectAuthTimeout`/`ShutdownGrace` block):
 ```go
 if c.PingInterval <= 0 {
 	return fmt.Errorf("--ping-interval must be > 0, got %s", c.PingInterval)
@@ -65,10 +65,10 @@ if c.CertValidity <= 0 {
 	return fmt.Errorf("--cert-validity must be > 0, got %s", c.CertValidity)
 }
 ```
-- [ ] **DoD:** the four checks are present; the existing `PingInterval > 90s` and `LimitRequestTimeout >= 100s` upper bounds are unchanged.
+- [x] **DoD:** the four checks are present; the existing `PingInterval > 90s` and `LimitRequestTimeout >= 100s` upper bounds are unchanged.
 
-### Task 1.2 — [ ] Reject degenerate byte-size limits
-- [ ] **Action** — modify `internal/config/config.go`, in the size-parse loop in `Validate()`, require each parsed size `≥ 1`:
+### Task 1.2 — [x] Reject degenerate byte-size limits
+- [x] **Action** — modify `internal/config/config.go`, in the size-parse loop in `Validate()`, require each parsed size `≥ 1`:
 ```go
 for _, sz := range []struct {
 	name string
@@ -89,29 +89,29 @@ for _, sz := range []struct {
 	}
 }
 ```
-- [ ] **DoD:** `--limit-response 0`, `--limit-headers 0b`, etc. fail `Validate()`.
+- [x] **DoD:** `--limit-response 0`, `--limit-headers 0b`, etc. fail `Validate()`.
 
-### Task 1.3 — [ ] Overflow-safe parsers
-- [ ] **Action** — modify `internal/config/size.go`, `ParseByteSize`: before `return n * mult`, guard the multiply:
+### Task 1.3 — [x] Overflow-safe parsers
+- [x] **Action** — modify `internal/config/size.go`, `ParseByteSize`: before `return n * mult`, guard the multiply:
 ```go
 if mult > 1 && n > math.MaxInt64/mult {
 	return 0, fmt.Errorf("byte size %q overflows int64", s)
 }
 return n * mult, nil
 ```
-- [ ] **Action** — modify `internal/config/size.go`, `ParseBitrate`: before `return (n * bitsMult) / 8`, guard:
+- [x] **Action** — modify `internal/config/size.go`, `ParseBitrate`: before `return (n * bitsMult) / 8`, guard:
 ```go
 if bitsMult > 1 && n > math.MaxInt64/bitsMult {
 	return 0, fmt.Errorf("bitrate %q overflows int64", s)
 }
 return (n * bitsMult) / 8, nil
 ```
-- [ ] **Action** — add `"math"` to the `internal/config/size.go` import block.
-- [ ] **DoD:** an input like `9223372036854775807kb` returns an error (not a negative value); in-range values are unchanged.
+- [x] **Action** — add `"math"` to the `internal/config/size.go` import block.
+- [x] **DoD:** an input like `9223372036854775807kb` returns an error (not a negative value); in-range values are unchanged.
 
 ---
 
-## US2 — [ ] Trusted-IP normalization (IPv4-mapped IPv6 + IPv6 robustness)
+## US2 — [x] Trusted-IP normalization (IPv4-mapped IPv6 + IPv6 robustness)
 
 **Why:** `clientip.TrustedIP` is the ONLY derivation of the abuse-control IP. It does not normalize
 IPv4-mapped IPv6 (`::ffff:a.b.c.d`) or strip zones, so the same client can present two distinct forms
@@ -119,11 +119,11 @@ that bypass bans and split rate-limit counters (ING-005). Fixing it here (the si
 covers `ban.Match` and every `rl:` key derived from it.
 
 **Acceptance criteria:**
-- [ ] `TrustedIP` returns an `Unmap()`ed, zone-stripped `netip.Addr` (ING-005 lookup side).
-- [ ] The right-most-token, fail-closed semantics are otherwise unchanged.
+- [x] `TrustedIP` returns an `Unmap()`ed, zone-stripped `netip.Addr` (ING-005 lookup side).
+- [x] The right-most-token, fail-closed semantics are otherwise unchanged.
 
-### Task 2.1 — [ ] Unmap + de-zone in `TrustedIP`
-- [ ] **Action** — modify `internal/clientip/clientip.go`, `TrustedIP`: after a successful parse, normalize:
+### Task 2.1 — [x] Unmap + de-zone in `TrustedIP`
+- [x] **Action** — modify `internal/clientip/clientip.go`, `TrustedIP`: after a successful parse, normalize:
 ```go
 addr, err := netip.ParseAddr(last)
 if err != nil {
@@ -131,11 +131,11 @@ if err != nil {
 }
 return addr.Unmap().WithZone(""), true
 ```
-- [ ] **DoD:** `::ffff:9.9.9.9` and `9.9.9.9` yield the identical `netip.Addr`; a zoned literal loses its zone.
+- [x] **DoD:** `::ffff:9.9.9.9` and `9.9.9.9` yield the identical `netip.Addr`; a zoned literal loses its zone.
 
 ---
 
-## US3 — [ ] Ban engine & watcher correctness
+## US3 — [x] Ban engine & watcher correctness
 
 **Why:** The ban engine (the ONLY revocation mechanism) has five defects that make it silently
 stale/open: mapped-IPv6 entries never match (ING-005 insert side); the watcher tracks only the max
@@ -145,15 +145,15 @@ country expansion (ING-008); a present-but-unreadable CSV silently drops all cou
 snapshot (ING-009); and `ParseLine` silently accepts extra tokens (ING-010).
 
 **Acceptance criteria:**
-- [ ] `ip`/`cidr` entries are `Unmap()`ed at insert so mapped-form entries match unmapped lookups (ING-005).
-- [ ] The watcher reloads on ANY per-file change including deletion and equal/older mtime replacement (ING-002).
-- [ ] A failed load is retried on the next tick (mtime not consumed on failure) (ING-003).
-- [ ] A malformed CSV row is skipped, not fatal to the whole expansion (ING-008).
-- [ ] A present CSV that yields ZERO parseable rows (corrupt/empty) is a HARD load error that keeps the previous snapshot; a valid CSV whose wanted country code is simply absent stays legal (empty result, no error); an ABSENT CSV still skip-and-warns (ING-009).
-- [ ] A ban line with extra tokens is rejected (warn-and-skip), not silently truncated (ING-010).
+- [x] `ip`/`cidr` entries are `Unmap()`ed at insert so mapped-form entries match unmapped lookups (ING-005).
+- [x] The watcher reloads on ANY per-file change including deletion and equal/older mtime replacement (ING-002).
+- [x] A failed load is retried on the next tick (mtime not consumed on failure) (ING-003).
+- [x] A malformed CSV row is skipped, not fatal to the whole expansion (ING-008).
+- [x] A present CSV that yields ZERO parseable rows (corrupt/empty) is a HARD load error that keeps the previous snapshot; a valid CSV whose wanted country code is simply absent stays legal (empty result, no error); an ABSENT CSV still skip-and-warns (ING-009).
+- [x] A ban line with extra tokens is rejected (warn-and-skip), not silently truncated (ING-010).
 
-### Task 3.1 — [ ] Unmap ip/cidr at insert
-- [ ] **Action** — modify `internal/ban/parse.go`, in `parseFile` `case "ip"`: `addr = addr.Unmap()` before building the prefix:
+### Task 3.1 — [x] Unmap ip/cidr at insert
+- [x] **Action** — modify `internal/ban/parse.go`, in `parseFile` `case "ip"`: `addr = addr.Unmap()` before building the prefix:
 ```go
 addr, e := netip.ParseAddr(value)
 if e != nil {
@@ -164,7 +164,7 @@ addr = addr.Unmap()
 src.Reason, src.Detail = ReasonIP, value
 p.prefixes = append(p.prefixes, prefixSource{netip.PrefixFrom(addr, addr.BitLen()), src})
 ```
-- [ ] **Action** — modify `internal/ban/parse.go`, `case "cidr"`: unmap the prefix address when it is 4-in-6:
+- [x] **Action** — modify `internal/ban/parse.go`, `case "cidr"`: unmap the prefix address when it is 4-in-6:
 ```go
 pfx, e := netip.ParsePrefix(value)
 if e != nil {
@@ -177,21 +177,21 @@ if a := pfx.Addr(); a.Is4In6() {
 src.Reason, src.Detail = ReasonCIDR, value
 p.prefixes = append(p.prefixes, prefixSource{pfx.Masked(), src})
 ```
-- [ ] **DoD:** a ban `ip ::ffff:9.9.9.9` matches a lookup of `9.9.9.9` and vice-versa.
+- [x] **DoD:** a ban `ip ::ffff:9.9.9.9` matches a lookup of `9.9.9.9` and vice-versa.
 
-### Task 3.2 — [ ] Reject extra tokens in `ParseLine`
-- [ ] **Action** — modify `internal/ban/parse.go`, `ParseLine`: after comment-stripping and `strings.Fields`, reject `len(fields) != 2`:
+### Task 3.2 — [x] Reject extra tokens in `ParseLine`
+- [x] **Action** — modify `internal/ban/parse.go`, `ParseLine`: after comment-stripping and `strings.Fields`, reject `len(fields) != 2`:
 ```go
 fields := strings.Fields(line)
 if len(fields) != 2 {
 	return "", "", fmt.Errorf("malformed ban line %q (want exactly '<kind> <value>')", line)
 }
 ```
-- [ ] **Action** — modify `internal/ban/parse.go`, the `ParseLine` doc comment: state that a line with anything other than exactly `<kind> <value>` — INCLUDING extra tokens — yields a non-nil error (the caller warns-and-skips).
-- [ ] **DoD:** `country XX YY` is warned-and-skipped (not silently reduced to `XX`); the `ParseLine` doc comment matches the new behavior.
+- [x] **Action** — modify `internal/ban/parse.go`, the `ParseLine` doc comment: state that a line with anything other than exactly `<kind> <value>` — INCLUDING extra tokens — yields a non-nil error (the caller warns-and-skips).
+- [x] **DoD:** `country XX YY` is warned-and-skipped (not silently reduced to `XX`); the `ParseLine` doc comment matches the new behavior.
 
-### Task 3.3 — [ ] Per-file fingerprint watcher (detect any change incl. deletion)
-- [ ] **Action** — modify `internal/ban/watch.go`: replace the single `last time.Time` and `maxMtime` with a per-path fingerprint map, reloading when ANY path's `(mtime, size, exists)` differs, and advancing the recorded fingerprint ONLY on a successful load.
+### Task 3.3 — [x] Per-file fingerprint watcher (detect any change incl. deletion)
+- [x] **Action** — modify `internal/ban/watch.go`: replace the single `last time.Time` and `maxMtime` with a per-path fingerprint map, reloading when ANY path's `(mtime, size, exists)` differs, and advancing the recorded fingerprint ONLY on a successful load.
 ```go
 type fileState struct {
 	exists  bool
@@ -270,13 +270,13 @@ func sameStates(a, b map[string]fileState) bool {
 	return true
 }
 ```
-- [ ] **Action** — update the `Watch` constructor call to initialise `last` as `nil` (so the first `tick` after a failed `initial` still fires): `w := &watcher{e: e, files: files, csv: csvPath, onReload: onReload, log: log}` (leave `last` zero/nil).
-- [ ] **Action** — delete the now-unused `maxMtime` function.
-- [ ] **Action** — modify `internal/ban/watch.go`, the `Watch` function doc comment: rewrite it to state it polls a per-path `(exists, mtime, size)` fingerprint every `poll` and reloads on ANY change — including deletion and equal/older-mtime replacement — dropping the stale "max mtime" wording.
-- [ ] **DoD:** deleting a ban file, or replacing one with an equal/older mtime, triggers a reload on the next tick; a failed load retries until it succeeds.
+- [x] **Action** — update the `Watch` constructor call to initialise `last` as `nil` (so the first `tick` after a failed `initial` still fires): `w := &watcher{e: e, files: files, csv: csvPath, onReload: onReload, log: log}` (leave `last` zero/nil).
+- [x] **Action** — delete the now-unused `maxMtime` function.
+- [x] **Action** — modify `internal/ban/watch.go`, the `Watch` function doc comment: rewrite it to state it polls a per-path `(exists, mtime, size)` fingerprint every `poll` and reloads on ANY change — including deletion and equal/older-mtime replacement — dropping the stale "max mtime" wording.
+- [x] **DoD:** deleting a ban file, or replacing one with an equal/older mtime, triggers a reload on the next tick; a failed load retries until it succeeds.
 
-### Task 3.4 — [ ] CSV row-skip + present-CSV-failure is fail-closed
-- [ ] **Action** — modify `internal/ban/dbip.go`, `ExpandCountries`: tolerate a malformed row instead of aborting the whole file (ING-008), AND treat a present-but-garbage CSV (zero parseable rows) as an error so the caller keeps the previous snapshot (ING-009). Set `r.FieldsPerRecord = -1`, skip bad/short rows, count validly-parsed rows, and error when none parsed. Parse the addresses BEFORE the wanted-code check so `validRows` counts every parseable row (this is what distinguishes "valid CSV, wanted code absent" — `validRows>0`, empty result, no error — from "garbage CSV" — `validRows==0`, error):
+### Task 3.4 — [x] CSV row-skip + present-CSV-failure is fail-closed
+- [x] **Action** — modify `internal/ban/dbip.go`, `ExpandCountries`: tolerate a malformed row instead of aborting the whole file (ING-008), AND treat a present-but-garbage CSV (zero parseable rows) as an error so the caller keeps the previous snapshot (ING-009). Set `r.FieldsPerRecord = -1`, skip bad/short rows, count validly-parsed rows, and error when none parsed. Parse the addresses BEFORE the wanted-code check so `validRows` counts every parseable row (this is what distinguishes "valid CSV, wanted code absent" — `validRows>0`, empty result, no error — from "garbage CSV" — `validRows==0`, error):
 ```go
 r := csv.NewReader(f)
 r.FieldsPerRecord = -1 // tolerate stray rows; validate width per-row below
@@ -316,7 +316,7 @@ if validRows == 0 {
 return out, nil
 ```
 Add `"fmt"` to the `internal/ban/dbip.go` import block.
-- [ ] **Action** — modify `internal/ban/engine.go`, `Load`: distinguish an ABSENT CSV (skip-and-warn, first deploy) from a PRESENT-but-unreadable CSV (HARD error → keep previous snapshot). Replace the `ExpandCountries` error branch:
+- [x] **Action** — modify `internal/ban/engine.go`, `Load`: distinguish an ABSENT CSV (skip-and-warn, first deploy) from a PRESENT-but-unreadable CSV (HARD error → keep previous snapshot). Replace the `ExpandCountries` error branch:
 ```go
 if len(wanted) > 0 {
 	prefixes, err := ExpandCountries(csvPath, wanted)
@@ -335,10 +335,10 @@ if len(wanted) > 0 {
 	}
 }
 ```
-- [ ] **Action** — confirm `internal/ban/engine.go` imports `io/fs` (already imported) and `errors` (already imported).
-- [ ] **Action** — modify `internal/ban/engine.go`, the `Load` doc comment: rewrite it to state — absent files/CSV skip-and-warn; a PRESENT CSV that yields zero parseable rows returns an error and keeps the previous snapshot; a valid CSV whose wanted country code is absent is legal (empty result, no error). (Removes the now-inaccurate "a missing/unreadable CSV skips only the country entries" wording.)
-- [ ] **Action** — modify `internal/ban/dbip.go`, the `ExpandCountries` doc comment: rewrite it to state it returns an error when `csvPath == ""`, the file is unreadable, OR it yields zero parseable rows (corrupt/empty); the caller keeps the previous snapshot on the present-but-unusable case and skip-and-warns ONLY when the CSV is absent. (Removes the now-inaccurate "the caller then warns and skips country entries" wording.)
-- [ ] **DoD:** one bad CSV row no longer drops all country bans; a present CSV with zero parseable rows keeps the previous snapshot; an absent CSV still skip-and-warns; the `Load`/`ExpandCountries` doc comments match the new behavior.
+- [x] **Action** — confirm `internal/ban/engine.go` imports `io/fs` (already imported) and `errors` (already imported).
+- [x] **Action** — modify `internal/ban/engine.go`, the `Load` doc comment: rewrite it to state — absent files/CSV skip-and-warn; a PRESENT CSV that yields zero parseable rows returns an error and keeps the previous snapshot; a valid CSV whose wanted country code is absent is legal (empty result, no error). (Removes the now-inaccurate "a missing/unreadable CSV skips only the country entries" wording.)
+- [x] **Action** — modify `internal/ban/dbip.go`, the `ExpandCountries` doc comment: rewrite it to state it returns an error when `csvPath == ""`, the file is unreadable, OR it yields zero parseable rows (corrupt/empty); the caller keeps the previous snapshot on the present-but-unusable case and skip-and-warns ONLY when the CSV is absent. (Removes the now-inaccurate "the caller then warns and skips country entries" wording.)
+- [x] **DoD:** one bad CSV row no longer drops all country bans; a present CSV with zero parseable rows keeps the previous snapshot; an absent CSV still skip-and-warns; the `Load`/`ExpandCountries` doc comments match the new behavior.
 
 ---
 
