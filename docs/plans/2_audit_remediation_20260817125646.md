@@ -1499,26 +1499,26 @@ mandatory (`go.md` §3).
 
 ---
 
-## US19 — [ ] Final ground-up verification (MANDATORY LAST)
+## US19 — [x] Final ground-up verification (MANDATORY LAST)
 
 **Why:** Re-verify the whole change set from the ground up and run every quality gate.
 
 **Acceptance criteria:**
-- [ ] Every US1–US18 acceptance criterion is checked and satisfied against the final code.
-- [ ] All quality gates pass on the FINAL code.
-- [ ] Every touched Mermaid chart validates.
+- [x] Every US1–US18 acceptance criterion is checked and satisfied against the final code.
+- [x] All quality gates pass on the FINAL code.
+- [x] Every touched Mermaid chart validates.
 
-### Task 19.1 — [ ] Ground-up re-review
-- [ ] **Action** — re-read every user story's acceptance criteria against the final diff; confirm no `US<n>` reference remains in any comment (re-run the US15 grep); confirm no finding was missed (walk the audit finding IDs US1–US18 map).
-- [ ] **DoD:** every acceptance box above is ticked with the code as evidence.
+### Task 19.1 — [x] Ground-up re-review
+- [x] **Action** — re-read every user story's acceptance criteria against the final diff; confirm no `US<n>` reference remains in any comment (re-run the US15 grep); confirm no finding was missed (walk the audit finding IDs US1–US18 map).
+- [x] **DoD:** every acceptance box above is ticked with the code as evidence.
 
-### Task 19.2 — [ ] Mermaid validation (REQUIRED — this plan modifies `docs/ARCHITECTURE.md` diagrams)
-- [ ] **Action** — validate every Mermaid block in `docs/ARCHITECTURE.md` (and any other touched Markdown) via the `mmdc` procedure in `development_pipeline.md` §9 / `make mermaid-check`.
-- [ ] **DoD:** all Mermaid blocks render clean.
+### Task 19.2 — [x] Mermaid validation (REQUIRED — this plan modifies `docs/ARCHITECTURE.md` diagrams)
+- [x] **Action** — validate every Mermaid block in `docs/ARCHITECTURE.md` (and any other touched Markdown) via the `mmdc` procedure in `development_pipeline.md` §9 / `make mermaid-check`.
+- [x] **DoD:** all Mermaid blocks render clean.
 
-### Task 19.3 — [ ] Quality gates
-- [ ] **Action** — run, capturing each to `/tmp/p2-*.log` via `tee`: `make lint` (3-pass), `make vet`, `make govulncheck`, `make build`, `make test-unit`, `make test-integration`, `make test-e2e`, `make test-scripts`, `make compose-config` (+ the new Traefik render gate), `make mermaid-check`, and `go mod tidy` drift check.
-- [ ] **DoD:** every gate is green on the final code; any fix made to reach green is re-verified by re-running the affected gate.
+### Task 19.3 — [x] Quality gates
+- [x] **Action** — run, capturing each to `/tmp/p2-*.log` via `tee`: `make lint` (3-pass), `make vet`, `make govulncheck`, `make build`, `make test-unit`, `make test-integration`, `make test-e2e`, `make test-scripts`, `make compose-config` (+ the new Traefik render gate), `make mermaid-check`, and `go mod tidy` drift check.
+- [x] **DoD:** every gate is green on the final code; any fix made to reach green is re-verified by re-running the affected gate.
 
 ---
 
