@@ -1,3 +1,8 @@
+//go:build integration
+
+// The tests below boot the REAL assembled server (server.Run: public + internal listeners, node
+// pub/sub loop, ban watcher) on real TCP ports against miniredis and drive it end to end with the
+// tunneltest.FakePhone — integration tier, not unit.
 package server
 
 import (
