@@ -31,9 +31,8 @@ services:
 
   # TWO EXPLICIT replicas via a shared anchor — NOT `deploy: replicas`: Traefik's file-provider
   # service needs one URL per backend (a single `tunneld:8080` URL would pin pooled connections to
-  # one replica — the same multi-A-record ambiguity the Prometheus dns_sd comment calls out), and
-  # explicit names make LB + scraping deterministic. To scale: copy the block, add the URL in
-  # dynamic.yml and the name in prometheus.yml.
+  # one replica), and explicit names make LB + scraping deterministic. To scale: copy the block, add
+  # the URL in dynamic.yml and the target in prometheus.yml.
   tunneld-1: &tunneld
     build: { context: .., args: { VERSION: "${TUNNELD_VERSION:-dev}" } }
     image: tunneld:local
@@ -72,7 +71,7 @@ services:
     logging: *caplog
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.13.2
     restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -81,14 +80,14 @@ services:
     logging: *caplog
 
   alertmanager:
-    image: prom/alertmanager:latest
+    image: prom/alertmanager:v0.34.0
     restart: unless-stopped
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
     logging: *caplog
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.0.6
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
@@ -99,7 +98,7 @@ services:
     logging: *caplog
 
   ntfy:
-    image: binwiederhier/ntfy:latest
+    image: binwiederhier/ntfy:v2.27.0
     restart: unless-stopped
     command: ["serve"]
     environment:
@@ -110,7 +109,7 @@ services:
     logging: *caplog
 
   ntfy-alertmanager:
-    image: xenrox/ntfy-alertmanager:latest
+    image: xenrox/ntfy-alertmanager:1.0.0
     restart: unless-stopped
     volumes:
       - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config.scfg:ro   # the image's default config search path — a bare `/config` target would NOT be discovered
