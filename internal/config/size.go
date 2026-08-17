@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -36,6 +37,9 @@ func ParseByteSize(s string) (int64, error) {
 	if n < 0 {
 		return 0, fmt.Errorf("negative byte size %q", s)
 	}
+	if mult > 1 && n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("byte size %q overflows int64", s)
+	}
 	return n * mult, nil
 }
 
@@ -68,6 +72,9 @@ func ParseBitrate(s string) (int64, error) {
 	}
 	if n < 0 {
 		return 0, fmt.Errorf("negative bitrate %q", s)
+	}
+	if bitsMult > 1 && n > math.MaxInt64/bitsMult {
+		return 0, fmt.Errorf("bitrate %q overflows int64", s)
 	}
 	return (n * bitsMult) / 8, nil
 }
