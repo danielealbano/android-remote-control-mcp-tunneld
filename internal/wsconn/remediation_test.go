@@ -97,13 +97,24 @@ func TestMidSendDeadlineIs504(t *testing.T) {
 }
 
 func TestOversizedChunkTearsDown(t *testing.T) {
-	h := newHarness(t, wire.ChunkSize, nil) // burst = 32 KiB
+	// A below-ChunkSize burst so a normal-sized response chunk exceeds the burst — the reachable
+	// ErrBurstExceeded case (a phone at the bandwidth floor sending a max-size frame).
+	h := newHarness(t, 64, nil) // burst = 64 bytes
 	p := h.rawPhoneConnect(tName)
 	go func() { _ = h.mgr.RouteLocal(context.Background(), routeReq(tName, "r1", "GET", "/mcp", nil)) }()
 	reqid, _ := p.drainRequest()
+	// Keep draining reads so the server's teardown close-handshake completes (a real client's read
+	// loop always does this; without it p.ws.Read is idle and c.ws.Close blocks).
+	go func() {
+		for {
+			if _, _, err := p.ws.Read(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
 	p.write(wire.RESPONSE_HEAD, wire.EncodeRespHeader(reqid, 200, nil), nil)
-	// A body chunk larger than the burst (but within the WS read limit) → ErrBurstExceeded → teardown.
-	p.write(wire.RESPONSE_BODY_CHUNK, wire.EncodeReqIDHeader(reqid), bytes.Repeat([]byte("Y"), wire.ChunkSize+40*1024))
+	// A 128-byte body chunk exceeds the 64-byte burst → ErrBurstExceeded → teardown.
+	p.write(wire.RESPONSE_BODY_CHUNK, wire.EncodeReqIDHeader(reqid), bytes.Repeat([]byte("Y"), 128))
 	waitRec(t, h.rec, "wsdisconnect", "oversized_frame", 1)
 }
 
