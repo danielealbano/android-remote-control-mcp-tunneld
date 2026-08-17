@@ -25,7 +25,7 @@ func setup(t *testing.T) (*Metrics, *PromRecorder, *admin.Store, *miniredis.Mini
 	t.Cleanup(func() { _ = rdb.Close() })
 	m := NewMetrics()
 	store := admin.NewStore(rdb, time.Hour)
-	rec := NewPromRecorder(m, caplog.New(discardLog()), store)
+	rec := NewPromRecorder(m, caplog.New(discardLog()), store, discardLog())
 	return m, rec, store, mr, rdb
 }
 
