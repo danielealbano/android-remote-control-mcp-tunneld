@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 )
@@ -39,7 +40,7 @@ func NewMux(cfg config.ServeCmd, manager connectHandler, ingressHandler, enrollH
 
 func hostOnly(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
+		host = h
 	}
-	return host
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
