@@ -110,25 +110,41 @@ func enrollThroughTraefik(t *testing.T, traefikURL string) (*x509.Certificate, *
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	req, _ := http.NewRequest("POST", traefikURL+"/enroll", bytes.NewReader(csrPEM))
-	req.Host = "enroll.example.test"
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	// Traefik's file provider loads dynamic.yml asynchronously AFTER its :80 listener is up, so an
+	// early request can reach Traefik before the router exists and get Traefik's own "404 page not
+	// found". Retry until the route is live and tunneld's enroll handler answers.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		req, _ := http.NewRequest("POST", traefikURL+"/enroll", bytes.NewReader(csrPEM))
+		req.Host = "enroll.example.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("enroll via traefik: %v", err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusNotFound && time.Now().Before(deadline) {
+			_ = resp.Body.Close()
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("enroll via traefik %d: body=%q", resp.StatusCode, b)
+		}
+		var out struct {
+			Name           string `json:"name"`
+			CertificatePEM string `json:"certificate_pem"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		block, _ := pem.Decode([]byte(out.CertificatePEM))
+		cert, _ := x509.ParseCertificate(block.Bytes)
+		return cert, key, out.Name
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("enroll via traefik %d: %s", resp.StatusCode, b)
-	}
-	var out struct {
-		Name           string `json:"name"`
-		CertificatePEM string `json:"certificate_pem"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	block, _ := pem.Decode([]byte(out.CertificatePEM))
-	cert, _ := x509.ParseCertificate(block.Bytes)
-	return cert, key, out.Name
 }
 
 // reqNoIP sends a request WITHOUT a client-injected X-Real-Ip — the edge (Traefik) must set it.
@@ -247,7 +263,7 @@ func TestRateLimit429(t *testing.T) {
 	defer cancel()
 	// Fire a CONCURRENT burst so many requests land in one RPS window regardless of runner speed
 	// (a sequential loop could straddle window boundaries on a slow runner).
-	var got429, missingRetry atomic.Bool
+	var got429, sawRetry atomic.Bool
 	var wg sync.WaitGroup
 	for i := 0; i < 40; i++ {
 		wg.Add(1)
@@ -262,8 +278,8 @@ func TestRateLimit429(t *testing.T) {
 			}
 			if resp.StatusCode == http.StatusTooManyRequests {
 				got429.Store(true)
-				if resp.Header.Get("Retry-After") == "" {
-					missingRetry.Store(true)
+				if resp.Header.Get("Retry-After") != "" { // rate-limit 429s carry it (concurrency 429s don't)
+					sawRetry.Store(true)
 				}
 			}
 			_ = resp.Body.Close()
@@ -273,8 +289,8 @@ func TestRateLimit429(t *testing.T) {
 	if !got429.Load() {
 		t.Error("rate limit never tripped under a concurrent burst of 40")
 	}
-	if missingRetry.Load() {
-		t.Error("a 429 was missing the Retry-After header")
+	if !sawRetry.Load() {
+		t.Error("no rate-limit 429 carried a Retry-After header")
 	}
 }
 
