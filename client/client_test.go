@@ -1,3 +1,7 @@
+//go:build integration
+
+// The tests below boot the REAL assembled server (server.Run) on real TCP ports against miniredis
+// and drive the full enroll → connect → bridge loop with this client — integration tier, not unit.
 package client
 
 import (
