@@ -10,7 +10,7 @@ import (
 
 // acquireScript atomically INCRs conc:{name}; if the result exceeds max it DECRs back and denies;
 // otherwise it sets the safety TTL and admits. Single Lua so a crash can never leave an un-TTL'd
-// counter (matches window.go and the "every Redis key has a TTL" invariant, US16.3).
+// counter (matches window.go and the "every Redis key has a TTL" invariant, docs/ARCHITECTURE.md §5).
 var acquireScript = redis.NewScript(`
 local c = redis.call('INCR', KEYS[1])
 if c > tonumber(ARGV[1]) then

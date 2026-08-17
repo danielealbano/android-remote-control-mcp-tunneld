@@ -1,12 +1,12 @@
-// Package observ defines a dependency-free observability interface so the ingress (US7), enroll
-// (US8), and wsconn (US6) rejection/serve sites can record metrics + cap-hit logs WITHOUT importing
-// the Prometheus/caplog implementations (built in US9). US9's PromRecorder is the concrete
-// implementation; US10 injects it.
+// Package observ defines a dependency-free observability interface so the ingress, enroll, and wsconn
+// rejection/serve sites can record metrics + cap-hit logs WITHOUT importing the Prometheus/caplog
+// implementations. metrics.PromRecorder is the concrete implementation, injected in server.Run
+// (docs/ARCHITECTURE.md §7).
 package observ
 
 import "time"
 
-// Recorder captures metric + cap-hit events. The concrete PromRecorder (US9) both updates the
+// Recorder captures metric + cap-hit events. The concrete PromRecorder both updates the
 // (per-tunnel-label-free) Prometheus families AND writes the per-tunnel tcnt:{name} Redis counters
 // that back /admin/tunnels — hence Request/Bytes carry tunnelName, which the callers already know.
 type Recorder interface {

@@ -122,7 +122,7 @@ services:
     command: ["/bin/sh", "/opt/fetcher/command.sh"]
     volumes:
       - ./fetcher/command.sh:/opt/fetcher/command.sh:ro
-      - ./scripts:/scripts:ro           # US12 droplist/DB-IP scripts (tunneld/deploy/scripts/)
+      - ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md §4)
       - banfiles:/banfiles
     logging: *caplog
 

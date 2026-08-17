@@ -1,6 +1,5 @@
 // Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the raw
-// coder/websocket FakePhone (US6.4). Authored here because US5's transport tests are the first
-// consumer; reused by US6/US7/US8/US9/US10.
+// coder/websocket FakePhone, reused across the transport, ingress, and wsconn test suites.
 package tunneltest
 
 import (

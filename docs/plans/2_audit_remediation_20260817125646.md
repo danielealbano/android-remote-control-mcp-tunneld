@@ -342,7 +342,7 @@ if len(wanted) > 0 {
 
 ---
 
-## US4 — [ ] Bandwidth-bucket lifecycle & bounded cap-hit accounting
+## US4 — [x] Bandwidth-bucket lifecycle & bounded cap-hit accounting
 
 **Why:** The bucket registry evicts a connected-but-quiet tunnel's entry after the idle window; the
 live `Conn` keeps the old pointers while ingress mints a fresh pair, so uploads can drain two budgets
@@ -350,11 +350,11 @@ live `Conn` keeps the old pointers while ingress mints a fresh pair, so uploads 
 per-key distinct-IP set grows unbounded within a window under a distributed flood (ING-011).
 
 **Acceptance criteria:**
-- [ ] A live WS connection's bucket pair is never evicted while the connection is held (ING-001).
-- [ ] caplog's per-key IP set is bounded; overflow is reported as a capped count (ING-011).
+- [x] A live WS connection's bucket pair is never evicted while the connection is held (ING-001).
+- [x] caplog's per-key IP set is bounded; overflow is reported as a capped count (ING-011).
 
-### Task 4.1 — [ ] Pin buckets for the lifetime of a connection
-- [ ] **Action** — modify `internal/limit/registry.go`: add a pin refcount to `bucketEntry` and skip eviction of pinned entries; add `Pin`/`Unpin`.
+### Task 4.1 — [x] Pin buckets for the lifetime of a connection
+- [x] **Action** — modify `internal/limit/registry.go`: add a pin refcount to `bucketEntry` and skip eviction of pinned entries; add `Pin`/`Unpin`.
 ```go
 type bucketEntry struct {
 	up, down   *TokenBucket
@@ -410,13 +410,13 @@ func (r *BucketRegistry) ensure(name string) *bucketEntry {
 	return e
 }
 ```
-- [ ] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: replace `up, down := m.buckets.Pair(name)` with `up, down := m.buckets.Pin(name)`.
-- [ ] **Action** — modify `internal/wsconn/conn.go`, `teardown` (inside the `closeOnce.Do`): after `c.cancel()`, add `c.mgr.buckets.Unpin(c.name)`.
-- [ ] **DoD:** a connection idle >10 min keeps its bucket pair; ingress and the WS leg resolve the SAME pair for that name throughout.
+- [x] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: replace `up, down := m.buckets.Pair(name)` with `up, down := m.buckets.Pin(name)`.
+- [x] **Action** — modify `internal/wsconn/conn.go`, `teardown` (inside the `closeOnce.Do`): after `c.cancel()`, add `c.mgr.buckets.Unpin(c.name)`.
+- [x] **DoD:** a connection idle >10 min keeps its bucket pair; ingress and the WS leg resolve the SAME pair for that name throughout.
 
-### Task 4.2 — [ ] Bound caplog's per-key IP set
-- [ ] **Action** — modify `internal/caplog/caplog.go`: cap the distinct-IP set per `(tunnel, reason)` key at a constant (e.g. `maxTrackedIPs = 1024`); once reached, stop inserting and mark the entry so the summary reports `ips=<cap>+`. Add a `const maxTrackedIPs = 1024`; where the code does `ips[clientIP] = struct{}{}`, guard with `if len(ips) < maxTrackedIPs { ips[clientIP] = struct{}{} } else { entry.ipsCapped = true }`; where it formats `len(ips)`, append `"+"` when `ipsCapped` (add `"strconv"` to the `internal/caplog/caplog.go` imports for formatting `<cap>+`).
-- [ ] **DoD:** a flood from >1024 distinct IPs allocates at most `maxTrackedIPs` map entries per key per window; the summary line reports the capped count.
+### Task 4.2 — [x] Bound caplog's per-key IP set
+- [x] **Action** — modify `internal/caplog/caplog.go`: cap the distinct-IP set per `(tunnel, reason)` key at a constant (e.g. `maxTrackedIPs = 1024`); once reached, stop inserting and mark the entry so the summary reports `ips=<cap>+`. Add a `const maxTrackedIPs = 1024`; where the code does `ips[clientIP] = struct{}{}`, guard with `if len(ips) < maxTrackedIPs { ips[clientIP] = struct{}{} } else { entry.ipsCapped = true }`; where it formats `len(ips)`, append `"+"` when `ipsCapped` (add `"strconv"` to the `internal/caplog/caplog.go` imports for formatting `<cap>+`).
+- [x] **DoD:** a flood from >1024 distinct IPs allocates at most `maxTrackedIPs` map entries per key per window; the summary line reports the capped count.
 
 ---
 
@@ -622,17 +622,17 @@ case res := <-ch:
 
 ---
 
-## US7 — [ ] Host-dispatch normalization in the mux
+## US7 — [x] Host-dispatch normalization in the mux
 
 **Why:** `server.NewMux` compares the enroll host case-sensitively and does not strip a trailing dot,
 unlike the two sibling parsers on the same path (`ingress.firstLabel`, `wsconn.hostLabel`) — a valid
 `Host: Enroll.example.test` or `enroll.example.test.` is mis-dispatched (OPS-007).
 
 **Acceptance criteria:**
-- [ ] `hostOnly` strips the trailing dot and folds case, matching the sibling parsers (OPS-007).
+- [x] `hostOnly` strips the trailing dot and folds case, matching the sibling parsers (OPS-007).
 
-### Task 7.1 — [ ] Normalise `hostOnly`
-- [ ] **Action** — modify `internal/server/routes.go`, `hostOnly`:
+### Task 7.1 — [x] Normalise `hostOnly`
+- [x] **Action** — modify `internal/server/routes.go`, `hostOnly`:
 ```go
 func hostOnly(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -641,12 +641,12 @@ func hostOnly(host string) string {
 	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 ```
-- [ ] **Action** — add `"strings"` to the `internal/server/routes.go` imports; ensure the `EnrollHost` comparison remains `hostOnly(r.Host) == cfg.EnrollHost` (default enroll host is already lowercase).
-- [ ] **DoD:** `Enroll.example.test`, `enroll.example.test.`, and `enroll.example.test:443` all dispatch to the enroll branch.
+- [x] **Action** — add `"strings"` to the `internal/server/routes.go` imports; ensure the `EnrollHost` comparison remains `hostOnly(r.Host) == cfg.EnrollHost` (default enroll host is already lowercase).
+- [x] **DoD:** `Enroll.example.test`, `enroll.example.test.`, and `enroll.example.test:443` all dispatch to the enroll branch.
 
 ---
 
-## US8 — [ ] `/connect` handshake hardening
+## US8 — [x] `/connect` handshake hardening
 
 **Why:** Bind uses the request context rather than the connection lifetime (AUTH-002); the CN check
 runs on an under-validated Host label with no tunnel-domain suffix check (AUTH-003); the per-IP
@@ -654,13 +654,13 @@ connect rate-limit Redis call runs unbounded ahead of the pre-auth semaphore (AU
 decision: semaphore first); the AUTH cert has no size cap distinct from the WS read limit (AUTH-005).
 
 **Acceptance criteria:**
-- [ ] `Bind` uses a connection-lifetime context, consistent with `Unbind`/`Heartbeat` (AUTH-002).
-- [ ] The Host's suffix is verified to equal `.<tunnel-domain>` before/at authentication (AUTH-003).
-- [ ] The pre-auth semaphore is acquired BEFORE the per-IP connect rate-limit Redis call; ban stays FIRST; a 429 releases the slot (AUTH-004).
-- [ ] The decoded AUTH cert DER is bounded to a small cap before `x509.ParseCertificate` (AUTH-005).
+- [x] `Bind` uses a connection-lifetime context, consistent with `Unbind`/`Heartbeat` (AUTH-002).
+- [x] The Host's suffix is verified to equal `.<tunnel-domain>` before/at authentication (AUTH-003).
+- [x] The pre-auth semaphore is acquired BEFORE the per-IP connect rate-limit Redis call; ban stays FIRST; a 429 releases the slot (AUTH-004).
+- [x] The decoded AUTH cert DER is bounded to a small cap before `x509.ParseCertificate` (AUTH-005).
 
-### Task 8.1 — [ ] Reorder: semaphore before connect rate-limit (ban stays first)
-- [ ] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: move the pre-auth semaphore acquisition to immediately AFTER the ban check and BEFORE `limit.Allow("connect", …)`; ensure `releaseSlot`/`defer releaseSlot()` are established before the rate check so the 429 return releases the slot.
+### Task 8.1 — [x] Reorder: semaphore before connect rate-limit (ban stays first)
+- [x] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: move the pre-auth semaphore acquisition to immediately AFTER the ban check and BEFORE `limit.Allow("connect", …)`; ensure `releaseSlot`/`defer releaseSlot()` are established before the rate check so the 429 return releases the slot.
 ```go
 if src, banned := m.ban.Match(ip); banned {
 	m.rec.Reject(src.Reason.String(), "", ip.String())
@@ -699,10 +699,10 @@ if !allowed {
 }
 ```
 Everything from `if !isWebSocketUpgrade(r)` onward is unchanged (the existing `releaseSlot()` after `authenticate` still applies).
-- [ ] **DoD:** the ban check is still the first handler-level check; the semaphore bounds concurrent connect work including the Redis call; a `429`/`503`/`400` all release the slot.
+- [x] **DoD:** the ban check is still the first handler-level check; the semaphore bounds concurrent connect work including the Redis call; a `429`/`503`/`400` all release the slot.
 
-### Task 8.2 — [ ] Bind on the connection lifetime
-- [ ] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: allocate `connCtx` BEFORE `Bind`, and bind on `connCtx` (not `r.Context()`), matching `Unbind`/`Heartbeat`.
+### Task 8.2 — [x] Bind on the connection lifetime
+- [x] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: allocate `connCtx` BEFORE `Bind`, and bind on `connCtx` (not `r.Context()`), matching `Unbind`/`Heartbeat`.
 ```go
 connID := randID()
 connCtx, cancel := context.WithCancel(m.baseCtx)
@@ -727,10 +727,10 @@ conn := &Conn{
 }
 ```
 (The `connCtx, cancel := context.WithCancel(m.baseCtx)` line that previously sat after `Pair` is now moved above `Bind`; remove the duplicate.)
-- [ ] **DoD:** the route's Redis lifetime is tied to the WS connection, not the HTTP request; a request-context cancel after a successful bind does not orphan the route.
+- [x] **DoD:** the route's Redis lifetime is tied to the WS connection, not the HTTP request; a request-context cancel after a successful bind does not orphan the route.
 
-### Task 8.3 — [ ] Host-suffix validation for the CN check
-- [ ] **Action** — modify `internal/wsconn/manager.go`: add a Host-suffix check in `HandleConnect` (BEFORE `websocket.Accept`) verifying the Host's suffix equals `.<tunnel-domain>` (case-folded, port/dot-stripped), rejecting `404` otherwise. Add a helper and the check:
+### Task 8.3 — [x] Host-suffix validation for the CN check
+- [x] **Action** — modify `internal/wsconn/manager.go`: add a Host-suffix check in `HandleConnect` (BEFORE `websocket.Accept`) verifying the Host's suffix equals `.<tunnel-domain>` (case-folded, port/dot-stripped), rejecting `404` otherwise. Add a helper and the check:
 ```go
 func hostSuffixOK(host, tunnelDomain string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -748,10 +748,10 @@ if !hostSuffixOK(r.Host, m.cfg.TunnelDomain) {
 }
 ```
 (Place this before `websocket.Accept`; it is fail-closed and needs no WS.)
-- [ ] **DoD:** `Host: name.attacker.example` is rejected `404` before the upgrade even if `name` would match a CN; `name.<tunnel-domain>` proceeds.
+- [x] **DoD:** `Host: name.attacker.example` is rejected `404` before the upgrade even if `name` would match a CN; `name.<tunnel-domain>` proceeds.
 
-### Task 8.4 — [ ] Bound the AUTH cert DER
-- [ ] **Action** — modify `internal/wsconn/manager.go`, `authenticate`: reject an oversized decoded cert before parsing. Add `const maxAuthCertDER = 4096` (a P-256 leaf is well under 1 KiB) at package scope, and after decoding `auth.Cert`:
+### Task 8.4 — [x] Bound the AUTH cert DER
+- [x] **Action** — modify `internal/wsconn/manager.go`, `authenticate`: reject an oversized decoded cert before parsing. Add `const maxAuthCertDER = 4096` (a P-256 leaf is well under 1 KiB) at package scope, and after decoding `auth.Cert`:
 ```go
 der, err := base64.StdEncoding.DecodeString(auth.Cert)
 if err != nil {
@@ -781,11 +781,11 @@ func ParseCertB64DERLimited(b64 string, maxDER int) (*x509.Certificate, error) {
 }
 ```
 and call `ca.ParseCertB64DERLimited(auth.Cert, maxAuthCertDER)` from `authenticate`.
-- [ ] **DoD:** an AUTH frame with a >4 KiB cert blob is rejected before `x509.ParseCertificate`.
+- [x] **DoD:** an AUTH frame with a >4 KiB cert blob is rejected before `x509.ParseCertificate`.
 
 ---
 
-## US9 — [ ] WS data-plane correctness
+## US9 — [x] WS data-plane correctness
 
 **Why:** Over-cap response chunks are drained unpaced/unaccounted after the request resolves —
 bandwidth-cap bypass (DP-003, operator decision: pace + account the drain); a ban reload firing
@@ -796,15 +796,15 @@ deadline is misreported as `502 tunnel_offline` instead of `504` (DP-004); the s
 and swallows errors, and `serveOne`/heartbeat swallow errors silently (DP-011).
 
 **Acceptance criteria:**
-- [ ] Every RESPONSE_BODY_CHUNK is paced + byte-accounted, including chunks after the response is resolved over-cap or for an unknown reqid (DP-003).
-- [ ] A ban that lands during connect is re-checked after `conns.Store`; a now-banned conn is torn down (DP-002).
-- [ ] A per-message deadline expiry mid-send yields `504` (nil), not `502 tunnel_gone` (DP-004).
-- [ ] The self-heal `Bind` on `missing` is connID/absence-conditional in one Lua script (DP-006).
-- [ ] An oversized-chunk `ErrBurstExceeded` tears down with a distinct reason + Warn log (DP-010).
-- [ ] `teardown`'s `Unbind` is time-bounded and logs failures; heartbeat/serveOne decode errors are logged (DP-011).
+- [x] Every RESPONSE_BODY_CHUNK is paced + byte-accounted, including chunks after the response is resolved over-cap or for an unknown reqid (DP-003).
+- [x] A ban that lands during connect is re-checked after `conns.Store`; a now-banned conn is torn down (DP-002).
+- [x] A per-message deadline expiry mid-send yields `504` (nil), not `502 tunnel_gone` (DP-004).
+- [x] The self-heal `Bind` on `missing` is connID/absence-conditional in one Lua script (DP-006).
+- [x] An oversized-chunk `ErrBurstExceeded` tears down with a distinct reason + Warn log (DP-010).
+- [x] `teardown`'s `Unbind` is time-bounded and logs failures; heartbeat/serveOne decode errors are logged (DP-011).
 
-### Task 9.1 — [ ] Pace + account all response chunks (over-cap drain)
-- [ ] **Action** — modify `internal/wsconn/conn.go`, `readPump` `case wire.RESPONSE_BODY_CHUNK`: move the pace + accounting ABOVE the `inf == nil` check so every chunk is paced/accounted; distinguish the WaitN error class:
+### Task 9.1 — [x] Pace + account all response chunks (over-cap drain)
+- [x] **Action** — modify `internal/wsconn/conn.go`, `readPump` `case wire.RESPONSE_BODY_CHUNK`: move the pace + accounting ABOVE the `inf == nil` check so every chunk is paced/accounted; distinguish the WaitN error class:
 ```go
 case wire.RESPONSE_BODY_CHUNK:
 	rid := wire.FrameReqID(hdr)
@@ -830,11 +830,11 @@ case wire.RESPONSE_BODY_CHUNK:
 	}
 	inf.body.Write(body)
 ```
-- [ ] **Action** — add `"errors"` and the `limit` import (`.../internal/limit`) to `internal/ingress`… no — to `internal/wsconn/conn.go`. `limit` is already imported there; add `"errors"`.
-- [ ] **DoD:** with `--limit-response` small, a large response is fully paced (not drained at wire speed) and every received byte is accounted; an oversized single chunk tears down with reason `oversized_frame` + a Warn.
+- [x] **Action** — add `"errors"` and the `limit` import (`.../internal/limit`) to `internal/ingress`… no — to `internal/wsconn/conn.go`. `limit` is already imported there; add `"errors"`.
+- [x] **DoD:** with `--limit-response` small, a large response is fully paced (not drained at wire speed) and every received byte is accounted; an oversized single chunk tears down with reason `oversized_frame` + a Warn.
 
-### Task 9.2 — [ ] Re-check bans after `conns.Store`
-- [ ] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: after `m.conns.Store(name, conn)` and the existing `m.closed.Load()` shutdown re-check, add a ban re-check mirroring the shutdown pattern:
+### Task 9.2 — [x] Re-check bans after `conns.Store`
+- [x] **Action** — modify `internal/wsconn/manager.go`, `HandleConnect`: after `m.conns.Store(name, conn)` and the existing `m.closed.Load()` shutdown re-check, add a ban re-check mirroring the shutdown pattern:
 ```go
 m.conns.Store(name, conn)
 m.rec.WSConnect()
@@ -851,10 +851,10 @@ if src, banned := m.ban.MatchTunnel(name, fp); banned {
 }
 conn.serve()
 ```
-- [ ] **DoD:** a ban applied during the connect window evicts the conn immediately after Store rather than waiting for the next reload.
+- [x] **DoD:** a ban applied during the connect window evicts the conn immediately after Store rather than waiting for the next reload.
 
-### Task 9.3 — [ ] Correct 504-vs-502 on a mid-send deadline
-- [ ] **Action** — modify `internal/wsconn/conn.go`, `Do`: on the send legs (`REQUEST_HEAD`, chunk `WaitN`, chunk `write`, `REQUEST_END`), when the failure is the per-message ctx expiring/cancelling, return `nil` (→ frontend 504) rather than `synthErr(..., "tunnel_gone")` (→ 502). Introduce a helper and use it at each send failure:
+### Task 9.3 — [x] Correct 504-vs-502 on a mid-send deadline
+- [x] **Action** — modify `internal/wsconn/conn.go`, `Do`: on the send legs (`REQUEST_HEAD`, chunk `WaitN`, chunk `write`, `REQUEST_END`), when the failure is the per-message ctx expiring/cancelling, return `nil` (→ frontend 504) rather than `synthErr(..., "tunnel_gone")` (→ 502). Introduce a helper and use it at each send failure:
 ```go
 // sendResult maps a send-leg error to the response the frontend should see: a per-message ctx
 // deadline/cancel is a timeout (nil → 504), any other write failure is a dead tunnel (502).
@@ -866,10 +866,10 @@ func (c *Conn) sendFailure(ctx context.Context, reqid string) *wire.RespEnvelope
 }
 ```
 Replace each `return synthErr(req.ReqID, "tunnel_gone")` inside `Do`'s send path with `return c.sendFailure(ctx, req.ReqID)`.
-- [ ] **DoD:** a large paced upload that exceeds the request timeout mid-send yields `504` (not `502 tunnel_offline`); a genuine write failure on a live-ctx still yields `502 tunnel_gone`.
+- [x] **DoD:** a large paced upload that exceeds the request timeout mid-send yields `504` (not `502 tunnel_offline`); a genuine write failure on a live-ctx still yields `502 tunnel_gone`.
 
-### Task 9.4 — [ ] connID/absence-conditional self-heal bind
-- [ ] **Action** — modify `internal/router/registry.go`: add a Lua script + method `BindIfAbsentOrOwner(ctx, name, node, fp, connID)` that sets `route:{name}` only if the key is absent OR its stored `connID` matches, returning a three-state result (bound / not-owner / conflict-fingerprint). Model it on the existing `bindScript`/`heartbeatScript`, setting the TTL in the same script.
+### Task 9.4 — [x] connID/absence-conditional self-heal bind
+- [x] **Action** — modify `internal/router/registry.go`: add a Lua script + method `BindIfAbsentOrOwner(ctx, name, node, fp, connID)` that sets `route:{name}` only if the key is absent OR its stored `connID` matches, returning a three-state result (bound / not-owner / conflict-fingerprint). Model it on the existing `bindScript`/`heartbeatScript`, setting the TTL in the same script.
 ```go
 // selfHealScript binds route:{name} ONLY if the key is absent, or is still owned by this connID
 // (same-fingerprint). A key owned by a DIFFERENT connID/fingerprint is left untouched (not-owner),
@@ -893,7 +893,7 @@ return 'bound'
 `)
 ```
 Add a NEW result enum `SelfHealResult` with constants `SelfHealBound` / `SelfHealNotOwner` / `SelfHealConflict`, and the method `BindIfAbsentOrOwner(ctx, name, node, fp, connID) (SelfHealResult, error)` that runs `selfHealScript` and maps `'bound'`→`SelfHealBound`, `'not-owner'`→`SelfHealNotOwner`, `'conflict'`→`(SelfHealConflict, ErrNameHeldByOther)`. The `heartbeat.go` code below references `router.SelfHealNotOwner` and `router.ErrNameHeldByOther`, so BOTH MUST be defined (do NOT reuse the `Heartbeat*` enum).
-- [ ] **Action** — modify `internal/wsconn/heartbeat.go`, `heartbeatOnce` `case router.HeartbeatMissing`: call the new conditional bind instead of the unconditional `Bind`:
+- [x] **Action** — modify `internal/wsconn/heartbeat.go`, `heartbeatOnce` `case router.HeartbeatMissing`: call the new conditional bind instead of the unconditional `Bind`:
 ```go
 case router.HeartbeatMissing:
 	res, err := c.mgr.registry.BindIfAbsentOrOwner(c.ctx, c.name, c.mgr.nodeID, c.fp, c.connID)
@@ -908,10 +908,10 @@ case router.HeartbeatMissing:
 		return false
 	}
 ```
-- [ ] **DoD:** a stale conn's `missing` self-heal cannot overwrite a route now owned by a different connID; it tears itself down as `superseded` instead.
+- [x] **DoD:** a stale conn's `missing` self-heal cannot overwrite a route now owned by a different connID; it tears itself down as `superseded` instead.
 
-### Task 9.5 — [ ] Time-bound + log lifecycle Redis calls
-- [ ] **Action** — modify `internal/wsconn/conn.go`, `teardown`: bound `Unbind` with a short timeout and log a failure:
+### Task 9.5 — [x] Time-bound + log lifecycle Redis calls
+- [x] **Action** — modify `internal/wsconn/conn.go`, `teardown`: bound `Unbind` with a short timeout and log a failure:
 ```go
 uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
 if err := c.mgr.registry.Unbind(uctx, c.name, c.connID); err != nil {
@@ -920,22 +920,22 @@ if err := c.mgr.registry.Unbind(uctx, c.name, c.connID); err != nil {
 ucancel()
 ```
 (Add `"time"` to `conn.go` imports.)
-- [ ] **Action** — the heartbeat self-heal generic-error Warn (`c.mgr.log.Warn("heartbeat self-heal bind failed", "tunnel", c.name, "err", err)`) is already folded into Task 9.4's `heartbeatOnce` switch block — no separate edit here; ensure it is present.
-- [ ] **Action** — modify `internal/transport/transport.go`, `serveOne`: log an undecodable request envelope: `rec` has no logger; add a `log *slog.Logger` parameter to `ServeNode`/`serveOne` (thread it from `server.Run`) and `log.Warn("dropping undecodable request envelope", "err", err)`. (This parameter addition also serves US11's readiness callback — do both in one signature change.) Add `"log/slog"` to the `internal/transport/transport.go` imports.
-- [ ] **DoD:** teardown `Unbind` cannot block indefinitely and logs failures; envelope-decode drops and heartbeat bind errors are visible in logs.
+- [x] **Action** — the heartbeat self-heal generic-error Warn (`c.mgr.log.Warn("heartbeat self-heal bind failed", "tunnel", c.name, "err", err)`) is already folded into Task 9.4's `heartbeatOnce` switch block — no separate edit here; ensure it is present.
+- [x] **Action** — modify `internal/transport/transport.go`, `serveOne`: log an undecodable request envelope: `rec` has no logger; add a `log *slog.Logger` parameter to `ServeNode`/`serveOne` (thread it from `server.Run`) and `log.Warn("dropping undecodable request envelope", "err", err)`. (This parameter addition also serves US11's readiness callback — do both in one signature change.) Add `"log/slog"` to the `internal/transport/transport.go` imports.
+- [x] **DoD:** teardown `Unbind` cannot block indefinitely and logs failures; envelope-decode drops and heartbeat bind errors are visible in logs.
 
 ---
 
-## US10 — [ ] Wire codec error handling
+## US10 — [x] Wire codec error handling
 
 **Why:** The `wire` decode helpers discard `json.Unmarshal` errors with no documented justification,
 and phone-side `DecodeReqHeader` silently converts a corrupt header into a `GET /` request (DP-012).
 
 **Acceptance criteria:**
-- [ ] The decode helpers return the decode error (callers apply the documented drop rule explicitly), or the `_ =` discard is justified with a `docs/PROTOCOL.md` citation (DP-012).
+- [x] The decode helpers return the decode error (callers apply the documented drop rule explicitly), or the `_ =` discard is justified with a `docs/PROTOCOL.md` citation (DP-012).
 
-### Task 10.1 — [ ] Surface the harmful decode error; justify the benign zero-value drops
-- [ ] **Action** — modify `internal/wire/frame.go`, `DecodeReqHeader`: return an `error` instead of fabricating a `GET /` request on a bad header (this is the one genuinely harmful silent path — a corrupt header would otherwise be forwarded to the phone backend as `GET /`):
+### Task 10.1 — [x] Surface the harmful decode error; justify the benign zero-value drops
+- [x] **Action** — modify `internal/wire/frame.go`, `DecodeReqHeader`: return an `error` instead of fabricating a `GET /` request on a bad header (this is the one genuinely harmful silent path — a corrupt header would otherwise be forwarded to the phone backend as `GET /`):
 ```go
 func DecodeReqHeader(header, body []byte) (reqid string, req *http.Request, err error) {
 	var h reqHeaderJSON
@@ -955,14 +955,14 @@ func DecodeReqHeader(header, body []byte) (reqid string, req *http.Request, err 
 	return h.ReqID, req, nil
 }
 ```
-- [ ] **Action** — update the phone-side `DecodeReqHeader` call site `internal/tunneltest/fakephone.go` to the 3-return form and drop the frame when `err != nil`. (The `client/client.go` call site is created fresh in its 3-return form by US14.1's `handleOne` rewrite — no separate change is made here, avoiding a forward reference.)
-- [ ] **Action** — modify `internal/wire/frame.go`: keep `FrameReqID`, `DecodeRespHeader`, and `DecodeErrorHeader` at their CURRENT signatures (unchanged — they are used across the read-pump/demux as single-/multi-value returns; changing them would ripple through US9.1 and US14.1 call sites for no behavioral gain). Replace each bare `_ = json.Unmarshal(...)` with a justification comment citing the drop rule, e.g. `// A malformed header yields a zero-value reqid/status; per docs/PROTOCOL.md §3 an unknown/stale reqid frame is dropped by the read-pump and an out-of-range status is clamped to 502 — the zero value IS the documented drop, not a silent failure.`
-- [ ] **Context:** on-wire bytes are unchanged (decode-side only) — the golden fixtures do NOT change. `FrameReqID` stays single-return, so US9.1's `rid := wire.FrameReqID(hdr)` and US14.1's `wire.FrameReqID(hdr)` call sites need no change.
-- [ ] **DoD:** phone-side `DecodeReqHeader` drops a corrupt request header instead of forwarding a fabricated `GET /`; every remaining `_ = json.Unmarshal` in `internal/wire` carries a `docs/PROTOCOL.md`-citing justification; the golden-fixture tests are untouched.
+- [x] **Action** — update the phone-side `DecodeReqHeader` call site `internal/tunneltest/fakephone.go` to the 3-return form and drop the frame when `err != nil`. (The `client/client.go` call site is created fresh in its 3-return form by US14.1's `handleOne` rewrite — no separate change is made here, avoiding a forward reference.)
+- [x] **Action** — modify `internal/wire/frame.go`: keep `FrameReqID`, `DecodeRespHeader`, and `DecodeErrorHeader` at their CURRENT signatures (unchanged — they are used across the read-pump/demux as single-/multi-value returns; changing them would ripple through US9.1 and US14.1 call sites for no behavioral gain). Replace each bare `_ = json.Unmarshal(...)` with a justification comment citing the drop rule, e.g. `// A malformed header yields a zero-value reqid/status; per docs/PROTOCOL.md §3 an unknown/stale reqid frame is dropped by the read-pump and an out-of-range status is clamped to 502 — the zero value IS the documented drop, not a silent failure.`
+- [x] **Context:** on-wire bytes are unchanged (decode-side only) — the golden fixtures do NOT change. `FrameReqID` stays single-return, so US9.1's `rid := wire.FrameReqID(hdr)` and US14.1's `wire.FrameReqID(hdr)` call sites need no change.
+- [x] **DoD:** phone-side `DecodeReqHeader` drops a corrupt request header instead of forwarding a fabricated `GET /`; every remaining `_ = json.Unmarshal` in `internal/wire` carries a `docs/PROTOCOL.md`-citing justification; the golden-fixture tests are untouched.
 
 ---
 
-## US11 — [ ] Transport readiness & client-abort discrimination
+## US11 — [x] Transport readiness & client-abort discrimination
 
 **Why:** `ServeNode` never confirms its `req:{nodeID}` subscription and the public listener starts
 accepting concurrently, so a request published in the startup window is silently lost → user-visible
@@ -970,11 +970,11 @@ accepting concurrently, so a request published in the startup window is silently
 inflating the timeout metric (DP-015).
 
 **Acceptance criteria:**
-- [ ] The public listener does not accept until `req:{nodeID}` is confirmed subscribed (DP-005).
-- [ ] A public-client abort during the round trip is not counted as a timeout (DP-015).
+- [x] The public listener does not accept until `req:{nodeID}` is confirmed subscribed (DP-005).
+- [x] A public-client abort during the round trip is not counted as a timeout (DP-015).
 
-### Task 11.1 — [ ] Confirm subscription before accepting public traffic
-- [ ] **Action** — modify `internal/transport/transport.go`, `ServeNode`: confirm the subscription with `pubsub.Receive(ctx)` before the loop and signal readiness via a callback param:
+### Task 11.1 — [x] Confirm subscription before accepting public traffic
+- [x] **Action** — modify `internal/transport/transport.go`, `ServeNode`: confirm the subscription with `pubsub.Receive(ctx)` before the loop and signal readiness via a callback param:
 ```go
 func ServeNode(ctx context.Context, rdb redis.UniversalClient, nodeID string, timeout time.Duration, rec observ.Recorder, log *slog.Logger, ready func(), handle func(context.Context, *wire.ReqEnvelope) *wire.RespEnvelope) error {
 	pubsub := rdb.Subscribe(ctx, "req:"+nodeID)
@@ -993,7 +993,7 @@ func ServeNode(ctx context.Context, rdb redis.UniversalClient, nodeID string, ti
 }
 ```
 (Thread `log` through `serveOne` per US9.5.)
-- [ ] **Action** — modify `internal/server/server.go`, `Run`: gate the public listener on node readiness.
+- [x] **Action** — modify `internal/server/server.go`, `Run`: gate the public listener on node readiness.
 ```go
 nodeReady := make(chan struct{})
 var readyOnce sync.Once
@@ -1013,11 +1013,11 @@ g.Go(func() error {
 g.Go(func() error { return serveHTTP(internalSrv) })
 ```
 (Add `"sync"` to `server.go` imports. The internal listener — `/healthz`, `/metrics` — may start immediately; only the public listener, which hosts `/connect` and public ingress, gates on readiness.)
-- [ ] **Action** — modify `internal/transport/transport_test.go`: update the direct `serveOne(...)` call in `TestServeNodeRecordsPublishError` to pass a logger argument matching the new `serveOne` signature (US9.5 + this task), so the `transport` test package compiles.
-- [ ] **DoD:** a request routed to a freshly-started replica is never dropped in the subscription window; startup fails fast if the subscription cannot be confirmed.
+- [x] **Action** — modify `internal/transport/transport_test.go`: update the direct `serveOne(...)` call in `TestServeNodeRecordsPublishError` to pass a logger argument matching the new `serveOne` signature (US9.5 + this task), so the `transport` test package compiles.
+- [x] **DoD:** a request routed to a freshly-started replica is never dropped in the subscription window; startup fails fast if the subscription cannot be confirmed.
 
-### Task 11.2 — [ ] Client-abort ≠ timeout in `RoundTrip`
-- [ ] **Action** — modify `internal/transport/transport.go`, `RoundTrip`: on `deadline.Done()`, distinguish a parent-ctx cancel (client gone) from a real deadline:
+### Task 11.2 — [x] Client-abort ≠ timeout in `RoundTrip`
+- [x] **Action** — modify `internal/transport/transport.go`, `RoundTrip`: on `deadline.Done()`, distinguish a parent-ctx cancel (client gone) from a real deadline:
 ```go
 case <-deadline.Done():
 	// reqCtx (ctx) is itself a WithTimeout of the same budget, so a genuine end-to-end timeout
@@ -1028,7 +1028,7 @@ case <-deadline.Done():
 	}
 	return nil, ErrTimeout
 ```
-- [ ] **Action** — modify `internal/ingress/handler.go`, the `RoundTrip` error handling: treat `context.Canceled` as a client abort (no `rec.Timeout()`, no `Reject("timeout")`, no body write):
+- [x] **Action** — modify `internal/ingress/handler.go`, the `RoundTrip` error handling: treat `context.Canceled` as a client abort (no `rec.Timeout()`, no `Reject("timeout")`, no body write):
 ```go
 resp, err := transport.RoundTrip(reqCtx, h.rdb, node, env, h.cfg.LimitRequestTimeout)
 if err != nil {
@@ -1047,11 +1047,11 @@ if err != nil {
 	}
 }
 ```
-- [ ] **DoD:** a public client that disconnects during the round trip does not increment `tunneld_request_timeouts_total` or the `timeout` rejection counter.
+- [x] **DoD:** a public client that disconnects during the round trip does not increment `tunneld_request_timeouts_total` or the `timeout` rejection counter.
 
 ---
 
-## US12 — [ ] Metrics, admin & logging robustness
+## US12 — [x] Metrics, admin & logging robustness
 
 **Why:** `PromRecorder.flush` discards Redis errors AND the drained deltas with no log (OPS-008); the
 final shutdown flush runs on `context.Background()` with no deadline (OPS-009); a misconfigured `--log`
@@ -1059,13 +1059,13 @@ file path is never opened at startup and write failures vanish (OPS-010); `/admi
 no key dedup and no empty-hash filtering (OPS-011).
 
 **Acceptance criteria:**
-- [ ] `flush` logs each failed `Incr` with identifiers (OPS-008).
-- [ ] The final shutdown flush is time-bounded (OPS-009).
-- [ ] A file log sink is probed at startup and a failure fails fast (OPS-010).
-- [ ] `TopN` de-duplicates keys and skips empty hashes (OPS-011).
+- [x] `flush` logs each failed `Incr` with identifiers (OPS-008).
+- [x] The final shutdown flush is time-bounded (OPS-009).
+- [x] A file log sink is probed at startup and a failure fails fast (OPS-010).
+- [x] `TopN` de-duplicates keys and skips empty hashes (OPS-011).
 
-### Task 12.1 — [ ] Log flush errors; give the recorder a logger
-- [ ] **Action** — modify `internal/metrics/recorder.go`: add a `log *slog.Logger` field to `PromRecorder` and `NewPromRecorder`; in `flush`, log each failed `Incr`:
+### Task 12.1 — [x] Log flush errors; give the recorder a logger
+- [x] **Action** — modify `internal/metrics/recorder.go`: add a `log *slog.Logger` field to `PromRecorder` and `NewPromRecorder`; in `flush`, log each failed `Incr`:
 ```go
 if e.requests != 0 {
 	if err := p.admin.Incr(ctx, name, "requests", e.requests); err != nil {
@@ -1074,12 +1074,12 @@ if e.requests != 0 {
 }
 ```
 (mirror for `bytes_in`/`bytes_out`.) Add `"log/slog"` to the `internal/metrics/recorder.go` imports.
-- [ ] **Action** — modify `internal/server/server.go`, `Run`: pass `logger` to `NewPromRecorder`.
-- [ ] **Action** — modify `internal/metrics/metrics_test.go`: update the `setup()` helper's `NewPromRecorder(...)` call to pass a discard/no-op logger, so the `metrics` test package compiles against the new 4-arg signature.
-- [ ] **DoD:** a Redis failure during flush emits an actionable Warn per field.
+- [x] **Action** — modify `internal/server/server.go`, `Run`: pass `logger` to `NewPromRecorder`.
+- [x] **Action** — modify `internal/metrics/metrics_test.go`: update the `setup()` helper's `NewPromRecorder(...)` call to pass a discard/no-op logger, so the `metrics` test package compiles against the new 4-arg signature.
+- [x] **DoD:** a Redis failure during flush emits an actionable Warn per field.
 
-### Task 12.2 — [ ] Bound the shutdown flush
-- [ ] **Action** — modify `internal/metrics/recorder.go`, `RunFlusher`: replace `p.flush(context.Background())` with a bounded context:
+### Task 12.2 — [x] Bound the shutdown flush
+- [x] **Action** — modify `internal/metrics/recorder.go`, `RunFlusher`: replace `p.flush(context.Background())` with a bounded context:
 ```go
 case <-ctx.Done():
 	fctx, cancel := context.WithTimeout(context.Background(), flushShutdownTimeout)
@@ -1088,10 +1088,10 @@ case <-ctx.Done():
 	return ctx.Err()
 ```
 Add `const flushShutdownTimeout = 5 * time.Second` at package scope.
-- [ ] **DoD:** the final flush cannot block shutdown indefinitely.
+- [x] **DoD:** the final flush cannot block shutdown indefinitely.
 
-### Task 12.3 — [ ] Probe file log sinks at startup
-- [ ] **Action** — modify `internal/logging/logging.go`, `newLogger`: after constructing each lumberjack sink, perform a zero-length `Write` (lumberjack opens lazily) and return an error if it fails, so a bad path fails fast:
+### Task 12.3 — [x] Probe file log sinks at startup
+- [x] **Action** — modify `internal/logging/logging.go`, `newLogger`: after constructing each lumberjack sink, perform a zero-length `Write` (lumberjack opens lazily) and return an error if it fails, so a bad path fails fast:
 ```go
 lj := &lumberjack.Logger{Filename: s.path, MaxSize: s.maxSizeMB, MaxBackups: s.maxFiles, Compress: false}
 if _, werr := lj.Write(nil); werr != nil {
@@ -1101,11 +1101,11 @@ if _, werr := lj.Write(nil); werr != nil {
 closers = append(closers, lj)
 children = append(children, newLeaf(lj, s))
 ```
-- [ ] **Context:** `ParseSpecs` (used by `config.Validate()`) MUST remain side-effect-free — the probe lives only in `New`/`newLogger`, which runs at process start in `main`. A zero-length write creates/opens the file without emitting a log line.
-- [ ] **DoD:** starting with `--log output=/nonexistent/dir/x.log` fails fast with a clear error instead of silently dropping all logs.
+- [x] **Context:** `ParseSpecs` (used by `config.Validate()`) MUST remain side-effect-free — the probe lives only in `New`/`newLogger`, which runs at process start in `main`. A zero-length write creates/opens the file without emitting a log line.
+- [x] **DoD:** starting with `--log output=/nonexistent/dir/x.log` fails fast with a clear error instead of silently dropping all logs.
 
-### Task 12.4 — [ ] Dedup + filter in `TopN`
-- [ ] **Action** — modify `internal/admin/tunnels.go`, `TopN`: track seen keys across SCAN pages and skip an empty `HGETALL`:
+### Task 12.4 — [x] Dedup + filter in `TopN`
+- [x] **Action** — modify `internal/admin/tunnels.go`, `TopN`: track seen keys across SCAN pages and skip an empty `HGETALL`:
 ```go
 seen := map[string]struct{}{}
 ...
@@ -1124,11 +1124,11 @@ for _, k := range keys {
 	stats = append(stats, TunnelStat{...})
 }
 ```
-- [ ] **DoD:** `/admin/tunnels` never double-counts a key delivered twice by SCAN, nor lists an all-zero phantom.
+- [x] **DoD:** `/admin/tunnels` never double-counts a key delivered twice by SCAN, nor lists an all-zero phantom.
 
 ---
 
-## US13 — [ ] CA defense-in-depth & enroll-host reservation
+## US13 — [x] CA defense-in-depth & enroll-host reservation
 
 **Why:** `VerifyEnrolledCert` accepts `ExtKeyUsageAny` and does not assert `!IsCA` / digital-signature
 key usage (AUTH-007); the reserved-label guard is not fed the configured enroll host and
@@ -1136,12 +1136,12 @@ key usage (AUTH-007); the reserved-label guard is not fed the configured enroll 
 when `--name-prefix` is set (AUTH-006).
 
 **Acceptance criteria:**
-- [ ] `VerifyEnrolledCert` asserts the leaf is non-CA and carries digital-signature key usage (AUTH-007).
-- [ ] `--enroll-host` and `--tunnel-domain` are validated non-empty/well-formed; the enroll host's first label is reserved from name generation (OPS-012).
-- [ ] The reserved-label semantics with a non-empty prefix are documented (AUTH-006).
+- [x] `VerifyEnrolledCert` asserts the leaf is non-CA and carries digital-signature key usage (AUTH-007).
+- [x] `--enroll-host` and `--tunnel-domain` are validated non-empty/well-formed; the enroll host's first label is reserved from name generation (OPS-012).
+- [x] The reserved-label semantics with a non-empty prefix are documented (AUTH-006).
 
-### Task 13.1 — [ ] Assert leaf constraints at verify
-- [ ] **Action** — modify `internal/ca/verify.go`, `VerifyEnrolledCert`: after `cert.Verify`, assert non-CA + digital signature:
+### Task 13.1 — [x] Assert leaf constraints at verify
+- [x] **Action** — modify `internal/ca/verify.go`, `VerifyEnrolledCert`: after `cert.Verify`, assert non-CA + digital signature:
 ```go
 if cert.IsCA {
 	return "", "", errors.New("ca: enrolled cert must not be a CA")
@@ -1150,10 +1150,10 @@ if cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 	return "", "", errors.New("ca: enrolled cert lacks digitalSignature key usage")
 }
 ```
-- [ ] **DoD:** a CA-flagged cert minted by the same key is rejected at `/connect`.
+- [x] **DoD:** a CA-flagged cert minted by the same key is rejected at `/connect`.
 
-### Task 13.2 — [ ] Validate enroll host / tunnel domain; reserve the enroll label
-- [ ] **Action** — modify `internal/config/config.go`, `Validate()`: reject empty/degenerate `EnrollHost`/`TunnelDomain` (non-empty, must contain a dot / be a valid host):
+### Task 13.2 — [x] Validate enroll host / tunnel domain; reserve the enroll label
+- [x] **Action** — modify `internal/config/config.go`, `Validate()`: reject empty/degenerate `EnrollHost`/`TunnelDomain` (non-empty, must contain a dot / be a valid host):
 ```go
 if c.TunnelDomain == "" || !strings.Contains(c.TunnelDomain, ".") {
 	return fmt.Errorf("--tunnel-domain must be a dotted domain, got %q", c.TunnelDomain)
@@ -1163,15 +1163,15 @@ if c.EnrollHost == "" || !strings.Contains(c.EnrollHost, ".") {
 }
 ```
 (Add `"strings"` to the `internal/config/config.go` import block.)
-- [ ] **Action** — modify `internal/ca/name.go`, `GenerateName`: accept an extra reserved label (the enroll host's first label) so a generated name can never shadow the enroll host. Add a variadic `extraReserved ...string` parameter (or a `GenerateNameReserving(prefix string, length int, extra ...string)`), and have `ingress.EnrollHandler` pass `firstLabel(cfg.EnrollHost)`. Skip a candidate whose `prefix+enc[:length]` equals any extra-reserved label, case-folded.
-- [ ] **Action** — modify `internal/ca/name.go`: make the random source injectable via an unexported seam so tests can force a reserved-label collision and the 8-attempt exhaustion path — keep `GenerateName` delegating to `generateName(prefix string, length int, rnd io.Reader, extra ...string)` with `rnd` defaulting to `rand.Reader` (enables the reserved-skip/exhaustion test). Add `"io"` to the `internal/ca/name.go` imports.
-- [ ] **Action** — modify the `GenerateName` call site in `internal/ingress/enroll.go` to pass the enroll host's first label.
-- [ ] **Action** — modify `internal/ca/name.go`: update the `reserved` comment to state that with a non-empty `--name-prefix` the bare-label reservations only match when the prefix is empty (documenting AUTH-006), citing the enroll-host reservation as the prefix-independent guard.
-- [ ] **DoD:** with any `--enroll-host`, a generated tunnel name can never equal the enroll host's label; an empty OR dot-less `--tunnel-domain`/`--enroll-host` fails `Validate()`.
+- [x] **Action** — modify `internal/ca/name.go`, `GenerateName`: accept an extra reserved label (the enroll host's first label) so a generated name can never shadow the enroll host. Add a variadic `extraReserved ...string` parameter (or a `GenerateNameReserving(prefix string, length int, extra ...string)`), and have `ingress.EnrollHandler` pass `firstLabel(cfg.EnrollHost)`. Skip a candidate whose `prefix+enc[:length]` equals any extra-reserved label, case-folded.
+- [x] **Action** — modify `internal/ca/name.go`: make the random source injectable via an unexported seam so tests can force a reserved-label collision and the 8-attempt exhaustion path — keep `GenerateName` delegating to `generateName(prefix string, length int, rnd io.Reader, extra ...string)` with `rnd` defaulting to `rand.Reader` (enables the reserved-skip/exhaustion test). Add `"io"` to the `internal/ca/name.go` imports.
+- [x] **Action** — modify the `GenerateName` call site in `internal/ingress/enroll.go` to pass the enroll host's first label.
+- [x] **Action** — modify `internal/ca/name.go`: update the `reserved` comment to state that with a non-empty `--name-prefix` the bare-label reservations only match when the prefix is empty (documenting AUTH-006), citing the enroll-host reservation as the prefix-independent guard.
+- [x] **DoD:** with any `--enroll-host`, a generated tunnel name can never equal the enroll host's label; an empty OR dot-less `--tunnel-domain`/`--enroll-host` fails `Validate()`.
 
 ---
 
-## US14 — [ ] Go reference client rework
+## US14 — [x] Go reference client rework
 
 **Why:** The client dispatches the backend synchronously on the read loop — no multiplexing and pings
 go unanswered, so a slow-but-valid request gets the tunnel killed as `dead_peer` (DP-007); the whole
@@ -1180,13 +1180,13 @@ response is buffered despite a "streams" comment and `httptest` is imported by a
 `Enroll` has no client-side P-256 guard (AUTH-010).
 
 **Acceptance criteria:**
-- [ ] Each `REQUEST_END` is handled in its own goroutine with a client-side write mutex; the read loop always stays in `Read` so pings are answered (DP-007).
-- [ ] The response is streamed via a custom `http.ResponseWriter` (no `httptest` in the library) (DP-014).
-- [ ] `Serve` surfaces the per-attempt connect error via an optional logger/callback (DP-013).
-- [ ] `Enroll` rejects a non-P-256 key locally with a clear error (AUTH-010).
+- [x] Each `REQUEST_END` is handled in its own goroutine with a client-side write mutex; the read loop always stays in `Read` so pings are answered (DP-007).
+- [x] The response is streamed via a custom `http.ResponseWriter` (no `httptest` in the library) (DP-014).
+- [x] `Serve` surfaces the per-attempt connect error via an optional logger/callback (DP-013).
+- [x] `Enroll` rejects a non-P-256 key locally with a clear error (AUTH-010).
 
-### Task 14.1 — [ ] Concurrent bridge with a write mutex
-- [ ] **Action** — modify `client/client.go`, `bridge`: keep the read loop always reading; on `REQUEST_END`, dispatch in a goroutine; guard all frame writes with a shared `sync.Mutex`; track a `sync.WaitGroup` so `bridge` returns only after in-flight handlers finish. Replace the synchronous `backend.ServeHTTP` + inline writes with a goroutine that writes RESPONSE_HEAD/chunks/END under the mutex. Add `"sync"` to the `client/client.go` imports.
+### Task 14.1 — [x] Concurrent bridge with a write mutex
+- [x] **Action** — modify `client/client.go`, `bridge`: keep the read loop always reading; on `REQUEST_END`, dispatch in a goroutine; guard all frame writes with a shared `sync.Mutex`; track a `sync.WaitGroup` so `bridge` returns only after in-flight handlers finish. Replace the synchronous `backend.ServeHTTP` + inline writes with a goroutine that writes RESPONSE_HEAD/chunks/END under the mutex. Add `"sync"` to the `client/client.go` imports.
 ```go
 func bridge(ctx context.Context, ws *websocket.Conn, backend http.Handler) error {
 	type partial struct{ hdr, body []byte }
@@ -1229,7 +1229,7 @@ func bridge(ctx context.Context, ws *websocket.Conn, backend http.Handler) error
 	}
 }
 ```
-- [ ] **Action** — add a streaming `handleOne` + a custom `http.ResponseWriter` (`wsResponseWriter`) that emits RESPONSE_HEAD on first write and RESPONSE_BODY_CHUNK per ≤ChunkSize slice, then RESPONSE_END — removing the `net/http/httptest` import.
+- [x] **Action** — add a streaming `handleOne` + a custom `http.ResponseWriter` (`wsResponseWriter`) that emits RESPONSE_HEAD on first write and RESPONSE_BODY_CHUNK per ≤ChunkSize slice, then RESPONSE_END — removing the `net/http/httptest` import.
 ```go
 func handleOne(ctx context.Context, write func(wire.FrameType, []byte, []byte) error, backend http.Handler, reqid string, hdr, body []byte) {
 	_, req, err := wire.DecodeReqHeader(hdr, body)
@@ -1242,38 +1242,38 @@ func handleOne(ctx context.Context, write func(wire.FrameType, []byte, []byte) e
 }
 ```
 (`wsResponseWriter` implements `Header()`, `WriteHeader`, `Write` (emitting HEAD lazily then chunked bodies), and `finish()` emitting RESPONSE_END; it drops write errors — the read loop surfaces the drop.)
-- [ ] **Context (DP-007):** writes are already frame-atomic; the mutex mirrors the server's `writeMu`. The read loop never blocks on a handler, so `coder/websocket` control pings are answered within the server's 10 s pong window. If `DecodeReqHeader` now returns an error (US10), handle the drop.
-- [ ] **DoD:** two concurrent backend requests multiplex; a 15 s handler does not cause a `dead_peer` teardown; `net/http/httptest` is no longer imported by `client`.
+- [x] **Context (DP-007):** writes are already frame-atomic; the mutex mirrors the server's `writeMu`. The read loop never blocks on a handler, so `coder/websocket` control pings are answered within the server's 10 s pong window. If `DecodeReqHeader` now returns an error (US10), handle the drop.
+- [x] **DoD:** two concurrent backend requests multiplex; a 15 s handler does not cause a `dead_peer` teardown; `net/http/httptest` is no longer imported by `client`.
 
-### Task 14.2 — [ ] Surface connect errors from `Serve`
-- [ ] **Action** — modify `client/client.go`: add an optional `OnConnectError func(error)` field on `Client` (nil-safe); in `Serve`, capture `err := c.Connect(...)` and, when non-nil and `ctx.Err() == nil`, invoke `c.OnConnectError(err)` (or log via an injected logger). Keep the bounded-backoff loop unchanged.
-- [ ] **DoD:** a permanent refusal (expired cert, `4403`, `4409`) is observable to the caller rather than silently retried forever.
+### Task 14.2 — [x] Surface connect errors from `Serve`
+- [x] **Action** — modify `client/client.go`: add an optional `OnConnectError func(error)` field on `Client` (nil-safe); in `Serve`, capture `err := c.Connect(...)` and, when non-nil and `ctx.Err() == nil`, invoke `c.OnConnectError(err)` (or log via an injected logger). Keep the bounded-backoff loop unchanged.
+- [x] **DoD:** a permanent refusal (expired cert, `4403`, `4409`) is observable to the caller rather than silently retried forever.
 
-### Task 14.3 — [ ] Client-side P-256 guard in `Enroll`
-- [ ] **Action** — modify `client/client.go`, `Enroll`: assert the key curve before building the CSR:
+### Task 14.3 — [x] Client-side P-256 guard in `Enroll`
+- [x] **Action** — modify `client/client.go`, `Enroll`: assert the key curve before building the CSR:
 ```go
 if key.Curve != elliptic.P256() {
 	return nil, "", errors.New("client: enrollment key must be ECDSA P-256")
 }
 ```
 (Add `"crypto/elliptic"` to the imports.)
-- [ ] **DoD:** a non-P-256 key returns a clear local error before any network call.
+- [x] **DoD:** a non-P-256 key returns a clear local error before any network call.
 
 ---
 
-## US15 — [ ] Remove plan-artifact references from all code comments
+## US15 — [x] Remove plan-artifact references from all code comments
 
 **Why:** 32 comments across 17 Go files plus `deploy/docker-compose.yml` reference user-story IDs
 (`US1`, `US6.2`, `US7 step 8`, …). `agent.md` §1 forbids this absolutely (comments cite ONLY `docs/`).
 
 **Acceptance criteria:**
-- [ ] No source comment (Go, YAML, shell) contains a `US<n>` / plan / task / action reference (DOC-005/DP-001/DEP-002).
-- [ ] Where a comment carried load-bearing rationale, it cites the relevant `docs/` section instead.
+- [x] No source comment (Go, YAML, shell) contains a `US<n>` / plan / task / action reference (DOC-005/DP-001/DEP-002).
+- [x] Where a comment carried load-bearing rationale, it cites the relevant `docs/` section instead.
 
-### Task 15.1 — [ ] Sweep and rewrite US-referencing comments
-- [ ] **Action** — enumerate every occurrence with `grep -rnE 'US[0-9]' --include='*.go' --include='*.yml' --include='*.sh' .` and rewrite each comment to drop the `US<n>` token, substituting a `docs/` citation where the rationale is load-bearing. Known sites (non-exhaustive — the grep is authoritative): `internal/config/config.go` (15-18, 147, 153), `internal/wire/envelope.go` (1-3, 18, 31), `internal/wire/frame.go` (30-31, 98), `internal/ingress/handler.go` (219, 307), `internal/limit/*` (bucket.go 15/19, concurrency.go 13, registry.go 11), `internal/router/registry.go` (111), `internal/wsconn/conn.go` (53), `internal/server/server.go` (71-72, 92), `internal/metrics/recorder.go` (15-16), `internal/observ/recorder.go` (1-4, 9), `internal/admin/tunnels.go` (36, 42), `internal/ban/watch.go` (15), `internal/ca/ca.go` (23), `internal/tunneltest/fakephone.go`, `internal/tunneltest/recorder.go`, `deploy/docker-compose.yml` (125).
-- [ ] **Action** — modify `deploy/docker-compose.yml:125`: `- ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md §4)`.
-- [ ] **DoD:** `grep -rnE 'US[0-9]' --include='*.go' --include='*.yml' --include='*.sh' .` returns nothing (excluding this plan and other `docs/plans/` files).
+### Task 15.1 — [x] Sweep and rewrite US-referencing comments
+- [x] **Action** — enumerate every occurrence with `grep -rnE 'US[0-9]' --include='*.go' --include='*.yml' --include='*.sh' .` and rewrite each comment to drop the `US<n>` token, substituting a `docs/` citation where the rationale is load-bearing. Known sites (non-exhaustive — the grep is authoritative): `internal/config/config.go` (15-18, 147, 153), `internal/wire/envelope.go` (1-3, 18, 31), `internal/wire/frame.go` (30-31, 98), `internal/ingress/handler.go` (219, 307), `internal/limit/*` (bucket.go 15/19, concurrency.go 13, registry.go 11), `internal/router/registry.go` (111), `internal/wsconn/conn.go` (53), `internal/server/server.go` (71-72, 92), `internal/metrics/recorder.go` (15-16), `internal/observ/recorder.go` (1-4, 9), `internal/admin/tunnels.go` (36, 42), `internal/ban/watch.go` (15), `internal/ca/ca.go` (23), `internal/tunneltest/fakephone.go`, `internal/tunneltest/recorder.go`, `deploy/docker-compose.yml` (125).
+- [x] **Action** — modify `deploy/docker-compose.yml:125`: `- ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md §4)`.
+- [x] **DoD:** `grep -rnE 'US[0-9]' --include='*.go' --include='*.yml' --include='*.sh' .` returns nothing (excluding this plan and other `docs/plans/` files).
 
 ---
 
