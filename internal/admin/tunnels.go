@@ -32,7 +32,7 @@ func NewStore(rdb redis.UniversalClient, ttl time.Duration) *Store {
 }
 
 // incrScript does HINCRBY + PEXPIRE in ONE Lua script so the key is always TTL'd (same invariant as
-// the US3 limiters).
+// the rate/concurrency limiters).
 var incrScript = redis.NewScript(`
 redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
@@ -48,6 +48,7 @@ func (s *Store) Incr(ctx context.Context, name, field string, n int64) error {
 // TopN returns the top-n tunnels by total bytes (in+out), descending.
 func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {
 	var stats []TunnelStat
+	seen := map[string]struct{}{}
 	var cursor uint64
 	for {
 		keys, next, err := s.rdb.Scan(ctx, cursor, "tcnt:*", 100).Result()
@@ -55,9 +56,16 @@ func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {
 			return nil, err
 		}
 		for _, k := range keys {
+			if _, dup := seen[k]; dup {
+				continue // SCAN may deliver a key more than once — count it once
+			}
+			seen[k] = struct{}{}
 			h, err := s.rdb.HGetAll(ctx, k).Result()
 			if err != nil {
 				return nil, err
+			}
+			if len(h) == 0 {
+				continue // key expired between SCAN and HGETALL — skip the phantom
 			}
 			stats = append(stats, TunnelStat{
 				Name:     k[len("tcnt:"):],
