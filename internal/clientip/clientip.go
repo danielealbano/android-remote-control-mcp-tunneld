@@ -23,5 +23,7 @@ func TrustedIP(r *http.Request, header string) (netip.Addr, bool) {
 	if err != nil {
 		return netip.Addr{}, false
 	}
-	return addr, true
+	// Normalize so an IPv4-mapped IPv6 form (::ffff:a.b.c.d) and a zoned literal cannot bypass bans
+	// or split rate-limit counters against the plain IPv4 form.
+	return addr.Unmap().WithZone(""), true
 }
