@@ -13,10 +13,10 @@ import (
 )
 
 // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
-// wire.ChunkSize (US6.1, 32*1024): the bandwidth bucket's burst is one second of rate and every
-// caller acquires tokens in ≤ChunkSize slices (US3.3), so a rate below one chunk would make every
-// chunk acquisition error and silently break the whole data plane. wire is a later story, so the
-// literal is duplicated here with this note rather than imported (no forward dependency).
+// wire.ChunkSize (32*1024): the bandwidth bucket's burst is one second of rate and every caller
+// acquires tokens in ≤ChunkSize slices, so a rate below one chunk would make every chunk acquisition
+// error and silently break the whole data plane (docs/ARCHITECTURE.md §4/§9). The literal is
+// duplicated here with this note rather than importing wire (avoids an import cycle).
 const bandwidthFloorBytesPerSec int64 = 32 * 1024
 
 // ServeCmd is the configuration surface of `tunneld serve`. kong derives the TUNNELD_* env twin for
@@ -166,7 +166,7 @@ func (c ServeCmd) Validate() error {
 }
 
 // checkPresent ensures a mandatory path flag is non-empty and the file exists (fail-fast). The
-// authoritative read + parse of the CA material happens in ca.Load (US4), which surfaces any
+// authoritative read + parse of the CA material happens in ca.Load, which surfaces any
 // permission/parse error at startup; here we only reject an empty or missing path early.
 func checkPresent(flag, path string) error {
 	if path == "" {
