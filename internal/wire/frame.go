@@ -27,7 +27,7 @@ const (
 )
 
 // ChunkSize is the max body bytes per REQUEST_BODY_CHUNK/RESPONSE_BODY_CHUNK frame (bandwidth pacing
-// granularity). It equals config's bandwidth floor (US1) and the WS SetReadLimit base (US6).
+// granularity). It equals config's bandwidth floor and the WS SetReadLimit base (docs/PROTOCOL.md §3).
 const ChunkSize = 32 * 1024
 
 var errShortFrame = errors.New("wire: frame too short")
@@ -95,21 +95,24 @@ func EncodeReqHeader(r *ReqEnvelope) []byte {
 }
 
 // DecodeReqHeader reconstructs the *http.Request from a REQUEST_HEAD header and the ACCUMULATED body
-// (called at REQUEST_END). Phone-side (FakePhone, US11 client).
-func DecodeReqHeader(header, body []byte) (reqid string, req *http.Request) {
+// (called at REQUEST_END). Phone-side. A malformed header returns an error so the caller drops the
+// frame rather than forwarding a fabricated request (docs/PROTOCOL.md §3).
+func DecodeReqHeader(header, body []byte) (reqid string, req *http.Request, err error) {
 	var h reqHeaderJSON
-	_ = json.Unmarshal(header, &h)
+	if uerr := json.Unmarshal(header, &h); uerr != nil {
+		return "", nil, uerr
+	}
 	u := &url.URL{Path: h.Path, RawQuery: h.RawQuery}
-	req, _ = http.NewRequest(h.Method, u.String(), bytes.NewReader(body))
-	if req == nil { // defensive: a bad method yields a nil request
-		req, _ = http.NewRequest(http.MethodGet, "/", bytes.NewReader(body))
+	req, err = http.NewRequest(h.Method, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return "", nil, err
 	}
 	req.Host = h.Host
 	if h.Header != nil {
 		req.Header = h.Header
 	}
 	req.ContentLength = int64(len(body))
-	return h.ReqID, req
+	return h.ReqID, req, nil
 }
 
 // EncodeRespHeader builds the RESPONSE_HEAD header.
@@ -121,6 +124,9 @@ func EncodeRespHeader(reqid string, code int, h http.Header) []byte {
 // DecodeRespHeader parses a RESPONSE_HEAD header.
 func DecodeRespHeader(header []byte) (reqid string, code int, h http.Header) {
 	var r respHeaderJSON
+	// A malformed header yields a zero-value reqid/status; per docs/PROTOCOL.md §3 an unknown/stale
+	// reqid frame is dropped by the read-pump and an out-of-range status is clamped to 502 — the zero
+	// value IS the documented drop, not a silent failure.
 	_ = json.Unmarshal(header, &r)
 	return r.ReqID, r.Status, r.Header
 }
@@ -140,6 +146,8 @@ func EncodeErrorHeader(reqid, message string) []byte {
 // DecodeErrorHeader parses an ERROR frame header.
 func DecodeErrorHeader(header []byte) (reqid, message string) {
 	var e errorHeaderJSON
+	// A malformed header yields a zero-value reqid; per docs/PROTOCOL.md §3 an ERROR with an
+	// unknown/stale reqid is dropped — the zero value IS the documented drop.
 	_ = json.Unmarshal(header, &e)
 	return e.ReqID, e.Message
 }
@@ -147,6 +155,8 @@ func DecodeErrorHeader(header []byte) (reqid, message string) {
 // FrameReqID cheaply extracts the reqid from any reqid-carrying frame header (read-pump demux).
 func FrameReqID(header []byte) string {
 	var h reqidHeaderJSON
+	// A malformed header yields a zero-value reqid, which matches no pending request; per
+	// docs/PROTOCOL.md §3 such a frame is dropped by the read-pump — the zero value IS the drop.
 	_ = json.Unmarshal(header, &h)
 	return h.ReqID
 }
