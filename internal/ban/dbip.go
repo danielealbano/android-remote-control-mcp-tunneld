@@ -3,6 +3,7 @@ package ban
 import (
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -12,9 +13,11 @@ import (
 )
 
 // ExpandCountries reads a DB-IP Country Lite CSV (columns: start_ip,end_ip,country_code) and returns
-// the covering prefixes for the requested country codes (via netipx.IPRange.Prefixes()). It returns
-// (nil, err) if csvPath == "" or the file is unreadable — the caller then warns and skips country
-// entries, leaving ip/cidr bans enforced.
+// the covering prefixes for the requested country codes (via netipx.IPRange.Prefixes()). Malformed
+// rows are skipped. It returns (nil, err) when csvPath == "", the file is unreadable, OR it yields
+// zero parseable rows (corrupt/empty): on the present-but-unusable case the caller keeps the previous
+// snapshot, and it skip-and-warns ONLY when the CSV is absent. A valid CSV whose wanted country code
+// is simply absent yields an empty result with no error.
 //
 // The file is tens of MB and parsed only on reload, so it is streamed with ReuseRecord.
 func ExpandCountries(csvPath string, wanted map[string]struct{}) ([]netip.Prefix, error) {
@@ -28,32 +31,39 @@ func ExpandCountries(csvPath string, wanted map[string]struct{}) ([]netip.Prefix
 	defer func() { _ = f.Close() }()
 
 	r := csv.NewReader(f)
-	r.FieldsPerRecord = 3
+	r.FieldsPerRecord = -1 // tolerate stray rows; validate width per-row below
 	r.ReuseRecord = true
 
 	var out []netip.Prefix
+	validRows := 0
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
 			break
 		}
-		if err != nil {
-			return nil, err
-		}
-		cc := strings.ToUpper(strings.TrimSpace(rec[2]))
-		if _, ok := wanted[cc]; !ok {
-			continue
+		if err != nil || len(rec) < 3 {
+			continue // skip a malformed/short row, keep going (matches the address-parse skip policy)
 		}
 		start, e1 := netip.ParseAddr(strings.TrimSpace(rec[0]))
 		end, e2 := netip.ParseAddr(strings.TrimSpace(rec[1]))
 		if e1 != nil || e2 != nil {
-			continue // skip a malformed row, keep going
+			continue
+		}
+		validRows++
+		cc := strings.ToUpper(strings.TrimSpace(rec[2]))
+		if _, ok := wanted[cc]; !ok {
+			continue
 		}
 		rng := netipx.IPRangeFrom(start, end)
 		if !rng.IsValid() {
 			continue
 		}
 		out = append(out, rng.Prefixes()...)
+	}
+	if validRows == 0 {
+		// A present CSV that produced no parseable rows is corrupt/empty — error so the caller keeps the
+		// previous snapshot rather than silently dropping every country ban (docs/ARCHITECTURE.md §6).
+		return nil, fmt.Errorf("dbip csv %q produced no valid rows", csvPath)
 	}
 	return out, nil
 }

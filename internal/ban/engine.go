@@ -54,8 +54,10 @@ func (e *Engine) MatchTunnel(name, fingerprint string) (Source, bool) {
 }
 
 // Load parses all files, expands country entries against the DB-IP CSV, builds a fresh table, and
-// atomically swaps it in. Absent files (not-exist) and malformed lines are warned-and-skipped; a
-// missing/unreadable CSV skips only the country entries. A HARD read error on a configured file
+// atomically swaps it in. Absent files (not-exist) and malformed lines are warned-and-skipped. An
+// ABSENT CSV skips only the country entries (skip-and-warn, first deploy); a PRESENT CSV that yields
+// zero parseable rows returns an error and keeps the previous snapshot; a valid CSV whose wanted
+// country code is absent is legal (empty result, no error). A HARD read error on a configured file
 // (e.g. an I/O error or a path that is a directory — NOT not-exist) returns a non-nil error WITHOUT
 // swapping, so the previous snapshot is preserved (never emptied on error).
 func (e *Engine) Load(files []string, csvPath string, log *slog.Logger) error {
@@ -86,12 +88,18 @@ func (e *Engine) Load(files []string, csvPath string, log *slog.Logger) error {
 
 	if len(wanted) > 0 {
 		prefixes, err := ExpandCountries(csvPath, wanted)
-		if err != nil {
-			log.Warn("country ban expansion skipped (CSV missing/unreadable); ip/cidr bans still enforced", "csv", csvPath, "err", err)
-		} else {
+		switch {
+		case err == nil:
 			for _, pfx := range prefixes {
 				table.Insert(pfx, Source{Reason: ReasonCountry, File: csvPath, Detail: "country-expansion"})
 			}
+		case csvPath == "" || errors.Is(err, fs.ErrNotExist):
+			// First-deploy / geo-off: the CSV does not exist yet — skip country entries, keep ip/cidr.
+			log.Warn("country ban expansion skipped (CSV absent); ip/cidr bans still enforced", "csv", csvPath, "err", err)
+		default:
+			// A configured CSV is present but failed to parse: do NOT silently drop active geo bans.
+			log.Warn("country ban expansion failed on a present CSV; keeping previous snapshot", "csv", csvPath, "err", err)
+			return err // preserve the previous snapshot (never swap in one missing the country layer)
 		}
 	}
 

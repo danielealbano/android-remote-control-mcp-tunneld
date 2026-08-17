@@ -9,8 +9,9 @@ import (
 )
 
 // ParseLine parses one ban-file line into (kind, value). A blank line or a comment (everything from
-// the first '#') yields ("", "", nil) — a skip, not an error. An unknown keyword or a line with no
-// value yields a non-nil error (the caller warns and skips it).
+// the first '#') yields ("", "", nil) — a skip, not an error. Anything other than exactly
+// '<kind> <value>' — an unknown keyword, no value, OR extra tokens — yields a non-nil error (the
+// caller warns and skips it).
 func ParseLine(line string) (kind, value string, err error) {
 	if i := strings.IndexByte(line, '#'); i >= 0 {
 		line = line[:i]
@@ -20,8 +21,8 @@ func ParseLine(line string) (kind, value string, err error) {
 		return "", "", nil
 	}
 	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return "", "", fmt.Errorf("malformed ban line %q (want '<kind> <value>')", line)
+	if len(fields) != 2 {
+		return "", "", fmt.Errorf("malformed ban line %q (want exactly '<kind> <value>')", line)
 	}
 	kind = strings.ToLower(fields[0])
 	value = fields[1]
@@ -78,6 +79,7 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 				log.Warn("skipping invalid ip", "file", path, "line", lineNo, "value", value)
 				continue
 			}
+			addr = addr.Unmap() // 4-in-6 (::ffff:a.b.c.d) → plain IPv4 so it matches unmapped lookups
 			src.Reason, src.Detail = ReasonIP, value
 			p.prefixes = append(p.prefixes, prefixSource{netip.PrefixFrom(addr, addr.BitLen()), src})
 		case "cidr":
@@ -85,6 +87,9 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 			if e != nil {
 				log.Warn("skipping invalid cidr", "file", path, "line", lineNo, "value", value)
 				continue
+			}
+			if a := pfx.Addr(); a.Is4In6() {
+				pfx = netip.PrefixFrom(a.Unmap(), pfx.Bits()-96)
 			}
 			src.Reason, src.Detail = ReasonCIDR, value
 			p.prefixes = append(p.prefixes, prefixSource{pfx.Masked(), src})
