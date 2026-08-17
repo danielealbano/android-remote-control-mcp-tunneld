@@ -50,3 +50,39 @@ func TestMuxDispatch(t *testing.T) {
 		t.Errorf("/mcp → %d, want ingress (299)", code)
 	}
 }
+
+func TestHostOnly_DotAndCase(t *testing.T) {
+	cases := map[string]string{
+		"Enroll.Example.Test":     "enroll.example.test",
+		"enroll.example.test.":    "enroll.example.test",
+		"enroll.example.test:443": "enroll.example.test",
+		"enroll.example.test":     "enroll.example.test",
+	}
+	for in, want := range cases {
+		if got := hostOnly(in); got != want {
+			t.Errorf("hostOnly(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestMux_MethodAndHostEdges(t *testing.T) {
+	cfg := config.ServeCmd{EnrollHost: "enroll.example.test"}
+	conn := &recordConnect{}
+	mux := NewMux(cfg, conn, &recordHandler{}, &recordHandler{})
+	call := func(method, host, path string) int {
+		r := httptest.NewRequest(method, "http://"+host+path, nil)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, r)
+		return rr.Code
+	}
+	// Wrong method on the enroll host → 404.
+	if code := call("GET", "enroll.example.test", "/enroll"); code != http.StatusNotFound {
+		t.Errorf("GET /enroll → %d, want 404", code)
+	}
+	// Case / trailing-dot / port variants of the enroll host still dispatch to the enroll handler.
+	for _, h := range []string{"Enroll.Example.Test", "enroll.example.test.", "enroll.example.test:443"} {
+		if code := call("POST", h, "/enroll"); code != 299 {
+			t.Errorf("POST /enroll on %q → %d, want enroll(299)", h, code)
+		}
+	}
+}

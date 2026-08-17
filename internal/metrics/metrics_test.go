@@ -29,6 +29,45 @@ func setup(t *testing.T) (*Metrics, *PromRecorder, *admin.Store, *miniredis.Mini
 	return m, rec, store, mr, rdb
 }
 
+func TestAdminTunnelsHandler(t *testing.T) {
+	m, _, store, mr, rdb := setup(t)
+	_ = store.Incr(context.Background(), "t1", "bytes_in", 100)
+	h := Handler(m.Registry(), rdb, store, discardLog())
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/admin/tunnels", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "t1") {
+		t.Errorf("admin/tunnels = %d body=%q", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("content-type = %q, want json", ct)
+	}
+
+	mr.Close() // TopN now errors → 500
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/admin/tunnels", nil))
+	if rr2.Code != http.StatusInternalServerError {
+		t.Errorf("admin/tunnels with Redis down = %d, want 500", rr2.Code)
+	}
+}
+
+func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
+	_, rec, store, _, _ := setup(t)
+	rec.Request("t1", "mcp", 200, time.Millisecond)
+	rec.Bytes("t1", "in", 500)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = rec.RunFlusher(ctx, 20*time.Millisecond) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if stats, _ := store.TopN(context.Background(), 10); len(stats) == 1 && stats[0].Requests == 1 && stats[0].BytesIn == 500 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("the flusher did not drain the accumulator to the store")
+}
+
 func TestHealthz200WhenRedisUp(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
 	h := Handler(m.Registry(), rdb, store, discardLog())
