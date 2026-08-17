@@ -1277,7 +1277,7 @@ if key.Curve != elliptic.P256() {
 
 ---
 
-## US16 — [ ] Deployment & CI hardening (resource protection first)
+## US16 — [x] Deployment & CI hardening (resource protection first)
 
 **Why:** `gen-ca.sh` silently destroys an existing CA on re-run — permanent loss of the only
 persistent identity (DEP-001); no `.gitignore` protection for the CA key/secrets (DEP-003); the CA
@@ -1288,16 +1288,16 @@ implicit (DEP-013); the production Traefik template is validated by no gate (DEP
 leaks temp dirs (DEP-010).
 
 **Acceptance criteria:**
-- [ ] `gen-ca.sh` refuses to overwrite an existing CA and creates its output dir (DEP-001, DEP-004).
-- [ ] `.gitignore` protects `deploy/ca/`, `deploy/.env`, `deploy/tunneld.env`, `deploy/logs/` (DEP-003).
-- [ ] Operator env examples use escaping that survives Compose interpolation; the misleading comment is corrected (DEP-012).
-- [ ] `NodeDown` uses `static_configs` so a fully-down replica yields `up==0` (DEP-006).
-- [ ] The release workflow checks out the dispatched tag (DEP-005).
-- [ ] Ops-stack images, GitHub Actions, and mermaid-cli are pinned (DEP-009, DEP-008, DEP-007).
-- [ ] ntfy + bridge ports are explicit (DEP-013); the Traefik template gets a render gate (DEP-011); `scripts_test.sh` cleans up (DEP-010).
+- [x] `gen-ca.sh` refuses to overwrite an existing CA and creates its output dir (DEP-001, DEP-004).
+- [x] `.gitignore` protects `deploy/ca/`, `deploy/.env`, `deploy/tunneld.env`, `deploy/logs/` (DEP-003).
+- [x] Operator env examples use escaping that survives Compose interpolation; the misleading comment is corrected (DEP-012).
+- [x] `NodeDown` uses `static_configs` so a fully-down replica yields `up==0` (DEP-006).
+- [x] The release workflow checks out the dispatched tag (DEP-005).
+- [x] Ops-stack images, GitHub Actions, and mermaid-cli are pinned (DEP-009, DEP-008, DEP-007).
+- [x] ntfy + bridge ports are explicit (DEP-013); the Traefik template gets a render gate (DEP-011); `scripts_test.sh` cleans up (DEP-010).
 
-### Task 16.1 — [ ] `gen-ca.sh`: no-clobber + mkdir
-- [ ] **Action** — modify `deploy/scripts/gen-ca.sh`: create the dir and refuse to overwrite an existing CA.
+### Task 16.1 — [x] `gen-ca.sh`: no-clobber + mkdir
+- [x] **Action** — modify `deploy/scripts/gen-ca.sh`: create the dir and refuse to overwrite an existing CA.
 ```sh
 set -eu
 OUT_DIR="${1:?usage: gen-ca.sh <out-dir>}"
@@ -1308,20 +1308,20 @@ if [ -e "$OUT_DIR/ca-key.pem" ] || [ -e "$OUT_DIR/ca.pem" ]; then
 fi
 umask 077
 ```
-- [ ] **DoD:** a second run against a populated dir exits non-zero without touching the existing key/cert; a first run against a missing dir succeeds.
+- [x] **DoD:** a second run against a populated dir exits non-zero without touching the existing key/cert; a first run against a missing dir succeeds.
 
-### Task 16.2 — [ ] `.gitignore` protection
-- [ ] **Action** — modify `.gitignore`, append:
+### Task 16.2 — [x] `.gitignore` protection
+- [x] **Action** — modify `.gitignore`, append:
 ```
 /deploy/ca/
 /deploy/.env
 /deploy/tunneld.env
 /deploy/logs/
 ```
-- [ ] **DoD:** the CA key, secret env files, and logs cannot be accidentally staged.
+- [x] **DoD:** the CA key, secret env files, and logs cannot be accidentally staged.
 
-### Task 16.3 — [ ] Compose env escaping + corrected comments
-- [ ] **Action** — modify `deploy/.env.example`: single-quote the ops-auth value so Compose does not interpolate its `$`, and correct the comment (verified: unquoted `$` in a `.env` value IS interpolated by Compose; single-quoting disables it). Move the inline comments to their own lines.
+### Task 16.3 — [x] Compose env escaping + corrected comments
+- [x] **Action** — modify `deploy/.env.example`: single-quote the ops-auth value so Compose does not interpolate its `$`, and correct the comment (verified: unquoted `$` in a `.env` value IS interpolated by Compose; single-quoting disables it). Move the inline comments to their own lines.
 ```
 # Ops access
 # htpasswd (apr1/bcrypt) — SINGLE-QUOTE so Compose does not interpolate the `$` in the hash.
@@ -1329,36 +1329,36 @@ OPS_BASIC_AUTH='admin:$apr1$changeme'
 GRAFANA_ADMIN_PASSWORD=changeme
 ```
 Also move the `CLOUDFLARE_IP_RANGES` trailing comment to its own line (defensive; the space-preceded inline form is stripped correctly today but the own-line form removes the fragility).
-- [ ] **Action** — modify `deploy/tunneld.env.example`: move the line-1 inline comment to its own line above the value.
-- [ ] **DoD:** `docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config` renders `OPS_BASIC_AUTH` as the literal `admin:$apr1$changeme` (verify by inspecting the rendered value).
+- [x] **Action** — modify `deploy/tunneld.env.example`: move the line-1 inline comment to its own line above the value.
+- [x] **DoD:** `docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config` renders `OPS_BASIC_AUTH` as the literal `admin:$apr1$changeme` (verify by inspecting the rendered value).
 
-### Task 16.4 — [ ] `NodeDown` via static targets
-- [ ] **Action** — modify `deploy/prometheus/prometheus.yml`: replace the `dns_sd_configs` block with static targets so a stopped replica still yields `up==0`:
+### Task 16.4 — [x] `NodeDown` via static targets
+- [x] **Action** — modify `deploy/prometheus/prometheus.yml`: replace the `dns_sd_configs` block with static targets so a stopped replica still yields `up==0`:
 ```yaml
 scrape_configs:
   - job_name: tunneld
     static_configs:
       - targets: ["tunneld-1:9090", "tunneld-2:9090"]
 ```
-- [ ] **Action** — modify `deploy/docker-compose.yml:32-36`: fix the dangling "the Prometheus dns_sd comment calls out" cross-reference (now that `dns_sd` is gone) — reword to reference the per-URL file-provider requirement without the stale pointer.
-- [ ] **DoD:** stopping `tunneld-1` produces `up{job="tunneld"} == 0` for that target, so `NodeDown` can fire.
+- [x] **Action** — modify `deploy/docker-compose.yml:32-36`: fix the dangling "the Prometheus dns_sd comment calls out" cross-reference (now that `dns_sd` is gone) — reword to reference the per-URL file-provider requirement without the stale pointer.
+- [x] **DoD:** stopping `tunneld-1` produces `up{job="tunneld"} == 0` for that target, so `NodeDown` can fire.
 
-### Task 16.5 — [ ] Release checks out the dispatched tag
-- [ ] **Action** — modify `.github/workflows/release.yml`, the `actions/checkout@v4` step: add `ref: ${{ github.event.inputs.tag || github.ref }}`.
-- [ ] **DoD:** a `workflow_dispatch` with `tag: v1.0.0` builds that tag's commit, not the branch HEAD.
+### Task 16.5 — [x] Release checks out the dispatched tag
+- [x] **Action** — modify `.github/workflows/release.yml`, the `actions/checkout@v4` step: add `ref: ${{ github.event.inputs.tag || github.ref }}`.
+- [x] **DoD:** a `workflow_dispatch` with `tag: v1.0.0` builds that tag's commit, not the branch HEAD.
 
-### Task 16.6 — [ ] Pin images, actions, and mermaid-cli
-- [ ] **Action** — modify `deploy/docker-compose.yml`: pin the five `:latest` images (`prom/prometheus`, `prom/alertmanager`, `grafana/grafana`, `binwiederhier/ntfy`, `xenrox/ntfy-alertmanager`) to explicit current tags (the implementer selects the latest stable tag of each at implementation time and records the chosen versions in `## Deviations`).
-- [ ] **Action** — modify `.github/workflows/ci.yml` AND `.github/workflows/release.yml`: pin EVERY `uses:` action in BOTH workflows to a full commit SHA with the tag in a trailing comment (`actions/checkout`, `actions/setup-go`, `golangci/golangci-lint-action`, `actions/setup-node`, `docker/setup-qemu-action`, `docker/setup-buildx-action`, `docker/login-action`, `goreleaser/goreleaser-action`).
-- [ ] **Action** — modify `scripts/mermaid-check.sh` and `Makefile` (mermaid-check target): pin `@mermaid-js/mermaid-cli` to an explicit version (`npx --yes @mermaid-js/mermaid-cli@<version> ...`), consistent with the repo's pinning policy.
-- [ ] **DoD:** no `:latest` image remains; no mutable-tag action remains in EITHER workflow; mermaid-cli is version-pinned.
+### Task 16.6 — [x] Pin images, actions, and mermaid-cli
+- [x] **Action** — modify `deploy/docker-compose.yml`: pin the five `:latest` images (`prom/prometheus`, `prom/alertmanager`, `grafana/grafana`, `binwiederhier/ntfy`, `xenrox/ntfy-alertmanager`) to explicit current tags (the implementer selects the latest stable tag of each at implementation time and records the chosen versions in `## Deviations`).
+- [x] **Action** — modify `.github/workflows/ci.yml` AND `.github/workflows/release.yml`: pin EVERY `uses:` action in BOTH workflows to a full commit SHA with the tag in a trailing comment (`actions/checkout`, `actions/setup-go`, `golangci/golangci-lint-action`, `actions/setup-node`, `docker/setup-qemu-action`, `docker/setup-buildx-action`, `docker/login-action`, `goreleaser/goreleaser-action`).
+- [x] **Action** — modify `scripts/mermaid-check.sh` and `Makefile` (mermaid-check target): pin `@mermaid-js/mermaid-cli` to an explicit version (`npx --yes @mermaid-js/mermaid-cli@<version> ...`), consistent with the repo's pinning policy.
+- [x] **DoD:** no `:latest` image remains; no mutable-tag action remains in EITHER workflow; mermaid-cli is version-pinned.
 
-### Task 16.7 — [ ] Explicit ntfy/bridge ports + Traefik render gate + script cleanup
-- [ ] **Action** — modify `deploy/ntfy/server.yml`: set `listen-http: ":80"` explicitly; modify `deploy/ntfy-alertmanager/config.scfg`: set the bridge's `http-address` explicitly to `:8080` (matching `alertmanager.yml`'s webhook URL) — so the wiring no longer rests on image defaults.
-- [ ] **Action** — add a Traefik dynamic-config render gate: extend `make compose-config` (or add a `make traefik-config` target invoked by CI's `static-checks`) that renders/loads `deploy/traefik/dynamic.yml` under a `traefik:v3.3` container with placeholder env and fails on a template/parse error. Wire it into `.github/workflows/ci.yml` `static-checks`.
-- [ ] **Action** — modify `deploy/scripts/scripts_test.sh`: track every `mktemp -d` under one root and remove them in an `EXIT` trap (`trap 'rm -rf "$tmproot"' EXIT`), matching `scripts/mermaid-check.sh`.
-- [ ] **Action** — modify `deploy/scripts/scripts_test.sh`: add a `gen-ca refuses to clobber an existing CA` case — run `gen-ca.sh` against a dir twice and assert the second run exits non-zero with the original `ca.pem`/`ca-key.pem` bytes unchanged (regression test for US16.1 / DEP-001).
-- [ ] **DoD:** ntfy + bridge listen on documented ports; a broken Traefik template is caught by a gate; `make test-scripts` leaves no temp dirs behind.
+### Task 16.7 — [x] Explicit ntfy/bridge ports + Traefik render gate + script cleanup
+- [x] **Action** — modify `deploy/ntfy/server.yml`: set `listen-http: ":80"` explicitly; modify `deploy/ntfy-alertmanager/config.scfg`: set the bridge's `http-address` explicitly to `:8080` (matching `alertmanager.yml`'s webhook URL) — so the wiring no longer rests on image defaults.
+- [x] **Action** — add a Traefik dynamic-config render gate: extend `make compose-config` (or add a `make traefik-config` target invoked by CI's `static-checks`) that renders/loads `deploy/traefik/dynamic.yml` under a `traefik:v3.3` container with placeholder env and fails on a template/parse error. Wire it into `.github/workflows/ci.yml` `static-checks`.
+- [x] **Action** — modify `deploy/scripts/scripts_test.sh`: track every `mktemp -d` under one root and remove them in an `EXIT` trap (`trap 'rm -rf "$tmproot"' EXIT`), matching `scripts/mermaid-check.sh`.
+- [x] **Action** — modify `deploy/scripts/scripts_test.sh`: add a `gen-ca refuses to clobber an existing CA` case — run `gen-ca.sh` against a dir twice and assert the second run exits non-zero with the original `ca.pem`/`ca-key.pem` bytes unchanged (regression test for US16.1 / DEP-001).
+- [x] **DoD:** ntfy + bridge listen on documented ports; a broken Traefik template is caught by a gate; `make test-scripts` leaves no temp dirs behind.
 
 ---
 
@@ -1524,5 +1524,22 @@ mandatory (`go.md` §3).
 
 ## Deviations
 
-(To be filled during implementation — record any reconciliation with existing code, chosen pinned
-image/action versions, and any place the delivered code necessarily diverges from a block above.)
+- **Task 16.6 — pinned ops-stack image versions** (selected as the latest stable tag from each image's
+  Docker Hub registry at implementation time): `prom/prometheus:v3.13.2`, `prom/alertmanager:v0.34.0`,
+  `grafana/grafana:13.0.6`, `binwiederhier/ntfy:v2.27.0`, `xenrox/ntfy-alertmanager:1.0.0`.
+- **Task 16.6 — pinned GitHub Action commit SHAs** (resolved via `gh api repos/<a>/commits/<tag>`):
+  `actions/checkout` v4 `11d5960…`, `actions/setup-go` v5 `40f1582…`, `golangci/golangci-lint-action`
+  v7 `9fae48a…`, `actions/setup-node` v4 `49933ea…`, `docker/setup-qemu-action` v3 `c7c5346…`,
+  `docker/setup-buildx-action` v3 `8d2750c…`, `docker/login-action` v3 `c94ce9f…`,
+  `goreleaser/goreleaser-action` v6 `e435ccd…`. mermaid-cli pinned to `@11.16.0` (npm latest).
+- **Task 16.7 — ntfy bridge port left at its default** (`:8080`, which `alertmanager.yml`'s webhook
+  already targets). ntfy's own `listen-http: ":80"` was set (directive verified against docs.ntfy.sh).
+  The `xenrox/ntfy-alertmanager` scfg directive for the HTTP address could NOT be verified against an
+  authoritative source, so per the external-claim-verification rule no unverified directive was added
+  (a wrong scfg key would break the strict parser); a `config.scfg` comment documents the expectation.
+- **Task 16.7 — Traefik render gate is best-effort.** `make traefik-config` runs `traefik:v3.3`
+  briefly and fails on the file-provider's template/parse error lines. Traefik keeps running on a bad
+  hot-reloadable dynamic config, so the gate greps for `template:` / `error while building the
+  configuration` / `error while parsing`; the exact match set is best-effort (Traefik's log strings
+  were not verified against a rendered failure) and missing-entrypoint warnings are intentionally not
+  matched.
