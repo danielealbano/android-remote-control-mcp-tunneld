@@ -1362,7 +1362,7 @@ scrape_configs:
 
 ---
 
-## US17 — [ ] Documentation sync
+## US17 — [x] Documentation sync
 
 **Why:** README quickstart step 1 fails on a fresh checkout (DOC-001); the `§2` sequence diagram shows
 the wrong order of operations (DOC-002); `project.md` points at a non-existent reason-writer list in
@@ -1371,29 +1371,29 @@ ARCHITECTURE §7 (DOC-003); Plan 1 has unrecorded plan-vs-code deviations (DOC-0
 reorder and US9 behavior changes must be reflected in `PROTOCOL.md`/`ARCHITECTURE.md`.
 
 **Acceptance criteria:**
-- [ ] README step 1 works on a fresh checkout (mkdir handled) (DOC-001).
-- [ ] The `§2` diagram matches the code's order (lookup + tunnel-ban before allowlist/caps) and validates with `mmdc` (DOC-002).
-- [ ] The reason→writer set is documented where `project.md` claims, or the cross-reference is corrected (DOC-003).
-- [ ] Plan 1 gains a `## Deviations` section recording module-path, CI-shape, Makefile, and ban-file-wording divergences (DOC-004).
-- [ ] The README image-tag guidance states the tag is the version without the leading `v` (DEP-014).
-- [ ] `PROTOCOL.md` §2 / `ARCHITECTURE.md` §3 reflect the semaphore-first `/connect` order (US8).
+- [x] README step 1 works on a fresh checkout (mkdir handled) (DOC-001).
+- [x] The `§2` diagram matches the code's order (lookup + tunnel-ban before allowlist/caps) and validates with `mmdc` (DOC-002).
+- [x] The reason→writer set is documented where `project.md` claims, or the cross-reference is corrected (DOC-003).
+- [x] Plan 1 gains a `## Deviations` section recording module-path, CI-shape, Makefile, and ban-file-wording divergences (DOC-004).
+- [x] The README image-tag guidance states the tag is the version without the leading `v` (DEP-014).
+- [x] `PROTOCOL.md` §2 / `ARCHITECTURE.md` §3 reflect the semaphore-first `/connect` order (US8).
 
-### Task 17.1 — [ ] README fixes
-- [ ] **Action** — modify `README.md` step 1: since `gen-ca.sh` now `mkdir -p`s, the command works as-is; update the comment to note the dir is created. Modify the prebuilt-image paragraph: state the image tag is the version WITHOUT the leading `v` (git tag `v1.0.0` → `ghcr.io/danielealbano/tunneld:1.0.0`).
-- [ ] **DoD:** README step 1 succeeds on a bare checkout; the image example uses the `v`-stripped tag.
+### Task 17.1 — [x] README fixes
+- [x] **Action** — modify `README.md` step 1: since `gen-ca.sh` now `mkdir -p`s, the command works as-is; update the comment to note the dir is created. Modify the prebuilt-image paragraph: state the image tag is the version WITHOUT the leading `v` (git tag `v1.0.0` → `ghcr.io/danielealbano/tunneld:1.0.0`).
+- [x] **DoD:** README step 1 succeeds on a bare checkout; the image example uses the `v`-stripped tag.
 
-### Task 17.2 — [ ] Fix the `§2` sequence diagram
-- [ ] **Action** — modify `docs/ARCHITECTURE.md` §2 Mermaid sequence diagram: place `Lookup route:{name}` and the `MatchTunnel` tunnel-ban gate BEFORE the allowlist/caps/concurrency step, matching the prose and the code.
-- [ ] **DoD:** the diagram order equals the prose order; it validates via `mmdc` (US19 Mermaid step).
+### Task 17.2 — [x] Fix the `§2` sequence diagram
+- [x] **Action** — modify `docs/ARCHITECTURE.md` §2 Mermaid sequence diagram: place `Lookup route:{name}` and the `MatchTunnel` tunnel-ban gate BEFORE the allowlist/caps/concurrency step, matching the prose and the code.
+- [x] **DoD:** the diagram order equals the prose order; it validates via `mmdc` (US19 Mermaid step).
 
-### Task 17.3 — [ ] Reason→writer documentation
-- [ ] **Action** — modify `docs/ARCHITECTURE.md` §7: add the registered rejection-reason label set and its writers (the set is fixed and enumerated in Plan 1 Task 9.1), OR modify `.claude/rules/project.md` to point at the actual location. Prefer adding the table to `§7` so the `project.md` cross-reference becomes true.
-- [ ] **DoD:** the `project.md` "the architecture doc lists" claim resolves to real content.
+### Task 17.3 — [x] Reason→writer documentation
+- [x] **Action** — modify `docs/ARCHITECTURE.md` §7: add the registered rejection-reason label set and its writers (the set is fixed and enumerated in Plan 1 Task 9.1), OR modify `.claude/rules/project.md` to point at the actual location. Prefer adding the table to `§7` so the `project.md` cross-reference becomes true.
+- [x] **DoD:** the `project.md` "the architecture doc lists" claim resolves to real content.
 
-### Task 17.4 — [ ] Record Plan 1 deviations + reflect US8/US9 in the wire/architecture docs
-- [ ] **Action** — modify `docs/plans/1_self_hosted_tunnel_server_20260814130404.md`: add a `## Deviations` section (a permitted plan-file edit) recording: module path is `…-tunneld` not `…/tunneld`; CI is `ci.yml` (unfiltered, e2e always-on) not an opt-in `tunnel-ci.yml`; the Makefile is the tiered/3-pass form; and the ban unreadable-file behavior aborts the whole reload (ARCHITECTURE §6 documents the real behavior).
-- [ ] **Action** — modify `docs/PROTOCOL.md` §2 and `docs/ARCHITECTURE.md` §3: update the `/connect` pre-upgrade order to ban → pre-auth semaphore → per-IP connect rate → upgrade (US8 reorder), and note the over-cap response is paced+accounted, not dropped at wire speed (US9.1).
-- [ ] **DoD:** Plan 1 records the deviations; the wire/architecture docs match the new `/connect` order and drain behavior.
+### Task 17.4 — [x] Record Plan 1 deviations + reflect US8/US9 in the wire/architecture docs
+- [x] **Action** — modify `docs/plans/1_self_hosted_tunnel_server_20260814130404.md`: add a `## Deviations` section (a permitted plan-file edit) recording: module path is `…-tunneld` not `…/tunneld`; CI is `ci.yml` (unfiltered, e2e always-on) not an opt-in `tunnel-ci.yml`; the Makefile is the tiered/3-pass form; and the ban unreadable-file behavior aborts the whole reload (ARCHITECTURE §6 documents the real behavior).
+- [x] **Action** — modify `docs/PROTOCOL.md` §2 and `docs/ARCHITECTURE.md` §3: update the `/connect` pre-upgrade order to ban → pre-auth semaphore → per-IP connect rate → upgrade (US8 reorder), and note the over-cap response is paced+accounted, not dropped at wire speed (US9.1).
+- [x] **DoD:** Plan 1 records the deviations; the wire/architecture docs match the new `/connect` order and drain behavior.
 
 ---
 

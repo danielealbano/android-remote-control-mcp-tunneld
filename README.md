@@ -40,7 +40,7 @@ either replica; the receiving replica resolves `name → node` via Redis and bri
 
 1. **Generate the internal CA** (once):
    ```sh
-   deploy/scripts/gen-ca.sh deploy/ca      # writes deploy/ca/{ca.pem,ca-key.pem}; compose mounts it at /ca
+   deploy/scripts/gen-ca.sh deploy/ca      # creates deploy/ca/{ca.pem,ca-key.pem} (refuses to overwrite an existing CA); compose mounts it at /ca
    ```
 2. **Create the logs dir** (bind-mounted, operator-owned — the file log sink writes here):
    ```sh
@@ -65,8 +65,9 @@ the path, `--client-ip-header=X-Real-Ip`, no `IPAllowList`.
 
 **Prebuilt image (optional):** the Compose stack builds tunneld locally via `build:`. Multi-arch
 images (linux/amd64 + linux/arm64) are also published to `ghcr.io/danielealbano/tunneld` on
-`v*` tags — swap the tunneld services' `build:` for
-`image: ghcr.io/danielealbano/tunneld:<tag>` to pull instead of build.
+`v*` tags — the image tag is the version **without** the leading `v` (git tag `v1.0.0` →
+`ghcr.io/danielealbano/tunneld:1.0.0`). Swap the tunneld services' `build:` for
+`image: ghcr.io/danielealbano/tunneld:1.0.0` to pull instead of build.
 
 **Never publish tunneld's port.** The replicas have NO published ports — reachable only on the
 compose network (Traefik + Prometheus). With orange-cloud the equivalent is "origin only reachable
