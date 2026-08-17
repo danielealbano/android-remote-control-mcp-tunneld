@@ -13,29 +13,87 @@ permissions:
   contents: read
 
 jobs:
-  build-test:
+  static-checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
-      - run: go build ./...
-      - run: go vet ./...
-      - name: golangci-lint
+          go-version-file: go.mod
+      # One pass per build-tag set (same job): files behind `//go:build integration` / `//go:build e2e`
+      # are INVISIBLE to an untagged run, so each tag set must be linted explicitly or those files are
+      # never checked. Mirrors `make lint`. The action installs golangci-lint once; later steps reuse it.
+      - name: lint (default tags)
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
+      - name: lint (integration tags)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          args: --build-tags=integration
+      - name: lint (e2e tags)
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+          args: --build-tags=e2e
+      - name: govulncheck
+        run: make govulncheck
+      - name: go.mod/go.sum tidy drift
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum \
+            || { echo "::error::go.mod/go.sum not tidy — run 'go mod tidy' and commit"; exit 1; }
       - name: shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh
+          shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh
       - name: script tests
         run: make test-scripts
-      - name: unit + integration tests
-        run: go test ./...
       - name: compose config
-        run: docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config -q
+        run: make compose-config
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: mermaid-check
+        run: make mermaid-check
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+
+  test-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-unit
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-integration
+
+  test-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-e2e
 
   image:
     runs-on: ubuntu-latest
@@ -43,15 +101,3 @@ jobs:
       - uses: actions/checkout@v4
       - name: build image
         run: docker build -t tunneld:ci -f Dockerfile .
-
-  e2e:
-    # Runs on every push/PR so the full-stack path is regression-tested — not left to rot behind a
-    # manual trigger.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-      - name: e2e
-        run: make test-e2e
