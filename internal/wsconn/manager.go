@@ -214,11 +214,21 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	// Close the ban-reload race: a reload firing between the auth-time MatchTunnel and this Store could
 	// have missed this conn in EvictBanned's Range; re-check against the CURRENT snapshot and drop it
 	// here so a newly-banned tunnel never stays connected (docs/ARCHITECTURE.md §3).
-	if src, banned := m.ban.MatchTunnel(name, fp); banned {
-		conn.teardown(src.Reason.String())
+	if m.dropIfBanned(conn) {
 		return
 	}
 	conn.serve()
+}
+
+// dropIfBanned tears a just-Stored conn down if its (name, fingerprint) is banned under the CURRENT
+// ban snapshot, closing the reload race between the auth-time check and conns.Store. Returns true if
+// it tore the conn down. Split out for deterministic testing.
+func (m *Manager) dropIfBanned(conn *Conn) bool {
+	if src, banned := m.ban.MatchTunnel(conn.name, conn.fp); banned {
+		conn.teardown(src.Reason.String())
+		return true
+	}
+	return false
 }
 
 // authenticate sends CHALLENGE, reads AUTH within --connect-auth-timeout, verifies the cert chain +
