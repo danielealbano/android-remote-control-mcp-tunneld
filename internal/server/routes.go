@@ -4,7 +4,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 )
 
 // connectHandler is the subset of *wsconn.Manager the mux needs (kept as an interface so routes.go

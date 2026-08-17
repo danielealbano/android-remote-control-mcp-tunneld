@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
 
 // runHeartbeat refreshes the routing entry every --route-ttl/3. not-owner → the phone re-bound

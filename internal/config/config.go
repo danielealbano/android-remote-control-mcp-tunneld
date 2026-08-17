@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/logging"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
 	"github.com/redis/go-redis/v9"
 )
 

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 )
 
 // captureStdout redirects os.Stdout for the duration of fn and returns what was written.

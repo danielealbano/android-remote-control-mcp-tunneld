@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/ca"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/wire"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 const (

@@ -6,9 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/admin"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/caplog"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/caplog"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
 
 // PromRecorder implements observ.Recorder by combining the metric registry, the cap-hit deduping

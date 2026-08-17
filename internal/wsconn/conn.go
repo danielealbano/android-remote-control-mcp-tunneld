@@ -7,8 +7,8 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/wire"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // Conn is one authenticated phone WebSocket. Up to --limit-concurrent Do goroutines multiplex over

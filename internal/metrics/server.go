@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/admin"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"

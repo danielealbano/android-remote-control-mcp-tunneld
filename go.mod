@@ -1,4 +1,4 @@
-module github.com/danielealbano/android-remote-control-mcp/tunneld
+module github.com/danielealbano/android-remote-control-mcp-tunneld
 
 go 1.26
 
