@@ -420,7 +420,7 @@ func (r *BucketRegistry) ensure(name string) *bucketEntry {
 
 ---
 
-## US5 — [ ] Ingress pipeline hardening
+## US5 — [x] Ingress pipeline hardening
 
 **Why:** The public hot path has the same unjoined-goroutine ResponseWriter race as enroll — a fatal,
 remotely-triggerable crash (AUTH-001); Redis errors on the rate-limit/concurrency path return a bare
@@ -429,14 +429,14 @@ remotely-triggerable crash (AUTH-001); Redis errors on the rate-limit/concurrenc
 client abort mid-body is mislabeled `body_read_timeout` (ING-015).
 
 **Acceptance criteria:**
-- [ ] The body read never touches the `ResponseWriter` from the unjoined goroutine — no `MaxBytesReader` in the goroutine (AUTH-001).
-- [ ] Redis errors on the rps/rpm/concurrency path are logged with identifiers before the 500 (ING-004).
-- [ ] Headers named by the `Connection` header value are stripped in BOTH directions (ING-007).
-- [ ] Host→name resolution is case-insensitive (ING-014).
-- [ ] A client disconnect mid-body is not counted as a cap-hit `body_read_timeout` (ING-015).
+- [x] The body read never touches the `ResponseWriter` from the unjoined goroutine — no `MaxBytesReader` in the goroutine (AUTH-001).
+- [x] Redis errors on the rps/rpm/concurrency path are logged with identifiers before the 500 (ING-004).
+- [x] Headers named by the `Connection` header value are stripped in BOTH directions (ING-007).
+- [x] Host→name resolution is case-insensitive (ING-014).
+- [x] A client disconnect mid-body is not counted as a cap-hit `body_read_timeout` (ING-015).
 
-### Task 5.1 — [ ] Race-free paced body read
-- [ ] **Action** — modify `internal/ingress/handler.go`: change `bodyResult` to `{data []byte; tooBig bool; err error}`; replace `readPacedBody` with `readPacedBodyLimited` that enforces the limit itself (NO `MaxBytesReader`, never touching `w`):
+### Task 5.1 — [x] Race-free paced body read
+- [x] **Action** — modify `internal/ingress/handler.go`: change `bodyResult` to `{data []byte; tooBig bool; err error}`; replace `readPacedBody` with `readPacedBodyLimited` that enforces the limit itself (NO `MaxBytesReader`, never touching `w`):
 ```go
 type bodyResult struct {
 	data   []byte
@@ -470,7 +470,7 @@ func readPacedBodyLimited(ctx context.Context, body io.Reader, bucket *limit.Tok
 	}
 }
 ```
-- [ ] **Action** — modify `internal/ingress/handler.go`, `ServeHTTP` body-read section: drop the `MaxBytesReader`, launch the limited reader, and on the timeout branch close the body (which unblocks the goroutine — it writes to the buffered channel and exits, never touching `w`), then map `tooBig`/errors:
+- [x] **Action** — modify `internal/ingress/handler.go`, `ServeHTTP` body-read section: drop the `MaxBytesReader`, launch the limited reader, and on the timeout branch close the body (which unblocks the goroutine — it writes to the buffered channel and exits, never touching `w`), then map `tooBig`/errors:
 ```go
 up, _ := h.buckets.Pair(name)
 bodyCh := make(chan bodyResult, 1)
@@ -511,11 +511,11 @@ case res := <-bodyCh:
 	body = res.data
 }
 ```
-- [ ] **Context (ING-015):** `reqCtx` derives from `r.Context()`. Distinguishing `context.Canceled` (client gone) from `context.DeadlineExceeded` (real timeout) removes the mislabelled `body_read_timeout` cap-hit. If `context.Cause` is not convenient, gate on `r.Context().Err() == context.Canceled` for the parent-cancel case and `errors.Is(res.err, context.Canceled)` for the read-side case.
-- [ ] **DoD:** an over-limit or timed-out body never triggers a concurrent write to `w`; a client abort is not recorded as a cap-hit; `race` detector is clean under a slow/over-limit body test (US18).
+- [x] **Context (ING-015):** `reqCtx` derives from `r.Context()`. Distinguishing `context.Canceled` (client gone) from `context.DeadlineExceeded` (real timeout) removes the mislabelled `body_read_timeout` cap-hit. If `context.Cause` is not convenient, gate on `r.Context().Err() == context.Canceled` for the parent-cancel case and `errors.Is(res.err, context.Canceled)` for the read-side case.
+- [x] **DoD:** an over-limit or timed-out body never triggers a concurrent write to `w`; a client abort is not recorded as a cap-hit; `race` detector is clean under a slow/over-limit body test (US18).
 
-### Task 5.2 — [ ] Log Redis errors on the limiter path
-- [ ] **Action** — modify `internal/ingress/handler.go`: in each of the three `err != nil → h.serverError(w)` branches (rps, rpm, `Acquire`), log first with identifiers. Change `h.serverError` to accept context, or add logging inline:
+### Task 5.2 — [x] Log Redis errors on the limiter path
+- [x] **Action** — modify `internal/ingress/handler.go`: in each of the three `err != nil → h.serverError(w)` branches (rps, rpm, `Acquire`), log first with identifiers. Change `h.serverError` to accept context, or add logging inline:
 ```go
 if allowed, retry, err := limit.Allow(r.Context(), h.rdb, "rps", ip, h.cfg.LimitRPS, time.Second); err != nil {
 	h.log.Warn("rps limit check failed", "name", name, "ip", ipStr, "err", err)
@@ -527,10 +527,10 @@ if allowed, retry, err := limit.Allow(r.Context(), h.rdb, "rps", ip, h.cfg.Limit
 }
 ```
 Apply the same `h.log.Warn(...)` (scope `"rpm"` / `"concurrency"`) to the rpm and `Acquire` branches.
-- [ ] **DoD:** a Redis outage on the limiter path emits an actionable Warn per branch; the 500 is unchanged.
+- [x] **DoD:** a Redis outage on the limiter path emits an actionable Warn per branch; the 500 is unchanged.
 
-### Task 5.3 — [ ] Strip `Connection`-nominated hop-by-hop headers
-- [ ] **Action** — modify `internal/ingress/headers.go`: in BOTH `Sanitize` and `SanitizeResponse`, before dropping, collect the set of field names named by the `Connection` header and drop those too.
+### Task 5.3 — [x] Strip `Connection`-nominated hop-by-hop headers
+- [x] **Action** — modify `internal/ingress/headers.go`: in BOTH `Sanitize` and `SanitizeResponse`, before dropping, collect the set of field names named by the `Connection` header and drop those too.
 ```go
 // connectionNominated returns the canonicalised set of header names listed in the Connection header
 // value (RFC 9110 §7.6.1 connection-scoped headers), which MUST NOT be forwarded across the hop.
@@ -547,25 +547,25 @@ func connectionNominated(in http.Header) map[string]struct{} {
 }
 ```
 In `Sanitize`'s copy loop add, alongside the `hopByHop` check: `if _, nom := nominated[ck]; nom { continue }` (where `nominated := connectionNominated(in)` is computed once before the loop). Mirror the same in `SanitizeResponse`.
-- [ ] **DoD:** a request with `Connection: X-Custom` + `X-Custom: v` forwards neither `Connection` nor `X-Custom`; same for a phone response.
+- [x] **DoD:** a request with `Connection: X-Custom` + `X-Custom: v` forwards neither `Connection` nor `X-Custom`; same for a phone response.
 
-### Task 5.4 — [ ] Case-insensitive Host→name (`firstLabel`)
-- [ ] **Action** — modify `internal/ingress/handler.go`, `firstLabel`: lowercase the extracted label. After stripping port and trailing dot, `host = strings.ToLower(host)` before extracting the first label (so `NAME.tunnel-domain` resolves to the lowercase route key). Return `strings.ToLower(host[:i])` / `strings.ToLower(host)`.
-- [ ] **DoD:** an uppercased Host resolves to the same `route:{name}` as the lowercase form.
+### Task 5.4 — [x] Case-insensitive Host→name (`firstLabel`)
+- [x] **Action** — modify `internal/ingress/handler.go`, `firstLabel`: lowercase the extracted label. After stripping port and trailing dot, `host = strings.ToLower(host)` before extracting the first label (so `NAME.tunnel-domain` resolves to the lowercase route key). Return `strings.ToLower(host[:i])` / `strings.ToLower(host)`.
+- [x] **DoD:** an uppercased Host resolves to the same `route:{name}` as the lowercase form.
 
 ---
 
-## US6 — [ ] Enroll handler race fix
+## US6 — [x] Enroll handler race fix
 
 **Why:** The enroll CSR read has the identical unjoined-goroutine `MaxBytesReader` race as the public
 path — a fatal concurrent-map-write crash triggerable by a dribbled over-limit body (AUTH-001).
 
 **Acceptance criteria:**
-- [ ] The CSR read never wraps `w` in a `MaxBytesReader` from the unjoined goroutine.
-- [ ] The `413`/timeout/`400` outcomes are preserved.
+- [x] The CSR read never wraps `w` in a `MaxBytesReader` from the unjoined goroutine.
+- [x] The `413`/timeout/`400` outcomes are preserved.
 
-### Task 6.1 — [ ] Race-free CSR read
-- [ ] **Action** — add to `internal/ingress` a small helper (place in `enroll.go`):
+### Task 6.1 — [x] Race-free CSR read
+- [x] **Action** — add to `internal/ingress` a small helper (place in `enroll.go`):
 ```go
 // readAllLimited reads up to limit+1 bytes and reports tooBig if the source exceeds limit. It never
 // touches the ResponseWriter, so a caller that abandons this read on timeout cannot race w.
@@ -580,7 +580,7 @@ func readAllLimited(r io.Reader, limit int64) (data []byte, tooBig bool, err err
 	return data, false, nil
 }
 ```
-- [ ] **Action** — modify `internal/ingress/enroll.go`, `ServeHTTP`: replace the `MaxBytesReader` + goroutine block with the helper-based read (same timeout `select`, closing `r.Body` on timeout):
+- [x] **Action** — modify `internal/ingress/enroll.go`, `ServeHTTP`: replace the `MaxBytesReader` + goroutine block with the helper-based read (same timeout `select`, closing `r.Body` on timeout):
 ```go
 type readRes struct {
 	data   []byte
@@ -617,8 +617,8 @@ case res := <-ch:
 	body = res.data
 }
 ```
-- [ ] **Action** — drop the now-unused `*http.MaxBytesError` handling and the `limited := http.MaxBytesReader(...)` line; keep the `"io"` and `"errors"` imports.
-- [ ] **DoD:** the enroll timeout path never races `w`; `413` (`enroll_body_too_large`) still fires for an over-limit CSR.
+- [x] **Action** — drop the now-unused `*http.MaxBytesError` handling and the `limited := http.MaxBytesReader(...)` line; keep the `"io"` and `"errors"` imports.
+- [x] **DoD:** the enroll timeout path never races `w`; `413` (`enroll_body_too_large`) still fires for an over-limit CSR.
 
 ---
 

@@ -38,9 +38,13 @@ func Sanitize(in http.Header) (out http.Header, rejected bool) {
 		}
 	}
 	out = http.Header{}
+	nominated := connectionNominated(in)
 	for k, vs := range in {
 		ck := http.CanonicalHeaderKey(k)
 		if _, hop := hopByHop[ck]; hop {
+			continue
+		}
+		if _, nom := nominated[ck]; nom {
 			continue
 		}
 		if ck == "Forwarded" || strings.HasPrefix(ck, "X-Forwarded-") {
@@ -63,12 +67,17 @@ func Sanitize(in http.Header) (out http.Header, rejected bool) {
 	return out, false
 }
 
-// SanitizeResponse strips hop-by-hop headers from a phone response before returning it to the client.
+// SanitizeResponse strips hop-by-hop headers (fixed set plus any named by the Connection header) from
+// a phone response before returning it to the client.
 func SanitizeResponse(in http.Header) http.Header {
 	out := http.Header{}
+	nominated := connectionNominated(in)
 	for k, vs := range in {
 		ck := http.CanonicalHeaderKey(k)
 		if _, hop := hopByHop[ck]; hop {
+			continue
+		}
+		if _, nom := nominated[ck]; nom {
 			continue
 		}
 		for _, v := range vs {
@@ -76,4 +85,18 @@ func SanitizeResponse(in http.Header) http.Header {
 		}
 	}
 	return out
+}
+
+// connectionNominated returns the canonicalised set of header names listed in the Connection header
+// value (RFC 9110 §7.6.1 connection-scoped headers), which MUST NOT be forwarded across the hop.
+func connectionNominated(in http.Header) map[string]struct{} {
+	named := map[string]struct{}{}
+	for _, v := range in.Values("Connection") {
+		for _, tok := range strings.Split(v, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				named[http.CanonicalHeaderKey(tok)] = struct{}{}
+			}
+		}
+	}
+	return named
 }
