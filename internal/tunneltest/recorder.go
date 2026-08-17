@@ -46,6 +46,19 @@ func (r *Recorder) InflightAdd(delta int)      { r.add(RecCall{Kind: "inflight",
 func (r *Recorder) Timeout()                   { r.add(RecCall{Kind: "timeout"}) }
 func (r *Recorder) PublishError()              { r.add(RecCall{Kind: "publisherror"}) }
 
+// BytesFor sums the bytes recorded for a tunnel in a direction ("in"/"out") across all Bytes calls.
+func (r *Recorder) BytesFor(tunnel, dir string) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for _, c := range r.Calls {
+		if c.Kind == "bytes" && c.Tunnel == tunnel && c.Direction == dir {
+			n += c.N
+		}
+	}
+	return n
+}
+
 // Count returns how many captured calls match kind and (optionally) reason ("" matches any reason).
 func (r *Recorder) Count(kind, reason string) int {
 	r.mu.Lock()
