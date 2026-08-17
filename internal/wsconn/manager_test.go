@@ -390,23 +390,44 @@ func TestSameNodeReconnectNotClobbered(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitBound(tName)
+	v1, _ := h.mgr.conns.Load(tName)
+	conn1 := v1.(*Conn)
 	// phone2: SAME cert/key (same fingerprint) → same-node rebind onto a new connID
 	p2, err := tunneltest.Dial(context.Background(), h.wsURL(), h.host(tName), cert, key, okHandler("v2"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = p2.Close() }()
-	// Give the server a moment to overwrite conns[name] with conn2.
-	time.Sleep(100 * time.Millisecond)
+	// Poll (not sleep) until conns[name] has been overwritten with conn2.
+	waitCond(t, func() bool {
+		v, ok := h.mgr.conns.Load(tName)
+		return ok && v.(*Conn) != conn1
+	}, "conn2 never replaced conn1 in the conns map")
+
 	_ = p1.Close() // stale conn teardown must NOT clobber conn2
-	time.Sleep(100 * time.Millisecond)
-	if _, _, ok, _ := h.reg.Lookup(context.Background(), tName); !ok {
-		t.Fatal("route must survive the stale conn teardown")
+	// The stale teardown is conn-conditional, so the route must remain conn2's and requests keep
+	// flowing. Poll to absorb the async teardown timing; the condition must never break.
+	waitCond(t, func() bool {
+		_, _, ok, _ := h.reg.Lookup(context.Background(), tName)
+		if !ok {
+			return false
+		}
+		resp := h.mgr.RouteLocal(context.Background(), routeReq(tName, "r1", "GET", "/mcp", nil))
+		return resp != nil && resp.Status == 200
+	}, "route must survive the stale conn teardown and keep serving via conn2")
+}
+
+// waitCond polls cond until true (2s) or fails with msg — a deterministic replacement for time.Sleep.
+func waitCond(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	resp := h.mgr.RouteLocal(context.Background(), routeReq(tName, "r1", "GET", "/mcp", nil))
-	if resp == nil || resp.Status != 200 {
-		t.Errorf("requests must keep flowing to conn2: %+v", resp)
-	}
+	t.Fatal(msg)
 }
 
 func TestHeartbeatNotOwnerClosesStale(t *testing.T) {
