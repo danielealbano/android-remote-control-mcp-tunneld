@@ -1397,19 +1397,19 @@ reorder and US9 behavior changes must be reflected in `PROTOCOL.md`/`ARCHITECTUR
 
 ---
 
-## US18 — [ ] Test coverage additions
+## US18 — [x] Test coverage additions
 
 **Why:** The suite is broad but has real gaps and a few misleading/nondeterministic tests. Each fix
 above needs a regression test; several documented behaviors have no coverage at any tier. Tests are
 mandatory (`go.md` §3).
 
 **Acceptance criteria:**
-- [ ] Every US1–US17 behavior change has a test at the appropriate tier.
-- [ ] The e2e proxy edge is actually exercised (TEST-001); misleading/nondeterministic tests are fixed (TEST-004/005/008/010/011/015/024, ING-006).
-- [ ] Documented-but-untested behaviors gain coverage (dead-peer, publish-failure, fingerprint-ban revocation, `/admin/tunnels`, golden fixtures, envelope malformed input, etc.).
+- [x] Every US1–US17 behavior change has a test at the appropriate tier.
+- [x] The e2e proxy edge is actually exercised (TEST-001); misleading/nondeterministic tests are fixed (TEST-004/005/008/010/011/015/024, ING-006).
+- [x] Documented-but-untested behaviors gain coverage (dead-peer, publish-failure, fingerprint-ban revocation, `/admin/tunnels`, golden fixtures, envelope malformed input, etc.).
 
-### Task 18.1 — [ ] Unit tests (compressed)
-- [ ] **Action** — add unit tests (test code derived from the implementation; names + intents below):
+### Task 18.1 — [x] Unit tests (compressed)
+- [x] **Action** — add unit tests (test code derived from the implementation; names + intents below):
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1447,8 +1447,8 @@ mandatory (`go.md` §3).
 | `TestEnrollBodyReadTimeout` | stalling CSR body → 408 `body_read_timeout` | blocking body, short timeout (TEST-027) |
 | `TestBan_IPv6EntriesMatch` | IPv6 `ip`/`cidr` ban entries match IPv6 lookups | (TEST-021) |
 
-### Task 18.2 — [ ] wsconn / dataplane tests (compressed)
-- [ ] **Action** — add:
+### Task 18.2 — [x] wsconn / dataplane tests (compressed)
+- [x] **Action** — add:
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1469,8 +1469,8 @@ mandatory (`go.md` §3).
 | `TestBindSurvivesRequestCtxCancel` | route survives a cancelled REQUEST context post-bind (bind on conn ctx) | integration tier (AUTH-002) |
 | `TestTeardownUnbindTimeBounded` | teardown returns within the 5s bound when Redis is unresponsive; failure logged | stalled miniredis / capturing logger (DP-011) |
 
-### Task 18.3 — [ ] Ingress / transport / server tests (compressed)
-- [ ] **Action** — add:
+### Task 18.3 — [x] Ingress / transport / server tests (compressed)
+- [x] **Action** — add:
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1485,17 +1485,17 @@ mandatory (`go.md` §3).
 | `TestRunFlusherCadenceAndFinalFlush` | ticker flush + final flush on cancel; failed Incr logged | fake store (TEST-013.4, OPS-008) |
 | `TestMux_MethodAndHostEdges` | `GET /enroll`→404; trailing-dot/case/port hosts dispatch | (TEST-023, OPS-007) |
 
-### Task 18.4 — [ ] e2e: exercise the proxy edge; determinism
-- [ ] **Action** — modify `e2e/tunnel_e2e_test.go`: route at least the core lifecycle scenario (enroll → `/connect` WS → public `POST /mcp` → response) through `c.traefikURL` with real `Host` headers and NO client-injected `X-Real-Ip` (Traefik sets the client-IP header per `e2e/testdata/traefik-e2e.yml`); keep one direct-to-replica test for deterministic cross-replica routing (TEST-001).
-- [ ] **Action** — modify `e2e/tunnel_e2e_test.go` `TestRateLimit429`: set a low `TUNNELD_LIMIT_RPS` (e.g. `2`) in the replica env (or issue the burst concurrently) so the trip is deterministic (TEST-015).
-- [ ] **Action** — add an e2e assertion that a `/connect` with a banned `tunnel-fingerprint` is REFUSED (the missing half of `TestBannedTunnelFingerprintRefusedAndEvicted`) and that a banned fingerprint blocks public ingress on the resolved route (TEST-024).
-- [ ] **DoD:** the e2e suite drives Traefik for the core path; rate-limit and fingerprint-ban scenarios are deterministic and complete.
+### Task 18.4 — [x] e2e: exercise the proxy edge; determinism
+- [x] **Action** — modify `e2e/tunnel_e2e_test.go`: route at least the core lifecycle scenario (enroll → `/connect` WS → public `POST /mcp` → response) through `c.traefikURL` with real `Host` headers and NO client-injected `X-Real-Ip` (Traefik sets the client-IP header per `e2e/testdata/traefik-e2e.yml`); keep one direct-to-replica test for deterministic cross-replica routing (TEST-001).
+- [x] **Action** — modify `e2e/tunnel_e2e_test.go` `TestRateLimit429`: set a low `TUNNELD_LIMIT_RPS` (e.g. `2`) in the replica env (or issue the burst concurrently) so the trip is deterministic (TEST-015).
+- [x] **Action** — add an e2e assertion that a `/connect` with a banned `tunnel-fingerprint` is REFUSED (the missing half of `TestBannedTunnelFingerprintRefusedAndEvicted`) and that a banned fingerprint blocks public ingress on the resolved route (TEST-024).
+- [x] **DoD:** the e2e suite drives Traefik for the core path; rate-limit and fingerprint-ban scenarios are deterministic and complete.
 
-### Task 18.5 — [ ] Test-quality cleanups
-- [ ] **Action** — replace `time.Sleep` synchronization in `internal/wsconn/manager_test.go` `TestSameNodeReconnectNotClobbered` with deterministic polling on `conns.Load`/`Lookup` (TEST-010).
-- [ ] **Action** — add `t.Parallel()` to the parallel-safe pure-function suites (`wire`, `config/size`, `clientip`, `ingress/allowlist`, `ban/parse`, `ca`) and their subtests (TEST-013).
-- [ ] **Action** — convert the table loops in `internal/config/size_test.go`, `internal/ban/parse_test.go`, `internal/ingress/allowlist_test.go` to named `t.Run` subtests using `t.Errorf` (not `t.Fatalf`-in-loop) (TEST-014); add `t.Helper()` to the failing helpers in `internal/ingress/handler_test.go`/`enroll_test.go` (TEST-028).
-- [ ] **DoD:** no `time.Sleep`-based synchronization remains in wsconn tests; parallel-safe suites run parallel; table tests are named subtests.
+### Task 18.5 — [x] Test-quality cleanups
+- [x] **Action** — replace `time.Sleep` synchronization in `internal/wsconn/manager_test.go` `TestSameNodeReconnectNotClobbered` with deterministic polling on `conns.Load`/`Lookup` (TEST-010).
+- [x] **Action** — add `t.Parallel()` to the parallel-safe pure-function suites (`wire`, `config/size`, `clientip`, `ingress/allowlist`, `ban/parse`, `ca`) and their subtests (TEST-013).
+- [x] **Action** — convert the table loops in `internal/config/size_test.go`, `internal/ban/parse_test.go`, `internal/ingress/allowlist_test.go` to named `t.Run` subtests using `t.Errorf` (not `t.Fatalf`-in-loop) (TEST-014); add `t.Helper()` to the failing helpers in `internal/ingress/handler_test.go`/`enroll_test.go` (TEST-028).
+- [x] **DoD:** no `time.Sleep`-based synchronization remains in wsconn tests; parallel-safe suites run parallel; table tests are named subtests.
 
 ---
 
