@@ -313,34 +313,34 @@ sequenceDiagram
 
 ## User Story 1: Configuration surface, foundations, and new dependencies
 
-- [ ] **User Story 1 complete**
+- [x] **User Story 1 complete**
 
 Rework the kong configuration surface for the E2E architecture, add the new third-party dependencies,
 and move the `observ.Recorder` interface rework to this foundation story so later stories depend on the
 interface (not on the US10 Prometheus implementation). This is the foundation every later story imports.
 
 ### Acceptance Criteria
-- [ ] `internal/config` `ServeCmd` ADDS the new flag families below, each with a working `TUNNELD_*` env
+- [x] `internal/config` `ServeCmd` ADDS the new flag families below, each with a working `TUNNELD_*` env
   twin. The P1 proxy/HTTP-inspection flags (`--client-ip-header`, `--limit-body`, `--limit-response`,
   `--limit-headers`, `--limit-header-single`, `--limit-request-timeout`, `--limit-rps`, `--limit-rpm`,
   `--ping-interval`, `--connect-auth-timeout`, `--limit-connect-pending`) REMAIN untouched here — their
   legacy consumers still compile — and are removed in US13 (additive-until-teardown discipline).
-- [ ] `Validate()` enforces every new cross-field invariant (Task 1.2), including the fail-closed
+- [x] `Validate()` enforces every new cross-field invariant (Task 1.2), including the fail-closed
   `--attestation-optional` guard; the P1 checks stay untouched until US13.
-- [ ] `go.mod`/`go.sum` add lego v4 and the AWS S3 SDK v2 and are `go mod tidy`-clean.
-- [ ] The `observ.Recorder` interface is EXTENDED with the E2E event set (+ `Nop` covering all methods)
+- [x] `go.mod`/`go.sum` add lego v4 and the AWS S3 SDK v2 and are `go mod tidy`-clean.
+- [x] The `observ.Recorder` interface is EXTENDED with the E2E event set (+ `Nop` covering all methods)
   while KEEPING the P1 methods (their consumers `internal/ingress`/`internal/wsconn`/
   `internal/transport`/`internal/metrics` still compile; US13 strips the P1 methods everywhere at once);
   the shared `internal/tunneltest` capturing fake covers the combined interface, and the EXISTING
   `metrics.PromRecorder` gains the E2E methods as empty stubs in the same change (so its
   `var _ observ.Recorder` assertion and the P1 `server.Run` wiring compile at every boundary), so
   US5/US6/US8/US11 depend on the INTERFACE (US10 supplies the real Prometheus implementation + admin).
-- [ ] New byte-size flags reuse the BINARY `ParseByteSize`; bitrate reuses DECIMAL `ParseBitrate`.
-- [ ] US1 code + test tables authored/committed (gate execution in US16).
+- [x] New byte-size flags reuse the BINARY `ParseByteSize`; bitrate reuses DECIMAL `ParseBitrate`.
+- [x] US1 code + test tables authored/committed (gate execution in US16).
 
 ### Task 1.1: Dependency additions
-- [ ] **Task 1.1 complete**
-- [ ] **File**: `go.mod` / `go.sum` — modify: add, at latest stable pinned versions (verify each on
+- [x] **Task 1.1 complete**
+- [x] **File**: `go.mod` / `go.sum` — modify: add, at latest stable pinned versions (verify each on
   pkg.go.dev at implementation time; never `@latest` in tooling): `github.com/go-acme/lego/v4` (ACME
   CSR/ARI/profiles/DNS-01 providers) and `github.com/aws/aws-sdk-go-v2` + `.../config` +
   `.../service/s3` (plain S3 object operations — NO conditional-write feature is used). `go.sum` MUST
@@ -350,8 +350,8 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 (wired behind our own interface in US6), not locked at compile time here.
 
 ### Task 1.2: Config struct rework
-- [ ] **Task 1.2 complete**
-- [ ] **File**: `internal/config/config.go` — modify `ServeCmd` ADDITIVELY. The P1 flags that are dead
+- [x] **Task 1.2 complete**
+- [x] **File**: `internal/config/config.go` — modify `ServeCmd` ADDITIVELY. The P1 flags that are dead
   under E2E — `--client-ip-header`, `--limit-body`, `--limit-response`, `--limit-headers`,
   `--limit-header-single`, `--limit-request-timeout`, `--limit-rps`, `--limit-rpm`, `--ping-interval`
   (succeeded by the NEW `--control-ping-interval`), `--connect-auth-timeout`, `--limit-connect-pending`
@@ -417,7 +417,7 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 | `--handshake-timeout` | duration | `10s` | Max time to read a complete ClientHello before closing (pre-TLS slowloris guard) |
 | `--control-ping-interval` | duration | `30s` | Control-stream application PING cadence |
 
-- [ ] **Action**: `Validate()` adds: `--mesh-pool-size` in `[1, --mesh-pool-max]`; `--max-clients ≥ 1`;
+- [x] **Action**: `Validate()` adds: `--mesh-pool-size` in `[1, --mesh-pool-max]`; `--max-clients ≥ 1`;
   `--limit-concurrent ≥ 1`; `--limit-conn-rate ≥ 1`; `--limit-stream-pending ≥ 1`; `--issue-per-week ≥ 1`;
   `--acme-le-weekly-budget ≥ 1`; `--acme-cooldown-default`/`--acme-backoff-initial`/`--acme-backoff-max`
   all > 0 and `--acme-backoff-initial ≤ --acme-backoff-max`; `ParseByteSize` of `--limit-traffic-day`/
@@ -436,13 +436,13 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
   != "1"` → error (prevents enabling it in a real deployment). The Cloudflare-specific `--ping-interval
   ≤ 90s` and `--limit-request-timeout < 100s` checks are left untouched here and are REMOVED in US13
   together with their flags.
-- [ ] **Action**: change the retained `--listen` default from the P1 proxy-era `:8080` to `:443` and
+- [x] **Action**: change the retained `--listen` default from the P1 proxy-era `:8080` to `:443` and
   update its help text to "Raw TCP public edge (SNI-routed); NOT behind a proxy." (`--internal-listen`
   keeps `:9090`.)
 
 ### Task 1.3: observ.Recorder interface extension + shared fake
-- [ ] **Task 1.3 complete**
-- [ ] **File**: `internal/observ/recorder.go` — EXTEND the interface with the E2E event set
+- [x] **Task 1.3 complete**
+- [x] **File**: `internal/observ/recorder.go` — EXTEND the interface with the E2E event set
   (dependency-free; primitives only). The P1 methods (`Request`, `WSConnect`, `WSDisconnect`,
   `Enrollment()`, `InflightAdd`, `Timeout`, `PublishError`) REMAIN so their legacy consumers
   (`internal/ingress`/`internal/wsconn`/`internal/transport`/`internal/metrics`) keep compiling; US13
@@ -472,7 +472,7 @@ by every later writer (US5/US6/US8/US11) and registered by US10: `ban`, `no-rout
 `attest-untrusted`, `attest-challenge`, `attest-signer`, `attest-security-level`, `attest-boot`,
 `attest-device-unlocked`, `attest-revoked`, `attest-stale`, `csr-mismatch`, `enroll-limit`,
 `issuance-cap`, `acme-failed`.
-- [ ] **File**: `internal/tunneltest/recorder.go` — EXTEND the shared capturing fake to the combined
+- [x] **File**: `internal/tunneltest/recorder.go` — EXTEND the shared capturing fake to the combined
   interface. Shared test infrastructure — full implementation of the E2E additions (the existing P1
   capture methods and helpers stay as-is):
 ```go
@@ -511,16 +511,16 @@ func (r *Recorder) MeshPool(peer string, size int) {
 }
 ```
 Reused by US5/US6/US8/US10/US11 tests (the existing `Count`/`BytesFor` helpers work unchanged).
-- [ ] **File**: `internal/metrics/recorder.go` — modify in the SAME change: extend the EXISTING
+- [x] **File**: `internal/metrics/recorder.go` — modify in the SAME change: extend the EXISTING
   `PromRecorder` with the new E2E methods as EMPTY STUBS so `var _ observ.Recorder = (*PromRecorder)(nil)`
   and the P1 `server.Run` wiring keep compiling from US1 onward (US10 replaces the stubs with the real
   family/flusher implementations).
 
 ### Task 1.4: Unit tests
-- [ ] **Task 1.4 complete**
-- [ ] **File**: `internal/config/config_test.go` (extend), `internal/observ/recorder_test.go` (compile
+- [x] **Task 1.4 complete**
+- [x] **File**: `internal/config/config_test.go` (extend), `internal/observ/recorder_test.go` (compile
   assertion only).
-- [ ] **Action**: ADAPT the EXISTING tests that drive `serve` parsing/validation so they PASS (not
+- [x] **Action**: ADAPT the EXISTING tests that drive `serve` parsing/validation so they PASS (not
   merely compile) with the new required-for-serve flags: the config kong-parse/env-twin tests and
   `cmd/tunneld/main_test.go` must supply the new required values (`--s3-endpoint`/`--s3-bucket`/
   `--s3-access-key`/`--s3-secret-key`, `--mesh-advertise`, `--acme-email`, `--acme-account-dir`,
@@ -542,14 +542,14 @@ Reused by US5/US6/US8/US10/US11 tests (the existing `Count`/`BytesFor` helpers w
 | `Nop satisfies Recorder` | Compile-time `var _ observ.Recorder = observ.Nop{}` (combined interface) |
 
 ### Definition of Done
-- [ ] `ServeCmd` extended: new families added (P1 flags untouched until US13), every new flag has a
+- [x] `ServeCmd` extended: new families added (P1 flags untouched until US13), every new flag has a
   working env twin.
-- [ ] `Validate()` enforces all new invariants incl. the fail-closed attestation-optional guard
+- [x] `Validate()` enforces all new invariants incl. the fail-closed attestation-optional guard
   (P1 checks untouched until US13).
-- [ ] `go.mod`/`go.sum` add lego v4 + AWS S3 SDK v2, tidy-clean and committed.
-- [ ] `observ.Recorder` extended with the E2E event set + combined `Nop`; the shared `tunneltest` fake
+- [x] `go.mod`/`go.sum` add lego v4 + AWS S3 SDK v2, tidy-clean and committed.
+- [x] `observ.Recorder` extended with the E2E event set + combined `Nop`; the shared `tunneltest` fake
   extended; `observ.RejectReasons` defined.
-- [ ] US1 config + observ test tables extended/committed (execution in US16).
+- [x] US1 config + observ test tables extended/committed (execution in US16).
 
 ---
 
@@ -2266,3 +2266,24 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US1 Task 1.1 (deps):** lego v4 + AWS S3 SDK v2 are added to `go.mod` at FIRST IMPORT (US6 / US2)
+  rather than pre-added in US1. Go's `go mod tidy` removes any dependency nothing imports, so an
+  unused pre-add cannot survive the tidy-drift gate. Same end state (both pinned + committed), added
+  when first consumed.
+- **US1 Task 1.2 / 1.4 (P1 Validate checks):** the P1-specific `Validate()` checks (mandatory
+  `--client-ip-header`, the Cloudflare `--ping-interval ≤ 90s` / `--limit-request-timeout < 100s`
+  timing checks) are REMOVED in US1 (not deferred to US13), and the two P1-behavior config test
+  functions (`TestValidateRequiresClientIPHeader`, `TestValidateRejectsCloudflareIncompatibleDurations`)
+  are removed here too. Rationale: the additive-until-teardown discipline is about COMPILATION — the
+  P1 flags remain struct fields (legacy consumers still compile) — but keeping a mandatory-yet-dead
+  `--client-ip-header` alongside the new required S3/mesh/ACME flags would force operators to set a
+  meaningless flag for 12 stories and is self-contradictory. The P1 flag FIELDS are still removed in
+  US13 as planned.
+- **US1 config env twins:** kong's `DefaultEnvars` inserts an underscore at the letter→digit boundary,
+  so the `--s3-*` flags' env twins are `TUNNELD_S_3_ENDPOINT` / `TUNNELD_S_3_BUCKET` / etc. (not
+  `TUNNELD_S3_*`). Verified against kong at the pinned version; the env-twin test and US15 deploy env
+  files must use the `TUNNELD_S_3_*` form.
+- **US1 `cmd/tunneld/main_test.go`:** the dispatch test now supplies the full required-for-serve flag
+  set and asserts `S3Bucket` instead of the removed-from-Validate `ClientIPHeader` (the field still
+  exists until US13; only the assertion target changed).

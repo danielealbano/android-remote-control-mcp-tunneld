@@ -82,6 +82,24 @@ func (p *PromRecorder) InflightAdd(delta int) { p.m.httpInflight.Add(float64(del
 func (p *PromRecorder) Timeout()              { p.m.requestTimeouts.Inc() }
 func (p *PromRecorder) PublishError()         { p.m.pubsubPublishErrors.Inc() }
 
+// --- Plan 3 (E2E) event set: stub bodies here; the real family/counter updates land in US10 when the
+// registry gains the E2E families. Declared now so the extended observ.Recorder assertion and the
+// server.Run wiring compile at every story boundary (additive-until-teardown). ---
+
+func (p *PromRecorder) PublicConnOpen()                          {}
+func (p *PromRecorder) PublicConnClose(reason string)            {}
+func (p *PromRecorder) PhoneConnOpen()                           {}
+func (p *PromRecorder) PhoneConnClose(reason string)             {}
+func (p *PromRecorder) StreamOpen()                              {}
+func (p *PromRecorder) StreamClose()                             {}
+func (p *PromRecorder) EnrollmentResult(result string)           {}
+func (p *PromRecorder) AttestVerify(result string)               {}
+func (p *PromRecorder) ACMEIssue(ca, result string)              {}
+func (p *PromRecorder) ACMERenew(ca, result string)              {}
+func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {}
+func (p *PromRecorder) ACMECooldown(ca string)                   {}
+func (p *PromRecorder) MeshPool(peer string, size int)           {}
+
 func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 	if name == "" {
 		return

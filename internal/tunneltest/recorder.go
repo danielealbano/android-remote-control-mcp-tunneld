@@ -15,6 +15,8 @@ type RecCall struct {
 	Code                                       int
 	N                                          int64
 	Dur                                        time.Duration
+	CA, Result, Window, Peer                   string
+	Size                                       int
 }
 
 // Recorder is a thread-safe capturing observ.Recorder for assertions.
@@ -45,6 +47,36 @@ func (r *Recorder) Enrollment()                { r.add(RecCall{Kind: "enrollment
 func (r *Recorder) InflightAdd(delta int)      { r.add(RecCall{Kind: "inflight", Code: delta}) }
 func (r *Recorder) Timeout()                   { r.add(RecCall{Kind: "timeout"}) }
 func (r *Recorder) PublishError()              { r.add(RecCall{Kind: "publisherror"}) }
+
+// --- Plan 3 (E2E) event set ---
+
+func (r *Recorder) PublicConnOpen() { r.add(RecCall{Kind: "publicconnopen"}) }
+func (r *Recorder) PublicConnClose(reason string) {
+	r.add(RecCall{Kind: "publicconnclose", Reason: reason})
+}
+func (r *Recorder) PhoneConnOpen() { r.add(RecCall{Kind: "phoneconnopen"}) }
+func (r *Recorder) PhoneConnClose(reason string) {
+	r.add(RecCall{Kind: "phoneconnclose", Reason: reason})
+}
+func (r *Recorder) StreamOpen()  { r.add(RecCall{Kind: "streamopen"}) }
+func (r *Recorder) StreamClose() { r.add(RecCall{Kind: "streamclose"}) }
+func (r *Recorder) EnrollmentResult(result string) {
+	r.add(RecCall{Kind: "enrollmentresult", Result: result})
+}
+func (r *Recorder) AttestVerify(result string) { r.add(RecCall{Kind: "attestverify", Result: result}) }
+func (r *Recorder) ACMEIssue(ca, result string) {
+	r.add(RecCall{Kind: "acmeissue", CA: ca, Result: result})
+}
+func (r *Recorder) ACMERenew(ca, result string) {
+	r.add(RecCall{Kind: "acmerenew", CA: ca, Result: result})
+}
+func (r *Recorder) QuotaExhausted(tunnel, window string) {
+	r.add(RecCall{Kind: "quotaexhausted", Tunnel: tunnel, Window: window})
+}
+func (r *Recorder) ACMECooldown(ca string) { r.add(RecCall{Kind: "acmecooldown", CA: ca}) }
+func (r *Recorder) MeshPool(peer string, size int) {
+	r.add(RecCall{Kind: "meshpool", Peer: peer, Size: size})
+}
 
 // BytesFor sums the bytes recorded for a tunnel in a direction ("in"/"out") across all Bytes calls.
 func (r *Recorder) BytesFor(tunnel, dir string) int64 {
