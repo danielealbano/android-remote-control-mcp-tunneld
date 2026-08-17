@@ -1543,3 +1543,22 @@ mandatory (`go.md` §3).
   configuration` / `error while parsing`; the exact match set is best-effort (Traefik's log strings
   were not verified against a rendered failure) and missing-entrypoint warnings are intentionally not
   matched.
+- **Task 18.4 — e2e Traefik file-provider readiness.** `enrollThroughTraefik` retries on Traefik's own
+  `404 page not found` until the file provider has loaded the dynamic routers (the `:80` listener comes
+  up before the routers are parsed). `TestRateLimit429` accepts that a concurrency-limit 429 legitimately
+  omits `Retry-After` (only rate-limit 429s carry it), so it asserts at least one 429 carries the header
+  rather than requiring it on all.
+- **Task 18.2 — two production methods extracted for deterministic testing** (behaviour unchanged;
+  mirrors the existing `heartbeatOnce` "split out for deterministic testing" seam):
+  `Manager.dropIfBanned(conn)` isolates the post-`Store` ban re-check so `TestBanDuringConnectEvicts`
+  can drive it without a timing race; `Conn.selfHeal()` isolates the heartbeat missing-route self-heal
+  so `TestSelfHealDoesNotClobberNewerConn` can assert the connID-conditional not-owner→teardown wiring.
+  `TestBindSurvivesRequestCtxCancel` and `TestTeardownUnbindTimeBounded` live in the wsconn harness tier
+  (real Manager over real WebSockets + miniredis) rather than a separate integration file; the harness's
+  Manager logger was switched from a discard sink to a captured warn+ buffer so the teardown-unbind
+  failure log can be asserted.
+- **Task 18.1 — golden AUTH/RESPONSE_BODY_CHUNK frame fixtures added.**
+  `internal/wire/testdata/auth.frame` and `response_body_chunk.frame` are byte-pinned in
+  `TestGoldenFrameFixtures`, and `TestGoldenFrameFixtures_ChallengeAndAuth` structurally validates both
+  the CHALLENGE and AUTH frames — closing the wire-drift gap for the two frame types the future Kotlin
+  client must also emit/consume.
