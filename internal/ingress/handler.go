@@ -135,6 +135,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Per-IP rps/rpm then per-tunnel concurrency.
 	if allowed, retry, err := limit.Allow(r.Context(), h.rdb, "rps", ip, h.cfg.LimitRPS, time.Second); err != nil {
+		h.log.Warn("rps limit check failed", "name", name, "ip", ipStr, "err", err)
 		h.serverError(w)
 		return
 	} else if !allowed {
@@ -142,6 +143,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if allowed, retry, err := limit.Allow(r.Context(), h.rdb, "rpm", ip, h.cfg.LimitRPM, time.Minute); err != nil {
+		h.log.Warn("rpm limit check failed", "name", name, "ip", ipStr, "err", err)
 		h.serverError(w)
 		return
 	} else if !allowed {
@@ -150,6 +152,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	release, acquired, err := limit.Acquire(r.Context(), h.rdb, name, h.cfg.LimitConcurrent, 2*h.cfg.LimitRequestTimeout)
 	if err != nil {
+		h.log.Warn("concurrency acquire failed", "name", name, "ip", ipStr, "err", err)
 		h.serverError(w)
 		return
 	}
@@ -172,33 +175,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(h.cfg.LimitRequestTimeout))
 
 	up, _ := h.buckets.Pair(name)
-	limited := http.MaxBytesReader(w, r.Body, h.bodyLimit)
 	bodyCh := make(chan bodyResult, 1)
 	go func() {
-		data, rerr := readPacedBody(reqCtx, limited, up)
-		bodyCh <- bodyResult{data, rerr}
+		data, tooBig, rerr := readPacedBodyLimited(reqCtx, r.Body, up, h.bodyLimit)
+		bodyCh <- bodyResult{data: data, tooBig: tooBig, err: rerr}
 	}()
 
 	var body []byte
 	select {
 	case <-reqCtx.Done():
 		_ = r.Body.Close()
+		if errors.Is(context.Cause(reqCtx), context.Canceled) || errors.Is(r.Context().Err(), context.Canceled) {
+			return // client aborted (parent request context cancelled) — not a cap-hit; no Reject
+		}
 		h.rec.Reject("body_read_timeout", name, ipStr)
 		h.writeStatus(w, http.StatusRequestTimeout)
 		return
 	case res := <-bodyCh:
 		if res.err != nil {
-			var mbe *http.MaxBytesError
 			switch {
-			case errors.As(res.err, &mbe):
-				h.rec.Reject("body_too_large", name, ipStr)
-				h.writeStatus(w, http.StatusRequestEntityTooLarge)
-			case errors.Is(res.err, context.DeadlineExceeded), errors.Is(res.err, context.Canceled):
+			case errors.Is(res.err, context.Canceled):
+				return // client abort during a paced read — not a cap-hit
+			case errors.Is(res.err, context.DeadlineExceeded):
 				h.rec.Reject("body_read_timeout", name, ipStr)
 				h.writeStatus(w, http.StatusRequestTimeout)
 			default:
 				h.writeStatus(w, http.StatusBadRequest)
 			}
+			return
+		}
+		if res.tooBig {
+			h.rec.Reject("body_too_large", name, ipStr)
+			h.writeStatus(w, http.StatusRequestEntityTooLarge)
 			return
 		}
 		body = res.data
@@ -216,20 +224,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Body:           body,
 		ClientIP:       ipStr,
 		ForwardedProto: r.Header.Get("X-Forwarded-Proto"),
-		PacedByNode:    h.nodeID, // this node's up-bucket already paced the body read (US6.2 guard)
+		PacedByNode:    h.nodeID, // this node's up-bucket already paced the body read (docs/ARCHITECTURE.md §4)
 	}
 
 	resp, err := transport.RoundTrip(reqCtx, h.rdb, node, env, h.cfg.LimitRequestTimeout)
 	if err != nil {
-		if errors.Is(err, transport.ErrTimeout) {
+		switch {
+		case errors.Is(err, context.Canceled):
+			return // client aborted mid-round-trip — not a timeout
+		case errors.Is(err, transport.ErrTimeout):
 			h.rec.Timeout()
 			h.rec.Reject("timeout", name, ipStr)
 			h.writeStatus(w, http.StatusGatewayTimeout)
 			return
+		default:
+			h.rec.PublishError()
+			h.writeStatus(w, http.StatusBadGateway)
+			return
 		}
-		h.rec.PublishError()
-		h.writeStatus(w, http.StatusBadGateway)
-		return
 	}
 	if resp.ErrCode == "tunnel_gone" {
 		h.rec.Reject("tunnel_offline", name, ipStr)
@@ -243,28 +255,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type bodyResult struct {
-	data []byte
-	err  error
+	data   []byte
+	tooBig bool
+	err    error
 }
 
-// readPacedBody reads body in ≤ChunkSize slices, pacing each read against the up-bucket (TCP
-// backpressure). A ctx-cancel from WaitN surfaces as the read error (mapped to 408 by the caller).
-func readPacedBody(ctx context.Context, body io.Reader, bucket *limit.TokenBucket) ([]byte, error) {
+// readPacedBodyLimited reads body in ≤ChunkSize slices, pacing each slice against the up-bucket, and
+// enforces the byte limit ITSELF (returning tooBig) so the caller never wraps w in a MaxBytesReader
+// from this goroutine — a timeout path that abandons the goroutine must not race the ResponseWriter.
+func readPacedBodyLimited(ctx context.Context, body io.Reader, bucket *limit.TokenBucket, limit int64) (data []byte, tooBig bool, err error) {
 	var buf bytes.Buffer
 	tmp := make([]byte, wire.ChunkSize)
 	for {
-		n, err := body.Read(tmp)
+		n, rerr := body.Read(tmp)
 		if n > 0 {
 			if werr := bucket.WaitN(ctx, n); werr != nil {
-				return nil, werr
+				return nil, false, werr
+			}
+			if int64(buf.Len())+int64(n) > limit {
+				return nil, true, nil
 			}
 			buf.Write(tmp[:n])
 		}
-		if errors.Is(err, io.EOF) {
-			return buf.Bytes(), nil
+		if errors.Is(rerr, io.EOF) {
+			return buf.Bytes(), false, nil
 		}
-		if err != nil {
-			return nil, err
+		if rerr != nil {
+			return nil, false, rerr
 		}
 	}
 }
@@ -302,7 +319,7 @@ func (h *Handler) serverError(w http.ResponseWriter) {
 
 // writeStatus writes a synthetic status (no phone body). It does NOT record rec.Request: these
 // paths never received a real phone response and are already recorded via rec.Reject/Timeout/
-// PublishError (US7 step 8/9). rec.Request is reserved for a forwarded request that produced a real
+// PublishError (docs/ARCHITECTURE.md §2). rec.Request is reserved for a forwarded request that produced a real
 // response (the writeResp path), so tunneld_http_requests_total and the per-tunnel tcnt counter are
 // not inflated by requests that never reached the phone.
 func (h *Handler) writeStatus(w http.ResponseWriter, code int) {
@@ -319,12 +336,13 @@ func writeResp(w http.ResponseWriter, resp *wire.RespEnvelope) {
 	_, _ = w.Write(resp.Body) // #nosec G705 -- transparent tunnel passthrough of the phone's response bytes to an MCP JSON client (not an HTML browser); nothing to sanitize
 }
 
-// firstLabel returns the first DNS label of a Host header (stripping any port).
+// firstLabel returns the first DNS label of a Host header (stripping any port), lower-cased so an
+// uppercased Host resolves to the same lowercase route key.
 func firstLabel(host string) string {
 	if i := strings.IndexByte(host, ':'); i >= 0 {
 		host = host[:i]
 	}
-	host = strings.TrimSuffix(host, ".")
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if i := strings.IndexByte(host, '.'); i >= 0 {
 		return host[:i]
 	}
