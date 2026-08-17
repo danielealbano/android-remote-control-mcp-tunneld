@@ -602,9 +602,9 @@ func TestLimiterRedisError500(t *testing.T) {
 
 func TestPublishFailure502(t *testing.T) {
 	mr := miniredis.RunT(t)
-	real := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = real.Close() })
-	rdb := failPublish{real}
+	realRDB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = realRDB.Close() })
+	rdb := failPublish{realRDB}
 	cfg := config.ServeCmd{
 		ClientIPHeader: "X-Real-Ip", LimitRPS: 10, LimitRPM: 100, LimitConcurrent: 4,
 		LimitBody: "1mb", LimitResponse: "10mb", LimitHeaders: "16kb", LimitHeaderSingle: "8kb",
