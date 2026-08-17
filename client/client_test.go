@@ -246,7 +246,9 @@ func TestNodeReadyBeforeAccept(t *testing.T) {
 	cert, _ := x509.ParseCertificate(block.Bytes)
 	sctx, scancel := context.WithCancel(context.Background())
 	defer scancel()
-	go func() { _ = cl.Serve(sctx, "ws://"+cfg.Listen+"/connect", name+".example.test", cert, key, ok200("ready")) }()
+	go func() {
+		_ = cl.Serve(sctx, "ws://"+cfg.Listen+"/connect", name+".example.test", cert, key, ok200("ready"))
+	}()
 
 	// Confirm the tunnel is up, then a SINGLE request with NO retry loop must succeed immediately —
 	// the readiness gate ensures the public listener only accepts after ServeNode subscribed.
