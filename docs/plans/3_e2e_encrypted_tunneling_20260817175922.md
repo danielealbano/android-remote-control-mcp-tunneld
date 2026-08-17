@@ -555,7 +555,7 @@ Reused by US5/US6/US8/US10/US11 tests (the existing `Count`/`BytesFor` helpers w
 
 ## User Story 2: Durable store layer (S3/MinIO) — name registry + connection logs
 
-- [ ] **User Story 2 complete**
+- [x] **User Story 2 complete**
 
 Create the durable-state package: a PLAIN-S3 client behind a small interface (no conditional-write
 feature anywhere — the registry must work on any plain S3 provider; MinIO is the local/e2e stand-in),
@@ -563,21 +563,21 @@ the name-registry object operations, and the connection-event log writer. First 
 state in the project. The write-verify CLAIM ORCHESTRATION lives in the enroll service (US5), not here.
 
 ### Acceptance Criteria
-- [ ] `internal/store` defines SMALL COMPOSABLE interfaces (`NameStore`, `ConnLogStore`,
+- [x] `internal/store` defines SMALL COMPOSABLE interfaces (`NameStore`, `ConnLogStore`,
   `EvidenceStore`, `LifecycleStore`, composed as `Store`) and an S3-backed implementation using ONLY
   plain `GetObject`/`PutObject`/`DeleteObject` — no `If-None-Match`, no `If-Match`, no ETags; each
   consumer depends only on the sub-interface it uses.
-- [ ] Registry writes have SDK auto-retries DISABLED (a claim PUT retried after a timeout is a zombie
+- [x] Registry writes have SDK auto-retries DISABLED (a claim PUT retried after a timeout is a zombie
   write; renewal LWW PUTs don't need retries either — callers handle errors).
-- [ ] `NameRecord` (incl. `claim_nonce`) and connection-log `Event` types serialize to the exact JSON
+- [x] `NameRecord` (incl. `claim_nonce`) and connection-log `Event` types serialize to the exact JSON
   schemas in Task 2.2/2.3.
-- [ ] Connection-log objects are written at the exact key layout
+- [x] Connection-log objects are written at the exact key layout
   `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<tsNanos>-<conn8>-<start|end>.json`.
-- [ ] Integration tests (US14) exercise real MinIO; unit tests use a fake `Store`.
+- [x] Integration tests (US14) exercise real MinIO; unit tests use a fake `Store`.
 
 ### Task 2.1: Store interface + S3 implementation
-- [ ] **Task 2.1 complete**
-- [ ] **File**: `internal/store/store.go` — create the consumer-side interface:
+- [x] **Task 2.1 complete**
+- [x] **File**: `internal/store/store.go` — create the consumer-side interface:
 ```go
 // Small composable interfaces (go.md: 1–3 methods, consumer-site) — each consumer
 // depends only on what it uses; the S3 type implements them all.
@@ -600,7 +600,7 @@ type Store interface { // the full composition, implemented by the S3 type and t
 }
 var ErrNotFound = errors.New("store: name not found")
 ```
-- [ ] **File**: `internal/store/s3.go` — create the S3-backed `Store`: plain `GetObject` (`GetName`
+- [x] **File**: `internal/store/s3.go` — create the S3-backed `Store`: plain `GetObject` (`GetName`
   maps `NoSuchKey` → `ErrNotFound`), plain `PutObject` (`PutName` — the S3 client for registry writes
   is configured with SDK auto-retries DISABLED, `retry.NewStandard` max attempts 1 / `aws.Retryer`
   off, so a timed-out claim PUT is never silently replayed; the caller's ctx carries the
@@ -617,8 +617,8 @@ comes from the US5 write-verify claim protocol, not from storage semantics. Obje
 multipart.
 
 ### Task 2.2: Name registry record
-- [ ] **Task 2.2 complete**
-- [ ] **File**: `internal/store/name_record.go` — create `DeviceInfo` (os VERSION + os/vendor/boot patch
+- [x] **Task 2.2 complete**
+- [x] **File**: `internal/store/name_record.go` — create `DeviceInfo` (os VERSION + os/vendor/boot patch
   levels, attestation+keymint versions, security level string — the seven agreed device scalars),
   `CertInfo` (ca, serial, not-before, not-after, ARI id — the shared cert-metadata type returned by the
   US6 issuer and consumed by the US5 enroll flow; `not_before` anchors the fixed GTS/ZeroSSL renewal
@@ -629,15 +629,15 @@ multipart.
   ari_id}` (the CA lives top-level, NOT inside the `cert` sub-object), `device{...}`. A
   `SetCert(info CertInfo)` helper populates `ca` + `cert` from the issuer's `CertInfo`. JSON snake_case;
   times RFC3339 nanosecond UTC. NEVER cert PEM, private keys, or chains.
-- [ ] **File**: `internal/store/rejected.go` — create `RejectedEnrollment` (ts, src_ip, reason,
+- [x] **File**: `internal/store/rejected.go` — create `RejectedEnrollment` (ts, src_ip, reason,
   attestation chain PEM as submitted, claimed package + signer digest when parseable, nonce hex) and its
   key helper `RejectedKey(ev) string` = `rejected-enroll/<yyyy>/<mm>/<dd>/<ts-ns>-<rand4>.json`
   (30-day-lifecycle prefix; forensic evidence for abuse/lawful-request handling — the ONLY place a
   submitted chain is retained, and only for REJECTED enrollments).
 
 ### Task 2.3: Connection-log event
-- [ ] **Task 2.3 complete**
-- [ ] **File**: `internal/store/event.go` — create the `Event` type (schema=1; event start|end; conn (10
+- [x] **Task 2.3 complete**
+- [x] **File**: `internal/store/event.go` — create the `Event` type (schema=1; event start|end; conn (10
   hex chars = hex of 3 bytes seconds-since-tunnel-session-start ‖ 2 random bytes); type public|phone;
   tunnel; node_hostname; node_start; ts_start; ts_end; duration_ms; src_ip;
   src_port; sni (public only); alpn; tls_version; tls_fp (JA4); bytes_in/bytes_out (end only, peer's
@@ -655,8 +655,8 @@ multipart.
   evicted, error}.
 
 ### Task 2.4: Shared store fake + unit tests
-- [ ] **Task 2.4 complete**
-- [ ] **File**: `internal/tunneltest/store.go` — a thread-safe in-memory `store.Store` fake. Shared test
+- [x] **Task 2.4 complete**
+- [x] **File**: `internal/tunneltest/store.go` — a thread-safe in-memory `store.Store` fake. Shared test
   infrastructure — full implementation:
 ```go
 // Store is a thread-safe in-memory store.Store fake for assertions. The exported
@@ -737,7 +737,7 @@ func (s *Store) EnsureLifecycles(_ context.Context, _, _ int) error { return nil
 ```
 Reused by US5/US6/US8/US11 tests (tests needing failure injection wrap it or use a small local
 override type embedding it).
-- [ ] **File**: `internal/store/store_test.go`, `name_record_test.go`, `event_test.go`
+- [x] **File**: `internal/store/store_test.go`, `name_record_test.go`, `event_test.go`
 
 | Test | Verifies |
 |---|---|
@@ -751,13 +751,13 @@ override type embedding it).
 | `fake PutRejectedEnrollment` | Evidence captured by the fake for assertion |
 
 ### Definition of Done
-- [ ] `internal/store` interface + S3 implementation (plain get/put/delete, retries disabled on
+- [x] `internal/store` interface + S3 implementation (plain get/put/delete, retries disabled on
   registry writes, rejected-evidence writes, two-rule lifecycle provisioning) authored — NO
   conditional-write usage anywhere.
-- [ ] `NameRecord` (top-level `ca`, `claim_nonce`, shared `CertInfo` with `not_before`) +
+- [x] `NameRecord` (top-level `ca`, `claim_nonce`, shared `CertInfo` with `not_before`) +
   connection-log `Event` + `RejectedEnrollment` with exact schemas and key layouts.
-- [ ] Shared in-memory store fake in `internal/tunneltest`.
-- [ ] US2 unit tables authored/committed (execution in US16); real-MinIO coverage deferred to US14.
+- [x] Shared in-memory store fake in `internal/tunneltest`.
+- [x] US2 unit tables authored/committed (execution in US16); real-MinIO coverage deferred to US14.
 
 ---
 
