@@ -112,6 +112,26 @@ func TestHeartbeatIsConnConditional(t *testing.T) {
 	}
 }
 
+func TestBindIfAbsentOrOwner_ThreeState(t *testing.T) {
+	reg, _ := newReg(t)
+	ctx := context.Background()
+	if res, err := reg.BindIfAbsentOrOwner(ctx, "abc", "nodeA", "fp", "conn1"); err != nil || res != SelfHealBound {
+		t.Fatalf("absent → bound: res=%v err=%v", res, err)
+	}
+	if res, err := reg.BindIfAbsentOrOwner(ctx, "abc", "nodeA", "fp", "conn1"); err != nil || res != SelfHealBound {
+		t.Fatalf("same connID → bound: res=%v err=%v", res, err)
+	}
+	if res, err := reg.BindIfAbsentOrOwner(ctx, "abc", "nodeB", "fp", "conn2"); err != nil || res != SelfHealNotOwner {
+		t.Fatalf("different connID (same fp) → not-owner: res=%v err=%v", res, err)
+	}
+	if node, _, _, _ := reg.Lookup(ctx, "abc"); node != "nodeA" {
+		t.Errorf("a not-owner self-heal must not clobber the route: node=%q", node)
+	}
+	if res, err := reg.BindIfAbsentOrOwner(ctx, "abc", "nodeC", "DIFFERENT", "conn3"); res != SelfHealConflict || err != ErrNameHeldByOther {
+		t.Errorf("different fingerprint → conflict: res=%v err=%v, want SelfHealConflict/ErrNameHeldByOther", res, err)
+	}
+}
+
 func TestHeartbeatDistinguishesMissingFromNotOwner(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
