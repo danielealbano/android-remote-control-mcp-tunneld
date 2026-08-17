@@ -135,7 +135,7 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, err := ca.GenerateName(h.cfg.NamePrefix, h.cfg.NameLength)
+	name, err := ca.GenerateName(h.cfg.NamePrefix, h.cfg.NameLength, firstLabel(h.cfg.EnrollHost))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
