@@ -36,6 +36,34 @@ func TestAdminTopNSortsByBytes(t *testing.T) {
 	}
 }
 
+func TestAdminTopN_DedupAndEmptySkip(t *testing.T) {
+	s, _ := newStore(t)
+	ctx := context.Background()
+	_ = s.Incr(ctx, "a", "bytes_in", 100)
+	_ = s.Incr(ctx, "b", "bytes_in", 200)
+	_ = s.Incr(ctx, "c", "bytes_in", 300)
+	stats, err := s.TopN(ctx, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 2 || stats[0].Name != "c" {
+		t.Fatalf("TopN(2) truncation/order wrong: %+v", stats)
+	}
+	all, err := s.TopN(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, st := range all {
+		seen[st.Name]++
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("name %q listed %d times, want 1 (dedup)", name, n)
+		}
+	}
+}
+
 func TestAdminCounterKeyHasTTL(t *testing.T) {
 	s, mr := newStore(t)
 	_ = s.Incr(context.Background(), "x", "requests", 1)

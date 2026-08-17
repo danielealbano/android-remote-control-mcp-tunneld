@@ -2,6 +2,7 @@ package wire
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"testing"
@@ -71,6 +72,51 @@ func TestGoldenFrameFixtures(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s golden drift: got %d bytes, want %d", name, len(got), len(want))
 		}
+	}
+}
+
+func TestWire_DecodeErrors(t *testing.T) {
+	if _, _, err := DecodeReqHeader([]byte("{not json"), nil); err == nil {
+		t.Error("DecodeReqHeader must error on a malformed header (no fabricated request)")
+	}
+	hdr := EncodeReqHeader(&ReqEnvelope{ReqID: "r1", Method: "POST", Path: "/mcp", Host: "h"})
+	if id, req, err := DecodeReqHeader(hdr, []byte("body")); err != nil || req == nil || id != "r1" {
+		t.Errorf("valid header: id=%q req=%v err=%v", id, req, err)
+	}
+	if _, err := UnmarshalReq([]byte{0x00, 0x01}); err == nil {
+		t.Error("UnmarshalReq must error on a too-short buffer")
+	}
+	if _, err := UnmarshalResp([]byte{0x00}); err == nil {
+		t.Error("UnmarshalResp must error on a too-short buffer")
+	}
+	if _, err := UnmarshalReq([]byte{0x00, 0x00, 0x00, 0x0a, 0x7b}); err == nil {
+		t.Error("UnmarshalReq must error when the header length overruns the buffer")
+	}
+}
+
+func TestGoldenFrameFixtures_Challenge(t *testing.T) {
+	data, err := os.ReadFile("testdata/challenge.frame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typ, hdr, body, err := DecodeFrame(data)
+	if err != nil {
+		t.Fatalf("challenge.frame is not a valid frame: %v", err)
+	}
+	if typ != CHALLENGE {
+		t.Errorf("type = %d, want CHALLENGE(%d)", typ, CHALLENGE)
+	}
+	if len(body) != 0 {
+		t.Errorf("CHALLENGE must carry no body, got %d bytes", len(body))
+	}
+	var h struct {
+		Nonce []byte `json:"nonce"`
+	}
+	if err := json.Unmarshal(hdr, &h); err != nil {
+		t.Fatalf("CHALLENGE header is not valid JSON: %v", err)
+	}
+	if len(h.Nonce) != 32 {
+		t.Errorf("nonce = %d bytes, want 32", len(h.Nonce))
 	}
 }
 

@@ -229,6 +229,19 @@ func TestEnrollUsesTrustedClientIP(t *testing.T) {
 	}
 }
 
+func TestEnrollBodyReadTimeout(t *testing.T) {
+	x := newEnroll(t, func(c *config.ServeCmd) { c.LimitRequestTimeout = 150 * time.Millisecond })
+	bb := &blockingBody{done: make(chan struct{})}
+	r := httptest.NewRequest("POST", "http://enroll.example.test/enroll", bb)
+	r.Header.Set("X-Real-Ip", "203.0.113.7")
+	r.ContentLength = -1
+	rr := httptest.NewRecorder()
+	x.h.ServeHTTP(rr, r)
+	if rr.Code != http.StatusRequestTimeout || x.rec.Count("reject", "body_read_timeout") != 1 {
+		t.Errorf("enroll slow body = %d, want 408 body_read_timeout", rr.Code)
+	}
+}
+
 func TestEnrollMissingClientIP400(t *testing.T) {
 	x := newEnroll(t, nil)
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

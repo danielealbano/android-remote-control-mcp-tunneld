@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,15 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 	"github.com/redis/go-redis/v9"
 )
+
+// failPublish wraps a real client but makes Publish error, to exercise the publish-failure → 502 path.
+type failPublish struct{ redis.UniversalClient }
+
+func (f failPublish) Publish(ctx context.Context, channel string, message any) *redis.IntCmd {
+	c := redis.NewIntCmd(ctx)
+	c.SetErr(errors.New("publish failed"))
+	return c
+}
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -472,6 +482,179 @@ func TestSlowBodyRead408ReleasesSlot(t *testing.T) {
 	rr2 := x.do("POST", host(iName), "/mcp", []byte(`{}`))
 	if rr2.Code == http.StatusTooManyRequests {
 		t.Error("concurrency slot was not released after 408")
+	}
+}
+
+func TestSanitize_ConnectionNominatedStripped(t *testing.T) {
+	out, rejected := Sanitize(http.Header{"Connection": {"X-Custom"}, "X-Custom": {"v"}, "Content-Type": {"application/json"}})
+	if rejected {
+		t.Fatal("unexpected rejection")
+	}
+	if out.Get("X-Custom") != "" {
+		t.Error("a Connection-nominated header must be stripped")
+	}
+	if out.Get("Connection") != "" {
+		t.Error("Connection must be stripped")
+	}
+	if out.Get("Content-Type") != "application/json" {
+		t.Error("a normal header must pass through")
+	}
+	rout := SanitizeResponse(http.Header{"Connection": {"X-Trailer"}, "X-Trailer": {"v"}, "Content-Type": {"text/plain"}})
+	if rout.Get("X-Trailer") != "" {
+		t.Error("a response Connection-nominated header must be stripped")
+	}
+}
+
+func TestSanitize_MTLSAndForwarded(t *testing.T) {
+	for _, h := range []string{"X-Forwarded-Tls-Client-Cert", "X-Forwarded-Tls-Client-Cert-Info", "Ssl-Client-Cert", "X-Client-Cert", "X-Ssl-Client-Cert"} {
+		if _, rejected := Sanitize(http.Header{h: {"cert"}}); !rejected {
+			t.Errorf("mTLS header %q must be rejected", h)
+		}
+	}
+	out, rejected := Sanitize(http.Header{
+		"Forwarded":          {"for=1.2.3.4"},
+		"X-Forwarded-For":    {"9.9.9.9"},
+		"X-Forwarded-Proto":  {"https"},
+		"X-Forwarded-Host":   {"h.example.test"},
+		"X-Forwarded-Server": {"evil"},
+	})
+	if rejected {
+		t.Fatal("unexpected rejection")
+	}
+	if out.Get("Forwarded") != "" || out.Get("X-Forwarded-Server") != "" {
+		t.Error("RFC Forwarded and client X-Forwarded-* must be dropped")
+	}
+	if out.Get("X-Forwarded-Proto") != "https" || out.Get("X-Forwarded-Host") != "h.example.test" || out.Get("X-Forwarded-For") != "9.9.9.9" {
+		t.Error("proxy X-Forwarded-Proto/Host/For must be re-added")
+	}
+}
+
+func TestFirstLabel_CaseInsensitive(t *testing.T) {
+	cases := map[string]string{
+		"ABC.example.test":     "abc",
+		"Abc.example.test:443": "abc",
+		"abc.example.test.":    "abc",
+		"ABC":                  "abc",
+	}
+	for h, want := range cases {
+		if got := firstLabel(h); got != want {
+			t.Errorf("firstLabel(%q) = %q, want %q", h, got, want)
+		}
+	}
+}
+
+func TestTotalHeaderCap431(t *testing.T) {
+	x := newIngress(t, 0, func(c *config.ServeCmd) { c.LimitHeaderSingle = "8kb"; c.LimitHeaders = "2kb" })
+	x.bind(iName)
+	opts := []reqOpt{}
+	for i := 0; i < 20; i++ { // 20 × ~205 bytes ≈ 4 kb total (> 2 kb), each < 8 kb single
+		opts = append(opts, withHeader(fmt.Sprintf("X-H-%d", i), repeat("z", 200)))
+	}
+	rr := x.do("POST", host(iName), "/mcp", []byte(`{}`), opts...)
+	if rr.Code != http.StatusRequestHeaderFieldsTooLarge || x.rec.Count("reject", "headers_too_large") == 0 {
+		t.Errorf("total headers over cap = %d, want 431 headers_too_large", rr.Code)
+	}
+}
+
+func TestRateRPM429(t *testing.T) {
+	x := newIngress(t, 0, func(c *config.ServeCmd) { c.LimitRPM = 1; c.LimitRPS = 100 })
+	x.bind(iName)
+	x.startEcho(200, "ok", nil)
+	saw429 := false
+	for i := 0; i < 5; i++ { // 5 quick requests cannot span two 60s windows → at least one 429
+		if x.do("POST", host(iName), "/mcp", []byte(`{}`)).Code == http.StatusTooManyRequests {
+			saw429 = true
+		}
+	}
+	if !saw429 {
+		t.Error("with LimitRPM=1 a burst of 5 must trip 429")
+	}
+	if x.rec.Count("reject", "rate_rpm") < 1 {
+		t.Error("rate_rpm reason not recorded")
+	}
+}
+
+func TestPacedByNodeStamped(t *testing.T) {
+	x := newIngress(t, 0, nil)
+	x.bind(iName)
+	x.startEcho(200, "ok", nil)
+	x.do("POST", host(iName), "/mcp", []byte(`{}`))
+	env := x.forwarded()
+	if env == nil {
+		t.Fatal("no forwarded request captured")
+	}
+	if env.PacedByNode != "nodeA" {
+		t.Errorf("PacedByNode = %q, want nodeA", env.PacedByNode)
+	}
+}
+
+func TestLimiterRedisError500(t *testing.T) {
+	x := newIngress(t, 0, nil)
+	x.bind(iName)
+	x.mr.Close() // Redis down → a Redis-backed check errors → 500 (logged)
+	rr := x.do("POST", host(iName), "/mcp", []byte(`{}`))
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("Redis error = %d, want 500", rr.Code)
+	}
+}
+
+func TestPublishFailure502(t *testing.T) {
+	mr := miniredis.RunT(t)
+	real := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = real.Close() })
+	rdb := failPublish{real}
+	cfg := config.ServeCmd{
+		ClientIPHeader: "X-Real-Ip", LimitRPS: 10, LimitRPM: 100, LimitConcurrent: 4,
+		LimitBody: "1mb", LimitResponse: "10mb", LimitHeaders: "16kb", LimitHeaderSingle: "8kb",
+		LimitRequestTimeout: 5 * time.Second,
+	}
+	reg := router.NewRegistry(rdb, 30*time.Second)
+	rec := &tunneltest.Recorder{}
+	h, err := NewHandler(cfg, "nodeA", rdb, ban.NewEngine(), reg, limit.NewBucketRegistry(100*1024*1024), rec, discardLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Bind(context.Background(), iName, "nodeA", "sha256:fp", "conn1"); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "http://"+host(iName)+"/mcp", bytes.NewReader([]byte(`{}`)))
+	r.Header.Set("X-Real-Ip", "203.0.113.7")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, r)
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("publish failure = %d, want 502", rr.Code)
+	}
+	if rec.Count("publisherror", "") < 1 {
+		t.Error("PublishError not recorded")
+	}
+}
+
+func TestClientAbortNotTimeout(t *testing.T) {
+	x := newIngress(t, 0, nil)
+	x.bind(iName)
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("POST", "http://"+host(iName)+"/mcp", bytes.NewReader([]byte(`{}`))).WithContext(ctx)
+	r.Header.Set("X-Real-Ip", "203.0.113.7")
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	x.h.ServeHTTP(httptest.NewRecorder(), r)
+	if x.rec.Count("timeout", "") != 0 || x.rec.Count("reject", "timeout") != 0 {
+		t.Errorf("a client abort must record no timeout: timeout=%d reject=%d",
+			x.rec.Count("timeout", ""), x.rec.Count("reject", "timeout"))
+	}
+}
+
+func TestBodyTimeoutNoWriterRace(t *testing.T) {
+	x := newIngress(t, 0, func(c *config.ServeCmd) { c.LimitRequestTimeout = 100 * time.Millisecond })
+	x.bind(iName)
+	x.startEcho(200, "ok", nil)
+	bb := &blockingBody{done: make(chan struct{})}
+	r := httptest.NewRequest("POST", "http://"+host(iName)+"/mcp", bb)
+	r.Header.Set("X-Real-Ip", "203.0.113.7")
+	r.ContentLength = -1
+	rr := httptest.NewRecorder()
+	x.h.ServeHTTP(rr, r) // under -race: the body goroutine must never touch w
+	if rr.Code != http.StatusRequestTimeout {
+		t.Errorf("slow-body timeout = %d, want 408", rr.Code)
 	}
 }
 

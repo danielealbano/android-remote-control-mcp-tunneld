@@ -73,6 +73,21 @@ func TestLogDefaultWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestLogging_FileSinkProbeFails(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The parent path is a regular file, so the sink cannot be created → the startup probe must fail.
+	bad := filepath.Join(blocker, "x.log")
+	_, closeAll, err := newLogger([]string{"output=" + bad + ";level=info"}, &bytes.Buffer{}, &bytes.Buffer{})
+	if err == nil {
+		_ = closeAll()
+		t.Error("an unwritable file sink must fail at startup")
+	}
+}
+
 func TestParseSpecsRejectsBad(t *testing.T) {
 	for _, spec := range []string{
 		"level=info",             // missing output
