@@ -6,7 +6,9 @@ replicas bridge requests over Redis. Identity is a CA-signed certificate the pho
 enrollment; each `/connect` is authenticated at the **application layer** (challenge-response
 proof-of-possession — NOT TLS mutual auth), so the tunnel works through Cloudflare's proxy.
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol.
+See [`docs/PROJECT.md`](docs/PROJECT.md) for the operational reference,
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system map, and
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire protocol.
 
 ## Architecture
 
