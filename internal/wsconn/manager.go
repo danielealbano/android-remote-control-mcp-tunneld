@@ -38,6 +38,10 @@ const (
 	closeConflict   = websocket.StatusCode(4409)
 )
 
+// maxAuthCertDER bounds the decoded AUTH-frame certificate before x509 parsing. A P-256 leaf is well
+// under 1 KiB, so 4 KiB is generous and caps per-handshake parse cost inside a pre-auth slot.
+const maxAuthCertDER = 4096
+
 // challengeJSON is the CHALLENGE frame header ({"nonce": base64}).
 type challengeJSON struct {
 	Nonce []byte `json:"nonce"`
@@ -113,18 +117,9 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	allowed, _, err := limit.Allow(r.Context(), m.rdb, "connect", ip, m.cfg.LimitRPM, time.Minute)
-	if err != nil {
-		m.log.Warn("connect rate check failed", "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if !allowed {
-		m.rec.Reject("rate_connect", "", ip.String())
-		http.Error(w, "too many requests", http.StatusTooManyRequests)
-		return
-	}
-	// Pre-auth semaphore: bound concurrent unauthenticated handshakes.
+	// Pre-auth semaphore FIRST (after the SACRED ban check): bound ALL unauthenticated /connect work —
+	// including the per-IP rate-limit Redis round trip below — to --limit-connect-pending concurrent
+	// (docs/PROTOCOL.md §2).
 	select {
 	case m.connectSem <- struct{}{}:
 	default:
@@ -141,8 +136,26 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer releaseSlot() // safety net; also released explicitly once the handshake resolves
 
+	allowed, _, err := limit.Allow(r.Context(), m.rdb, "connect", ip, m.cfg.LimitRPM, time.Minute)
+	if err != nil {
+		m.log.Warn("connect rate check failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		m.rec.Reject("rate_connect", "", ip.String())
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
 	if !isWebSocketUpgrade(r) {
 		http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+		return
+	}
+	// Defensive: the Host MUST belong to the tunnel domain (the edge only routes *.<tunnel-domain>,
+	// but do not rely on that alone) — the CN==label check below only compares the first label.
+	if !hostSuffixOK(r.Host, m.cfg.TunnelDomain) {
+		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
@@ -167,7 +180,11 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connID := randID()
-	if err := m.registry.Bind(r.Context(), name, m.nodeID, fp, connID); err != nil {
+	// Bind on the CONNECTION lifetime (not the request context), matching Unbind/Heartbeat — the
+	// route's lifetime is the WebSocket's, not the HTTP request's (docs/ARCHITECTURE.md §3).
+	connCtx, cancel := context.WithCancel(m.baseCtx)
+	if err := m.registry.Bind(connCtx, name, m.nodeID, fp, connID); err != nil {
+		cancel()
 		if errors.Is(err, router.ErrNameHeldByOther) {
 			m.rec.Reject("fingerprint_conflict", name, ip.String())
 			m.log.Warn("fingerprint conflict on /connect", "name", name)
@@ -179,8 +196,7 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	up, down := m.buckets.Pair(name)
-	connCtx, cancel := context.WithCancel(m.baseCtx)
+	up, down := m.buckets.Pin(name)
 	conn := &Conn{
 		name: name, fp: fp, connID: connID,
 		ws: c, mgr: m, up: up, down: down,
@@ -193,6 +209,13 @@ func (m *Manager) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	// never outlives shutdown.
 	if m.closed.Load() {
 		conn.teardown("shutdown")
+		return
+	}
+	// Close the ban-reload race: a reload firing between the auth-time MatchTunnel and this Store could
+	// have missed this conn in EvictBanned's Range; re-check against the CURRENT snapshot and drop it
+	// here so a newly-banned tunnel never stays connected (docs/ARCHITECTURE.md §3).
+	if src, banned := m.ban.MatchTunnel(name, fp); banned {
+		conn.teardown(src.Reason.String())
 		return
 	}
 	conn.serve()
@@ -227,7 +250,7 @@ func (m *Manager) authenticate(c *websocket.Conn, hostName string) (name, fp str
 	if err := json.Unmarshal(hdr, &auth); err != nil {
 		return "", "", err
 	}
-	cert, err := ca.ParseCertB64DER(auth.Cert)
+	cert, err := ca.ParseCertB64DERLimited(auth.Cert, maxAuthCertDER)
 	if err != nil {
 		return "", "", err
 	}
@@ -287,6 +310,16 @@ func (m *Manager) EvictBanned(e *ban.Engine) {
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+// hostSuffixOK reports whether host is (or is a subdomain of) tunnelDomain, case-folded and
+// port/dot-stripped. It is the application-layer defence behind the edge's *.<tunnel-domain> routing.
+func hostSuffixOK(host, tunnelDomain string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return host == tunnelDomain || strings.HasSuffix(host, "."+tunnelDomain)
 }
 
 // hostLabel extracts the tunnel <name> (first DNS label) from a Host header, stripping any port.
