@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/server"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/server"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

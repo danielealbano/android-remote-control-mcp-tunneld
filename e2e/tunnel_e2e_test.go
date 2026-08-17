@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
 )
 
 const clientIP = "203.0.113.77"

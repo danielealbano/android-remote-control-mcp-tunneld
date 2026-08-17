@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/tunneltest"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/wire"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 const tName = "abcname2345" // 11-char valid DNS label

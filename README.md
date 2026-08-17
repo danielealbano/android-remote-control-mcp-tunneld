@@ -63,7 +63,7 @@ the path, `--client-ip-header=X-Real-Ip`, no `IPAllowList`.
 
 **Prebuilt image (optional):** the Compose stack builds tunneld locally via `build:`. Multi-arch
 images (linux/amd64 + linux/arm64) are also published to `ghcr.io/danielealbano/tunneld` on
-`tunneld-v*` tags — swap the tunneld services' `build:` for
+`v*` tags — swap the tunneld services' `build:` for
 `image: ghcr.io/danielealbano/tunneld:<tag>` to pull instead of build.
 
 **Never publish tunneld's port.** The replicas have NO published ports — reachable only on the

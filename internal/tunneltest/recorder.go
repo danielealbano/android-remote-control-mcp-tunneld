@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
 
 // RecCall is one captured Recorder invocation.

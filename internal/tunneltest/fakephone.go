@@ -14,8 +14,8 @@ import (
 	"net/http/httptest"
 
 	"github.com/coder/websocket"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/ca"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/wire"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // FakePhone is a raw coder/websocket client that completes the /connect CHALLENGE/AUTH handshake and

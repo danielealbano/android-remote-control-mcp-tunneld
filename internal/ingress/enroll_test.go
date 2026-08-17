@@ -19,10 +19,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/ban"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/ca"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ban"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/redis/go-redis/v9"
 )
 

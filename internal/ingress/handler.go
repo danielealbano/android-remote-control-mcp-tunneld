@@ -11,14 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/ban"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/clientip"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/observ"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/router"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/transport"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/wire"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ban"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/clientip"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/transport"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 	"github.com/redis/go-redis/v9"
 )
 

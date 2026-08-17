@@ -8,9 +8,9 @@ import (
 	"syscall"
 
 	"github.com/alecthomas/kong"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/logging"
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/server"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/server"
 )
 
 var version = "dev" // overridden via -ldflags at build time

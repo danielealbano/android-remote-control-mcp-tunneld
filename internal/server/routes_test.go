@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/danielealbano/android-remote-control-mcp/tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 )
 
 type recordHandler struct{}
