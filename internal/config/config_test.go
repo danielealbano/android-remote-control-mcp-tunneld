@@ -169,6 +169,89 @@ func TestValidateRejectsBadRedisLimitsLog(t *testing.T) {
 	}
 }
 
+func TestValidate_DurationLowerBounds(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"ping-interval zero", func(c *ServeCmd) { c.PingInterval = 0 }},
+		{"ping-interval negative", func(c *ServeCmd) { c.PingInterval = -time.Second }},
+		{"request-timeout zero", func(c *ServeCmd) { c.LimitRequestTimeout = 0 }},
+		{"request-timeout negative", func(c *ServeCmd) { c.LimitRequestTimeout = -time.Second }},
+		{"ban-poll zero", func(c *ServeCmd) { c.BanPoll = 0 }},
+		{"cert-validity zero", func(c *ServeCmd) { c.CertValidity = 0 }},
+		{"cert-validity negative", func(c *ServeCmd) { c.CertValidity = -time.Hour }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s: expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_ZeroSizeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"limit-body", func(c *ServeCmd) { c.LimitBody = "0b" }},
+		{"limit-response", func(c *ServeCmd) { c.LimitResponse = "0" }},
+		{"limit-headers", func(c *ServeCmd) { c.LimitHeaders = "0b" }},
+		{"limit-header-single", func(c *ServeCmd) { c.LimitHeaderSingle = "0b" }},
+		{"limit-enroll-body", func(c *ServeCmd) { c.LimitEnrollBody = "0b" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s=0 expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_HostAndDomain(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"empty domain", func(c *ServeCmd) { c.TunnelDomain = "" }},
+		{"dotless domain", func(c *ServeCmd) { c.TunnelDomain = "example" }},
+		{"empty enroll host", func(c *ServeCmd) { c.EnrollHost = "" }},
+		{"dotless enroll host", func(c *ServeCmd) { c.EnrollHost = "enroll" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestParseByteSize_Overflow(t *testing.T) {
+	for _, in := range []string{"9223372036854775807kb", "9999999999999gb"} {
+		if _, err := ParseByteSize(in); err == nil {
+			t.Errorf("ParseByteSize(%q) expected overflow error", in)
+		}
+	}
+}
+
+func TestParseBitrate_Overflow(t *testing.T) {
+	for _, in := range []string{"9223372036854775807kbit", "99999999999gbit"} {
+		if _, err := ParseBitrate(in); err == nil {
+			t.Errorf("ParseBitrate(%q) expected overflow error", in)
+		}
+	}
+}
+
 // TestEnvTwinOverridesFlag exercises one env twin per kong type category (DefaultEnvars): int, size
 // string, duration, repeatable []string, plain string — backing the "every flag has a twin" AC.
 func TestEnvTwinOverridesFlag(t *testing.T) {

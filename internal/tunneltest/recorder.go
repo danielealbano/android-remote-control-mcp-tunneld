@@ -1,6 +1,5 @@
 // Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the raw
-// coder/websocket FakePhone (US6.4). Authored here because US5's transport tests are the first
-// consumer; reused by US6/US7/US8/US9/US10.
+// coder/websocket FakePhone, reused across the transport, ingress, and wsconn test suites.
 package tunneltest
 
 import (
@@ -46,6 +45,19 @@ func (r *Recorder) Enrollment()                { r.add(RecCall{Kind: "enrollment
 func (r *Recorder) InflightAdd(delta int)      { r.add(RecCall{Kind: "inflight", Code: delta}) }
 func (r *Recorder) Timeout()                   { r.add(RecCall{Kind: "timeout"}) }
 func (r *Recorder) PublishError()              { r.add(RecCall{Kind: "publisherror"}) }
+
+// BytesFor sums the bytes recorded for a tunnel in a direction ("in"/"out") across all Bytes calls.
+func (r *Recorder) BytesFor(tunnel, dir string) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for _, c := range r.Calls {
+		if c.Kind == "bytes" && c.Tunnel == tunnel && c.Direction == dir {
+			n += c.N
+		}
+	}
+	return n
+}
 
 // Count returns how many captured calls match kind and (optionally) reason ("" matches any reason).
 func (r *Recorder) Count(kind, reason string) int {

@@ -4,6 +4,29 @@ import (
 	"testing"
 )
 
+func TestEnrollHourLimit(t *testing.T) {
+	rdb, _ := newTestRedis(t)
+	ctx := ctxT(t)
+	freezeClock(t)
+	// perHour=2 (the binding limit), perMinute=100 (room).
+	for i := 0; i < 2; i++ {
+		ok, _, err := AllowEnroll(ctx, rdb, testIP, 2, 100)
+		if err != nil || !ok {
+			t.Fatalf("enroll %d: ok=%v err=%v", i+1, ok, err)
+		}
+	}
+	ok, retry, err := AllowEnroll(ctx, rdb, testIP, 2, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("3rd enrollment in an hour must be denied even with per-minute room")
+	}
+	if retry <= 0 {
+		t.Errorf("retry-after must be positive, got %s", retry)
+	}
+}
+
 func TestEnrollDeniesWhenEitherSubLimitTrips(t *testing.T) {
 	rdb, _ := newTestRedis(t)
 	ctx := ctxT(t)

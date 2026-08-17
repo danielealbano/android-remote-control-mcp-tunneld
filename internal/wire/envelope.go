@@ -1,5 +1,5 @@
-// Package wire holds the shared request/response envelopes carried over Redis pub/sub (US5) and the
-// binary WebSocket frame codec (US6). Bodies are appended raw (length-prefixed) — never base64,
+// Package wire holds the shared request/response envelopes carried over Redis pub/sub and the binary
+// WebSocket frame codec (docs/PROTOCOL.md §3-4). Bodies are appended raw (length-prefixed) — never base64,
 // which would add ~33% under the bandwidth cap.
 package wire
 
@@ -15,7 +15,7 @@ import (
 // AUTHORITY: ClientIP/ForwardedProto/PacedByNode are node/frontend-side metadata (logging,
 // diagnostics, double-pacing guard) ONLY — the phone-side adapter reconstructs the http.Request
 // EXCLUSIVELY from Method/Path/RawQuery/Host/Header/Body; the app-visible X-Forwarded-* values live
-// in Header (put there by ingress.Sanitize, US7.2) and are the single source of truth.
+// in Header (put there by ingress.Sanitize) and are the single source of truth.
 type ReqEnvelope struct {
 	ReqID          string      `json:"reqid"`
 	Node           string      `json:"node"`
@@ -28,7 +28,7 @@ type ReqEnvelope struct {
 	Body           []byte      `json:"-"` // appended raw after the JSON header (no base64)
 	ClientIP       string      `json:"client_ip"`
 	ForwardedProto string      `json:"forwarded_proto"`
-	PacedByNode    string      `json:"paced_by_node"` // nodeID whose up-bucket already paced this body (US7 step 8)
+	PacedByNode    string      `json:"paced_by_node"` // nodeID whose up-bucket already paced this body (docs/ARCHITECTURE.md §4)
 }
 
 // RespEnvelope is the phone's response (or a synthetic error) bridged back to the frontend.

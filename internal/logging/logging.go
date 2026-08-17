@@ -50,6 +50,12 @@ func newLogger(specs []string, stdout, stderr io.Writer) (*slog.Logger, func() e
 			MaxBackups: s.maxFiles,
 			Compress:   false,
 		}
+		// Probe the sink at startup (lumberjack opens lazily) so a bad path fails fast instead of
+		// silently dropping every log line. A zero-length write creates/opens the file, no record.
+		if _, werr := lj.Write(nil); werr != nil {
+			_ = lj.Close()
+			return nil, noopClose, fmt.Errorf("log sink %q not writable: %w", s.path, werr)
+		}
 		closers = append(closers, lj)
 		children = append(children, newLeaf(lj, s))
 	}

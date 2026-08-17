@@ -32,7 +32,7 @@ func Dial(ctx context.Context, connectURL, hostName string, cert *x509.Certifica
 }
 
 // DialWithHeaders is Dial plus extra HTTP headers on the upgrade request (e.g. the trusted client-IP
-// header the in-process US10 test must inject since no proxy is in front).
+// header the in-process test must inject since no proxy is in front).
 func DialWithHeaders(ctx context.Context, connectURL, hostName string, extra http.Header,
 	cert *x509.Certificate, key crypto.Signer, handler http.Handler) (*FakePhone, error) {
 	ws, _, err := websocket.Dial(ctx, connectURL, &websocket.DialOptions{Host: hostName, HTTPHeader: extra})
@@ -99,7 +99,10 @@ func (p *FakePhone) serve(ctx context.Context, handler http.Handler) {
 				continue // unknown/stale reqid: drop
 			}
 			delete(pending, reqid)
-			_, req := wire.DecodeReqHeader(pr.hdr, pr.body)
+			_, req, derr := wire.DecodeReqHeader(pr.hdr, pr.body)
+			if derr != nil {
+				continue // drop a corrupt request header rather than serving a fabricated request
+			}
 			rr := httptest.NewRecorder()
 			handler.ServeHTTP(rr, req)
 			_ = writeFrame(ctx, p.ws, wire.RESPONSE_HEAD, wire.EncodeRespHeader(reqid, rr.Code, rr.Header()), nil)

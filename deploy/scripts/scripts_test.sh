@@ -5,6 +5,11 @@ set -eu
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 FAILS=0
+
+# All mktemp -d dirs land under one root (via TMPDIR) so a single EXIT trap cleans them all up.
+tmproot="$(mktemp -d)"
+trap 'rm -rf "$tmproot"' EXIT
+export TMPDIR="$tmproot"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
@@ -100,6 +105,19 @@ if openssl x509 -in "$t/ca.pem" -noout -text | grep -q 'CA:TRUE' &&
   fi
 else
   fail "gen-ca missing CA:TRUE / keyCertSign"
+fi
+
+# --- gen-ca refuses to clobber an existing CA ---
+t="$(mktemp -d)"
+sh "$DIR/gen-ca.sh" "$t" >/dev/null 2>&1
+key_before="$(cat "$t/ca-key.pem")"
+crt_before="$(cat "$t/ca.pem")"
+if sh "$DIR/gen-ca.sh" "$t" >/dev/null 2>&1; then
+  fail "gen-ca clobbered an existing CA (second run should exit non-zero)"
+elif [ "$(cat "$t/ca-key.pem")" = "$key_before" ] && [ "$(cat "$t/ca.pem")" = "$crt_before" ]; then
+  pass "gen-ca refuses to clobber an existing CA"
+else
+  fail "gen-ca modified the existing CA on the second run"
 fi
 
 if [ "$FAILS" -ne 0 ]; then

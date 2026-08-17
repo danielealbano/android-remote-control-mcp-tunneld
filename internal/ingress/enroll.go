@@ -91,16 +91,17 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read the CSR body (bounded + deadline-guarded).
-	limited := http.MaxBytesReader(w, r.Body, h.bodyLimit)
+	// Read the CSR body (bounded + deadline-guarded) WITHOUT wrapping w — a timeout path that abandons
+	// the read goroutine must never race the ResponseWriter (docs/PROTOCOL.md §1).
 	type readRes struct {
-		data []byte
-		err  error
+		data   []byte
+		tooBig bool
+		err    error
 	}
 	ch := make(chan readRes, 1)
 	go func() {
-		d, e := io.ReadAll(limited)
-		ch <- readRes{d, e}
+		d, tooBig, e := readAllLimited(r.Body, h.bodyLimit)
+		ch <- readRes{d, tooBig, e}
 	}()
 	var body []byte
 	select {
@@ -111,18 +112,17 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case res := <-ch:
 		if res.err != nil {
-			var mbe *http.MaxBytesError
-			if errors.As(res.err, &mbe) {
-				h.rec.Reject("enroll_body_too_large", "", ipStr)
-				http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
-				return
-			}
 			if errors.Is(res.err, context.DeadlineExceeded) || errors.Is(res.err, context.Canceled) {
 				h.rec.Reject("body_read_timeout", "", ipStr)
 				http.Error(w, "request timeout", http.StatusRequestTimeout)
 				return
 			}
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if res.tooBig {
+			h.rec.Reject("enroll_body_too_large", "", ipStr)
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		body = res.data
@@ -135,7 +135,7 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, err := ca.GenerateName(h.cfg.NamePrefix, h.cfg.NameLength)
+	name, err := ca.GenerateName(h.cfg.NamePrefix, h.cfg.NameLength, firstLabel(h.cfg.EnrollHost))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -164,4 +164,17 @@ func (h *EnrollHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		CertificatePEM: string(leafPEM),
 		ExpiresAt:      time.Now().Add(h.cfg.CertValidity).Unix(),
 	})
+}
+
+// readAllLimited reads up to limit+1 bytes and reports tooBig if the source exceeds limit. It never
+// touches the ResponseWriter, so a caller that abandons this read on timeout cannot race w.
+func readAllLimited(r io.Reader, limit int64) (data []byte, tooBig bool, err error) {
+	data, err = io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(data)) > limit {
+		return nil, true, nil
+	}
+	return data, false, nil
 }

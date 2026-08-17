@@ -316,6 +316,84 @@ func TestFingerprintStableAndPrefixed(t *testing.T) {
 	}
 }
 
+// constReader fills every read with a constant byte, so generateName produces the SAME name each
+// attempt — used to force reserved-label collisions and the attempt-exhaustion path deterministically.
+type constReader byte
+
+func (c constReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(c)
+	}
+	return len(p), nil
+}
+
+func TestVerifyEnrolledCert_RejectsCAAndNoDigSig(t *testing.T) {
+	ca := newTestCA(t)
+	key := p256Key(t)
+
+	caTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(10), Subject: pkix.Name{CommonName: "caleaf1234"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true, MaxPathLenZero: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, caTmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caLeaf, _ := x509.ParseCertificate(der)
+	if _, _, err := VerifyEnrolledCert(caLeaf, ca.Pool()); err == nil {
+		t.Error("a CA-flagged leaf must be rejected")
+	}
+
+	kuTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(11), Subject: pkix.Name{CommonName: "kuleaf1234"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageKeyEncipherment, BasicConstraintsValid: true,
+	}
+	der2, err := x509.CreateCertificate(rand.Reader, kuTmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kuLeaf, _ := x509.ParseCertificate(der2)
+	if _, _, err := VerifyEnrolledCert(kuLeaf, ca.Pool()); err == nil {
+		t.Error("a leaf lacking digitalSignature key usage must be rejected")
+	}
+}
+
+func TestGenerateName_ReservesEnrollLabel(t *testing.T) {
+	produced, err := generateName("", 10, constReader(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Passing that label as an extra reserved label (the enroll host's first label) must prevent it.
+	if _, err := generateName("", 10, constReader(0), produced); err == nil {
+		t.Error("the extra-reserved (enroll host) label must never be produced")
+	}
+}
+
+func TestGenerateName_ReservedSkipAndExhaustion(t *testing.T) {
+	produced, _ := generateName("", 10, constReader(0))
+	if _, err := generateName("", 10, constReader(0), produced); err == nil {
+		t.Fatal("when the only producible name is reserved, all attempts collide → exhaustion error")
+	}
+	if _, err := generateName("", 10, constReader(0)); err != nil {
+		t.Errorf("a non-reserved deterministic name must succeed: %v", err)
+	}
+}
+
+func TestAuthCertSizeCap(t *testing.T) {
+	ca := newTestCA(t)
+	leafPEM, _ := ca.SignCSR(makeCSR(t, p256Key(t)), "sizetest12")
+	block, _ := pem.Decode(leafPEM)
+	b64 := base64.StdEncoding.EncodeToString(block.Bytes)
+	if _, err := ParseCertB64DERLimited(b64, 4096); err != nil {
+		t.Fatalf("a normal leaf under the cap must parse: %v", err)
+	}
+	if _, err := ParseCertB64DERLimited(b64, 8); err == nil {
+		t.Error("a cert exceeding the cap must be rejected before parse")
+	}
+}
+
 func TestGenerateNameShapeAndReservedSkip(t *testing.T) {
 	re := regexp.MustCompile(`^[a-z2-7]{10}$`)
 	for i := 0; i < 200; i++ {

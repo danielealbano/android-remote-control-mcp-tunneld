@@ -32,8 +32,10 @@ byte fixtures live in [`../internal/wire/testdata/`](../internal/wire/testdata/)
 `GET wss://<name>.<tunnel-domain>/connect` (an ordinary WSS upgrade — Cloudflare-proxyable). A
 non-WebSocket request to `/connect` is answered `426 Upgrade Required`.
 
-Before the upgrade the server ban-checks the source IP (`403`), applies a per-IP connect-attempt
-limit (`429`), and acquires a bounded pre-auth semaphore (`503` if full). After the upgrade:
+Before the upgrade the server ban-checks the source IP (`403`), acquires a bounded pre-auth semaphore
+(`503` if full), then applies a per-IP connect-attempt limit (`429`). The semaphore is taken BEFORE
+the rate-limit Redis call so unauthenticated connect work — including that Redis round trip — is
+bounded by `--limit-connect-pending`; the ban check stays first. After the upgrade:
 
 1. **Server → phone `CHALLENGE`**: header `{"nonce":"<base64 of 32 random bytes>"}`, no body.
 2. **Phone → server `AUTH`**: header

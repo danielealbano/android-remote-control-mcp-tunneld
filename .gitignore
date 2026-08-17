@@ -1,2 +1,8 @@
 /dist/
 /bin/
+
+# Operator secrets & generated material — MUST never be committed.
+/deploy/ca/
+/deploy/.env
+/deploy/tunneld.env
+/deploy/logs/

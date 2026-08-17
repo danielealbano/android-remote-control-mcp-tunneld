@@ -3,6 +3,7 @@ package ban
 import "testing"
 
 func TestParseHandlesAllEntryKinds(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		line, kind, value string
 	}{
@@ -14,30 +15,36 @@ func TestParseHandlesAllEntryKinds(t *testing.T) {
 		{"  ip  5.5.5.5  # trailing comment", "ip", "5.5.5.5"},
 	}
 	for _, c := range cases {
-		k, v, err := ParseLine(c.line)
-		if err != nil {
-			t.Errorf("ParseLine(%q) error: %v", c.line, err)
-			continue
-		}
-		if k != c.kind || v != c.value {
-			t.Errorf("ParseLine(%q) = (%q,%q), want (%q,%q)", c.line, k, v, c.kind, c.value)
-		}
+		t.Run(c.line, func(t *testing.T) {
+			t.Parallel()
+			k, v, err := ParseLine(c.line)
+			if err != nil {
+				t.Fatalf("ParseLine(%q) error: %v", c.line, err)
+			}
+			if k != c.kind || v != c.value {
+				t.Errorf("ParseLine(%q) = (%q,%q), want (%q,%q)", c.line, k, v, c.kind, c.value)
+			}
+		})
 	}
-	// Comments and blank lines are skipped (no kind, no error).
 	for _, line := range []string{"", "   ", "# full comment"} {
-		k, _, err := ParseLine(line)
-		if err != nil || k != "" {
-			t.Errorf("ParseLine(%q) = kind %q err %v, want skip", line, k, err)
-		}
+		t.Run("skip:"+line, func(t *testing.T) {
+			t.Parallel()
+			k, _, err := ParseLine(line)
+			if err != nil || k != "" {
+				t.Errorf("ParseLine(%q) = kind %q err %v, want skip", line, k, err)
+			}
+		})
 	}
 }
 
 func TestParseSkipsMalformedLines(t *testing.T) {
 	// Unknown keyword and a value-less line → ParseLine error (caller skips).
 	for _, line := range []string{"bogus 1.2.3.4", "ip", "wat"} {
-		if _, _, err := ParseLine(line); err == nil {
-			t.Errorf("ParseLine(%q) expected error", line)
-		}
+		t.Run(line, func(t *testing.T) {
+			if _, _, err := ParseLine(line); err == nil {
+				t.Errorf("ParseLine(%q) expected error", line)
+			}
+		})
 	}
 	// A bad CIDR value passes ParseLine but is skipped by parseFile (invalid netip.Prefix), with the
 	// good entry still loaded.

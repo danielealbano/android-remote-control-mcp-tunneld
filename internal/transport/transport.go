@@ -6,6 +6,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
@@ -40,6 +41,12 @@ func RoundTrip(ctx context.Context, rdb redis.UniversalClient, node string, req 
 	for {
 		select {
 		case <-deadline.Done():
+			// reqCtx (ctx) is itself a WithTimeout of the same budget, so a genuine end-to-end timeout
+			// surfaces here with ctx.Err() == DeadlineExceeded — that MUST still be ErrTimeout → 504.
+			// Only a parent-context CANCEL (client gone) is reclassified.
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, context.Canceled
+			}
 			return nil, ErrTimeout
 		case msg, ok := <-ch:
 			if !ok {
@@ -57,9 +64,17 @@ func RoundTrip(ctx context.Context, rdb redis.UniversalClient, node string, req 
 // ServeNode subscribes to req:{nodeID} and, per message, runs handle in its own goroutine (bounded
 // by a WithTimeout(timeout) ctx so a phone that accepts but never completes a request still releases
 // the goroutine) and publishes the response; a failed response-publish records rec.PublishError().
-func ServeNode(ctx context.Context, rdb redis.UniversalClient, nodeID string, timeout time.Duration, rec observ.Recorder, handle func(context.Context, *wire.ReqEnvelope) *wire.RespEnvelope) error {
+func ServeNode(ctx context.Context, rdb redis.UniversalClient, nodeID string, timeout time.Duration, rec observ.Recorder, log *slog.Logger, ready func(), handle func(context.Context, *wire.ReqEnvelope) *wire.RespEnvelope) error {
 	pubsub := rdb.Subscribe(ctx, "req:"+nodeID)
 	defer func() { _ = pubsub.Close() }()
+	// Confirm the subscription is active before signalling readiness, so a request published to
+	// req:{nodeID} in the startup window is never silently lost (fail startup if it cannot confirm).
+	if _, err := pubsub.Receive(ctx); err != nil {
+		return err
+	}
+	if ready != nil {
+		ready()
+	}
 	ch := pubsub.Channel()
 	for {
 		select {
@@ -70,16 +85,17 @@ func ServeNode(ctx context.Context, rdb redis.UniversalClient, nodeID string, ti
 				return nil
 			}
 			payload := msg.Payload
-			go serveOne(ctx, rdb, timeout, rec, handle, payload)
+			go serveOne(ctx, rdb, timeout, rec, log, handle, payload)
 		}
 	}
 }
 
 // serveOne handles one request message: decode, run handle under a per-message deadline, and publish
 // the response. Split out so tests can drive it deterministically.
-func serveOne(ctx context.Context, rdb redis.UniversalClient, timeout time.Duration, rec observ.Recorder, handle func(context.Context, *wire.ReqEnvelope) *wire.RespEnvelope, payload string) {
+func serveOne(ctx context.Context, rdb redis.UniversalClient, timeout time.Duration, rec observ.Recorder, log *slog.Logger, handle func(context.Context, *wire.ReqEnvelope) *wire.RespEnvelope, payload string) {
 	req, err := wire.UnmarshalReq([]byte(payload))
 	if err != nil {
+		log.Warn("dropping undecodable request envelope", "err", err)
 		return
 	}
 	hctx, cancel := context.WithTimeout(ctx, timeout)

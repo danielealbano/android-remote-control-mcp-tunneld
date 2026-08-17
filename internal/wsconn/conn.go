@@ -3,8 +3,10 @@ package wsconn
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
@@ -48,26 +50,27 @@ func (c *Conn) Do(ctx context.Context, req *wire.ReqEnvelope) *wire.RespEnvelope
 	defer c.pending.Delete(req.ReqID)
 
 	if err := c.write(ctx, wire.REQUEST_HEAD, wire.EncodeReqHeader(req), nil); err != nil {
-		return synthErr(req.ReqID, "tunnel_gone")
+		return c.sendFailure(ctx, req.ReqID)
 	}
-	// Double-pacing guard: if this node's up-bucket already paced the ingress body read (US7 step 8),
-	// skip the token drain here (byte accounting is still recorded for every chunk written).
+	// Double-pacing guard: if this node's up-bucket already paced the ingress body read
+	// (docs/ARCHITECTURE.md §4), skip the token drain here (byte accounting is still recorded for
+	// every chunk written).
 	skipPace := req.PacedByNode == c.mgr.nodeID
 	for _, chunk := range chunkBytes(req.Body, wire.ChunkSize) {
 		if !skipPace {
 			if err := c.up.WaitN(ctx, len(chunk)); err != nil {
-				return synthErr(req.ReqID, "tunnel_gone")
+				return c.sendFailure(ctx, req.ReqID)
 			}
 		}
 		if err := c.write(ctx, wire.REQUEST_BODY_CHUNK, wire.EncodeReqIDHeader(req.ReqID), chunk); err != nil {
-			return synthErr(req.ReqID, "tunnel_gone")
+			return c.sendFailure(ctx, req.ReqID)
 		}
 		// Record AFTER a successful write (mirrors the read-pump's record-after-receipt): a chunk that
 		// failed to reach the wire must not inflate bytes_out.
 		c.mgr.rec.Bytes(c.name, "out", int64(len(chunk)))
 	}
 	if err := c.write(ctx, wire.REQUEST_END, wire.EncodeReqIDHeader(req.ReqID), nil); err != nil {
-		return synthErr(req.ReqID, "tunnel_gone")
+		return c.sendFailure(ctx, req.ReqID)
 	}
 
 	select {
@@ -78,6 +81,16 @@ func (c *Conn) Do(ctx context.Context, req *wire.ReqEnvelope) *wire.RespEnvelope
 	case <-c.ctx.Done():
 		return synthErr(req.ReqID, "tunnel_gone")
 	}
+}
+
+// sendFailure maps a send-leg error to the response the frontend should see: a per-message ctx
+// deadline/cancel is a timeout (nil → 504, matching the post-END select arm), any other write failure
+// is a dead tunnel (502).
+func (c *Conn) sendFailure(ctx context.Context, reqid string) *wire.RespEnvelope {
+	if ctx.Err() != nil {
+		return nil // deadline/cancel → frontend maps to 504
+	}
+	return synthErr(reqid, "tunnel_gone")
 }
 
 // readPump owns all WS reads and response reassembly, routing each RESPONSE_*/ERROR frame to the
@@ -106,14 +119,21 @@ func (c *Conn) readPump() string {
 			}
 		case wire.RESPONSE_BODY_CHUNK:
 			rid := wire.FrameReqID(hdr)
-			inf := c.get(rid)
-			if inf == nil {
-				continue // unknown/aborted reqid: drop
-			}
+			// Pace + account EVERY response chunk before dispatch/drop, so the per-tunnel bandwidth cap
+			// and byte accounting hold even while draining bytes the client will never receive (an
+			// over-cap or aborted response) — docs/ARCHITECTURE.md §4.
 			if err := c.down.WaitN(c.ctx, len(body)); err != nil {
+				if errors.Is(err, limit.ErrBurstExceeded) {
+					c.mgr.log.Warn("oversized response chunk exceeds bandwidth burst; tearing down", "tunnel", c.name, "bytes", len(body))
+					return "oversized_frame"
+				}
 				return "shutdown"
 			}
 			c.mgr.rec.Bytes(c.name, "in", int64(len(body)))
+			inf := c.get(rid)
+			if inf == nil {
+				continue // unknown/aborted/over-cap reqid: bytes already paced+accounted; drop the payload
+			}
 			if int64(inf.body.Len())+int64(len(body)) > c.mgr.responseLimit {
 				c.mgr.rec.Reject("response_too_large", c.name, "")
 				c.resolve(rid, &wire.RespEnvelope{ReqID: rid, Status: http.StatusBadGateway, Err: "response too large", ErrCode: "response_too_large"})
@@ -166,8 +186,13 @@ func (c *Conn) resolve(reqid string, resp *wire.RespEnvelope) {
 func (c *Conn) teardown(reason string) {
 	c.closeOnce.Do(func() {
 		c.mgr.conns.CompareAndDelete(c.name, c)
-		_ = c.mgr.registry.Unbind(context.Background(), c.name, c.connID)
+		uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.mgr.registry.Unbind(uctx, c.name, c.connID); err != nil {
+			c.mgr.log.Warn("route unbind on teardown failed", "tunnel", c.name, "err", err)
+		}
+		ucancel()
 		c.cancel()
+		c.mgr.buckets.Unpin(c.name)
 		_ = c.ws.Close(websocket.StatusNormalClosure, "")
 		c.pending.Range(func(k, v any) bool {
 			c.pending.Delete(k)

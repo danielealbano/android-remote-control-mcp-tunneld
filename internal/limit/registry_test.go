@@ -18,6 +18,25 @@ func TestRegistryReturnsSamePairPerName(t *testing.T) {
 	}
 }
 
+func TestBucketRegistry_PinnedNotEvicted(t *testing.T) {
+	clock := newFakeClock()
+	r := newBucketRegistry(1000, 10*time.Minute, clock.Now)
+	up1, _ := r.Pin("t")
+	clock.Advance(11 * time.Minute)
+	r.Pair("u") // triggers idle eviction — "t" is pinned so it survives
+	up2, _ := r.Pair("t")
+	if up1 != up2 {
+		t.Error("a pinned entry must survive idle eviction")
+	}
+	r.Unpin("t")
+	clock.Advance(11 * time.Minute)
+	r.Pair("u")
+	up3, _ := r.Pair("t")
+	if up1 == up3 {
+		t.Error("after Unpin, the idle entry must be evicted and recreated")
+	}
+}
+
 func TestRegistryEvictsIdlePairs(t *testing.T) {
 	clock := newFakeClock()
 	r := newBucketRegistry(1000, 10*time.Minute, clock.Now)

@@ -12,11 +12,11 @@ import (
 
 // ErrBurstExceeded is returned by WaitN when n exceeds the bucket burst — it can NEVER be satisfied
 // (the bucket never accumulates past burst), so WaitN returns immediately instead of blocking
-// forever. Callers MUST acquire large amounts in increments ≤ burst (≤ wire.ChunkSize per US6/US7).
+// forever. Callers MUST acquire large amounts in increments ≤ burst (≤ wire.ChunkSize, docs/ARCHITECTURE.md §4).
 var ErrBurstExceeded = errors.New("limit: WaitN n exceeds bucket burst")
 
 // TokenBucket is a classic refill token bucket pacing bytes/sec. It is mutex-guarded because the
-// per-tunnel up-bucket is shared by all concurrent Do goroutines (US6).
+// per-tunnel up-bucket is shared by all concurrent Do goroutines (docs/ARCHITECTURE.md §4).
 type TokenBucket struct {
 	mu     sync.Mutex
 	rate   int64 // bytes/sec (refill rate)

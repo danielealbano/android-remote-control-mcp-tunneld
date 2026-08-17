@@ -16,6 +16,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,6 +104,86 @@ func connectPhone(t *testing.T, c *cluster, replicaIdx int, name string, cert *x
 	return cancel
 }
 
+// enrollThroughTraefik enrolls via Traefik (Host set, NO client X-Real-Ip — Traefik sets it).
+func enrollThroughTraefik(t *testing.T, traefikURL string) (*x509.Certificate, *ecdsa.PrivateKey, string) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+	// Traefik's file provider loads dynamic.yml asynchronously AFTER its :80 listener is up, so an
+	// early request can reach Traefik before the router exists and get Traefik's own "404 page not
+	// found". Retry until the route is live and tunneld's enroll handler answers.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		req, _ := http.NewRequest("POST", traefikURL+"/enroll", bytes.NewReader(csrPEM))
+		req.Host = "enroll.example.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("enroll via traefik: %v", err)
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusNotFound && time.Now().Before(deadline) {
+			_ = resp.Body.Close()
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			t.Fatalf("enroll via traefik %d: body=%q", resp.StatusCode, b)
+		}
+		var out struct {
+			Name           string `json:"name"`
+			CertificatePEM string `json:"certificate_pem"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		_ = resp.Body.Close()
+		block, _ := pem.Decode([]byte(out.CertificatePEM))
+		cert, _ := x509.ParseCertificate(block.Bytes)
+		return cert, key, out.Name
+	}
+}
+
+// reqNoIP sends a request WITHOUT a client-injected X-Real-Ip — the edge (Traefik) must set it.
+func reqNoIP(t *testing.T, baseURL, host, method, path string, body []byte) (*http.Response, string) {
+	t.Helper()
+	var r *http.Request
+	if body != nil {
+		r, _ = http.NewRequest(method, baseURL+path, bytes.NewReader(body))
+	} else {
+		r, _ = http.NewRequest(method, baseURL+path, nil)
+	}
+	r.Host = host
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, string(b)
+}
+
+// TestTrafficThroughTraefik drives enroll + a public request through the Traefik edge (not directly at
+// a replica), verifying Host-based routing AND that Traefik supplies the trusted X-Real-Ip.
+func TestTrafficThroughTraefik(t *testing.T) {
+	c := startCluster(t)
+	cert, key, name := enrollThroughTraefik(t, c.traefikURL)
+	cancel := connectPhone(t, c, 0, name, cert, key, phoneBackend())
+	defer cancel()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, body := reqNoIP(t, c.traefikURL, name+".example.test", "POST", "/mcp", []byte(`{}`))
+		if resp.StatusCode == 200 && strings.HasPrefix(body, "phone:") {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("request through Traefik never succeeded (Host routing broken, or the edge did not set X-Real-Ip)")
+}
+
 func TestEnrollAndServeMcpCrossNode(t *testing.T) {
 	c := startCluster(t)
 	cert, key, name := enrollRaw(t, c.replicaURL[0])
@@ -179,19 +261,36 @@ func TestRateLimit429(t *testing.T) {
 	cert, key, name := enrollRaw(t, c.replicaURL[0])
 	cancel := connectPhone(t, c, 0, name, cert, key, phoneBackend())
 	defer cancel()
-	got429 := false
-	for i := 0; i < 30; i++ {
-		resp, _ := req(t, c.replicaURL[0], name+".example.test", "POST", "/mcp", []byte(`{}`), nil)
-		if resp.StatusCode == http.StatusTooManyRequests {
-			got429 = true
-			if resp.Header.Get("Retry-After") == "" {
-				t.Error("429 missing Retry-After")
+	// Fire a CONCURRENT burst so many requests land in one RPS window regardless of runner speed
+	// (a sequential loop could straddle window boundaries on a slow runner).
+	var got429, sawRetry atomic.Bool
+	var wg sync.WaitGroup
+	for i := 0; i < 40; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, _ := http.NewRequest("POST", c.replicaURL[0]+"/mcp", bytes.NewReader([]byte(`{}`)))
+			r.Host = name + ".example.test"
+			r.Header.Set("X-Real-Ip", clientIP)
+			resp, err := http.DefaultClient.Do(r)
+			if err != nil {
+				return
 			}
-			break
-		}
+			if resp.StatusCode == http.StatusTooManyRequests {
+				got429.Store(true)
+				if resp.Header.Get("Retry-After") != "" { // rate-limit 429s carry it (concurrency 429s don't)
+					sawRetry.Store(true)
+				}
+			}
+			_ = resp.Body.Close()
+		}()
 	}
-	if !got429 {
-		t.Error("rate limit never tripped after 30 rapid requests")
+	wg.Wait()
+	if !got429.Load() {
+		t.Error("rate limit never tripped under a concurrent burst of 40")
+	}
+	if !sawRetry.Load() {
+		t.Error("no rate-limit 429 carried a Retry-After header")
 	}
 }
 
@@ -220,16 +319,32 @@ func TestBannedTunnelFingerprintRefusedAndEvicted(t *testing.T) {
 	defer cancel()
 	fp := "sha256:" + hex.EncodeToString(sha256Sum(cert.Raw))
 	c.writeBans(t, "tunnel-fingerprint "+fp+"\n")
-	// Live tunnel is evicted → requests eventually fail (404 no route or 502).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	// The live tunnel is evicted → requests fail. The client keeps retrying, but each /connect with
+	// the banned fingerprint must be REFUSED, so the tunnel stays unreachable (never rebinds).
+	unreachable := func() bool {
 		resp, _ := req(t, c.replicaURL[1], name+".example.test", "POST", "/mcp", []byte(`{}`), nil)
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadGateway {
-			return
+		return resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusForbidden
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	evicted := false
+	for time.Now().Before(deadline) {
+		if unreachable() {
+			evicted = true
+			break
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	t.Error("banned fingerprint tunnel was never evicted")
+	if !evicted {
+		t.Fatal("banned fingerprint tunnel was never evicted")
+	}
+	// Sustained: reconnect attempts stay refused (a banned fingerprint /connect is rejected).
+	until := time.Now().Add(4 * time.Second)
+	for time.Now().Before(until) {
+		if !unreachable() {
+			t.Fatal("tunnel became reachable again — a banned-fingerprint /connect was NOT refused")
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 func sha256Sum(b []byte) []byte {

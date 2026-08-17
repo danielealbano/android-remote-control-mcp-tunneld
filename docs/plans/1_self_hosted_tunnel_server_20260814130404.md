@@ -2365,3 +2365,23 @@ Prometheus labels; confirm no country names/codes and no AI attribution across `
 No task depends on a later task. Tests for each user story run within that story's DoD during
 development conceptually, but per repo rules the FULL suite + linting run only after the entire plan
 is implemented, followed by the `code-reviewer` in plan-compliance mode.
+
+---
+
+## Deviations
+
+Recorded retroactively (Plan 2, audit remediation) — divergences between this plan and the delivered
+code that were not logged at implementation time:
+
+- **Module path**: the module is `github.com/danielealbano/android-remote-control-mcp-tunneld` (the
+  repo was split into a standalone module), not the `…/tunneld` sub-path this plan assumed; every
+  planned `tunneld/`-prefixed path lives at the repo root.
+- **CI shape**: CI is a single unfiltered `.github/workflows/ci.yml` running static-checks + tiered
+  build/test jobs on every push/PR (e2e always-on), not an opt-in path-filtered `tunnel-ci.yml`.
+- **Makefile**: the delivered Makefile is the tiered form (3-pass lint, `govulncheck`, `test-unit`/
+  `-integration`/`-e2e`, `compose-config`, `traefik-config`, `mermaid-check`), not the single-pass
+  `test`/`lint` this plan sketched.
+- **Ban unreadable-file behavior**: a HARD read error on a configured ban file aborts the whole
+  reload and keeps the previous snapshot (fail-closed), rather than skipping just that file; a present
+  DB-IP CSV that yields zero parseable rows is likewise a hard error that keeps the previous snapshot.
+  `docs/ARCHITECTURE.md` §6 documents the delivered behavior.

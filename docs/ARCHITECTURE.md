@@ -98,8 +98,9 @@ sequenceDiagram
   participant PH as Phone WS
 
   C->>FE: POST /mcp (Host: name.tunnel-domain)
-  FE->>FE: ban → allowlist → caps → concurrency
+  FE->>FE: trusted IP → ban → mTLS-header reject
   FE->>R: Lookup route:{name} → node N + fingerprint
+  FE->>FE: tunnel-ban → allowlist → caps → rps/rpm → concurrency
   FE->>FE: paced body read (up-bucket, ≤ChunkSize slices)
   FE->>R: SUBSCRIBE resp:{reqid} (before publish)
   FE->>R: PUBLISH req:{N} (ReqEnvelope, PacedByNode=M)
@@ -135,7 +136,7 @@ sequenceDiagram
   participant R as Redis
 
   PH->>WS: GET wss://name.tunnel-domain/connect
-  WS->>WS: TrustedIP → ban.Match → connect rate (429) → pre-auth semaphore (503)
+  WS->>WS: TrustedIP → ban.Match → pre-auth semaphore (503) → connect rate (429) → host-suffix (404)
   WS->>PH: WS accept + CHALLENGE {nonce}
   PH->>WS: AUTH {cert b64DER, signature}
   WS->>WS: verify chain+validity → possession → CN == Host name
@@ -179,9 +180,11 @@ evicted; callers acquire in ≤ `ChunkSize` slices):
   process, `Conn.Do` skips the duplicate token drain (bytes were already drawn from this very
   bucket) but still records byte metrics for every chunk. A foreign `PacedByNode` IS paced at the
   WS leg — the owning node is the authoritative choke point.
-- **Downloads**: the read-pump drains the down-bucket per `RESPONSE_BODY_CHUNK`. Client-side
-  egress (writing the assembled response to the public client) is deliberately unpaced — it was
-  already produced at the paced phone-leg rate.
+- **Downloads**: the read-pump drains the down-bucket per `RESPONSE_BODY_CHUNK` — including chunks
+  that arrive after a response is resolved over `--limit-response`, which are still paced +
+  byte-accounted while drained (never at wire speed). Client-side egress (writing the assembled
+  response to the public client) is deliberately unpaced — it was already produced at the paced
+  phone-leg rate.
 - Cross-replica exactness was explicitly rejected: worst case aggregate ingress is replicas ×
   rate, while true tunnel throughput stays 1 × rate at the WS leg.
 
@@ -215,6 +218,18 @@ Handlers depend on the `observ.Recorder` interface; `metrics.PromRecorder` imple
 - `Request`/`Bytes` → aggregate Prometheus families AND an in-process accumulator that a
   background flusher drains to `tcnt:{name}` (~5 s) — Redis is never on the data plane.
 - WS lifecycle → connects/disconnects{reason} + the derived `tunneld_tunnels_connected` gauge.
+
+### Registered rejection reasons (`tunneld_rejections_total{reason}`)
+
+Every label below has a known writer edge; no other reason string is ever passed to `Reject`. The
+`banned_*` reasons come from `ban.Source.Reason.String()`.
+
+| Edge | Reasons |
+|---|---|
+| Public ingress (`internal/ingress/handler.go`) | `missing_client_ip`, `banned_ip`, `banned_cidr`, `banned_country`, `banned_tunnel_name`, `banned_tunnel_fingerprint`, `public_mtls_header`, `unknown_host`, `method_denied`, `path_denied`, `headers_too_large`, `body_too_large`, `rate_rps`, `rate_rpm`, `concurrency`, `body_read_timeout`, `timeout`, `tunnel_offline` |
+| Enroll (`internal/ingress/enroll.go`) | `missing_client_ip`, `banned_*`, `enroll_rate`, `enroll_body_too_large`, `enroll_malformed_csr`, `enroll_unsupported_key` |
+| `/connect` (`internal/wsconn/manager.go`) | `missing_client_ip`, `banned_*`, `connect_pending`, `rate_connect`, `connect_auth_failed`, `fingerprint_conflict` |
+| Read-pump (`internal/wsconn/conn.go`) | `response_too_large` |
 
 Metric families carry NO per-tunnel labels; `/admin/tunnels` is the per-tunnel view.
 

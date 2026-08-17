@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -11,13 +12,17 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
 
+// flushShutdownTimeout bounds the final counter flush on shutdown so it cannot block the drain.
+const flushShutdownTimeout = 5 * time.Second
+
 // PromRecorder implements observ.Recorder by combining the metric registry, the cap-hit deduping
-// logger, and the async per-tunnel counter flusher. It is the single object injected (US10) into the
-// US6/US7/US8 handlers.
+// logger, and the async per-tunnel counter flusher. It is the single object injected into the ingress,
+// enroll, and WS handlers (docs/ARCHITECTURE.md §7).
 type PromRecorder struct {
 	m      *Metrics
 	caplog *caplog.Logger
 	admin  *admin.Store
+	log    *slog.Logger
 
 	mu  sync.Mutex
 	agg map[string]*aggEntry
@@ -32,8 +37,8 @@ type aggEntry struct {
 var _ observ.Recorder = (*PromRecorder)(nil)
 
 // NewPromRecorder builds the recorder.
-func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store) *PromRecorder {
-	return &PromRecorder{m: m, caplog: cl, admin: store, agg: map[string]*aggEntry{}}
+func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slog.Logger) *PromRecorder {
+	return &PromRecorder{m: m, caplog: cl, admin: store, log: log, agg: map[string]*aggEntry{}}
 }
 
 // Reject bumps the reason counter AND emits a deduped cap-hit log.
@@ -99,7 +104,9 @@ func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) erro
 	for {
 		select {
 		case <-ctx.Done():
-			p.flush(context.Background())
+			fctx, cancel := context.WithTimeout(context.Background(), flushShutdownTimeout)
+			p.flush(fctx)
+			cancel()
 			return ctx.Err()
 		case <-ticker.C:
 			p.flush(ctx)
@@ -116,13 +123,19 @@ func (p *PromRecorder) flush(ctx context.Context) {
 
 	for name, e := range drained {
 		if e.requests != 0 {
-			_ = p.admin.Incr(ctx, name, "requests", e.requests)
+			if err := p.admin.Incr(ctx, name, "requests", e.requests); err != nil {
+				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "requests", "err", err)
+			}
 		}
 		if e.bytesIn != 0 {
-			_ = p.admin.Incr(ctx, name, "bytes_in", e.bytesIn)
+			if err := p.admin.Incr(ctx, name, "bytes_in", e.bytesIn); err != nil {
+				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_in", "err", err)
+			}
 		}
 		if e.bytesOut != 0 {
-			_ = p.admin.Incr(ctx, name, "bytes_out", e.bytesOut)
+			if err := p.admin.Incr(ctx, name, "bytes_out", e.bytesOut); err != nil {
+				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_out", "err", err)
+			}
 		}
 	}
 }

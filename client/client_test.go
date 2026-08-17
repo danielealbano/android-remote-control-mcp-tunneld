@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -225,6 +226,97 @@ func TestClientReconnectsAfterDrop(t *testing.T) {
 	// The client's Serve loop must re-dial and re-bind on server2.
 	if code, body := postMCP(t, publicAddr, name); code != 200 || body != "v" {
 		t.Fatalf("request after reconnect = %d %q", code, body)
+	}
+}
+
+func TestNodeReadyBeforeAccept(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cp, kp := genCAFiles(t)
+	cfg := cfgFor(freePort(t), freePort(t), mr.Addr(), cp, kp)
+	cancel, done := runServer(t, cfg)
+	defer func() { cancel(); <-done }()
+
+	cl := testClient()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, name, err := cl.Enroll(context.Background(), "http://"+cfg.Listen+"/enroll", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+	sctx, scancel := context.WithCancel(context.Background())
+	defer scancel()
+	go func() {
+		_ = cl.Serve(sctx, "ws://"+cfg.Listen+"/connect", name+".example.test", cert, key, ok200("ready"))
+	}()
+
+	// Confirm the tunnel is up, then a SINGLE request with NO retry loop must succeed immediately —
+	// the readiness gate ensures the public listener only accepts after ServeNode subscribed.
+	if code, _ := postMCP(t, cfg.Listen, name); code != 200 {
+		t.Fatalf("initial request = %d", code)
+	}
+	req, _ := http.NewRequest("POST", "http://"+cfg.Listen+"/mcp", nil)
+	req.Host = name + ".example.test"
+	req.Header.Set("X-Real-Ip", "203.0.113.7")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("single request = %d, want 200 (no readiness-window drop)", resp.StatusCode)
+	}
+}
+
+func TestConcurrentClientBridge(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cp, kp := genCAFiles(t)
+	cfg := cfgFor(freePort(t), freePort(t), mr.Addr(), cp, kp)
+	cancel, done := runServer(t, cfg)
+	defer func() { cancel(); <-done }()
+
+	cl := testClient()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, name, _ := cl.Enroll(context.Background(), "http://"+cfg.Listen+"/enroll", key)
+	block, _ := pem.Decode(certPEM)
+	cert, _ := x509.ParseCertificate(block.Bytes)
+
+	var inflight, maxSeen atomic.Int32
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := inflight.Add(1)
+		for {
+			old := maxSeen.Load()
+			if cur <= old || maxSeen.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		time.Sleep(300 * time.Millisecond) // hold so concurrent requests overlap
+		inflight.Add(-1)
+		_, _ = io.WriteString(w, "ok")
+	})
+	sctx, scancel := context.WithCancel(context.Background())
+	defer scancel()
+	go func() { _ = cl.Serve(sctx, "ws://"+cfg.Listen+"/connect", name+".example.test", cert, key, backend) }()
+
+	if code, _ := postMCP(t, cfg.Listen, name); code != 200 { // confirm the tunnel is bound
+		t.Fatal("tunnel never became reachable")
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, _ := http.NewRequest("POST", "http://"+cfg.Listen+"/mcp", nil)
+			req.Host = name + ".example.test"
+			req.Header.Set("X-Real-Ip", "203.0.113.7")
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				_ = resp.Body.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	if maxSeen.Load() < 2 {
+		t.Errorf("the client bridge did not multiplex: max concurrent = %d, want ≥2", maxSeen.Load())
 	}
 }
 

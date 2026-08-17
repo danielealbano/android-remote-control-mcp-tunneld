@@ -20,7 +20,7 @@ import (
 
 // ErrUnsupportedKeyType is returned by SignCSR for a CSR whose public key is not ECDSA P-256. Only
 // P-256 can complete the /connect possession proof, so signing any other key would mint a cert that
-// can never authenticate. US8 maps this to 400 unsupported_key_type.
+// can never authenticate. The enroll handler maps this to 400 unsupported_key_type (docs/PROTOCOL.md §1).
 var ErrUnsupportedKeyType = errors.New("ca: unsupported CSR key type (only ECDSA P-256 accepted)")
 
 // CA holds the loaded signing material.

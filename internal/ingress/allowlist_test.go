@@ -6,6 +6,7 @@ import (
 )
 
 func TestAllowlistMatch(t *testing.T) {
+	t.Parallel()
 	hex64 := strings.Repeat("a", 64)
 	cases := []struct {
 		method, path string
@@ -37,9 +38,12 @@ func TestAllowlistMatch(t *testing.T) {
 		{"GET", "/health", "", Deny404}, // health never tunneled
 	}
 	for _, c := range cases {
-		route, dec := Match(c.method, c.path)
-		if dec != c.wantDec || route.Class != c.wantClass {
-			t.Errorf("Match(%s %s) = (%q, %d), want (%q, %d)", c.method, c.path, route.Class, dec, c.wantClass, c.wantDec)
-		}
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			t.Parallel()
+			route, dec := Match(c.method, c.path)
+			if dec != c.wantDec || route.Class != c.wantClass {
+				t.Errorf("Match(%s %s) = (%q, %d), want (%q, %d)", c.method, c.path, route.Class, dec, c.wantClass, c.wantDec)
+			}
+		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -19,7 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -40,6 +41,10 @@ type Client struct {
 	HTTP       *http.Client
 	Headers    http.Header
 	EnrollHost string
+	// OnConnectError, when set, is invoked with each failed connect attempt's error (before backoff),
+	// so a caller can observe a permanent refusal (expired cert, ban, fingerprint conflict) instead of
+	// it being silently retried forever. Not invoked after ctx is done.
+	OnConnectError func(error)
 }
 
 // New returns a Client using http.DefaultClient.
@@ -55,6 +60,9 @@ func (c *Client) httpClient() *http.Client {
 // Enroll builds a CSR from key and POSTs it to enrollURL, returning the signed certificate PEM and
 // the assigned tunnel name.
 func (c *Client) Enroll(ctx context.Context, enrollURL string, key *ecdsa.PrivateKey) (certPEM []byte, name string, err error) {
+	if key.Curve != elliptic.P256() {
+		return nil, "", errors.New("client: enrollment key must be ECDSA P-256")
+	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
 	if err != nil {
 		return nil, "", err
@@ -112,9 +120,12 @@ func (c *Client) Serve(ctx context.Context, connectURL, hostName string, cert *x
 			return ctx.Err()
 		}
 		start := time.Now()
-		_ = c.Connect(ctx, connectURL, hostName, cert, key, backend)
+		err := c.Connect(ctx, connectURL, hostName, cert, key, backend)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err != nil && c.OnConnectError != nil {
+			c.OnConnectError(err)
 		}
 		if time.Since(start) > time.Second {
 			backoff = initialBackoff // the connection was established for a while; reset
@@ -172,11 +183,20 @@ func handshake(ctx context.Context, ws *websocket.Conn, cert *x509.Certificate, 
 	return writeFrame(ctx, ws, wire.AUTH, auth, nil)
 }
 
-// bridge accumulates REQUEST_HEAD + REQUEST_BODY_CHUNKs per reqid, dispatches on REQUEST_END against
-// backend, and streams the response back as RESPONSE_HEAD + chunked RESPONSE_BODY_CHUNK + RESPONSE_END.
+// bridge accumulates REQUEST_HEAD + REQUEST_BODY_CHUNKs per reqid and, on REQUEST_END, dispatches each
+// request in its OWN goroutine so the read loop always stays in Read (control pings are answered). All
+// frame writes take a shared mutex; bridge returns only after in-flight handlers finish.
 func bridge(ctx context.Context, ws *websocket.Conn, backend http.Handler) error {
 	type partial struct{ hdr, body []byte }
 	pending := map[string]*partial{}
+	var writeMu sync.Mutex
+	var wg sync.WaitGroup
+	write := func(t wire.FrameType, header, body []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return ws.Write(ctx, websocket.MessageBinary, wire.EncodeFrame(t, header, body))
+	}
+	defer wg.Wait()
 	for {
 		typ, hdr, body, err := readFrame(ctx, ws)
 		if err != nil {
@@ -196,24 +216,78 @@ func bridge(ctx context.Context, ws *websocket.Conn, backend http.Handler) error
 				continue
 			}
 			delete(pending, reqid)
-			_, req := wire.DecodeReqHeader(pr.hdr, pr.body)
-			rr := httptest.NewRecorder()
-			backend.ServeHTTP(rr, req)
-			if err := writeFrame(ctx, ws, wire.RESPONSE_HEAD, wire.EncodeRespHeader(reqid, rr.Code, rr.Header()), nil); err != nil {
-				return err
-			}
-			for _, chunk := range chunkBy(rr.Body.Bytes(), wire.ChunkSize) {
-				if err := writeFrame(ctx, ws, wire.RESPONSE_BODY_CHUNK, wire.EncodeReqIDHeader(reqid), chunk); err != nil {
-					return err
-				}
-			}
-			if err := writeFrame(ctx, ws, wire.RESPONSE_END, wire.EncodeReqIDHeader(reqid), nil); err != nil {
-				return err
-			}
+			wg.Add(1)
+			go func(reqid string, pr *partial) {
+				defer wg.Done()
+				handleOne(ctx, write, backend, reqid, pr.hdr, pr.body)
+			}(reqid, pr)
 		default:
 			continue
 		}
 	}
+}
+
+// handleOne serves one buffered request against backend, streaming the response back over the WS.
+func handleOne(ctx context.Context, write func(wire.FrameType, []byte, []byte) error, backend http.Handler, reqid string, hdr, body []byte) {
+	_, req, err := wire.DecodeReqHeader(hdr, body)
+	if err != nil {
+		return // drop a corrupt request header rather than forwarding a fabricated request
+	}
+	w := &wsResponseWriter{ctx: ctx, write: write, reqid: reqid, header: http.Header{}, status: http.StatusOK}
+	backend.ServeHTTP(w, req)
+	w.finish()
+}
+
+// wsResponseWriter streams a backend response over the WS as RESPONSE_HEAD (emitted lazily on the
+// first write) + chunked RESPONSE_BODY_CHUNK (≤ChunkSize) + RESPONSE_END. Write errors are captured and
+// surface via the read loop's next failure; an empty body emits zero body-chunk frames (docs/PROTOCOL.md §3).
+type wsResponseWriter struct {
+	ctx       context.Context
+	write     func(wire.FrameType, []byte, []byte) error
+	reqid     string
+	header    http.Header
+	status    int
+	wroteHead bool
+	writeErr  error
+}
+
+func (w *wsResponseWriter) Header() http.Header { return w.header }
+
+func (w *wsResponseWriter) WriteHeader(status int) {
+	if w.wroteHead {
+		return
+	}
+	w.status = status
+	w.wroteHead = true
+	if err := w.write(wire.RESPONSE_HEAD, wire.EncodeRespHeader(w.reqid, w.status, w.header), nil); err != nil {
+		w.writeErr = err
+	}
+}
+
+func (w *wsResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHead {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	for _, chunk := range chunkBy(p, wire.ChunkSize) {
+		if err := w.write(wire.RESPONSE_BODY_CHUNK, wire.EncodeReqIDHeader(w.reqid), chunk); err != nil {
+			w.writeErr = err
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+func (w *wsResponseWriter) finish() {
+	if !w.wroteHead {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.writeErr != nil {
+		return
+	}
+	_ = w.write(wire.RESPONSE_END, wire.EncodeReqIDHeader(w.reqid), nil)
 }
 
 func readFrame(ctx context.Context, ws *websocket.Conn) (wire.FrameType, []byte, []byte, error) {

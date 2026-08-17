@@ -27,7 +27,7 @@ for f in "$@"; do
 			/^```[ \t]*$/        { if (in_block) { in_block = 0; grab = 0; next } }
 			grab { print }
 		' "$f" > "$OUT_DIR/block.mmd"
-		if npx --yes @mermaid-js/mermaid-cli -p "$OUT_DIR/puppeteer.json" \
+		if npx --yes @mermaid-js/mermaid-cli@11.16.0 -p "$OUT_DIR/puppeteer.json" \
 			-i "$OUT_DIR/block.mmd" -o "$OUT_DIR/block.svg" > "$OUT_DIR/mmdc.log" 2>&1; then
 			echo "OK   $f mermaid block $i"
 		else

@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 	"github.com/redis/go-redis/v9"
 )
+
+func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 func newTestRedis(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
 	t.Helper()
@@ -88,7 +92,7 @@ func TestServeNodeRecordsPublishError(t *testing.T) {
 	rdb, mr := newTestRedis(t)
 	rec := &tunneltest.Recorder{}
 	mr.Close() // subsequent Publish fails
-	serveOne(context.Background(), rdb, time.Second, rec,
+	serveOne(context.Background(), rdb, time.Second, rec, discardLog(),
 		func(ctx context.Context, req *wire.ReqEnvelope) *wire.RespEnvelope {
 			return &wire.RespEnvelope{ReqID: req.ReqID, Status: 200}
 		},

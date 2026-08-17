@@ -7,12 +7,14 @@ import (
 	"time"
 )
 
-// Watch polls the max mtime across all ban files + the CSV every `poll`; on a change it reloads the
-// engine and, on a SUCCESSFUL load, invokes onReload(e) (nil-safe). The initial load happens once
+// Watch polls a per-path (exists, mtime, size) fingerprint across all ban files + the CSV every
+// `poll`; on ANY change — including a deletion or a replacement with an equal/older mtime — it reloads
+// the engine and, on a SUCCESSFUL load, invokes onReload(e) (nil-safe). The initial load happens once
 // before the poll loop (and fires onReload on success). A load error keeps the previous snapshot
-// (never empties the table) and does NOT fire onReload.
+// (never empties the table), does NOT advance the recorded fingerprint (so it retries on the next
+// tick), and does NOT fire onReload.
 //
-// onReload is how live name/fingerprint revocation reaches the WS manager (US6 EvictBanned).
+// onReload is how live name/fingerprint revocation reaches the WS manager (see docs/ARCHITECTURE.md §6).
 func Watch(ctx context.Context, e *Engine, files []string, csvPath string, poll time.Duration, onReload func(*Engine), log *slog.Logger) {
 	w := &watcher{e: e, files: files, csv: csvPath, onReload: onReload, log: log}
 	w.initial()
@@ -29,6 +31,13 @@ func Watch(ctx context.Context, e *Engine, files []string, csvPath string, poll 
 	}
 }
 
+// fileState is one configured path's (exists, mtime, size) fingerprint.
+type fileState struct {
+	exists  bool
+	modTime time.Time
+	size    int64
+}
+
 // watcher holds the poll state; split out so tests can drive initial()/tick() deterministically
 // without depending on ticker timing.
 type watcher struct {
@@ -37,44 +46,43 @@ type watcher struct {
 	csv      string
 	onReload func(*Engine)
 	log      *slog.Logger
-	last     time.Time
+	last     map[string]fileState
 }
 
 func (w *watcher) initial() {
-	w.last = maxMtime(w.files, w.csv)
+	cur := w.fingerprint()
 	if err := w.e.Load(w.files, w.csv, w.log); err != nil {
 		w.log.Warn("initial ban load error; engine stays at empty/previous snapshot until next successful load", "err", err)
-		return
+		return // do NOT record cur — retry on the next tick
 	}
+	w.last = cur
 	if w.onReload != nil {
 		w.onReload(w.e)
 	}
 }
 
 func (w *watcher) tick() {
-	cur := maxMtime(w.files, w.csv)
-	if !cur.After(w.last) {
+	cur := w.fingerprint()
+	if w.last != nil && sameStates(w.last, cur) {
 		return
 	}
-	w.last = cur
 	if err := w.e.Load(w.files, w.csv, w.log); err != nil {
-		w.log.Warn("ban reload error; keeping previous snapshot", "err", err)
-		return // do NOT fire onReload
+		w.log.Warn("ban reload error; keeping previous snapshot (will retry)", "err", err)
+		return // do NOT advance w.last — retry on the next tick
 	}
+	w.last = cur
 	if w.onReload != nil {
 		w.onReload(w.e)
 	}
 }
 
-// maxMtime returns the latest modification time across the ban files and the CSV. Absent paths are
-// ignored (zero time). A path that exists (including a directory) contributes its mtime, so a file
-// replaced by a directory is still detected as a change (and the subsequent Load reports the read
-// error).
-func maxMtime(files []string, csvPath string) time.Time {
-	var latest time.Time
-	paths := files
-	if csvPath != "" {
-		paths = append(append([]string{}, files...), csvPath)
+// fingerprint records (exists, mtime, size) for every configured path so a change of ANY kind —
+// including deletion or a replacement with an equal/older mtime — is detected.
+func (w *watcher) fingerprint() map[string]fileState {
+	states := map[string]fileState{}
+	paths := w.files
+	if w.csv != "" {
+		paths = append(append([]string{}, w.files...), w.csv)
 	}
 	for _, p := range paths {
 		if p == "" {
@@ -82,11 +90,23 @@ func maxMtime(files []string, csvPath string) time.Time {
 		}
 		fi, err := os.Stat(p)
 		if err != nil {
+			states[p] = fileState{exists: false}
 			continue
 		}
-		if mt := fi.ModTime(); mt.After(latest) {
-			latest = mt
+		states[p] = fileState{exists: true, modTime: fi.ModTime(), size: fi.Size()}
+	}
+	return states
+}
+
+func sameStates(a, b map[string]fileState) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av != bv {
+			return false
 		}
 	}
-	return latest
+	return true
 }

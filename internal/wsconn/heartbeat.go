@@ -45,12 +45,24 @@ func (c *Conn) heartbeatOnce() (stop bool) {
 		c.teardown("superseded")
 		return true
 	case router.HeartbeatMissing:
-		if err := c.mgr.registry.Bind(c.ctx, c.name, c.mgr.nodeID, c.fp, c.connID); err != nil {
-			if errors.Is(err, router.ErrNameHeldByOther) {
-				c.teardown("superseded")
-				return true
-			}
-		}
+		return c.selfHeal()
+	default:
+		return false
+	}
+}
+
+// selfHeal re-binds a route whose TTL lapsed while the WS stayed healthy, connID-conditionally: if the
+// route is now owned by a DIFFERENT connID (same fingerprint) or a different fingerprint, this conn was
+// superseded and must tear down rather than clobber the newer owner (docs/ARCHITECTURE.md §3). Reports
+// whether the loop should stop. Split out for deterministic testing.
+func (c *Conn) selfHeal() (stop bool) {
+	res, err := c.mgr.registry.BindIfAbsentOrOwner(c.ctx, c.name, c.mgr.nodeID, c.fp, c.connID)
+	switch {
+	case res == router.SelfHealNotOwner || errors.Is(err, router.ErrNameHeldByOther):
+		c.teardown("superseded")
+		return true
+	case err != nil:
+		c.mgr.log.Warn("heartbeat self-heal bind failed", "tunnel", c.name, "err", err)
 		return false
 	default:
 		return false
