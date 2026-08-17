@@ -1,10 +1,8 @@
 version: 2
 
-# tunneld is a Go module in a subdir of a repo whose APP releases use `v*` tags. OSS goreleaser has
-# no monorepo mode, so this config is run FROM the tunneld/ dir on `tunneld-v<semver>` tags; the
-# release-tunneld workflow strips the prefix into GORELEASER_CURRENT_TAG (a clean semver) and creates
-# the GitHub release itself (goreleaser's own release is disabled below to avoid touching the app's
-# `v*` tag namespace).
+# tunneld is a standalone Go module released on `v<semver>` tags. goreleaser builds the multi-arch
+# binaries + archives, pushes the multi-arch docker image to ghcr.io, and creates the GitHub release
+# with the archives + checksums attached.
 project_name: tunneld
 
 before:
@@ -46,7 +44,7 @@ dockers:
       - "ghcr.io/danielealbano/tunneld:{{ .Version }}-amd64"
     build_flag_templates:
       - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp"
+      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
       - "--label=org.opencontainers.image.description=Self-hosted HTTP tunnel server (tunneld)"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -60,7 +58,7 @@ dockers:
       - "ghcr.io/danielealbano/tunneld:{{ .Version }}-arm64"
     build_flag_templates:
       - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp"
+      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
       - "--label=org.opencontainers.image.description=Self-hosted HTTP tunnel server (tunneld)"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -75,9 +73,3 @@ docker_manifests:
     image_templates:
       - "ghcr.io/danielealbano/tunneld:{{ .Version }}-amd64"
       - "ghcr.io/danielealbano/tunneld:{{ .Version }}-arm64"
-
-# goreleaser does NOT create the GitHub release (that would target a `v*` tag and collide with the
-# app's release scheme). The workflow creates the release on the `tunneld-v*` tag and uploads the
-# dist/ archives + checksums goreleaser produced.
-release:
-  disable: true

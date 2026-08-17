@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Minimal GITHUB_TOKEN permissions (CodeQL hardening): these jobs only read the repo — they build,
+# lint, and test; they never push images, comment, or release. Image publishing lives in the
+# separate release workflow, which requests packages:write on its own job.
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - run: go build ./...
+      - run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.12.2
+      - name: shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh
+      - name: script tests
+        run: make test-scripts
+      - name: unit + integration tests
+        run: go test ./...
+      - name: compose config
+        run: docker compose --env-file deploy/.env.example -f deploy/docker-compose.yml config -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t tunneld:ci -f Dockerfile .
+
+  e2e:
+    # Runs on every push/PR so the full-stack path is regression-tested — not left to rot behind a
+    # manual trigger.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: e2e
+        run: make test-e2e
