@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
@@ -63,13 +64,13 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	m := metrics.NewMetrics()
 	adminStore := admin.NewStore(rdb, adminCounterTTL)
 	caplogger := caplog.New(logger)
-	rec := metrics.NewPromRecorder(m, caplogger, adminStore)
+	rec := metrics.NewPromRecorder(m, caplogger, adminStore, logger)
 
 	// drainCtx keeps the NODE-serving path (ServeNode, the per-message handlers, the async flusher,
 	// and every Conn's lifetime) ALIVE after the parent ctx is cancelled — cancelled only AFTER
 	// http.Server.Shutdown has drained in-flight ingress handlers within --shutdown-grace, so an
-	// in-flight tunnel request completes instead of being abandoned to a 504 (US10 AC: "drain
-	// in-flight up to --shutdown-grace"). It derives from Background, NOT ctx.
+	// in-flight tunnel request completes instead of being abandoned to a 504 (docs/ARCHITECTURE.md §8).
+	// It derives from Background, NOT ctx.
 	drainCtx, drainCancel := context.WithCancel(context.Background())
 	defer drainCancel()
 
@@ -89,7 +90,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	publicSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           NewMux(cfg, manager, ingressH, enrollH),
-		MaxHeaderBytes:    int(2 * headersLimit), // strictly above the explicit US7 header check
+		MaxHeaderBytes:    int(2 * headersLimit), // strictly above the explicit handler-level header check (docs/ARCHITECTURE.md §2)
 		ReadHeaderTimeout: readHeaderTimeout,
 		// ReadTimeout is deliberately NOT set — it would kill legitimately paced (slow) body uploads.
 	}
@@ -107,13 +108,27 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	logger.Info("tunneld starting", "version", version, "node", nodeID, "listen", cfg.Listen, "internal", cfg.InternalListen)
 
+	// nodeReady gates the PUBLIC listener until ServeNode has confirmed its req:{nodeID} subscription,
+	// so a request routed here during startup is never silently dropped (docs/ARCHITECTURE.md §2). The
+	// internal listener (/healthz, /metrics) may start immediately.
+	nodeReady := make(chan struct{})
+	var readyOnce sync.Once
+	ready := func() { readyOnce.Do(func() { close(nodeReady) }) }
+
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return serveHTTP(publicSrv) })
-	g.Go(func() error { return serveHTTP(internalSrv) })
 	// Node-serving path runs on drainCtx (survives parent-cancel until the grace window ends).
 	g.Go(func() error {
-		return transport.ServeNode(drainCtx, rdb, nodeID, cfg.LimitRequestTimeout, rec, manager.RouteLocal)
+		return transport.ServeNode(drainCtx, rdb, nodeID, cfg.LimitRequestTimeout, rec, logger, ready, manager.RouteLocal)
 	})
+	g.Go(func() error {
+		select {
+		case <-nodeReady:
+		case <-gctx.Done():
+			return nil // shutting down before the node was ready
+		}
+		return serveHTTP(publicSrv)
+	})
+	g.Go(func() error { return serveHTTP(internalSrv) })
 	g.Go(func() error { return rec.RunFlusher(drainCtx, flushInterval) })
 	g.Go(func() error {
 		ban.Watch(gctx, banEng, cfg.BanFile, cfg.DBIPCountryLiteCSV, cfg.BanPoll, manager.EvictBanned, logger)
