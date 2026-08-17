@@ -86,12 +86,14 @@ func newIngress(t *testing.T, bps int64, tweak func(*config.ServeCmd)) *ih {
 }
 
 func (x *ih) bind(name string) {
+	x.t.Helper()
 	if err := x.reg.Bind(context.Background(), name, x.node, "sha256:fp", "conn1"); err != nil {
 		x.t.Fatal(err)
 	}
 }
 
 func (x *ih) loadBans(content string) {
+	x.t.Helper()
 	dir := x.t.TempDir()
 	f := dir + "/bans.txt"
 	if err := writeFile(f, content); err != nil {

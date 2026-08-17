@@ -102,6 +102,7 @@ func (x *eh) post(body []byte, ip string) *httptest.ResponseRecorder {
 }
 
 func (x *eh) loadBans(content string) {
+	x.t.Helper()
 	dir := x.t.TempDir()
 	f := filepath.Join(dir, "bans.txt")
 	_ = os.WriteFile(f, []byte(content), 0o644)
