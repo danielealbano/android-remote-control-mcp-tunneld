@@ -1,6 +1,7 @@
 package wsconn
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +38,25 @@ import (
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// syncBuffer is a goroutine-safe capturing io.Writer for the Manager's warn+ log sink (the log
+// fan-out writes from multiple goroutines: read-pump, heartbeat, keepalive).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 type harness struct {
 	t        *testing.T
 	mr       *miniredis.Miniredis
@@ -50,6 +71,7 @@ type harness struct {
 	cfg      config.ServeCmd
 	clientIP string
 	ctx      context.Context
+	logBuf   *syncBuffer
 }
 
 func newHarness(t *testing.T, bps int64, tweak func(*config.ServeCmd)) *harness {
@@ -82,11 +104,13 @@ func newHarness(t *testing.T, bps int64, tweak func(*config.ServeCmd)) *harness 
 	rec := &tunneltest.Recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	mgr, err := NewManager(ctx, cfg, "nodeA", rdb, reg, banEng, caObj, buckets, rec, discardLog())
+	logBuf := &syncBuffer{}
+	mgrLog := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	mgr, err := NewManager(ctx, cfg, "nodeA", rdb, reg, banEng, caObj, buckets, rec, mgrLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{t: t, mr: mr, rdb: rdb, caObj: caObj, reg: reg, ban: banEng, buckets: buckets, rec: rec, mgr: mgr, cfg: cfg, clientIP: "203.0.113.50", ctx: ctx}
+	h := &harness{t: t, mr: mr, rdb: rdb, caObj: caObj, reg: reg, ban: banEng, buckets: buckets, rec: rec, mgr: mgr, cfg: cfg, clientIP: "203.0.113.50", ctx: ctx, logBuf: logBuf}
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.clientIP != "" {
 			r.Header.Set("X-Real-Ip", h.clientIP)
