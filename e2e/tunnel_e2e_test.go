@@ -43,7 +43,7 @@ func enrollRaw(t *testing.T, url string) (*x509.Certificate, *ecdsa.PrivateKey, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("enroll %d: %s", resp.StatusCode, b)
