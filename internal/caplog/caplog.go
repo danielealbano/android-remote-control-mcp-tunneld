@@ -6,9 +6,15 @@ package caplog
 
 import (
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 )
+
+// maxTrackedIPs bounds the distinct-IP set per (tunnel, reason) key within a window, so a distributed
+// flood of many source IPs cannot grow this map without limit. Past the cap the count is reported with
+// a "+" suffix.
+const maxTrackedIPs = 1024
 
 // Logger is the deduping cap-hit logger.
 type Logger struct {
@@ -22,6 +28,7 @@ type Logger struct {
 type state struct {
 	count       int
 	ips         map[string]struct{}
+	ipsCapped   bool
 	windowStart time.Time
 }
 
@@ -55,7 +62,11 @@ func (l *Logger) Hit(tunnel, reason, clientIP string, fields ...any) {
 	default:
 		st.count++
 		if clientIP != "" {
-			st.ips[clientIP] = struct{}{}
+			if len(st.ips) < maxTrackedIPs {
+				st.ips[clientIP] = struct{}{}
+			} else {
+				st.ipsCapped = true
+			}
 		}
 	}
 	l.sweep(now, key)
@@ -94,9 +105,13 @@ func (l *Logger) emitSummary(tunnel, reason string, st *state) {
 	if st.count <= 1 {
 		return // only the immediately-logged first hit; nothing to summarize
 	}
+	ips := strconv.Itoa(len(st.ips))
+	if st.ipsCapped {
+		ips += "+"
+	}
 	l.log.Warn("cap hit summary",
 		"tunnel", tunnel, "reason", reason,
-		"count", st.count, "ips", len(st.ips),
+		"count", st.count, "ips", ips,
 		"window", l.window.String())
 }
 
