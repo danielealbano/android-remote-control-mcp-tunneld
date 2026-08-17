@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
@@ -82,6 +83,12 @@ func (c ServeCmd) Validate() error {
 	if c.ClientIPHeader == "" {
 		return fmt.Errorf("--client-ip-header is mandatory (no default): set Cf-Connecting-Ip (Cloudflare orange) or X-Real-Ip (grey)")
 	}
+	if c.TunnelDomain == "" || !strings.Contains(c.TunnelDomain, ".") {
+		return fmt.Errorf("--tunnel-domain must be a dotted domain, got %q", c.TunnelDomain)
+	}
+	if c.EnrollHost == "" || !strings.Contains(c.EnrollHost, ".") {
+		return fmt.Errorf("--enroll-host must be a dotted host, got %q", c.EnrollHost)
+	}
 	if _, err := redis.ParseURL(c.RedisURL); err != nil {
 		return fmt.Errorf("--redis-url is not parseable: %w", err)
 	}
@@ -94,8 +101,20 @@ func (c ServeCmd) Validate() error {
 	if c.ShutdownGrace <= 0 {
 		return fmt.Errorf("--shutdown-grace must be > 0, got %s", c.ShutdownGrace)
 	}
+	if c.BanPoll <= 0 {
+		return fmt.Errorf("--ban-poll must be > 0, got %s", c.BanPoll)
+	}
+	if c.CertValidity <= 0 {
+		return fmt.Errorf("--cert-validity must be > 0, got %s", c.CertValidity)
+	}
+	if c.PingInterval <= 0 {
+		return fmt.Errorf("--ping-interval must be > 0, got %s", c.PingInterval)
+	}
 	if c.PingInterval > 90*time.Second {
 		return fmt.Errorf("--ping-interval must be ≤ 90s (under Cloudflare's 100s WS idle timeout), got %s", c.PingInterval)
+	}
+	if c.LimitRequestTimeout <= 0 {
+		return fmt.Errorf("--limit-request-timeout must be > 0, got %s", c.LimitRequestTimeout)
 	}
 	if c.LimitRequestTimeout >= 100*time.Second {
 		return fmt.Errorf("--limit-request-timeout must be < 100s (under Cloudflare's 524 timeout), got %s", c.LimitRequestTimeout)
@@ -132,8 +151,12 @@ func (c ServeCmd) Validate() error {
 		{"--limit-header-single", c.LimitHeaderSingle},
 		{"--limit-enroll-body", c.LimitEnrollBody},
 	} {
-		if _, err := ParseByteSize(sz.v); err != nil {
+		n, err := ParseByteSize(sz.v)
+		if err != nil {
 			return fmt.Errorf("%s: %w", sz.name, err)
+		}
+		if n < 1 {
+			return fmt.Errorf("%s must be ≥ 1 byte, got %q", sz.name, sz.v)
 		}
 	}
 	if err := logging.ParseSpecs(c.Log); err != nil {
