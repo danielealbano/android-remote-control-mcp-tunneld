@@ -45,13 +45,17 @@ func (c *Conn) heartbeatOnce() (stop bool) {
 		c.teardown("superseded")
 		return true
 	case router.HeartbeatMissing:
-		if err := c.mgr.registry.Bind(c.ctx, c.name, c.mgr.nodeID, c.fp, c.connID); err != nil {
-			if errors.Is(err, router.ErrNameHeldByOther) {
-				c.teardown("superseded")
-				return true
-			}
+		res, err := c.mgr.registry.BindIfAbsentOrOwner(c.ctx, c.name, c.mgr.nodeID, c.fp, c.connID)
+		switch {
+		case res == router.SelfHealNotOwner || errors.Is(err, router.ErrNameHeldByOther):
+			c.teardown("superseded")
+			return true
+		case err != nil:
+			c.mgr.log.Warn("heartbeat self-heal bind failed", "tunnel", c.name, "err", err)
+			return false
+		default:
+			return false
 		}
-		return false
 	default:
 		return false
 	}
