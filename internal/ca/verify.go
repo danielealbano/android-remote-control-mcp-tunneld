@@ -27,6 +27,19 @@ func ParseCertB64DER(b64 string) (*x509.Certificate, error) {
 	return x509.ParseCertificate(der)
 }
 
+// ParseCertB64DERLimited decodes and parses a base64-DER certificate, rejecting a decoded length
+// above maxDER before parsing (bounds per-handshake x509 parse cost).
+func ParseCertB64DERLimited(b64 string, maxDER int) (*x509.Certificate, error) {
+	der, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64 cert: %w", err)
+	}
+	if len(der) > maxDER {
+		return nil, fmt.Errorf("certificate DER too large: %d > %d", len(der), maxDER)
+	}
+	return x509.ParseCertificate(der)
+}
+
 // VerifyEnrolledCert verifies the chain against the CA pool and the validity window, returning the
 // tunnel name (CN) and the fingerprint.
 func VerifyEnrolledCert(cert *x509.Certificate, pool *x509.CertPool) (name, fingerprint string, err error) {
@@ -35,6 +48,12 @@ func VerifyEnrolledCert(cert *x509.Certificate, pool *x509.CertPool) (name, fing
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}); err != nil {
 		return "", "", fmt.Errorf("verify enrolled cert: %w", err)
+	}
+	if cert.IsCA {
+		return "", "", errors.New("ca: enrolled cert must not be a CA")
+	}
+	if cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return "", "", errors.New("ca: enrolled cert lacks digitalSignature key usage")
 	}
 	name = cert.Subject.CommonName
 	if name == "" {
