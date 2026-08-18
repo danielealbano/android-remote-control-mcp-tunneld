@@ -984,42 +984,42 @@ positive + negative fixture matrix using REAL chains from the connected Realme T
 
 ## User Story 5: Internal CA rework, attested enrollment, and the enroll HTTP endpoint
 
-- [ ] **User Story 5 complete**
+- [x] **User Story 5 complete**
 
 Rework `internal/ca` for two-key enrollment, 6-month identity certs, and mesh-role certs; build the
 enrollment service (nonce → attestation → name → issuance check → identity cert → public cert → record,
 with rollback), and the server-TLS enroll HTTP handler.
 
 ### Acceptance Criteria
-- [ ] `internal/ca` issues 6-month identity certs from a phone identity CSR (CN=name) and short-lived
+- [x] `internal/ca` issues 6-month identity certs from a phone identity CSR (CN=name) and short-lived
   mesh-role certs (SAN=node id, mesh-role OU); the P1 challenge-response possession-proof code is
   UNTOUCHED here (mTLS replaces it; the code is removed in US13 with its consumer `internal/wsconn`).
-- [ ] Name generation reuses `GenerateName` (base32, hardcoded reserved set) BUT the enroll service also
+- [x] Name generation reuses `GenerateName` (base32, hardcoded reserved set) BUT the enroll service also
   passes `firstLabel(--enroll-host)` and `firstLabel(--control-host)` as extra reserved labels (restoring
   and extending P1's guard, whose `internal/ingress` call site is deleted in US13); the assigned name is
   claimed durably via the WRITE-VERIFY protocol (GET-absent → PUT with a fresh `claim_nonce` under the
   `--registry-claim-timeout` deadline, timeout/error = name abandoned permanently → wait
   `--registry-claim-settle` on an INJECTABLE clock → GET-verify the nonce; another's nonce = lost the
   race, new name; bounded loop) — no storage-side atomicity is assumed.
-- [ ] `internal/enroll` exposes `Nonce()` and `Enroll()`; it declares a CONSUMER-SIDE `PublicIssuer`
+- [x] `internal/enroll` exposes `Nonce()` and `Enroll()`; it declares a CONSUMER-SIDE `PublicIssuer`
   interface (implemented by US6) so it does NOT depend on `internal/acme`.
-- [ ] Enrollment ordering avoids orphaned durable state AND counts SUCCESSFUL issuances only:
+- [x] Enrollment ordering avoids orphaned durable state AND counts SUCCESSFUL issuances only:
   attestation → name (generate + write-verify claim on INITIAL / existing on RENEWAL) → issuance
   read-only check → identity cert → public cert → record issuance on success; on public-cert failure
   the just-claimed name is released (`store.DeleteName` — plain delete, safe because we only delete
   after a VERIFIED claim and nobody else can claim while our record exists) and NO issuance is
   recorded.
-- [ ] Per-IP enroll limits (retained), the issuance-per-week cap, and the ACME budgets are enforced.
-- [ ] REJECTED enrollments (attestation failures and suspicious submissions) persist their evidence via
+- [x] Per-IP enroll limits (retained), the issuance-per-week cap, and the ACME budgets are enforced.
+- [x] REJECTED enrollments (attestation failures and suspicious submissions) persist their evidence via
   `store.PutRejectedEnrollment` (best-effort — a store error is logged, never masks the rejection),
   under the 30-day `rejected-enroll/` prefix.
-- [ ] Nonces are single-use, short-TTL, stored in Valkey.
-- [ ] The enroll HTTP handler (server-TLS on `--enroll-host`) decodes CSRs + attestation chain, calls the
+- [x] Nonces are single-use, short-TTL, stored in Valkey.
+- [x] The enroll HTTP handler (server-TLS on `--enroll-host`) decodes CSRs + attestation chain, calls the
   service, and encodes the structured result/error.
 
 ### Task 5.1: CA signer rework
-- [ ] **Task 5.1 complete**
-- [ ] **File**: `internal/ca/ca.go` — modify: add `SignIdentity(csr *x509.CertificateRequest, name
+- [x] **Task 5.1 complete**
+- [x] **File**: `internal/ca/ca.go` — modify: add `SignIdentity(csr *x509.CertificateRequest, name
   string) (certPEM []byte, err error)` — the server-assigned `name` is passed EXPLICITLY and sets
   `Subject.CommonName = name`, IGNORING all CSR subject fields (SACRED invariant: the server assigns the
   name; it is generated AFTER attestation and is not in the phone CSR — mirrors P1
@@ -1033,14 +1033,14 @@ with rollback), and the server-TLS enroll HTTP handler.
 the listeners (US8 phone: name derived from cert CN, reject mesh-role marker; US9 mesh: SAN=registered node id).
 
 ### Task 5.2: Enrollment nonce
-- [ ] **Task 5.2 complete**
-- [ ] **File**: `internal/enroll/nonce.go` — `Nonce(ctx)` issuing a `crypto/rand` nonce stored at
+- [x] **Task 5.2 complete**
+- [x] **File**: `internal/enroll/nonce.go` — `Nonce(ctx)` issuing a `crypto/rand` nonce stored at
   `enroll-nonce:{nonce}` in Valkey (short TTL, single-use — deleted on consume). The nonce is the
   attestation challenge the app embeds at key generation.
 
 ### Task 5.3: Enroll service (consumer-side issuer interface + rollback)
-- [ ] **Task 5.3 complete**
-- [ ] **File**: `internal/enroll/enroll.go` — create the consumer-side issuer interface + the service:
+- [x] **Task 5.3 complete**
+- [x] **File**: `internal/enroll/enroll.go` — create the consumer-side issuer interface + the service:
 ```go
 type PublicIssuer interface { // implemented by internal/acme (US6); keeps enroll independent of acme
 	// Obtain = INITIAL enrollment: full LE→GTS→ZeroSSL spillover; an LE order consumes the weekly budget.
@@ -1111,8 +1111,8 @@ budget. The `Service` takes an injectable clock (constructor DI) so the settle w
 tests.
 
 ### Task 5.4: Enroll HTTP handler
-- [ ] **Task 5.4 complete**
-- [ ] **File**: `internal/enroll/http.go` — create the server-TLS HTTP handler for `--enroll-host`: `GET`
+- [x] **Task 5.4 complete**
+- [x] **File**: `internal/enroll/http.go` — create the server-TLS HTTP handler for `--enroll-host`: `GET`
   nonce route → the SAME per-IP enroll-minute/hour limit as enrollment (an unauthenticated surface must
   not mint unbounded Valkey nonce keys), then `Nonce()`; `POST` enroll route → decode `{nonce,
   attestation chain (PEM), identity CSR
@@ -1123,8 +1123,8 @@ tests.
   via `GetCertificate`) — server-TLS only, no client cert (the phone has no identity yet).
 
 ### Task 5.5: Unit tests
-- [ ] **Task 5.5 complete**
-- [ ] **File**: `internal/ca/ca_test.go` (extend), `internal/enroll/enroll_test.go`, `nonce_test.go`,
+- [x] **Task 5.5 complete**
+- [x] **File**: `internal/ca/ca_test.go` (extend), `internal/enroll/enroll_test.go`, `nonce_test.go`,
   `http_test.go`
 **Setup**: fake `attest.Verifier`, fake `store.Store`, fake `PublicIssuer` (canned cert or typed error),
 miniredis for nonces + limits.
@@ -1157,19 +1157,19 @@ miniredis for nonces + limits.
 | `attestation-optional accepts fixture` | With the mode on, a fixture chain enrolls without a real verify |
 
 ### Definition of Done
-- [ ] CA issues 6-month identity certs + mesh-role certs from CSR/nodeID (P1 possession-proof untouched
+- [x] CA issues 6-month identity certs + mesh-role certs from CSR/nodeID (P1 possession-proof untouched
   until US13).
-- [ ] `GenerateName` is called with `firstLabel(--enroll-host)` + `firstLabel(--control-host)` as extra
+- [x] `GenerateName` is called with `firstLabel(--enroll-host)` + `firstLabel(--control-host)` as extra
   reserved labels; the enroll handler accepts its server cert via an injected
   `tls.Config.GetCertificate` (the actual `ObtainSelf` certs are obtained and supplied in US11).
-- [ ] `internal/enroll` with a consumer-side `PublicIssuer` interface, the write-verify claim loop
+- [x] `internal/enroll` with a consumer-side `PublicIssuer` interface, the write-verify claim loop
   (injectable clock; timeout = permanent abandon; settle > timeout), an issuance gate keyed on the
   known name with success-only counting (`IssuanceRecord` after `Obtain`), and plain-delete rollback on
   failure (safe only after a verified claim).
-- [ ] Server-TLS enroll HTTP handler (ban-first, structured errors).
-- [ ] Rejected-enrollment evidence persisted best-effort via `store.PutRejectedEnrollment`.
-- [ ] Nonces single-use/TTL'd; per-IP + issuance limits enforced; attestation-optional honored.
-- [ ] US5 unit tables authored/committed (execution in US16).
+- [x] Server-TLS enroll HTTP handler (ban-first, structured errors).
+- [x] Rejected-enrollment evidence persisted best-effort via `store.PutRejectedEnrollment`.
+- [x] Nonces single-use/TTL'd; per-IP + issuance limits enforced; attestation-optional honored.
+- [x] US5 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,14 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US5 `ca.SignMesh`:** takes an explicit `ttl time.Duration` param (the plan's shorthand omitted
+  it) so the shared `ca.Load(certPath, keyPath, validity)` signature stays additive (server.Run knows
+  --mesh-cert-ttl). **US5 issuer-error classification:** the enroll package classifies ACME failures
+  via a `ClassifiedIssuerError` interface (IssuerClass()/RetryAfter()) the acme error type implements,
+  rather than importing acme's sentinels — keeps the consumer→provider dependency one-directional.
+  **US5 enroll ban check:** a `BanFunc` closure field (not an interface) so enroll stays decoupled from
+  internal/ban (a method returning ban.Source cannot satisfy an any-returning interface).
 
 - **US4 Task 4.5 (real Realme T70 fixture):** the committed real-device chain
   (`internal/attest/testdata/realme_t70_chain.pem`) requires on-device capture, which is not available
