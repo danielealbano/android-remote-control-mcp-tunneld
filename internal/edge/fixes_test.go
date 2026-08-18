@@ -317,3 +317,67 @@ func TestJA4SpecVector(t *testing.T) {
 		t.Fatalf("JA4 spec vector mismatch:\n got %s\nwant %s", got, want)
 	}
 }
+
+// eventKinds returns the recorded PublicEvent Event fields (start/end) safely.
+func (s *fakeSink) kinds() []PublicEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]PublicEvent(nil), s.events...)
+}
+
+// TestEdge_HandleTunnel_ConnLogStartEnd covers the bridge's connection-log accounting: a full public
+// connection produces a start event and an end event carrying the byte counts + close_reason.
+func TestEdge_HandleTunnel_ConnLogStartEnd(t *testing.T) {
+	name := "abcdef012345"
+	sni := name + ".example.test"
+	cfg := baseConfig()
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.ok = true
+	te.rtr.nodeID = "node-a"
+	te.rtr.fp = "fp"
+	te.rtr.connID = "conn"
+	te.rtr.startedAt = time.Unix(1_700_000_000, 0)
+
+	// A local phone that echoes: the client sends some bytes, the phone splices them back, then EOF.
+	te.local.has = true
+	te.local.owns = true
+	phoneSide := &pipeStream{r: bytes.NewReader([]byte("PONG-BYTES")), w: io.Discard, closed: make(chan struct{})}
+	te.local.ds = phoneSide
+
+	client := newScriptConn("198.51.100.40", []byte("CLIENT-BYTES"))
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(context.Background(), client, ClientHelloInfo{SNI: sni, ALPN: "h2", TLSVersion: "1.3"})
+		close(done)
+	}()
+	// The phone→client copy hits EOF (bytes.Reader drained) → the splice tears down.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleTunnel did not finish")
+	}
+
+	evs := te.sink.kinds()
+	var start, end *PublicEvent
+	for i := range evs {
+		switch evs[i].Event {
+		case "start":
+			start = &evs[i]
+		case "end":
+			end = &evs[i]
+		}
+	}
+	if start == nil || end == nil {
+		t.Fatalf("a public connection must log a start AND an end event, got %d events: %+v", len(evs), evs)
+	}
+	if start.Tunnel != name || start.SNI != sni || start.SrcIP != "198.51.100.40" {
+		t.Errorf("start event fields wrong: %+v", start)
+	}
+	if end.CloseReason == "" {
+		t.Error("the end event must carry a close_reason")
+	}
+	// The phone→client direction moved "PONG-BYTES" (10 bytes) out to the client.
+	if end.BytesOut != int64(len("PONG-BYTES")) {
+		t.Errorf("end event BytesOut = %d, want %d", end.BytesOut, len("PONG-BYTES"))
+	}
+}

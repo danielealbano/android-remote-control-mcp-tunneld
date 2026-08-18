@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
@@ -91,4 +93,54 @@ func TestValidNameFunc(t *testing.T) {
 	if !validP("t-abcdef234567") || validP("abcdef234567") || validP("x-abcdef234567") {
 		t.Fatal("the prefix must be enforced literally")
 	}
+}
+
+// TestMeshCertHolderHotSwap covers the mesh cert hot-swap path: mint installs a cert, a re-mint swaps
+// the atomic pointer, and getCert / GetClientCertificate serve the NEW cert to a fresh handshake with
+// no restart.
+func TestMeshCertHolderHotSwap(t *testing.T) {
+	certPath, keyPath := writeCA(t)
+	caObj, err := ca.Load(certPath, keyPath, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newMeshCertHolder(caObj, "node-hot", time.Hour, testLogger())
+
+	first, err := h.getCert(nil)
+	if err != nil || first == nil {
+		t.Fatalf("initial mint must serve a cert: %v", err)
+	}
+	firstLeaf := first.Certificate[0]
+
+	// Re-mint: the served cert pointer must change (a fresh serial), and both getCert and the mesh
+	// client's GetClientCertificate must return the NEW cert without any restart.
+	h.mint(caObj)
+	second, err := h.getCert(nil)
+	if err != nil || second == nil {
+		t.Fatalf("re-mint must serve a cert: %v", err)
+	}
+	if bytesEqual(second.Certificate[0], firstLeaf) {
+		t.Fatal("a re-mint must swap the served cert (fresh serial), not keep the old one")
+	}
+
+	gcc := h.clientTLS(caObj)().GetClientCertificate
+	cc, err := gcc(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytesEqual(cc.Certificate[0], second.Certificate[0]) {
+		t.Fatal("GetClientCertificate must serve the latest swapped cert")
+	}
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
