@@ -2218,47 +2218,47 @@ invariant amendments.
 
 ## User Story 16: Ground-up double-check + quality gates
 
-- [ ] **User Story 16 complete**
+- [x] **User Story 16 complete**
 
 The mandated final task: re-verify EVERYTHING implemented from the ground up, run the full quality
 gates, and validate all touched Mermaid diagrams.
 
 ### Acceptance Criteria
-- [ ] Every prior user story's Definition of Done is re-checked against the actual code, top to bottom.
-- [ ] The full quality gates pass: `make lint` (×3 build-tag passes), `make vet`, `make govulncheck`,
+- [x] Every prior user story's Definition of Done is re-checked against the actual code, top to bottom.
+- [x] The full quality gates pass: `make lint` (×3 build-tag passes), `make vet`, `make govulncheck`,
   `make build`, `make test-unit`, `make test-integration`, `make test-e2e`, `make test-scripts`,
   `make compose-config`.
-- [ ] `make mermaid-check` validates ALL Mermaid blocks in `README.md` + `docs/` + this plan document
+- [x] `make mermaid-check` validates ALL Mermaid blocks in `README.md` + `docs/` + this plan document
   (this plan and the rewritten docs add Mermaid — §9 requires validation).
-- [ ] No TODOs, no placeholders, no dead code; no removed-package references; `go mod tidy` clean.
-- [ ] The seven-point attestation predicate, the E2E/no-proxy/mTLS-with-role-separation/durable-state
+- [x] No TODOs, no placeholders, no dead code; no removed-package references; `go mod tidy` clean.
+- [x] The seven-point attestation predicate, the E2E/no-proxy/mTLS-with-role-separation/durable-state
   invariants, and the cap/quota defaults match this plan (or deviations are recorded in `## Deviations`).
 
 ### Task 16.1: Ground-up re-verification
-- [ ] **Task 16.1 complete**
-- [ ] **Action**: re-read this plan from the top; for each user story, confirm the code matches its DoD;
+- [x] **Task 16.1 complete**
+- [x] **Action**: re-read this plan from the top; for each user story, confirm the code matches its DoD;
   confirm the SACRED invariants (E2E, no TLS mutual auth on the PUBLIC side / mTLS only on phone + mesh
   with cert-role separation, attestation seven-point gate, bans-only revocation with all three
   enforcement points wired, Valkey transient + S3 durable split, wire `ChunkSize` = 32768, uniform caps)
   hold; confirm no real domain/project name leaked into the repo.
 
 ### Task 16.2: Quality gates
-- [ ] **Task 16.2 complete**
-- [ ] **Action**: run every gate via the PROJECT Makefile targets (never ad-hoc), piping through `tee` to
+- [x] **Task 16.2 complete**
+- [x] **Action**: run every gate via the PROJECT Makefile targets (never ad-hoc), piping through `tee` to
   a `/tmp/*.log` per the capture rule. Fix ANY failure (including pre-existing broken tests/lint) and
   re-run.
 
 ### Task 16.3: Mermaid validation
-- [ ] **Task 16.3 complete**
-- [ ] **Action**: run `make mermaid-check` (the §9 `mmdc` harness) over `README.md`, all `docs/`, and this
+- [x] **Task 16.3 complete**
+- [x] **Action**: run `make mermaid-check` (the §9 `mmdc` harness) over `README.md`, all `docs/`, and this
   plan document; fix any chart that fails; re-validate.
 
 ### Definition of Done
-- [ ] All prior DoDs re-verified against the code.
-- [ ] All quality gates green (lint ×3, vet, govulncheck, build, unit, integration, e2e, scripts,
+- [x] All prior DoDs re-verified against the code.
+- [x] All quality gates green (lint ×3, vet, govulncheck, build, unit, integration, e2e, scripts,
   compose-config).
-- [ ] All Mermaid validated via `mmdc`.
-- [ ] No TODOs/placeholders/dead code/dangling references; tidy clean; invariants honored or deviations
+- [x] All Mermaid validated via `mmdc`.
+- [x] No TODOs/placeholders/dead code/dangling references; tidy clean; invariants honored or deviations
   recorded.
 
 ---
