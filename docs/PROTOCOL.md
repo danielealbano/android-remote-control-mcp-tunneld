@@ -129,6 +129,9 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
 - Request: `{nonce, attestation_chain, identity_csr, tls_csr}` — `nonce` is the Phase-1 `issue_nonce`
   (initial) or the `RENEW_NUDGE` nonce (renewal); `tls_csr` MUST request `<name>.<tunnel-domain>`.
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs.
+- Errors: `{"reason", "retryable", "retry_after_seconds"?}` with an HTTP status (401 unauthorized,
+  503 retryable — `retry_after_seconds` carries the pacing hint when known, e.g. an ACME rate-limit
+  cooldown — 400 otherwise).
 
 **Renewal rotates the identity key**: on a `RENEW_NUDGE{nonce}` the phone calls `POST /issue` with a
 FRESH identity key + fresh TLS key + fresh attestation over the nonce; the server re-runs the full

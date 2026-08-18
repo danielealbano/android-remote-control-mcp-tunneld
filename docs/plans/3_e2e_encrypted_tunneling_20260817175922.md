@@ -232,7 +232,8 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
 
 ### Caps & abuse policy (free for everyone — no paid tier)
 - Per-tunnel traffic: **1 GB/day + 4 GB/week**, both directions combined; exhaustion refuses new
-  streams, brief grace for in-flight, one caplog line.
+  streams and closes in-flight streams at the exhausting chunk (see the Deviations entry "quota
+  exhaustion closes in-flight immediately"), one caplog line.
 - Carried from P1: per-direction bandwidth `1mbit`, enroll `2`/min + `20`/h per IP. Morphed:
   `4` concurrent streams/tunnel — enforced GLOBALLY across replicas via the retained/adapted Valkey
   `conc:{name}` counter (user decision: a Valkey counter, not per-replica in-memory, so N replicas
@@ -1608,7 +1609,7 @@ assembly ordering).
   `no-route`/`handshake-timeout`/`conn-rate`/`max-clients`; the BRIDGE (US11 Task 11.3) writes
   `quota-day`/`quota-week` — one `Reject` per NEW stream refused for that exhausted window — while
   `QuotaExhausted(tunnel, window)` fires ONCE per exhaustion transition (deduped via `caplog`) and
-  in-flight connections closed after grace record `close_reason quota-exhausted` via `PublicConnClose`
+  in-flight connections closed at the exhausting chunk record `close_reason quota-exhausted` via `PublicConnClose`
   (three distinct signals, no double-counting); the bridge also writes `stream-cap` when the global
   per-tunnel stream counter refuses a new stream; enroll/renewal write
   `attest-*`/`csr-mismatch`/`enroll-limit`/`issuance-cap`/`acme-failed`. Forced closures of EXISTING connections
@@ -2811,3 +2812,22 @@ gates, and validate all touched Mermaid diagrams.
     section pointers.
   - **Error-discard justifications:** the five best-effort Valkey discards in `internal/acme/chain.go`
     (CACooldown/ResetCAFailures/SetCACooldown/BumpCAFailures) now carry their fail-open justification.
+- **Seventh review wave (adversarial review round 7; forensic schema + retry pacing + dead code):**
+  - **`limit.AllowEnroll` deleted:** its only consumer died in the legacy teardown; the live enrollment
+    path is `enroll.Service.enrollLimit` (scopes `enroll-min`/`enroll-hour`). The TTL-coverage test now
+    exercises `Allow` directly.
+  - **Phone conn-log forensic fields fixed:** `identity_cert_serial` (schema-defined but never written)
+    is now stamped on every phone event, and `identity_key_fpr` now carries the identity-KEY
+    fingerprint (`sha256(PKIX SPKI)` via the new shared `ca.KeyFingerprint`, the same value the name
+    registry stores) instead of the identity-CERT fingerprint — cross-referencing a phone event
+    against its registry record by `identity_key_fpr` now actually matches. The cert fingerprint
+    remains the ban/route identifier (unchanged).
+  - **`/issue` errors carry `retry_after_seconds`:** `IssueError` gained `RetryAfter`, the adapter
+    propagates it, and the error JSON emits it (the agreed `{reason, retryable, retry_after}` shape —
+    the Go client already parsed the field). PROTOCOL.md §3 now documents the `/issue` error schema.
+  - **`wire.ChunkSize` comment corrected** to match PROTOCOL §6 (pacing slice only; no HTTP/2
+    read-limit configuration exists).
+  - **Quota exhaustion closes in-flight immediately (recorded):** the design text's "brief grace for
+    in-flight" was never built — as shipped (and as the canonical docs state) an in-flight stream
+    closes at the exhausting chunk, which is STRICTER than the agreed wording; new streams are refused
+    at admission. The plan's design text is aligned to the as-built behavior.
