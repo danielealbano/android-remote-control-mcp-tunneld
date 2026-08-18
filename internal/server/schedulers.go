@@ -72,7 +72,7 @@ func (h *meshCertHolder) getCert(*tls.ClientHelloInfo) (*tls.Certificate, error)
 }
 
 // clientTLS returns the mesh client's tls.Config factory (hot cert via GetClientCertificate; peer mesh
-// certs are verified by chain-to-CA + mesh-role, NOT by hostname — see meshPeerVerifier).
+// certs are verified by chain-to-CA + mesh-role, NOT by hostname — see meshVerifyConnection).
 func (h *meshCertHolder) clientTLS(caObj *ca.CA) func() *tls.Config {
 	pool := caObj.Pool()
 	return func() *tls.Config {

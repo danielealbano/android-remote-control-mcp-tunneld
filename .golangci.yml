@@ -20,7 +20,7 @@ linters:
       #          reading operator config is the whole point, not an inclusion vulnerability.
       #   G402 — the replica mesh client intentionally verifies peers by CA-chain + mesh-role (NOT
       #          hostname: a mesh cert's identity is the node id, not the dial address); resumption-safe
-      #          via VerifyConnection. See internal/server/schedulers.go meshPeerVerifier.
+      #          via VerifyConnection. See internal/server/schedulers.go meshVerifyConnection.
       #   G602 — the hand-rolled ClientHello parser guards every slice op with an explicit length check
       #          gosec's flow analysis cannot follow (see internal/edge/clienthello.go).
       excludes:
