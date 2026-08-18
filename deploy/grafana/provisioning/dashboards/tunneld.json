@@ -2,7 +2,7 @@
   "uid": "tunneld-overview",
   "title": "tunneld overview",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "time": { "from": "now-6h", "to": "now" },
   "refresh": "30s",
@@ -12,93 +12,103 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Tunnels connected",
+      "title": "Phones connected",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum(tunneld_tunnels_connected)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum(tunneld_phone_connections)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 2,
       "type": "stat",
-      "title": "In-flight requests",
+      "title": "Public connections",
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum(tunneld_http_inflight)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum(tunneld_public_connections)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "Enrollments (1h)",
+      "title": "Active data streams",
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum(increase(tunneld_enrollments_total[1h]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum(tunneld_streams_active)", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 4,
-      "type": "timeseries",
-      "title": "Requests by class",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "type": "stat",
+      "title": "Enrollments (1h) by result",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "{{class}}", "expr": "sum by (class) (rate(tunneld_http_requests_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (result) (increase(tunneld_enrollments_total[1h]))", "legendFormat": "{{result}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Request duration p50/p95",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "title": "Bandwidth by direction (B/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.5, sum by (le) (rate(tunneld_http_request_duration_seconds_bucket[5m])))", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(tunneld_http_request_duration_seconds_bucket[5m])))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (direction) (rate(tunneld_bytes_total[5m]))", "legendFormat": "{{direction}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 6,
       "type": "timeseries",
-      "title": "Rejections by reason",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "title": "Rejections by reason (/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "{{reason}}", "expr": "sum by (reason) (rate(tunneld_rejections_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (reason) (rate(tunneld_rejections_total[5m]))", "legendFormat": "{{reason}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Bandwidth by direction",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "title": "Quota exhaustion by window (/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "{{direction}}", "expr": "sum by (direction) (rate(tunneld_bytes_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (window) (rate(tunneld_quota_exhausted_total[5m]))", "legendFormat": "{{window}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 8,
       "type": "timeseries",
-      "title": "WS disconnects by reason",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "title": "Attestation verify outcomes (/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "{{reason}}", "expr": "sum by (reason) (rate(tunneld_ws_disconnects_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (result) (rate(tunneld_attest_verify_total[15m]))", "legendFormat": "{{result}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     },
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Timeouts / publish errors",
+      "title": "ACME issuance by CA + result (/s)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (ca, result) (rate(tunneld_acme_issue_total[15m]))", "legendFormat": "issue {{ca}} {{result}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "sum by (ca, result) (rate(tunneld_acme_renew_total[15m]))", "legendFormat": "renew {{ca}} {{result}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Per-CA cooldown activations + mesh pool size",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "legendFormat": "timeouts", "expr": "sum(rate(tunneld_request_timeouts_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } },
-        { "refId": "B", "legendFormat": "publish errors", "expr": "sum(rate(tunneld_pubsub_publish_errors_total[5m]))", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "refId": "A", "expr": "sum by (ca) (rate(tunneld_acme_cooldown_total[15m]))", "legendFormat": "cooldown {{ca}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "refId": "B", "expr": "sum by (peer) (tunneld_mesh_pool_size)", "legendFormat": "pool {{peer}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ]
     }
   ]

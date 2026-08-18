@@ -2919,3 +2919,17 @@ gates, and validate all touched Mermaid diagrams.
     TTL deregistration" (the eleventh wave made node deregistration + route unbind explicit; TTL is
     the crash backstop). The edge `ReleaseStream` discard carries its documented self-heals-at-TTL
     justification.
+- **Thirteenth review wave (adversarial review round 12, Fable reviewer; deploy observability
+  artifacts):** US15 Task 15.1 was checked complete but the Grafana dashboard and Prometheus alerts
+  were untouched pre-E2E artifacts — `deploy/grafana/provisioning/dashboards/tunneld.json` queried
+  seven metric families removed in the legacy teardown (six permanently-empty panels), and
+  `deploy/prometheus/alerts.yml` matched rejection labels (`tunnel_offline`, `rate_rps|rate_rpm`) that
+  are not in `observ.RejectReasons` — so `PromRecorder.Reject` refuses them and two abuse-alerting
+  rules could NEVER fire. The dashboard is rewritten onto the as-built families (phone/public
+  connections, active streams, enrollments-by-result, bytes-by-direction, rejections-by-reason,
+  quota-by-window, attest-verify outcomes, ACME issue/renew/cooldown by CA, mesh pool size), and the
+  alerts onto the real reason labels (`no-route` spike, ingress-limiting `conn-rate|max-clients|
+  stream-cap|enroll-limit`, `attest-.*|csr-mismatch` spike, `acme-failed`, node-down). Two regression
+  guard tests (`internal/metrics/deploy_test.go`) now fail the build if the dashboard references an
+  unregistered family or an alert matches a reason outside `observ.RejectReasons`, so this drift
+  cannot silently recur.
