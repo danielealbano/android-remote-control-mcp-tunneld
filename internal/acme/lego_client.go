@@ -15,6 +15,7 @@ import (
 
 	legoacme "github.com/go-acme/lego/v4/acme"
 	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
@@ -46,7 +47,8 @@ type LegoConfig struct {
 	UseARI       bool          // LE only
 	EABKID       string
 	EABHMAC      string
-	DNS          DNSProvider
+	DNS          DNSProvider        // our neutral seam (tests, or a raw-TXT publisher)
+	RawDNS       challenge.Provider // a lego-native DNS-01 provider (production, selected by --acme-dns-provider); preferred over DNS when set
 }
 
 // legoClient implements caIssuer via lego.
@@ -75,7 +77,12 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
 	}
-	if cfg.DNS != nil {
+	switch {
+	case cfg.RawDNS != nil:
+		if err := client.Challenge.SetDNS01Provider(cfg.RawDNS); err != nil {
+			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
+		}
+	case cfg.DNS != nil:
 		if err := client.Challenge.SetDNS01Provider(&legoDNSAdapter{p: cfg.DNS}); err != nil {
 			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
 		}
