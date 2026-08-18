@@ -115,7 +115,7 @@ func startIntegrationServer(t *testing.T) *itEnv {
 		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
 		ACMEDNSResolvers: []string{pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
-		ACMELEWeeklyBudget: 50, ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
+		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
 
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",

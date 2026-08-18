@@ -108,7 +108,7 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
 		ACMEDNSResolvers: []string{inf.pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
-		ACMELEWeeklyBudget: 50, ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
+		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
 		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,

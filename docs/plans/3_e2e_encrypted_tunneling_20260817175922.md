@@ -164,17 +164,16 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
   that CA (spillover proceeds to the next) until it expires; on repeated consecutive failures of any
   other kind, apply exponential per-CA backoff (`--acme-backoff-initial` doubling to
   `--acme-backoff-max`, reset on success) — this protects the LE account from the no-override
-  consecutive-failure pause without a proactive counter. SEPARATELY, a **weekly LE new-order budget**
-  (`--acme-le-weekly-budget`, default 50) models the per-registered-domain 50/week limit and gates every
-  LE NEW order — initial enrollments AND migration renewals (LE RENEWALS of LE-issued names are exempt
-  and never counted), with reserve-then-refund so failed orders never burn budget.
+  consecutive-failure pause without a proactive counter. There is NO order-counting budget (see the
+  Deviations entry "LE weekly budget removed"): when a CA — LE included — answers rate-limited, its per-CA
+  retry-after cooldown is set from the ACME `Retry-After` and the order spills to the next CA; when every
+  CA is cooling, issuance returns a retryable "quota exhausted, retry later".
 - **Migration to LE happens AT RENEWAL, opportunistically** (user decision — shift names onto LE as
-  much as possible, because LE alone does not rate-limit renewals): every renewal carries a fresh phone
-  CSR (keys rotate each renewal), so when a NON-LE name renews, the chain tries **LE FIRST** if the
-  weekly budget reserves; on no-budget/LE-failure it renews on its CURRENT CA, then falls through the
-  remaining chain. Once a name is on LE, its renewals are ARI-exempt forever. There is NO separate
-  migration job — the ≤50/week budget itself is the drip pace. Public-Suffix-List listing of the
-  tunnel domain is a future growth milestone (requires ~3000 users) that dissolves the per-domain limit;
+  much as possible, because LE alone does not rate-limit renewals): issue AND renew share the SAME
+  LE→GTS→ZeroSSL order, so every renewal (each carrying a fresh rotated phone CSR) tries **LE FIRST**; a
+  cooling LE is skipped and the name renews on the next available CA. Once a name is on LE, its renewals
+  are ARI-exempt forever. There is NO separate migration job — the per-CA retry-after is the only pacing.
+  Public-Suffix-List listing of the tunnel domain is a future growth milestone (requires ~3000 users);
   it is NOT in this plan.
 - Issuance cap **3 per tunnel per week** (SUCCESSFUL issuances only — the counter is consumed only after
   a cert is issued, never at the pre-issuance gate).
@@ -191,7 +190,7 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
   internal-CA identity/mesh certs. The `--control-host` listener ADDITIONALLY requires the phone's
   internal-CA identity client cert (mTLS); the `--enroll-host` listener is server-TLS only (the phone has
   no identity yet). These self-certs do NOT consume the per-tunnel 3/week issuance cap (that is keyed on
-  tunnel names), but each new order is subject to the per-CA cooldowns + weekly LE budget like any
+  tunnel names), but each new order is subject to the per-CA cooldowns like any
   other order.
 
 ### State
@@ -200,7 +199,7 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
   carrying the identity-cert fingerprint for edge ban resolution AND the tunnel-session start timestamp
   — the conn-id epoch every edge reads via the route lookup), batch-credit bandwidth accounting,
   rate windows, daily/weekly byte quotas, per-tunnel issuance counters, the per-CA ACME
-  cooldown/failure-backoff state + weekly LE budget counter. Every key's TTL is set in the SAME Lua
+  cooldown/failure-backoff state. Every key's TTL is set in the SAME Lua
   script as its mutation.
 - **S3/MinIO = the first durable server-side state** **[REVERSES P1: "NO permanent Redis state; the
   phone's cert is the only persistent identity."]** — a deliberate, minimal, portable amendment (flat
@@ -402,7 +401,6 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 | `--acme-cooldown-default` | duration | `1h` | Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After (Retry-After wins when larger) |
 | `--acme-backoff-initial` | duration | `1m` | First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure) |
 | `--acme-backoff-max` | duration | `6h` | Ceiling for the exponential per-CA failure backoff |
-| `--acme-le-weekly-budget` | int | `50` | Max NEW-name LE orders per rolling 7d (per-registered-domain limit); renewals exempt |
 | `--acme-renew-margin` | duration | `48h` | Renew floor before public-cert expiry (ARI may pull earlier) |
 | `--issue-per-week` | int | `3` | Max SUCCESSFUL public-cert issuances per tunnel per rolling 7d |
 | `--limit-traffic-day` | string | `1gb` | Per-tunnel bytes/day, both directions combined (BINARY) |
@@ -419,7 +417,7 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 
 - [x] **Action**: `Validate()` adds: `--mesh-pool-size` in `[1, --mesh-pool-max]`; `--max-clients ≥ 1`;
   `--limit-concurrent ≥ 1`; `--limit-conn-rate ≥ 1`; `--limit-stream-pending ≥ 1`; `--issue-per-week ≥ 1`;
-  `--acme-le-weekly-budget ≥ 1`; `--acme-cooldown-default`/`--acme-backoff-initial`/`--acme-backoff-max`
+  `--acme-cooldown-default`/`--acme-backoff-initial`/`--acme-backoff-max`
   all > 0 and `--acme-backoff-initial ≤ --acme-backoff-max`; `ParseByteSize` of `--limit-traffic-day`/
   `--limit-traffic-week`/`--limit-conn-min-rate`/`--limit-conn-protect-rate` succeeds and each > 0;
   `--limit-traffic-week ≥ --limit-traffic-day`; `--registry-claim-timeout` and
@@ -535,7 +533,7 @@ Reused by US5/US6/US8/US10/US11 tests (the existing `Count`/`BytesFor` helpers w
 | `Validate traffic week >= day` | `--limit-traffic-week 512mb` with `--limit-traffic-day 1gb` → error |
 | `Validate bandwidth floor` | `--limit-bandwidth 128kbit` → error; `1mbit` passes |
 | `Validate renew margin fits shortlived` | `--acme-renew-margin 200h` → error |
-| `Validate rejects zero integer limits` | `--max-clients 0`, `--limit-concurrent 0`, `--limit-conn-rate 0`, `--issue-per-week 0`, `--limit-stream-pending 0`, `--acme-le-weekly-budget 0` → error |
+| `Validate rejects zero integer limits` | `--max-clients 0`, `--limit-concurrent 0`, `--limit-conn-rate 0`, `--issue-per-week 0`, `--limit-stream-pending 0` → error |
 | `Validate attestation-optional fail-closed` | `--attestation-optional` without `TUNNELD_ALLOW_ATTESTATION_OPTIONAL=1` → error; with it set → passes |
 | `Validate registry settle > timeout` | `--registry-claim-settle 2s` with `--registry-claim-timeout 3s` → error; defaults pass |
 | `env twin overrides` | `TUNNELD_MAX_CLIENTS`, `TUNNELD_S3_BUCKET`, `TUNNELD_LIMIT_TRAFFIC_DAY`, `TUNNELD_ACME_DNS_PROVIDER` override defaults |
@@ -761,14 +759,14 @@ override type embedding it).
 
 ---
 
-## User Story 3: Valkey control plane — node registry, routing, batch-credit quotas, ACME budgets
+## User Story 3: Valkey control plane — node registry, routing, batch-credit quotas, ACME cooldowns
 
 - [x] **User Story 3 complete**
 
 Extend the control plane: a node registry (node id → mesh address), the route registry (retained,
 owner-conditional on connID, now carrying the identity-cert fingerprint), and the batch-credit Lua
-scripts for bandwidth, day/week byte quotas, per-tunnel issuance counters, the per-CA ACME
-cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atomically in-script.
+scripts for bandwidth, day/week byte quotas, per-tunnel issuance counters, and the per-CA ACME
+cooldown/backoff (retry-after) state. Every key TTL'd atomically in-script.
 
 ### Acceptance Criteria
 - [x] `internal/router` gains a node registry (`RegisterNode`/`RefreshNode`/`LookupNode`/`Nodes`,
@@ -781,10 +779,8 @@ cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atom
   per-tunnel stream counter `AcquireStream`/`ReleaseStream` (reusing the `conc:{name}` key, ADDED
   alongside the retained P1 `Acquire` — which keeps its `internal/ingress` consumer compiling until
   US13 removes both together), `IssuanceAllowed`
-  (read-only check) + `IssuanceRecord` (success-only increment), the per-CA reactive cooldown/backoff
-  primitives (`SetCACooldown`/`CACooldown`/`BumpCAFailures`/`ResetCAFailures`), and
-  `ConsumeLEOrder`/`ReleaseLEOrder` (rolling-week LE new-order counter with
-  reserve-then-refund semantics); each
+  (read-only check) + `IssuanceRecord` (success-only increment), and the per-CA reactive cooldown/backoff
+  (retry-after) primitives (`SetCACooldown`/`CACooldown`/`BumpCAFailures`/`ResetCAFailures`); each
   sets its TTL in the SAME Lua script as its mutation (or `SET EX` for the cooldown).
 - [x] All scripts are `EVALSHA`-cached; no dynamically generated script bodies.
 - [x] Unit tests run against miniredis.
@@ -813,7 +809,7 @@ cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atom
   on `connID`, shared by both stacks, UNCHANGED from P1. The SNI edge needs `connID` (phone owner id)
   for the mesh `StreamOpen` owner check and `fingerprint` for the resolved-route ban check.
 
-### Task 3.3: Batch-credit, quota, issuance, and ACME-budget scripts
+### Task 3.3: Batch-credit, quota, issuance, and ACME-cooldown scripts
 - [x] **Task 3.3 complete**
 - [x] **File**: `internal/limit/credit.go` — `ClaimBandwidth(ctx, name, dir, want) (granted, err)`: claim
   up to `want` bytes from the per-tunnel, per-direction refilling budget (window+TTL in-script); the
@@ -830,28 +826,22 @@ cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atom
   check that the rolling-7d per-tunnel issuance counter is below `cap` (NO mutation); and
   `IssuanceRecord(ctx, name) error`: atomically increment that counter with a 7d TTL in-script, called
   ONLY after a public cert is successfully issued (so the cap counts SUCCESSFUL issuances only).
-- [x] **File**: `internal/limit/acme_budget.go` — the REACTIVE per-CA state:
+- [x] **File**: `internal/limit/acme_cooldown.go` — the REACTIVE per-CA state (NO order-counting budget):
   `SetCACooldown(ctx, ca string, d time.Duration) error` (`SET acme-cooldown:{ca} 1 EX d` — TTL IS the
-  cooldown), `CACooldown(ctx, ca string) (remaining time.Duration, err)` (PTTL read; 0 = not cooling),
-  `BumpCAFailures(ctx, ca string, window time.Duration) (consecutive int, err)` (INCR + TTL in-script —
-  the caller derives the exponential backoff from `consecutive`; the `window` is ALWAYS
+  cooldown / retry-after), `CACooldown(ctx, ca string) (remaining time.Duration, err)` (PTTL read; 0 =
+  not cooling), `BumpCAFailures(ctx, ca string, window time.Duration) (consecutive int, err)` (INCR + TTL
+  in-script — the caller derives the exponential backoff from `consecutive`; the `window` is ALWAYS
   `--acme-backoff-max`, so a streak older than the largest backoff expires), `ResetCAFailures(ctx, ca
-  string) error` (DEL on success); and the rolling-7d LE new-order counter with RESERVE-THEN-REFUND
-  semantics: `ConsumeLEOrder(ctx, budget) (ok bool, err)` atomically
-  reserves one order slot only when below `budget` (called BEFORE an LE new-order attempt), and
-  `ReleaseLEOrder(ctx) error` refunds the reservation when that attempt FAILS (so failed orders never
-  burn budget and there is no check-then-consume race) — all TTL-in-script.
+  string) error` (DEL on success) — all TTL-in-script.
 **Context**: all scripts are short `EVALSHA`-cached Lua (INCR/HINCRBY/SET + a conditional + `PEXPIRE`),
 following the existing `internal/limit` fixed-window pattern. `ClaimTraffic` accounts for BOTH the local
-and mesh bridge. The LE weekly budget is DISTINCT from the per-CA cooldown/backoff state and is consumed
-by every LE NEW order — initial enrollments and migration renewals — while LE renewals of LE-issued
-names never consume it. The issuance counter is
-likewise consumed only on SUCCESS (via `IssuanceRecord`), never at the gate.
+and mesh bridge. The issuance counter is consumed only on SUCCESS (via `IssuanceRecord`), never at the
+gate.
 
 ### Task 3.4: Unit tests
 - [x] **Task 3.4 complete**
 - [x] **File**: `internal/router/nodes_test.go`, `internal/router/registry_test.go` (extend),
-  `internal/limit/credit_test.go`, `traffic_test.go`, `issuance_test.go`, `acme_budget_test.go`
+  `internal/limit/credit_test.go`, `traffic_test.go`, `issuance_test.go`, `acme_cooldown_test.go`
 **Setup**: miniredis; fake clock where the fixed-window helpers accept one.
 
 | Test | Verifies |
@@ -868,14 +858,12 @@ likewise consumed only on SUCCESS (via `IssuanceRecord`), never at the gate.
 | `SetCACooldown / CACooldown` | Cooldown readable while TTL'd; expires to 0 |
 | `BumpCAFailures / ResetCAFailures` | Consecutive counter increments in-window; reset deletes it |
 | `AcquireStream global cap` | INCRs to `cap` then refuses; `ReleaseStream` frees a slot; TTL refreshed per acquire; DECR floors at 0 |
-| `ConsumeLEOrder reserves` | Reserves atomically; refuses past `budget`; TTL 7d |
-| `ReleaseLEOrder refunds` | A reserve followed by a release restores the remaining budget |
 
 ### Definition of Done
 - [x] Node registry; additive `BindRoute`/`LookupRoute` (node+connID+fpr+startedAt) with the P1
   `Bind`/`Lookup` untouched until US13; teardown/refresh stay owner-conditional.
 - [x] Batch-credit bandwidth, day+week traffic, per-week issuance (read-only check + success-only
-  record), per-CA cooldown/backoff primitives, and the weekly LE budget (reserve/refund) — all TTL'd,
+  record), and per-CA cooldown/backoff (retry-after) primitives — all TTL'd,
   `EVALSHA`-cached (or `SET EX` for the cooldown).
 - [x] US3 unit tables (miniredis) authored/committed (execution in US16).
 
@@ -1009,7 +997,7 @@ with rollback), and the server-TLS enroll HTTP handler.
   the just-claimed name is released (`store.DeleteName` — plain delete, safe because we only delete
   after a VERIFIED claim and nobody else can claim while our record exists) and NO issuance is
   recorded.
-- [x] Per-IP enroll limits (retained), the issuance-per-week cap, and the ACME budgets are enforced.
+- [x] Per-IP enroll limits (retained), the issuance-per-week cap, and the ACME per-CA cooldowns are enforced.
 - [x] REJECTED enrollments (attestation failures and suspicious submissions) persist their evidence via
   `store.PutRejectedEnrollment` (best-effort — a store error is logged, never masks the rejection),
   under the 30-day `rejected-enroll/` prefix.
@@ -1043,11 +1031,10 @@ the listeners (US8 phone: name derived from cert CN, reject mesh-role marker; US
 - [x] **File**: `internal/enroll/enroll.go` — create the consumer-side issuer interface + the service:
 ```go
 type PublicIssuer interface { // implemented by internal/acme (US6); keeps enroll independent of acme
-	// Obtain = INITIAL enrollment: full LE→GTS→ZeroSSL spillover; an LE order consumes the weekly budget.
+	// Obtain = INITIAL enrollment: full LE→GTS→ZeroSSL spillover, LE first.
 	Obtain(ctx context.Context, csr *x509.CertificateRequest, name string) (pemChain []byte, info store.CertInfo, err error)
-	// Renew = RENEWAL of an existing name. A NON-LE name tries LE FIRST when the weekly budget
-	// reserves (opportunistic migration — user decision), else renews on cur.CA and falls through
-	// the remaining chain; an LE name renews on LE budget-exempt (ARI renewals are free).
+	// Renew = RENEWAL of an existing name. Same LE→GTS→ZeroSSL order as Obtain, so every renewal tries
+	// LE FIRST (opportunistic migration — user decision); a cooling CA is skipped. cur is unused.
 	Renew(ctx context.Context, csr *x509.CertificateRequest, name string, cur store.CertInfo) (pemChain []byte, info store.CertInfo, err error)
 }
 type Request struct {
@@ -1090,8 +1077,8 @@ RENEWAL, i.e. `req.Renewal`: use `req.Name` — the existing mTLS-authenticated 
 return retryable) → `ca.SignIdentity(IdentityCSR, name)` (the server-assigned name — generate-claim on
 INITIAL, `req.Name` on RENEWAL — sets the CN; CSR subject ignored) → the public cert: INITIAL calls
 `s.issuer.Obtain(TLSCSR, name)`; RENEWAL first reads the current record (`store.GetName(req.Name)`) and
-calls `s.issuer.Renew(TLSCSR, name, rec-cert-info)` so the chain can apply the LE-first migration /
-budget-exempt LE renewal rules (US6). On issuer
+calls `s.issuer.Renew(TLSCSR, name, rec-cert-info)` so the chain can apply the LE-first migration
+rules (US6). On issuer
 failure — and on ANY OTHER post-claim failure of an INITIAL enrollment (`ca.SignIdentity` error,
 context cancellation during/after issuance): `store.DeleteName(name)` (plain-delete rollback — safe
 only because the claim was VERIFIED; no orphaned durable state). (Key binding / CSR proof-of-possession
@@ -1106,8 +1093,8 @@ failures to structured `Error` (attestation → non-retryable `unauthorized`; AC
 retryable + `RetryAfter`; issuance cap → retryable at window reset).
 **Context**: renewal (US8) calls `Enroll` in renewal mode (existing name; NO new claim, NO delete —
 plain LWW `PutName` on the existing record; authenticated over the phone's mTLS control connection, not
-IP-limited). Because the counter is recorded only on success, a failed renewal never consumes issuance
-budget. The `Service` takes an injectable clock (constructor DI) so the settle wait is instant in
+IP-limited). Because the counter is recorded only on success, a failed renewal never consumes an
+issuance slot. The `Service` takes an injectable clock (constructor DI) so the settle wait is instant in
 tests.
 
 ### Task 5.4: Enroll HTTP handler
@@ -1179,13 +1166,13 @@ miniredis for nonces + limits.
 
 Implement public-cert issuance behind the `enroll.PublicIssuer` interface: lego-backed clients for the
 three CAs with automatic spillover, DNS-01, the split renewal timing (LE ARI / fixed cadence for
-GTS+ZeroSSL), reactive per-CA cooldown+backoff, and the weekly LE budget that both gates new orders and
-paces the opportunistic at-renewal migration onto LE.
+GTS+ZeroSSL), and reactive per-CA cooldown+backoff (a rate-limited CA gets a per-CA retry-after) driving
+the spillover and the opportunistic at-renewal migration onto LE. NO order-counting budget.
 
 ### Acceptance Criteria
 - [x] `internal/acme` provides a `chainIssuer` implementing `enroll.PublicIssuer` (BOTH `Obtain` —
-  initial spillover — and `Renew` — LE-first opportunistic migration for non-LE names, budget-exempt LE
-  renewal for LE names) plus `ShouldRenew(ctx context.Context, cur store.CertInfo) (bool, time.Time,
+  initial spillover — and `Renew` — the SAME LE-first order, so every renewal opportunistically
+  migrates the name to LE) plus `ShouldRenew(ctx context.Context, cur store.CertInfo) (bool, time.Time,
   error)` — ctx-first because for LE names it makes an ARI network call via the internal
   `caIssuer.shouldRenew(ctx, cur)` it wraps (the US11 renewal watcher propagates its drain ctx),
   recording which CA succeeded.
@@ -1199,14 +1186,12 @@ paces the opportunistic at-renewal migration onto LE.
   spillover; an `ErrRateLimited` answer sets `limit.SetCACooldown(max(RetryAfter,
   --acme-cooldown-default))`; any other failure bumps `limit.BumpCAFailures` and sets a cooldown of
   `min(--acme-backoff-initial × 2^(n−1), --acme-backoff-max)`; success calls `limit.ResetCAFailures`.
-  The weekly LE budget additionally gates LE new orders with RESERVE-THEN-REFUND semantics
-  (`limit.ConsumeLEOrder` before the attempt, `limit.ReleaseLEOrder` if it fails): NEW-name LE issuance
-  and migration renewals consume it; LE renewals of LE-issued names do not.
+  There is NO order-counting budget: LE is gated ONLY by its own retry-after cooldown, exactly like GTS
+  and ZeroSSL.
 - [x] `Renew` shifts names onto LE opportunistically (user decision — LE alone does not rate-limit
-  renewals): a NON-LE name tries LE FIRST when the weekly budget reserves; on no-budget/LE-failure it
-  renews on `cur.CA`, then falls through the remaining chain; an LE name renews on LE WITHOUT touching
-  the budget. Every renewal carries the phone's fresh CSR (rotation), so the LE issuance happens right
-  there — no separate migration job exists.
+  renewals): it uses the SAME LE→GTS→ZeroSSL order as `Obtain`, so every renewal tries LE FIRST; a
+  cooling LE is skipped and the name renews on the next available CA. Every renewal carries the phone's
+  fresh CSR (rotation), so the LE issuance happens right there — no separate migration job exists.
 - [x] `chainIssuer` also exposes `ObtainSelf(host)` (server-side key+CSR) for tunneld's own reserved-host
   server certs (`--enroll-host`/`--control-host`), via the same spillover.
 - [x] Classified errors (rate-limited / transient / permanent) propagate to enrollment.
@@ -1241,29 +1226,27 @@ var ErrPermanent   = errors.New("acme: permanent")
 ZeroSSL). If lego needs a specific registration/storage shape not covered here, record it in `##
 Deviations` and use the closest supported path.
 
-### Task 6.3: Spillover + budget gating
+### Task 6.3: Spillover + retry-after gating
 - [x] **Task 6.3 complete**
 - [x] **File**: `internal/acme/chain.go` — `chainIssuer` (implements `enroll.PublicIssuer`) holding
   `[LE, GTS, ZeroSSL]`. Common attempt mechanics (both entry points): SKIP any CA whose
-  `limit.CACooldown` > 0; every LE NEW-order attempt (anything except an LE renewal of an LE-issued
-  name) first RESERVES budget via `limit.ConsumeLEOrder` (no budget → skip LE) and REFUNDS via
-  `limit.ReleaseLEOrder` if that attempt fails; on `ErrRateLimited` set
+  `limit.CACooldown` > 0 (an active retry-after); attempt the CA; on `ErrRateLimited` set
   `limit.SetCACooldown(ca, max(RetryAfter, --acme-cooldown-default))`, record `ACMECooldown(ca)`, and
   fall through; on `ErrTransient`/other failure `limit.BumpCAFailures(ctx, ca, --acme-backoff-max)` →
   `limit.SetCACooldown(ca, min(--acme-backoff-initial × 2^(n−1), --acme-backoff-max))` and fall
   through; on success `limit.ResetCAFailures(ca)`; on `ErrPermanent` (bad CSR) stop and return; if ALL
   CAs are cooling down/failed, return `ErrRateLimited` carrying the SHORTEST remaining cooldown as
-  Retry-After (surfaces to the app as a retryable structured error). Record the winning CA in
-  `store.CertInfo.CA`. Entry points: `Obtain` (initial) tries the full chain in order.
-  `Renew(csr, name, cur)`: if `cur.CA != "letsencrypt"` AND the budget reserves → try LE FIRST
-  (opportunistic migration; refund on failure), else renew on `cur.CA` (an LE renewal of an LE name is
-  budget-EXEMPT — no reserve); on failure continue through the remaining chain in order.
+  Retry-After ("quota exhausted, retry later" — surfaces to the app as a retryable structured error).
+  Record the winning CA in `store.CertInfo.CA`. LE carries NO order-counting budget — it is gated ONLY
+  by its own retry-after, exactly like GTS/ZeroSSL. Entry points: `Obtain` (initial) and
+  `Renew(csr, name, _)` BOTH try the full `[LE, GTS, ZeroSSL]` chain in order (so a renewal tries LE
+  first and opportunistically migrates; `cur` is unused).
   `ShouldRenew(ctx, cur)` dispatches to the CA that issued `cur` (passing ctx into `caIssuer.shouldRenew`).
   Also expose
   `ObtainSelf(ctx, host) (certPEM, keyPEM []byte, info store.CertInfo, err error)` which generates a
   SERVER-SIDE key + CSR for one of tunneld's OWN reserved hostnames and obtains a cert via the same
-  spillover (used for `--enroll-host`/`--control-host`; subject to the per-CA cooldowns + LE budget but
-  NOT the per-tunnel issuance cap).
+  spillover (used for `--enroll-host`/`--control-host`; subject to the per-CA cooldowns but NOT the
+  per-tunnel issuance cap).
 
 ### Task 6.4: Unit tests
 - [x] **Task 6.4 complete**
@@ -1280,23 +1263,21 @@ ACME issuance is covered by the integration tier (US14, Pebble).
 | `rate-limited sets cooldown` | `ErrRateLimited` with Retry-After → `SetCACooldown(max(RetryAfter, default))`; `ACMECooldown(ca)` recorded |
 | `failure backoff doubles` | Consecutive non-rate-limit failures → cooldowns `initial, 2×, 4×…` capped at `--acme-backoff-max`; success resets |
 | `all CAs cooling → retryable` | Every CA in cooldown → `ErrRateLimited` with the shortest remaining cooldown as Retry-After |
-| `LE weekly budget skips to GTS` | LE budget exhausted → LE skipped without an attempt, GTS used |
-| `LE budget refund on failure` | Budget reserved, LE attempt fails → `ReleaseLEOrder` refunds; GTS attempted |
-| `non-LE renewal migrates to LE` | `Renew` with `cur.CA == gts` + budget available → LE tried FIRST, budget consumed, `info.CA == letsencrypt` |
-| `non-LE renewal stays without budget` | `Renew` with `cur.CA == gts` + budget exhausted → GTS renews; LE never attempted; no budget touched |
-| `LE renewal budget-exempt` | `Renew` with `cur.CA == letsencrypt` → LE attempted WITHOUT `ConsumeLEOrder` |
-| `migration refund on LE failure` | `Renew` non-LE name: budget reserved, LE fails → refunded; `cur.CA` renews |
+| `all cooling message is quota-exhausted` | The all-cooling error text is "quota exhausted, retry later" |
+| `rate-limited spills and sets retry-after` | LE rate-limited (Retry-After 30m) → LE retry-after set, order spills to GTS |
+| `renew tries LE first` | `Renew` with `cur.CA == gts` → LE tried FIRST (migration), `info.CA == letsencrypt`, GTS not called |
+| `renew spills when LE cooling` | `Renew` with `cur.CA == gts` + LE cooling → LE skipped, renews on GTS |
 | `ShouldRenew LE via ARI` | LE cert: ARI earlier than T-48h → renew earlier; else at margin |
 | `ShouldRenew fixed cadence GTS/ZeroSSL` | GTS/ZeroSSL cert: renews at `NotBefore + 112h` regardless of remaining validity; NO ARI call made |
 | `error classification` | Sample ACME problem docs map to ErrRateLimited/Transient/Permanent |
-| `ObtainSelf self-cert` | Produces a server-side key + cert for a reserved host; does NOT consume the per-tunnel issuance counter; IS subject to per-CA cooldowns + the LE budget |
+| `ObtainSelf self-cert` | Produces a server-side key + cert for a reserved host; does NOT consume the per-tunnel issuance counter; IS subject to per-CA cooldowns |
 
 ### Definition of Done
 - [x] `chainIssuer` implements `enroll.PublicIssuer` (`Obtain` + LE-first-migrating `Renew`); spillover
-  with reactive per-CA cooldown+backoff + reserve/refund LE budget; DNS-01 behind our own provider seam.
+  with reactive per-CA cooldown+backoff (per-CA retry-after, NO budget); DNS-01 behind our own provider seam.
 - [x] `ObtainForCSR` + `shortlived` profile via lego; renewal split LE-ARI vs fixed
   `NotBefore + 112h` cadence for GTS/ZeroSSL; opportunistic LE-first migration at renewal
-  (budget-paced, reserve/refund).
+  (paced only by the per-CA retry-after).
 - [x] Classified errors propagate to enrollment.
 - [x] US6 unit tables authored/committed (execution in US16; real ACME in US14).
 
@@ -2612,3 +2593,22 @@ gates, and validate all touched Mermaid diagrams.
   still connects directly to a replica's public port (no proxy anywhere), per the plan. Scenarios covered:
   cross-node mesh, same-node fast path, ACME CA spillover (LE unreachable → GTS), per-tunnel quota
   exhaustion, and idle-stream eviction.
+- **LE weekly budget removed (US3 Task 3.3, US6 Tasks 6.3/6.4, config flag) — post-implementation design
+  correction on EXPLICIT user direction:** the US6 implementation had introduced a weekly LE new-order
+  **budget** (an order-counting `acme-le-week:{week}` counter with reserve-then-refund) as a SECOND ACME
+  rate-limit control alongside the per-CA cooldown. The user directed that this was never requested and is
+  wrong — the ONLY control is the per-CA retry-after (cooldown). Removed end to end: the
+  `--acme-le-weekly-budget` flag + its `Validate` check (`internal/config`), `ChainConfig.LEWeeklyBudget`
+  and its wiring (`internal/server/acmewire.go`), and `limit.ConsumeLEOrder`/`limit.ReleaseLEOrder` with
+  their Lua scripts + `leWeekKey` (the file `internal/limit/acme_budget.go` was renamed to `acme_cooldown.go`
+  now that it holds cooldown state only). The chain's `run` lost its `leNewOrder` budget branch and
+  `Renew` lost its `orderFrom`/budget-migration logic: **Issue and Renew now share the SAME
+  `[LE, GTS, ZeroSSL]` order** (every renewal tries LE first, a cooling CA is skipped), and the all-CAs-
+  cooling error is the retryable message "quota exhausted, retry later". This also FIXES the latent budget-
+  bypass bug the removal supersedes (a migration-renewal could previously issue a NEW LE order without
+  consuming budget when the budget was exhausted and the primary CA failed). Tests updated: dropped
+  `TestConsumeAndReleaseLEOrder` (limit) and the four budget-oriented chain tests; added `TestRenewTriesLEFirst`,
+  `TestRenewSpillsWhenLECooling`, `TestRateLimitedSpillsAndSetsRetryAfter`, and
+  `TestAllCoolingMessageIsQuotaExhausted`. The per-tunnel `--issue-per-week` cap and the per-process
+  bandwidth buckets (distinct controls) are UNCHANGED. `docs/PROJECT.md`, `docs/ARCHITECTURE.md`, and
+  `.claude/rules/project.md` de-scoped every "weekly LE budget" mention to "per-CA cooldown/retry-after".

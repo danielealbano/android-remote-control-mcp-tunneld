@@ -103,7 +103,6 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		ACMECooldownDefault: time.Hour,
 		ACMEBackoffInitial:  time.Minute,
 		ACMEBackoffMax:      6 * time.Hour,
-		ACMELEWeeklyBudget:  50,
 		ACMERenewMargin:     48 * time.Hour,
 		IssuePerWeek:        3,
 

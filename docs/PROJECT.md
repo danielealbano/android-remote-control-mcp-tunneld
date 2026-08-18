@@ -115,7 +115,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 ## 5. State + retention
 
 - **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
-  counters, per-tunnel counters, single-use enrollment nonces, ACME cooldown/budget. Every key carries a
+  counters, per-tunnel counters, single-use enrollment nonces, ACME cooldown/backoff. Every key carries a
   TTL set atomically with its write. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only

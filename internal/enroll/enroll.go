@@ -28,8 +28,8 @@ type ClassifiedIssuerError interface {
 }
 
 // PublicIssuer is the consumer-side view of the ACME chain (implemented by internal/acme, US6). Obtain
-// runs the initial LE→GTS→ZeroSSL spillover; Renew renews an existing name (opportunistic LE-first
-// migration for non-LE names, budget-exempt LE renewal for LE names).
+// runs the initial LE→GTS→ZeroSSL spillover; Renew renews an existing name using the same LE-first order,
+// so every renewal opportunistically migrates the name to LE.
 type PublicIssuer interface {
 	Obtain(ctx context.Context, csr *x509.CertificateRequest, name string) (pemChain []byte, info store.CertInfo, err error)
 	Renew(ctx context.Context, csr *x509.CertificateRequest, name string, cur store.CertInfo) (pemChain []byte, info store.CertInfo, err error)

@@ -44,7 +44,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, 
 	accountsDir := filepath.Join(cfg.ACMEAccountDir, "accounts")
 
 	chainCfg := acme.ChainConfig{
-		Limiter: lim, Recorder: rec, LEWeeklyBudget: cfg.ACMELEWeeklyBudget,
+		Limiter: lim, Recorder: rec,
 		CooldownDefault: cfg.ACMECooldownDefault, BackoffInitial: cfg.ACMEBackoffInitial,
 		BackoffMax: cfg.ACMEBackoffMax, RenewMargin: cfg.ACMERenewMargin, ShortlivedLifetime: shortlivedLifetime,
 	}

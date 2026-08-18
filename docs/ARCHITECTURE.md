@@ -21,7 +21,7 @@ flowchart TD
   attest["attest: Android key-attestation verifier"]
   ca["ca: internal CA (identity + mesh-role certs)"]
   router["router: Valkey route + node registry"]
-  limit["limit: rate / traffic / concurrency / ACME budget"]
+  limit["limit: rate / traffic / concurrency / ACME cooldown"]
   store["store: durable S3 registry + logs + evidence"]
   metrics["metrics: internal listener + PromRecorder"]
 
@@ -50,11 +50,11 @@ flowchart TD
 | `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/data` dial-back, `/issue` cert generation |
 | `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
-| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego DNS-01, spillover, cooldown/backoff, weekly LE budget, self-heal) |
+| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
-| `internal/limit` | rate windows, enroll quota, global stream counter, per-process bandwidth buckets, ACME budget |
+| `internal/limit` | rate windows, enroll quota, global stream counter, per-process bandwidth buckets, ACME cooldown |
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
@@ -111,7 +111,7 @@ slice size.
 
 Routing (`route:{name}` → owner/fp/connID/epoch, owner-conditional teardown on `connID`), node registry
 (`node:{id}` → advertise), rate-limit windows, the global concurrency counter, per-tunnel counters
-(`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff/budget. No permanent
+(`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff. No permanent
 Valkey state; a stale connection never clobbers a re-bound route.
 
 ## 6. Durable S3 state
