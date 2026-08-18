@@ -2,12 +2,12 @@ package phoneconn
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
@@ -31,6 +31,7 @@ type BanTunnel func(name, fingerprint string) bool
 type Handler struct {
 	mgr           *Manager
 	validName     NameValidator
+	banIP         BanIP
 	banTunnel     BanTunnel
 	pingInterval  time.Duration
 	streamPending int
@@ -39,6 +40,9 @@ type Handler struct {
 
 	sem chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
 }
+
+// BanIP reports whether the phone's peer IP is banned.
+type BanIP func(addr netip.Addr) bool
 
 // IssueRequest is the POST /issue body: a fresh attestation over the enroll/nudge nonce plus rotated
 // identity and TLS CSRs. It is the SINGLE certificate-generation request for BOTH the initial public
@@ -74,6 +78,7 @@ type IssueFunc func(ctx context.Context, name, fp, ip string, req IssueRequest) 
 type HandlerConfig struct {
 	Manager       *Manager
 	ValidName     NameValidator
+	BanIP         BanIP
 	BanTunnel     BanTunnel
 	PingInterval  time.Duration
 	StreamPending int
@@ -90,7 +95,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		cfg.IssueBody = 256 * 1024
 	}
 	return &Handler{
-		mgr: cfg.Manager, validName: cfg.ValidName, banTunnel: cfg.BanTunnel,
+		mgr: cfg.Manager, validName: cfg.ValidName, banIP: cfg.BanIP, banTunnel: cfg.BanTunnel,
 		pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending,
 		onIssue: cfg.OnIssue, issueBody: cfg.IssueBody,
 		sem: make(chan struct{}, cfg.StreamPending),
@@ -115,6 +120,13 @@ func (h *Handler) identity(r *http.Request) (name, fingerprint string, ok bool) 
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Peer-IP ban check FIRST — a newly-banned IP must not keep using an established mTLS identity.
+	if h.banIP != nil {
+		if addr, err := netip.ParseAddr(peerIP(r)); err == nil && h.banIP(addr) {
+			http.Error(w, "banned", http.StatusForbidden)
+			return
+		}
+	}
 	name, fp, ok := h.identity(r)
 	if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -189,16 +201,29 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// livenessMissedPings is how many consecutive PING intervals may elapse without a PONG before the
+// connection is torn down as dead (tolerates one lost PONG without a spurious kill).
+const livenessMissedPings = 3
+
 // serveControl runs the long-lived bidirectional control stream: it writes queued frames to the
-// response body and reads incoming frames (PONG, RENEW_*) from the request body.
+// response body and reads incoming frames (PONG liveness) from the request body. The pre-bind
+// semaphore (--limit-stream-pending) is held ONLY until the route bind completes — it bounds
+// concurrent pre-bind handshakes, never the number of bound phones.
 func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp string) {
 	select {
 	case h.sem <- struct{}{}:
-		defer func() { <-h.sem }()
 	default:
 		http.Error(w, "too many pending", http.StatusServiceUnavailable)
 		return
 	}
+	semHeld := true
+	releaseSem := func() {
+		if semHeld {
+			semHeld = false
+			<-h.sem
+		}
+	}
+	defer releaseSem()
 	flusher, okf := w.(http.Flusher)
 	if !okf {
 		http.Error(w, "no http/2", http.StatusBadRequest)
@@ -208,16 +233,18 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 	defer cancel()
 
 	c := &conn{
-		name: name, fingerprint: fp, connID: mustConnID(h.mgr, time.Now()),
+		name: name, fingerprint: fp, connID: mustConnID(time.Now()),
 		sessionStart: h.mgr.now(), meta: metaFromRequest(r),
 		send: make(chan []byte, 32), cancel: cancel, pending: map[string]chan DataStream{},
 	}
+	c.lastPong.Store(c.sessionStart.UnixNano())
 	teardown, err := h.mgr.register(ctx, c)
 	if err != nil {
 		http.Error(w, "bind failed", http.StatusConflict)
 		return
 	}
 	defer teardown()
+	releaseSem() // bound — the pre-bind slot frees for the next handshake
 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -237,6 +264,11 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 			}
 			flusher.Flush()
 		case <-ping.C:
+			// Liveness: a phone that has not PONGed for livenessMissedPings intervals is dead.
+			if time.Since(time.Unix(0, c.lastPong.Load())) > time.Duration(livenessMissedPings)*h.pingInterval {
+				c.close("liveness-timeout")
+				return
+			}
 			pf, _ := wire.EncodeControl(wire.CtrlPing, nil)
 			if _, err := w.Write(pf); err != nil {
 				return
@@ -247,8 +279,8 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 }
 
 // readPump drains incoming control frames from the phone (length-framed). The phone→server direction
-// now carries only PONG liveness (certificate work moved to the mTLS POST /issue endpoint); any decode
-// failure or EOF tears the connection down.
+// carries only PONG liveness (certificate work moved to the mTLS POST /issue endpoint); a read error
+// or a malformed frame tears the connection down.
 func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {
 		frame, err := readControlFrame(body)
@@ -256,15 +288,21 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 			c.close("phone-close")
 			return
 		}
-		if _, _, derr := wire.DecodeControl(frame); derr != nil {
-			continue
+		typ, _, derr := wire.DecodeControl(frame)
+		if derr != nil {
+			c.close("protocol-error")
+			return
 		}
-		// Only CtrlPong is expected; it is liveness-only, so no dispatch is needed.
+		if typ == wire.CtrlPong {
+			c.lastPong.Store(time.Now().UnixNano())
+		}
 	}
 }
 
 // serveData delivers an arriving dial-back data stream to its waiter and blocks (keeping the HTTP
-// handler open) while the bridge splices, until the stream is done.
+// handler open) while the bridge splices, until the stream is done. No header is written before the
+// delivery succeeds, so an undeliverable stream gets a REAL 404 (the response commits on the bridge's
+// first Write; only the bridge goroutine touches w after delivery).
 func (h *Handler) serveData(w http.ResponseWriter, r *http.Request, name string) {
 	streamID := r.Header.Get("X-Stream-Id")
 	if streamID == "" {
@@ -276,8 +314,6 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request, name string)
 		http.Error(w, "no http/2", http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
 	done := make(chan struct{})
 	ds := &httpDataStream{r: r.Body, w: w, flush: flusher.Flush, done: done}
 	if !h.mgr.deliverStream(name, streamID, ds) {
@@ -304,13 +340,11 @@ func metaFromRequest(r *http.Request) ConnMeta {
 	return m
 }
 
-// mustConnID mints a phone connID seeded by the session start (best-effort; falls back to now).
-func mustConnID(m *Manager, now time.Time) string {
+// mustConnID mints a phone connID seeded by the session start (best-effort; falls back to a zero id).
+func mustConnID(now time.Time) string {
 	id, err := store.NewConnID(now, now)
 	if err != nil {
 		return "0000000000"
 	}
 	return id
 }
-
-var _ = x509.Certificate{}

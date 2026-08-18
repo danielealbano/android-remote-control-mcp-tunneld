@@ -3,7 +3,9 @@ package phoneconn
 import (
 	"context"
 	"io"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
@@ -43,8 +45,9 @@ type conn struct {
 	sessionStart time.Time
 	meta         ConnMeta
 
-	send   chan []byte // control frames to write to the phone (control-stream response body)
-	cancel context.CancelFunc
+	send     chan []byte // control frames to write to the phone (control-stream response body)
+	cancel   context.CancelFunc
+	lastPong atomic.Int64 // unix nanos of the last PONG received (liveness)
 
 	mu      sync.Mutex
 	pending map[string]chan DataStream // streamID → dial-back waiter
@@ -52,12 +55,17 @@ type conn struct {
 	reason  string
 }
 
+// teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (they run on
+// context.Background — a hung control plane or store must never pin a teardown goroutine).
+const teardownTimeout = 10 * time.Second
+
 // Manager tracks live phone control connections, binds routes, writes conn-log events, and drives
 // dial-back + eviction.
 type Manager struct {
 	router    Router
 	logs      ConnLogStore
 	rec       Recorder
+	logger    *slog.Logger
 	nodeID    string
 	nodeHost  string
 	nodeStart string
@@ -74,6 +82,7 @@ type Config struct {
 	Router    Router
 	Logs      ConnLogStore
 	Recorder  Recorder
+	Logger    *slog.Logger
 	NodeID    string
 	NodeHost  string
 	NodeStart string // ns process-start timestamp (RFC3339Nano)
@@ -82,8 +91,12 @@ type Config struct {
 
 // NewManager builds the Manager.
 func NewManager(cfg Config) *Manager {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &Manager{
-		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder,
+		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, logger: logger,
 		nodeID: cfg.NodeID, nodeHost: cfg.NodeHost, nodeStart: cfg.NodeStart, routeTTL: cfg.RouteTTL,
 		conns: map[string]*conn{}, now: time.Now,
 	}
@@ -133,8 +146,13 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 			delete(m.conns, c.name)
 		}
 		m.mu.Unlock()
-		_ = m.router.Unbind(context.Background(), c.name, c.connID) // owner-conditional
-		m.writeEvent(context.Background(), c, "end", c.closeReason())
+		// Bounded: a hung control plane / store must not pin the teardown (the route also TTL-expires).
+		tctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+		defer cancel()
+		if err := m.router.Unbind(tctx, c.name, c.connID); err != nil { // owner-conditional
+			m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)
+		}
+		m.writeEvent(tctx, c, "end", c.closeReason())
 		m.rec.PhoneConnClose(c.closeReason())
 		c.close("phone-close")
 	}
@@ -287,7 +305,9 @@ func (m *Manager) writeEvent(ctx context.Context, c *conn, event, reason string)
 		ev.DurationMS = ev.TSEnd.Sub(c.sessionStart).Milliseconds()
 		ev.CloseReason = reason
 	}
-	_ = m.logs.PutConnLog(ctx, ev)
+	if err := m.logs.PutConnLog(ctx, ev); err != nil {
+		m.logger.Warn("phone conn-log write failed", "tunnel", c.name, "event", event, "err", err)
+	}
 }
 
 func (c *conn) isClosed() bool {

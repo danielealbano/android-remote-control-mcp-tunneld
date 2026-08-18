@@ -3,6 +3,7 @@ package phoneconn
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 type fakeRouter struct {
+	mu       sync.Mutex
 	bound    map[string]time.Time // name → startedAt
 	hbResult router.HeartbeatResult
 	unbound  map[string]bool
@@ -21,6 +23,8 @@ func newFakeRouter() *fakeRouter {
 	return &fakeRouter{bound: map[string]time.Time{}, unbound: map[string]bool{}}
 }
 func (f *fakeRouter) BindRoute(_ context.Context, name, _, _, _ string, startedAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bound[name] = startedAt
 	return nil
 }
@@ -28,18 +32,35 @@ func (f *fakeRouter) Heartbeat(_ context.Context, _, _ string) (router.Heartbeat
 	return f.hbResult, nil
 }
 func (f *fakeRouter) Unbind(_ context.Context, name, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.unbound[name] = true
 	return nil
 }
 func (f *fakeRouter) BindRouteIfAbsentOrOwner(_ context.Context, name, _, _, _ string, s time.Time) (router.SelfHealResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bound[name] = s
 	return router.SelfHealBound, nil
 }
 
-type fakeRec struct{ opens, closes int }
+func (f *fakeRouter) boundAt(name string) (time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.bound[name]
+	return v, ok
+}
 
-func (r *fakeRec) PhoneConnOpen()        { r.opens++ }
-func (r *fakeRec) PhoneConnClose(string) { r.closes++ }
+func (f *fakeRouter) wasUnbound(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.unbound[name]
+}
+
+type fakeRec struct{ opens, closes atomic.Int64 }
+
+func (r *fakeRec) PhoneConnOpen()        { r.opens.Add(1) }
+func (r *fakeRec) PhoneConnClose(string) { r.closes.Add(1) }
 
 func newMgr(t *testing.T) (*Manager, *fakeRouter, *tunneltest.Store, *fakeRec) {
 	t.Helper()
@@ -64,17 +85,17 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fr.bound["abc"]; !got.Equal(c.sessionStart) {
+	if got, ok := fr.boundAt("abc"); !ok || !got.Equal(c.sessionStart) {
 		t.Errorf("route startedAt = %v, want %v", got, c.sessionStart)
 	}
-	if rec.opens != 1 {
+	if rec.opens.Load() != 1 {
 		t.Error("PhoneConnOpen not recorded")
 	}
 	if len(st.ConnLogs) != 1 || st.ConnLogs[0].Event != "start" || st.ConnLogs[0].Type != "phone" {
 		t.Errorf("start event not written: %+v", st.ConnLogs)
 	}
 	teardown()
-	if !fr.unbound["abc"] {
+	if !fr.wasUnbound("abc") {
 		t.Error("route not unbound on teardown")
 	}
 	var endSeen bool
@@ -83,7 +104,7 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 			endSeen = true
 		}
 	}
-	if !endSeen || rec.closes != 1 {
+	if !endSeen || rec.closes.Load() != 1 {
 		t.Error("end event / PhoneConnClose missing")
 	}
 }
