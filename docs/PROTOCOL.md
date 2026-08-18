@@ -87,14 +87,25 @@ stale).
 **Write-verify claim invariant**: the settle wait MUST strictly exceed the claim-PUT timeout, and
 registry writes disable SDK auto-retries (a retried claim PUT would be a self-inflicted zombie write).
 
+**Phase-1 HTTP surface** (server-TLS on `--enroll-host`, JSON, all binary blobs hex/PEM as noted):
+
+- `GET /enroll/nonce` → `{"nonce": "<hex>"}` — a single-use challenge nonce (per-IP rate-limited).
+- `POST /enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>"}`
+  → `{"name": "<assigned>", "identity_cert": "<PEM>", "issue_nonce": "<hex>"}`. `issue_nonce` is the
+  single-use nonce the phone echoes in its follow-up `POST /issue`. Errors are
+  `{"reason", "retryable", "retry_after_seconds"?}` with an HTTP status (401 unauthorized, 503 retryable,
+  400 otherwise).
+
 ## 3. Phone control connection (HTTP/2 + mTLS)
 
-The phone opens ONE outbound HTTP/2 connection to `--control-host`. It carries:
+The phone opens ONE outbound HTTP/2 connection to `--control-host` (mTLS, identity client cert). It
+carries:
 
-- a long-lived **control stream** with length-framed control messages (below), and
-- one **data stream per public connection**, opened by the phone via **dial-back** (the server announces
-  an incoming connection on the control stream; the phone opens the data stream — HTTP/2 streams are
-  always client-initiated).
+- a long-lived **control stream** — a `POST /control` request whose **request body** is the phone→server
+  frame stream (only `PONG`) and whose **response body** is the server→phone frame stream (`OPEN`,
+  `PING`, `RENEW_NUDGE`). Both bodies are the length-framed control messages below; the server flushes
+  each frame. The stream stays open for the connection's lifetime.
+- one **data stream per public connection**, opened by the phone via **dial-back** (below).
 
 Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values are FROZEN:
 
@@ -127,10 +138,13 @@ the new ones.
 
 ## 4. Data stream (opaque splice)
 
-Once the phone opens the data stream in response to `OPEN{stream_id}` (matched by `stream_id`), it is a
-**raw, bidirectional, opaque byte splice** carrying the client↔phone TLS session. It has NO framing —
-HTTP/2 provides the framing and `END_STREAM` is the teardown signal. `wire.ChunkSize` (32768) is the
-bandwidth-pacing slice size the bridge reads, NOT a wire frame.
+On `OPEN{stream_id}` the phone dials back with a `POST /data` request carrying the **`X-Stream-Id`**
+header set to that `stream_id` (this is how the server correlates the dial-back to the waiting public
+connection). The **request body** is the phone→client byte direction; the **response body** is the
+client→phone direction. Both are a **raw, bidirectional, opaque byte splice** carrying the client↔phone
+TLS session — NO framing (HTTP/2 provides framing; `END_STREAM` is the teardown signal). `wire.ChunkSize`
+(32768) is the bandwidth-pacing slice size the bridge reads, NOT a wire frame. (An unknown/expired
+`X-Stream-Id` gets a `404`.)
 
 ## 5. Replica mesh
 
@@ -146,5 +160,6 @@ is replica↔replica only — it is NOT part of the phone-client contract.
 - E2E: forward-secret TLS 1.3 between client and phone; tunneld holds no tunnel cert key, ever.
 - No reverse proxy anywhere; tunneld is the raw `:443` edge; the trusted client IP is the TCP peer.
 - Caps are UNIFORM (no per-path exceptions); rate limiting is global across replicas via Valkey.
-- `ChunkSize == 32768`; both peers set the HTTP/2 read limits accordingly.
+- `ChunkSize == 32768` is the paced-copy slice size only; HTTP/2 framing and flow control use the
+  library defaults (no custom read-limit configuration).
 - No secrets, key material, or tunnel payloads are ever logged.

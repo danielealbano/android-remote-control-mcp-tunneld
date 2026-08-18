@@ -2788,3 +2788,26 @@ gates, and validate all touched Mermaid diagrams.
   EXACTLY `<name>.<tunnel-domain>`: CN empty-or-equal, the SAN list exactly `{fqdn}` (or empty when
   the CN carries it), and NO other identifier types (IP/email/URI SANs). A table test covers the
   extra-tenant, wildcard, reserved-host, foreign-CN, and wildcard-only attack CSRs.
+- **Sixth review wave (adversarial review round 6; coverage, doc completeness, failure-path integrity):**
+  - **US9/US11 (plan-claimed coverage added):** a `meshCertHolder` hot-swap test (mint → re-mint →
+    `getCert`/`GetClientCertificate` serve the NEW cert to a fresh handshake, no restart) and an edge
+    connection-log test asserting a public connection produces a start AND an end event carrying the
+    byte counts + `close_reason` (the edge harness's `fakeSink` was previously wired but never asserted).
+  - **US5 (`csr_domain_mismatch` persists evidence):** the extra-SAN/wildcard/reserved-host CSR
+    rejection now writes `rejected-enroll/` evidence via `recordRejection` (the most attack-indicative
+    rejection previously recorded only the metric), matching every sibling csr-mismatch branch.
+  - **US5 (claim_nonce preserved on the failure path):** `recordCert`'s transient-re-read fallback now
+    reuses the `cur` record `Issue` already read (carrying the claim nonce + enrolled-at) instead of a
+    zero record — the "claim_nonce PRESERVED on every LWW update" invariant now holds even when the
+    success-path re-read fails.
+  - **Docs (PROTOCOL.md completeness):** §2 now documents the `GET /enroll/nonce` route and the
+    Phase-1 `/enroll` JSON schemas; §3 documents the `POST /control` request/response body directions;
+    §4 documents the `POST /data` `X-Stream-Id` correlation + body-direction mapping — the phone-client
+    surface a Kotlin client must implement (the mesh surface was already documented). The false §6
+    "both peers set the HTTP/2 read limits" claim was corrected (no custom read limit is configured).
+  - **Stale comments corrected:** four comments still describing the removed HTTP/WebSocket design
+    (`cmd/tunneld/main.go` "HTTP tunnel server", `router/registry.go` "WS heartbeat", `ban/watch.go`
+    "WS manager (§6)", `ca/name.go` "/connect path") rewritten to the as-built E2E design with correct
+    section pointers.
+  - **Error-discard justifications:** the five best-effort Valkey discards in `internal/acme/chain.go`
+    (CACooldown/ResetCAFailures/SetCACooldown/BumpCAFailures) now carry their fail-open justification.
