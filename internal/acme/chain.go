@@ -40,7 +40,6 @@ func (nopRecorder) ACMERenew(string, string) {}
 type ChainConfig struct {
 	Limiter            *limit.Limiter
 	Recorder           Recorder
-	LEWeeklyBudget     int
 	CooldownDefault    time.Duration
 	BackoffInitial     time.Duration
 	BackoffMax         time.Duration
@@ -48,8 +47,9 @@ type ChainConfig struct {
 	ShortlivedLifetime time.Duration // 160h
 }
 
-// chainIssuer implements enroll.PublicIssuer with reactive per-CA cooldown/backoff, a reserve-then-
-// refund weekly LE budget, and opportunistic LE-first migration at renewal.
+// chainIssuer implements enroll.PublicIssuer with reactive per-CA cooldown/backoff (a rate-limited CA
+// gets a Valkey retry-after; the spillover skips a cooling CA). Issue and renew use the SAME LE→GTS→
+// ZeroSSL order, so every renewal opportunistically migrates the name to LE (an LE renewal costs nothing).
 type chainIssuer struct {
 	cfg ChainConfig
 	cas []caIssuer // ordered [LE, GTS, ZeroSSL]
@@ -67,46 +67,23 @@ func NewChainIssuer(cfg ChainConfig, cas ...caIssuer) *chainIssuer {
 // SetClock overrides the clock (tests).
 func (c *chainIssuer) SetClock(f func() time.Time) { c.now = f }
 
-// Obtain runs the initial LE→GTS→ZeroSSL spillover: every LE attempt is a NEW order (budget-gated,
-// reserve-then-refund).
+// Obtain runs the initial LE→GTS→ZeroSSL spillover, trying LE first.
 func (c *chainIssuer) Obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
-	return c.run(ctx, csr, name, c.cas, true)
+	return c.run(ctx, csr, name, c.cas)
 }
 
-// Renew renews an existing name. A NON-LE name tries LE FIRST when the weekly budget reserves
-// (opportunistic migration); otherwise it renews on cur.CA (an LE renewal of an LE name is
-// budget-EXEMPT) and falls through the remaining chain on failure.
-func (c *chainIssuer) Renew(ctx context.Context, csr *x509.CertificateRequest, name string, cur store.CertInfo) ([]byte, store.CertInfo, error) {
-	le := c.byID(CALetsEncrypt)
-	// Opportunistic migration: a non-LE name tries LE first when the budget allows (a NEW LE order).
-	if cur.CA != CALetsEncrypt && le != nil {
-		if ok, _ := c.cfg.Limiter.ConsumeLEOrder(ctx, c.cfg.LEWeeklyBudget); ok {
-			if cool, _ := c.cfg.Limiter.CACooldown(ctx, CALetsEncrypt); cool <= 0 {
-				pemChain, info, err := le.obtain(ctx, csr, name)
-				if err == nil {
-					_ = c.cfg.Limiter.ResetCAFailures(ctx, CALetsEncrypt)
-					c.cfg.Recorder.ACMERenew(CALetsEncrypt, "ok")
-					return pemChain, info, nil
-				}
-				_ = c.cfg.Limiter.ReleaseLEOrder(ctx)
-				c.handleFailure(ctx, CALetsEncrypt, err)
-			} else {
-				_ = c.cfg.Limiter.ReleaseLEOrder(ctx) // LE cooling — refund the reservation
-			}
-		}
-	}
-	// Renew on cur.CA (LE renewal of an LE name is budget-exempt), then fall through the remaining chain.
-	order := c.orderFrom(cur.CA)
-	// The first element (cur.CA) uses NEW-order budget semantics ONLY if it is LE AND cur was non-LE
-	// (i.e. a migration) — but that path is handled above; here cur.CA==LE means an exempt renewal.
-	leNewOrder := false
-	return c.run(ctx, csr, name, order, leNewOrder)
+// Renew renews an existing name using the SAME LE→GTS→ZeroSSL order as initial issuance, so every
+// renewal opportunistically migrates the name to LE (an LE renewal costs nothing). cur is unused: a
+// name already on LE simply renews on LE first; a GTS/ZeroSSL name is retried on LE first.
+func (c *chainIssuer) Renew(ctx context.Context, csr *x509.CertificateRequest, name string, _ store.CertInfo) ([]byte, store.CertInfo, error) {
+	return c.run(ctx, csr, name, c.cas)
 }
 
-// run tries the CAs in order, skipping any that are cooling, applying reserve-then-refund LE budget for
-// LE NEW orders, and reactive cooldown/backoff on failure. leNewOrder marks whether an LE attempt in
-// this run is a NEW order (budget-consuming) vs an exempt LE renewal.
-func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, name string, cas []caIssuer, leNewOrder bool) ([]byte, store.CertInfo, error) {
+// run tries the CAs in order, skipping any that are cooling (an active Valkey retry-after) and applying
+// reactive cooldown/backoff on failure. The first success wins; a rate-limited CA gets a retry-after
+// honoring its Retry-After, other repeated failures get exponential backoff. When every CA is cooling or
+// failing, the error is retryable ("quota exhausted, retry later") with the shortest remaining cooldown.
+func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, name string, cas []caIssuer) ([]byte, store.CertInfo, error) {
 	shortest := time.Duration(0)
 	for _, ca := range cas {
 		if cool, _ := c.cfg.Limiter.CACooldown(ctx, ca.id()); cool > 0 {
@@ -115,22 +92,11 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			}
 			continue
 		}
-		reserved := false
-		if ca.id() == CALetsEncrypt && leNewOrder {
-			ok, _ := c.cfg.Limiter.ConsumeLEOrder(ctx, c.cfg.LEWeeklyBudget)
-			if !ok {
-				continue // no LE budget — skip LE without an attempt
-			}
-			reserved = true
-		}
 		pemChain, info, err := ca.obtain(ctx, csr, name)
 		if err == nil {
 			_ = c.cfg.Limiter.ResetCAFailures(ctx, ca.id())
 			c.cfg.Recorder.ACMEIssue(ca.id(), "ok")
 			return pemChain, info, nil
-		}
-		if reserved {
-			_ = c.cfg.Limiter.ReleaseLEOrder(ctx) // failed order never burns budget
 		}
 		c.cfg.Recorder.ACMEIssue(ca.id(), "fail")
 		if c.handleFailure(ctx, ca.id(), err) {
@@ -141,7 +107,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	if shortest == 0 {
 		shortest = c.cfg.CooldownDefault
 	}
-	return nil, store.CertInfo{}, rateLimited(shortest, fmt.Errorf("all CAs unavailable"))
+	return nil, store.CertInfo{}, rateLimited(shortest, fmt.Errorf("all issuance CAs are rate-limited; quota exhausted, retry later"))
 }
 
 // handleFailure applies the reactive cooldown/backoff for ca and reports whether the error is permanent.
@@ -181,8 +147,8 @@ func (c *chainIssuer) ShouldRenew(ctx context.Context, cur store.CertInfo) (bool
 }
 
 // ObtainSelf issues a cert for one of tunneld's OWN reserved hostnames using a SERVER-SIDE key + CSR,
-// via the same spillover (subject to the per-CA cooldowns + LE budget, but NOT the per-tunnel issuance
-// cap — that lives in enroll and is keyed on tunnel names).
+// via the same spillover (subject to the per-CA cooldowns, but NOT the per-tunnel issuance cap — that
+// lives in enroll and is keyed on tunnel names).
 func (c *chainIssuer) ObtainSelf(ctx context.Context, host string) (certPEM, keyPEM []byte, info store.CertInfo, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -198,7 +164,7 @@ func (c *chainIssuer) ObtainSelf(ctx context.Context, host string) (certPEM, key
 	if err != nil {
 		return nil, nil, store.CertInfo{}, err
 	}
-	certPEM, info, err = c.run(ctx, csr, host, c.cas, true)
+	certPEM, info, err = c.run(ctx, csr, host, c.cas)
 	if err != nil {
 		return nil, nil, store.CertInfo{}, err
 	}
@@ -217,23 +183,6 @@ func (c *chainIssuer) byID(id string) caIssuer {
 		}
 	}
 	return nil
-}
-
-// orderFrom returns the CA slice starting at the given id, then the rest in the canonical order.
-func (c *chainIssuer) orderFrom(id string) []caIssuer {
-	var head caIssuer
-	var rest []caIssuer
-	for _, ca := range c.cas {
-		if ca.id() == id {
-			head = ca
-		} else {
-			rest = append(rest, ca)
-		}
-	}
-	if head == nil {
-		return c.cas
-	}
-	return append([]caIssuer{head}, rest...)
 }
 
 // backoff = min(initial * 2^(n-1), max) for a streak length n (n>=1).

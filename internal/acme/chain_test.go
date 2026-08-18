@@ -3,6 +3,7 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,9 +41,6 @@ func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *li
 	lim := limit.NewLimiter(rdb, 1, 1, 1)
 	lim.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	cfg.Limiter = lim
-	if cfg.LEWeeklyBudget == 0 {
-		cfg.LEWeeklyBudget = 50
-	}
 	if cfg.CooldownDefault == 0 {
 		cfg.CooldownDefault = time.Hour
 	}
@@ -122,56 +120,59 @@ func TestAllCoolingReturnsRetryable(t *testing.T) {
 	}
 }
 
-func TestLEBudgetSkipsToGTS(t *testing.T) {
+func TestRenewTriesLEFirst(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
-	ch, lim := newChain(t, ChainConfig{LEWeeklyBudget: 1}, le, gts)
-	// Exhaust the LE budget.
-	_, _ = lim.ConsumeLEOrder(context.Background(), 1)
-	_, info, err := ch.Obtain(context.Background(), nil, "t")
-	if err != nil || info.CA != CAGTS {
-		t.Fatalf("exhausted LE budget should skip to GTS, got %+v %v", info, err)
-	}
-	if le.calls != 0 {
-		t.Error("LE must not be attempted with no budget")
-	}
-}
-
-func TestLEBudgetRefundOnFailure(t *testing.T) {
-	le := &fakeCA{caID: CALetsEncrypt, err: transient(nil)}
-	gts := &fakeCA{caID: CAGTS}
-	ch, lim := newChain(t, ChainConfig{LEWeeklyBudget: 1}, le, gts)
-	_, info, _ := ch.Obtain(context.Background(), nil, "t")
-	if info.CA != CAGTS {
-		t.Fatalf("LE failed → GTS, got %+v", info)
-	}
-	// The reserved LE slot was refunded, so a fresh reserve still succeeds within budget 1.
-	if ok, _ := lim.ConsumeLEOrder(context.Background(), 1); !ok {
-		t.Error("failed LE order must have refunded the budget")
-	}
-}
-
-func TestRenewMigratesNonLEToLE(t *testing.T) {
-	le := &fakeCA{caID: CALetsEncrypt}
-	gts := &fakeCA{caID: CAGTS}
-	ch, _ := newChain(t, ChainConfig{LEWeeklyBudget: 50}, le, gts)
+	ch, _ := newChain(t, ChainConfig{}, le, gts)
+	// A name currently on GTS renews: LE is tried FIRST (opportunistic migration), no budget involved.
 	_, info, err := ch.Renew(context.Background(), nil, "t", store.CertInfo{CA: CAGTS})
 	if err != nil || info.CA != CALetsEncrypt {
-		t.Fatalf("non-LE renewal should migrate to LE, got %+v %v", info, err)
+		t.Fatalf("renewal should try LE first and migrate, got %+v %v", info, err)
+	}
+	if le.calls != 1 || gts.calls != 0 {
+		t.Errorf("LE should be attempted once and GTS not at all, le=%d gts=%d", le.calls, gts.calls)
 	}
 }
 
-func TestRenewLEIsBudgetExempt(t *testing.T) {
+func TestRenewSpillsWhenLECooling(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
-	ch, lim := newChain(t, ChainConfig{LEWeeklyBudget: 0}, le) // zero budget
-	_, info, err := ch.Renew(context.Background(), nil, "t", store.CertInfo{CA: CALetsEncrypt})
-	if err != nil || info.CA != CALetsEncrypt {
-		t.Fatalf("LE renewal must be budget-exempt, got %+v %v", info, err)
+	gts := &fakeCA{caID: CAGTS}
+	ch, lim := newChain(t, ChainConfig{}, le, gts)
+	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour) // LE has an active retry-after
+	_, info, err := ch.Renew(context.Background(), nil, "t", store.CertInfo{CA: CAGTS})
+	if err != nil || info.CA != CAGTS {
+		t.Fatalf("a cooling LE should be skipped and renewal spill to GTS, got %+v %v", info, err)
 	}
-	if le.calls != 1 {
-		t.Errorf("LE should have been attempted once (budget-exempt), calls=%d", le.calls)
+	if le.calls != 0 {
+		t.Error("a cooling LE must not be attempted on renewal")
 	}
-	_ = lim
+}
+
+func TestRateLimitedSpillsAndSetsRetryAfter(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt, err: rateLimited(30*time.Minute, nil)}
+	gts := &fakeCA{caID: CAGTS}
+	ch, lim := newChain(t, ChainConfig{}, le, gts)
+	// LE answers rate-limited → its retry-after is set (honoring Retry-After) and the order spills to GTS.
+	_, info, err := ch.Obtain(context.Background(), nil, "t")
+	if err != nil || info.CA != CAGTS {
+		t.Fatalf("rate-limited LE should spill to GTS, got %+v %v", info, err)
+	}
+	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d < 30*time.Minute {
+		t.Errorf("LE retry-after should honor the 30m Retry-After, got %s", d)
+	}
+	if gts.calls != 1 {
+		t.Errorf("GTS should have been attempted once, calls=%d", gts.calls)
+	}
+}
+
+func TestAllCoolingMessageIsQuotaExhausted(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt}
+	ch, lim := newChain(t, ChainConfig{}, le)
+	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour)
+	_, _, err := ch.Obtain(context.Background(), nil, "t")
+	if err == nil || !strings.Contains(err.Error(), "quota exhausted, retry later") {
+		t.Fatalf("all-cooling error should be the quota-exhausted message, got %v", err)
+	}
 }
 
 func TestShouldRenewFixedCadence(t *testing.T) {
