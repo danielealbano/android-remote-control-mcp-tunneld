@@ -1175,7 +1175,7 @@ miniredis for nonces + limits.
 
 ## User Story 6: ACME issuance chain (LE → GTS → ZeroSSL) with ARI renewal + opportunistic LE migration
 
-- [ ] **User Story 6 complete**
+- [x] **User Story 6 complete**
 
 Implement public-cert issuance behind the `enroll.PublicIssuer` interface: lego-backed clients for the
 three CAs with automatic spillover, DNS-01, the split renewal timing (LE ARI / fixed cadence for
@@ -1183,37 +1183,37 @@ GTS+ZeroSSL), reactive per-CA cooldown+backoff, and the weekly LE budget that bo
 paces the opportunistic at-renewal migration onto LE.
 
 ### Acceptance Criteria
-- [ ] `internal/acme` provides a `chainIssuer` implementing `enroll.PublicIssuer` (BOTH `Obtain` —
+- [x] `internal/acme` provides a `chainIssuer` implementing `enroll.PublicIssuer` (BOTH `Obtain` —
   initial spillover — and `Renew` — LE-first opportunistic migration for non-LE names, budget-exempt LE
   renewal for LE names) plus `ShouldRenew(ctx context.Context, cur store.CertInfo) (bool, time.Time,
   error)` — ctx-first because for LE names it makes an ARI network call via the internal
   `caIssuer.shouldRenew(ctx, cur)` it wraps (the US11 renewal watcher propagates its drain ctx),
   recording which CA succeeded.
-- [ ] Issuance uses `ObtainForCSR` (phone CSR), the LE `shortlived` profile, and DNS-01 via the
+- [x] Issuance uses `ObtainForCSR` (phone CSR), the LE `shortlived` profile, and DNS-01 via the
   configured lego provider behind our own `DNSProvider` interface.
-- [ ] Renewal timing preserves the UNIFORM ~4.7-day rotation cadence: LE names use lego
+- [x] Renewal timing preserves the UNIFORM ~4.7-day rotation cadence: LE names use lego
   `GetRenewalInfo`/`ShouldRenewAt` (ARI) floored at `--acme-renew-margin`; GTS/ZeroSSL names (ARI
   unverified there) use NO ARI call — they renew on the FIXED schedule `NotBefore + (160h −
   --acme-renew-margin)`, so a 90-day ZeroSSL cert still rotates every ~4.7 days.
-- [ ] Rate-limit protection is REACTIVE: a CA in cooldown (`limit.CACooldown` > 0) is SKIPPED by the
+- [x] Rate-limit protection is REACTIVE: a CA in cooldown (`limit.CACooldown` > 0) is SKIPPED by the
   spillover; an `ErrRateLimited` answer sets `limit.SetCACooldown(max(RetryAfter,
   --acme-cooldown-default))`; any other failure bumps `limit.BumpCAFailures` and sets a cooldown of
   `min(--acme-backoff-initial × 2^(n−1), --acme-backoff-max)`; success calls `limit.ResetCAFailures`.
   The weekly LE budget additionally gates LE new orders with RESERVE-THEN-REFUND semantics
   (`limit.ConsumeLEOrder` before the attempt, `limit.ReleaseLEOrder` if it fails): NEW-name LE issuance
   and migration renewals consume it; LE renewals of LE-issued names do not.
-- [ ] `Renew` shifts names onto LE opportunistically (user decision — LE alone does not rate-limit
+- [x] `Renew` shifts names onto LE opportunistically (user decision — LE alone does not rate-limit
   renewals): a NON-LE name tries LE FIRST when the weekly budget reserves; on no-budget/LE-failure it
   renews on `cur.CA`, then falls through the remaining chain; an LE name renews on LE WITHOUT touching
   the budget. Every renewal carries the phone's fresh CSR (rotation), so the LE issuance happens right
   there — no separate migration job exists.
-- [ ] `chainIssuer` also exposes `ObtainSelf(host)` (server-side key+CSR) for tunneld's own reserved-host
+- [x] `chainIssuer` also exposes `ObtainSelf(host)` (server-side key+CSR) for tunneld's own reserved-host
   server certs (`--enroll-host`/`--control-host`), via the same spillover.
-- [ ] Classified errors (rate-limited / transient / permanent) propagate to enrollment.
+- [x] Classified errors (rate-limited / transient / permanent) propagate to enrollment.
 
 ### Task 6.1: chainIssuer + DNS provider seam
-- [ ] **Task 6.1 complete**
-- [ ] **File**: `internal/acme/issuer.go` — create the internal per-CA `caIssuer` interface + the neutral
+- [x] **Task 6.1 complete**
+- [x] **File**: `internal/acme/issuer.go` — create the internal per-CA `caIssuer` interface + the neutral
   `DNSProvider` wrapper over lego's provider, and typed errors:
 ```go
 type caIssuer interface {
@@ -1228,8 +1228,8 @@ var ErrPermanent   = errors.New("acme: permanent")
 ```
 
 ### Task 6.2: lego-backed per-CA client
-- [ ] **Task 6.2 complete**
-- [ ] **File**: `internal/acme/lego_client.go` — one `legoClient` per CA (directory + persisted account
+- [x] **Task 6.2 complete**
+- [x] **File**: `internal/acme/lego_client.go` — one `legoClient` per CA (directory + persisted account
   from `--acme-account-dir` + optional EAB + DNS-01 provider). `obtain` calls
   `certificate.ObtainForCSR(ObtainForCSRRequest{CSR: csr, Profile: <profile>, Bundle: true})` (LE →
   `shortlived`; GTS → `--acme-gts-validity` window; ZeroSSL → 90d default). `shouldRenew` is SPLIT: the
@@ -1242,8 +1242,8 @@ ZeroSSL). If lego needs a specific registration/storage shape not covered here, 
 Deviations` and use the closest supported path.
 
 ### Task 6.3: Spillover + budget gating
-- [ ] **Task 6.3 complete**
-- [ ] **File**: `internal/acme/chain.go` — `chainIssuer` (implements `enroll.PublicIssuer`) holding
+- [x] **Task 6.3 complete**
+- [x] **File**: `internal/acme/chain.go` — `chainIssuer` (implements `enroll.PublicIssuer`) holding
   `[LE, GTS, ZeroSSL]`. Common attempt mechanics (both entry points): SKIP any CA whose
   `limit.CACooldown` > 0; every LE NEW-order attempt (anything except an LE renewal of an LE-issued
   name) first RESERVES budget via `limit.ConsumeLEOrder` (no budget → skip LE) and REFUNDS via
@@ -1266,8 +1266,8 @@ Deviations` and use the closest supported path.
   NOT the per-tunnel issuance cap).
 
 ### Task 6.4: Unit tests
-- [ ] **Task 6.4 complete**
-- [ ] **File**: `internal/acme/chain_test.go`, `lego_client_test.go` (error classification only, no
+- [x] **Task 6.4 complete**
+- [x] **File**: `internal/acme/chain_test.go`, `lego_client_test.go` (error classification only, no
   network)
 **Setup**: fake per-CA `caIssuer` returning canned certs or typed errors; fake `store` + miniredis. Real
 ACME issuance is covered by the integration tier (US14, Pebble).
@@ -1292,13 +1292,13 @@ ACME issuance is covered by the integration tier (US14, Pebble).
 | `ObtainSelf self-cert` | Produces a server-side key + cert for a reserved host; does NOT consume the per-tunnel issuance counter; IS subject to per-CA cooldowns + the LE budget |
 
 ### Definition of Done
-- [ ] `chainIssuer` implements `enroll.PublicIssuer` (`Obtain` + LE-first-migrating `Renew`); spillover
+- [x] `chainIssuer` implements `enroll.PublicIssuer` (`Obtain` + LE-first-migrating `Renew`); spillover
   with reactive per-CA cooldown+backoff + reserve/refund LE budget; DNS-01 behind our own provider seam.
-- [ ] `ObtainForCSR` + `shortlived` profile via lego; renewal split LE-ARI vs fixed
+- [x] `ObtainForCSR` + `shortlived` profile via lego; renewal split LE-ARI vs fixed
   `NotBefore + 112h` cadence for GTS/ZeroSSL; opportunistic LE-first migration at renewal
   (budget-paced, reserve/refund).
-- [ ] Classified errors propagate to enrollment.
-- [ ] US6 unit tables authored/committed (execution in US16; real ACME in US14).
+- [x] Classified errors propagate to enrollment.
+- [x] US6 unit tables authored/committed (execution in US16; real ACME in US14).
 
 ---
 
@@ -2266,6 +2266,15 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US6 lego Retry-After:** lego v4.35.2's `acme.ProblemDetails` does not expose a Retry-After field,
+  so a rate-limited classification returns retry=0 and the chain applies `--acme-cooldown-default` as
+  the cooldown floor (the agreed `max(Retry-After, default)` degrades to `default`). **US6
+  `shouldRenew` ARI:** lego's `GetRenewalInfo`/`ShouldRenewAt` need the ISSUED cert, but `ShouldRenew`
+  is called with only `store.CertInfo` metadata; the LE path therefore floors at `NotAfter - margin`
+  (T-48h) rather than making a live ARI call at scheduling time — a live ARI refinement can be added in
+  the renewal watcher (US11) where the cert is at hand. The legoClient is real but exercised by the
+  US14 Pebble integration tier (no unit test); the chainIssuer orchestration is unit-tested with fakes.
 
 - **US5 `ca.SignMesh`:** takes an explicit `ttl time.Duration` param (the plan's shorthand omitted
   it) so the shared `ca.Load(certPath, keyPath, validity)` signature stays additive (server.Run knows
