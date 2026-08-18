@@ -409,6 +409,39 @@ func TestEdge_Splice_CloseReasonAttribution(t *testing.T) {
 			t.Fatalf("client EOF must record %q, got %q", store.CloseClientClose, got)
 		}
 	})
+
+	// A ctx cancel with the eviction marker set (evictLeastActive's order) records evicted.
+	t.Run("saturation eviction", func(t *testing.T) {
+		client := newScriptConn("203.0.113.22", nil) // blocks until closed
+		far := newScriptConn("203.0.113.22", nil)    // blocks until closed
+		ctx, cancel := context.WithCancel(context.Background())
+		as := &activeStream{tunnel: "t", started: time.Now(), cancel: cancel}
+		as.lastAct.Store(time.Now().UnixNano())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			as.evicted.Store(true)
+			cancel()
+		}()
+		if got := te.e.splice(ctx, "t", client, far, as); got != store.CloseEvicted {
+			t.Fatalf("a marked eviction cancel must record %q, got %q", store.CloseEvicted, got)
+		}
+	})
+
+	// A ctx cancel WITHOUT the eviction marker is the server draining (parent ctx) — never "evicted".
+	t.Run("server drain", func(t *testing.T) {
+		client := newScriptConn("203.0.113.23", nil) // blocks until closed
+		far := newScriptConn("203.0.113.23", nil)    // blocks until closed
+		ctx, cancel := context.WithCancel(context.Background())
+		as := &activeStream{tunnel: "t", started: time.Now(), cancel: func() {}}
+		as.lastAct.Store(time.Now().UnixNano())
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+		if got := te.e.splice(ctx, "t", client, far, as); got != store.CloseServerShutdown {
+			t.Fatalf("a drain cancel must record %q, got %q", store.CloseServerShutdown, got)
+		}
+	})
 }
 
 // closingConn is a scriptConn whose Read returns EOF immediately (the public client closing its side).

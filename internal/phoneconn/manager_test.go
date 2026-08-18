@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -120,6 +121,42 @@ func TestEvictBanned(t *testing.T) {
 	m.EvictBanned(func(name, fp string) bool { return name == "abc" })
 	if !c.isClosed() {
 		t.Error("banned connection should be closed")
+	}
+}
+
+// TestCloseAll covers the server-drain path: every live connection is closed with the given reason, so
+// each handler's teardown runs the owner-conditional unbind and writes the end event with that reason.
+func TestCloseAll(t *testing.T) {
+	m, fr, st, _ := newMgr(t)
+	c1 := newConn("abc")
+	c2 := newConn("xyz")
+	td1, err := m.register(context.Background(), c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	td2, err := m.register(context.Background(), c2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.CloseAll(store.CloseServerShutdown)
+	if !c1.isClosed() || !c2.isClosed() {
+		t.Fatal("CloseAll must close every live connection")
+	}
+	if c1.closeReason() != store.CloseServerShutdown || c2.closeReason() != store.CloseServerShutdown {
+		t.Errorf("close reasons = %q, %q, want %q", c1.closeReason(), c2.closeReason(), store.CloseServerShutdown)
+	}
+
+	// The handlers' deferred teardowns then unbind and write the end events with the drain reason.
+	td1()
+	td2()
+	if !fr.wasUnbound("abc") || !fr.wasUnbound("xyz") {
+		t.Error("teardown after CloseAll must unbind both routes")
+	}
+	for _, e := range st.ConnLogs {
+		if e.Event == "end" && e.CloseReason != store.CloseServerShutdown {
+			t.Errorf("end event close_reason = %q, want %q", e.CloseReason, store.CloseServerShutdown)
+		}
 	}
 }
 

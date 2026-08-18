@@ -26,6 +26,7 @@ type activeStream struct {
 	recent   atomic.Int64 // bytes in the current rolling window
 	started  time.Time
 	cancel   context.CancelFunc
+	evicted  atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
 	bytesIn  int64
 	bytesOut int64
 }
@@ -69,6 +70,7 @@ func (e *Edge) evictLeastActive(tunnel string) bool {
 	}
 	e.smu.Unlock()
 	if victim != nil {
+		victim.evicted.Store(true)
 		victim.cancel()
 		return true
 	}
@@ -289,7 +291,13 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 			case <-stopWatch:
 				return
 			case <-ctx.Done():
-				setReason(store.CloseEvicted)
+				// The stream ctx cancels on saturation eviction (evictLeastActive, which marks the
+				// stream first) OR on server drain (the parent ctx) — attribute each accurately.
+				if as.evicted.Load() {
+					setReason(store.CloseEvicted)
+				} else {
+					setReason(store.CloseServerShutdown)
+				}
 				closeBoth()
 				return
 			case <-ticker.C:

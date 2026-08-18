@@ -2947,3 +2947,22 @@ gates, and validate all touched Mermaid diagrams.
   stays a silent `continue` (a permanently-missing file would otherwise log every poll tick); only a
   changed-then-failed reload is logged. Tests assert the Warn fires on a failing root/status refetch and
   on a corrupt signer reload while the last-known-good snapshot is retained.
+
+- **Fifteenth review wave (adversarial review round, Fable reviewer; graceful-drain teardown):** two
+  drain defects against Task 11.4's shutdown order ("cancel bridges → tear down phone + mesh
+  connections → deregister node"). (1) Nothing closed a live `/control` handler at drain: its context
+  derives from the request (not the drain ctx) and `controlSrv.Shutdown` only waits — a never-idle
+  control stream pinned Shutdown for the full `--shutdown-grace`, then `Run` returned with the
+  handlers still alive, so the deferred teardown NEVER ran: the owner-conditional `Unbind` was skipped
+  (route lingered up to `--route-ttl` pointing at the deregistered node) and the phone `end`
+  conn-log event was durably lost on every graceful restart. `phoneconn.Manager.CloseAll(reason)` is
+  added and `server.Run` calls it right after closing the raw listener — each handler returns and its
+  teardown (unbind + end event) runs. (2) The splice policy watcher mapped ANY ctx cancel to
+  `close_reason=evicted`, so a graceful drain durably recorded every live public connection as a
+  saturation eviction. `activeStream` gains an eviction marker set by `evictLeastActive` BEFORE the
+  cancel; the watcher now attributes a marked cancel to `evicted` and an unmarked (parent-ctx / drain)
+  cancel to the new `server-shutdown` close reason (`store.CloseServerShutdown`, added to the
+  close-reason enum — forensic-only, no metric label). ARCHITECTURE §9's shutdown chart gains the
+  phone-close step. Tests: `TestCloseAll` (unbind + end-event reason after drain) and two new
+  `TestEdge_Splice_CloseReasonAttribution` subtests (marked eviction → `evicted`; unmarked drain →
+  `server-shutdown`).

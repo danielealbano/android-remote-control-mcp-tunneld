@@ -235,12 +235,15 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	})
 
 	<-gctx.Done()
-	// Shutdown order: stop accepting new public connections → drain the HTTP servers → the schedulers +
-	// phone/mesh goroutines unwind on gctx. Routes are owner-conditionally unbound at teardown and the
-	// node is explicitly deregistered below; the TTLs on both remain the crash backstop.
+	// Shutdown order: stop accepting new public connections → actively close the live phone control
+	// connections (each /control handler returns, running its teardown: owner-conditional route unbind +
+	// the durable end event — a never-idle control stream would otherwise pin Shutdown for the full
+	// grace and skip both) → drain the HTTP servers → the schedulers + mesh goroutines unwind on gctx.
+	// The node is explicitly deregistered below; the route/node TTLs remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	_ = rawLn.Close()
+	phoneMgr.CloseAll(store.CloseServerShutdown)
 	_ = enrollSrv.Shutdown(sctx)
 	_ = controlSrv.Shutdown(sctx)
 	_ = meshSrv.Shutdown(sctx)

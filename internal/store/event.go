@@ -18,6 +18,7 @@ const (
 	CloseIdleTimeout    = "idle-timeout"
 	CloseMinRate        = "min-rate"
 	CloseEvicted        = "evicted"
+	CloseServerShutdown = "server-shutdown"
 	CloseError          = "error"
 )
 

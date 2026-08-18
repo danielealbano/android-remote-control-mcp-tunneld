@@ -164,10 +164,14 @@ every CA in the chain declined).
 ```mermaid
 flowchart LR
   cancel["ctx cancel"] --> close["close raw :443 listener (stop new public conns)"]
-  close --> drain["Shutdown enroll / control / mesh / internal servers"]
+  close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + writes end events"]
+  phones --> drain["Shutdown enroll / control / mesh / internal servers"]
   drain --> group["errgroup unwinds: schedulers + flusher + watchers on the drain ctx"]
-  group --> dereg["Node explicitly deregistered; phone routes owner-conditionally unbound (TTL = crash backstop)"]
+  group --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
 ```
+
+Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
+(`evicted` is reserved for saturation eviction).
 
 ## 10. Configuration
 

@@ -243,6 +243,21 @@ func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 	return true
 }
 
+// CloseAll closes every live phone connection with the given close reason. Called at server drain so
+// each /control handler returns and its deferred teardown runs (owner-conditional route unbind + the
+// durable end event) instead of the connections outliving Run and losing both.
+func (m *Manager) CloseAll(reason string) {
+	m.mu.RLock()
+	victims := make([]*conn, 0, len(m.conns))
+	for _, c := range m.conns {
+		victims = append(victims, c)
+	}
+	m.mu.RUnlock()
+	for _, c := range victims {
+		c.close(reason)
+	}
+}
+
 // EvictBanned closes every live connection whose (name, fingerprint) matches the ban predicate,
 // recording ban-evict. Wired to the ban-reload hook in server.Run.
 func (m *Manager) EvictBanned(match func(name, fingerprint string) bool) {
