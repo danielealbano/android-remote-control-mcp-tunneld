@@ -52,3 +52,25 @@ func Acquire(ctx context.Context, rdb redis.UniversalClient, name string, maxInF
 	}
 	return release, true, nil
 }
+
+// streamCapTTL bounds leakage of the global per-tunnel stream counter from a crashed node: streams die
+// with their bridges, but a stale count self-heals after this TTL. It is refreshed on every acquire and
+// is generous enough to outlast any realistic stream (the connection policy caps idle streams at 120s;
+// there is no hard stream-lifetime cap, but an hour is far beyond any real MCP request/OAuth flow).
+const streamCapTTL = time.Hour
+
+// AcquireStream reserves one of `cap` GLOBAL concurrent-stream slots for tunnel name across replicas
+// (reusing the conc:{name} counter). Returns false when the tunnel is at its cap. The TTL is refreshed
+// on every acquire (the Plan-1 Acquire release-func API is kept for legacy; this is the E2E form).
+func (l *Limiter) AcquireStream(ctx context.Context, name string, maxN int) (bool, error) {
+	res, err := acquireScript.Run(ctx, l.rdb, []string{"conc:" + name}, maxN, streamCapTTL.Milliseconds()).Int64()
+	if err != nil {
+		return false, err
+	}
+	return res == 1, nil
+}
+
+// ReleaseStream frees a global stream slot for name (DECR floored at 0; the key is removed at zero).
+func (l *Limiter) ReleaseStream(ctx context.Context, name string) error {
+	return releaseScript.Run(ctx, l.rdb, []string{"conc:" + name}).Err()
+}

@@ -763,7 +763,7 @@ override type embedding it).
 
 ## User Story 3: Valkey control plane — node registry, routing, batch-credit quotas, ACME budgets
 
-- [ ] **User Story 3 complete**
+- [x] **User Story 3 complete**
 
 Extend the control plane: a node registry (node id → mesh address), the route registry (retained,
 owner-conditional on connID, now carrying the identity-cert fingerprint), and the batch-credit Lua
@@ -771,13 +771,13 @@ scripts for bandwidth, day/week byte quotas, per-tunnel issuance counters, the p
 cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atomically in-script.
 
 ### Acceptance Criteria
-- [ ] `internal/router` gains a node registry (`RegisterNode`/`RefreshNode`/`LookupNode`/`Nodes`,
+- [x] `internal/router` gains a node registry (`RegisterNode`/`RefreshNode`/`LookupNode`/`Nodes`,
   `node:{id}` → advertise address, TTL'd, heartbeat-refreshed).
-- [ ] The route registry gains ADDITIVE `BindRoute`/`LookupRoute` — the route record carries the owning
+- [x] The route registry gains ADDITIVE `BindRoute`/`LookupRoute` — the route record carries the owning
   node id, connID, the identity-cert fingerprint, AND the tunnel-session start (`startedAt`, the
   conn-id epoch) (the P1 `Bind`/`Lookup` stay untouched for their legacy consumers until US13);
   teardown/refresh stay owner-conditional on connID.
-- [ ] `internal/limit` gains `ClaimBandwidth`, `ClaimTraffic` (day+week combined), the new global
+- [x] `internal/limit` gains `ClaimBandwidth`, `ClaimTraffic` (day+week combined), the new global
   per-tunnel stream counter `AcquireStream`/`ReleaseStream` (reusing the `conc:{name}` key, ADDED
   alongside the retained P1 `Acquire` — which keeps its `internal/ingress` consumer compiling until
   US13 removes both together), `IssuanceAllowed`
@@ -786,19 +786,19 @@ cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atom
   `ConsumeLEOrder`/`ReleaseLEOrder` (rolling-week LE new-order counter with
   reserve-then-refund semantics); each
   sets its TTL in the SAME Lua script as its mutation (or `SET EX` for the cooldown).
-- [ ] All scripts are `EVALSHA`-cached; no dynamically generated script bodies.
-- [ ] Unit tests run against miniredis.
+- [x] All scripts are `EVALSHA`-cached; no dynamically generated script bodies.
+- [x] Unit tests run against miniredis.
 
 ### Task 3.1: Node registry
-- [ ] **Task 3.1 complete**
-- [ ] **File**: `internal/router/nodes.go` — create `RegisterNode(ctx, nodeID, advertise, ttl)`
+- [x] **Task 3.1 complete**
+- [x] **File**: `internal/router/nodes.go` — create `RegisterNode(ctx, nodeID, advertise, ttl)`
   (`SET node:{id} advertise EX ttl` in one call), `RefreshNode`, `LookupNode(ctx, nodeID) (advertise,
   ok, err)`, and `Nodes()` (SCAN — ops/admin only, not the data path). A background heartbeat (US11)
   refreshes at `route-ttl/3`.
 
 ### Task 3.2: Route registry — additive BindRoute/LookupRoute with the tunnel-session epoch
-- [ ] **Task 3.2 complete**
-- [ ] **File**: `internal/router/registry.go` — ADD two methods consumed by the new stack:
+- [x] **Task 3.2 complete**
+- [x] **File**: `internal/router/registry.go` — ADD two methods consumed by the new stack:
   `BindRoute(ctx, name, nodeID, fingerprint, connID string, startedAt time.Time) error` (the P1 `Bind`
   hash plus a `startedAt` field — the tunnel-session start, i.e. the phone control connection's
   establishment time, stored as unix nanos) and `LookupRoute(ctx, name) (nodeID, fingerprint, connID
@@ -814,23 +814,23 @@ cooldown/backoff state, and the weekly LE new-order budget. Every key TTL'd atom
   for the mesh `StreamOpen` owner check and `fingerprint` for the resolved-route ban check.
 
 ### Task 3.3: Batch-credit, quota, issuance, and ACME-budget scripts
-- [ ] **Task 3.3 complete**
-- [ ] **File**: `internal/limit/credit.go` — `ClaimBandwidth(ctx, name, dir, want) (granted, err)`: claim
+- [x] **Task 3.3 complete**
+- [x] **File**: `internal/limit/credit.go` — `ClaimBandwidth(ctx, name, dir, want) (granted, err)`: claim
   up to `want` bytes from the per-tunnel, per-direction refilling budget (window+TTL in-script); the
   pacer draws ~1 MB at a time into a local bucket (Redis hit ~once/MB).
-- [ ] **File**: `internal/limit/concurrency.go` — ADD (additive — the P1 `Acquire`/`acquireScript`
+- [x] **File**: `internal/limit/concurrency.go` — ADD (additive — the P1 `Acquire`/`acquireScript`
   stay untouched so their consumer `internal/ingress/handler.go` keeps compiling until US13): the GLOBAL
   per-tunnel concurrent-STREAM counter reusing the same `conc:{name}` key —
   `AcquireStream(ctx, name, cap) (ok bool, err error)` (Lua: INCR-if-below-cap with the TTL refreshed
   in the same script) and `ReleaseStream(ctx, name) error` (DECR floored at 0). The TTL bounds leakage
   from a crashed node (streams die with their bridges; a stale count self-heals at TTL expiry).
-- [ ] **File**: `internal/limit/traffic.go` — `ClaimTraffic(ctx, name, n) (dayOK, weekOK, err)`: add `n`
+- [x] **File**: `internal/limit/traffic.go` — `ClaimTraffic(ctx, name, n) (dayOK, weekOK, err)`: add `n`
   bytes to the combined day+week counters (both TTL'd in-script), report per-window exhaustion.
-- [ ] **File**: `internal/limit/issuance.go` — `IssuanceAllowed(ctx, name, cap) (bool, err)`: READ-ONLY
+- [x] **File**: `internal/limit/issuance.go` — `IssuanceAllowed(ctx, name, cap) (bool, err)`: READ-ONLY
   check that the rolling-7d per-tunnel issuance counter is below `cap` (NO mutation); and
   `IssuanceRecord(ctx, name) error`: atomically increment that counter with a 7d TTL in-script, called
   ONLY after a public cert is successfully issued (so the cap counts SUCCESSFUL issuances only).
-- [ ] **File**: `internal/limit/acme_budget.go` — the REACTIVE per-CA state:
+- [x] **File**: `internal/limit/acme_budget.go` — the REACTIVE per-CA state:
   `SetCACooldown(ctx, ca string, d time.Duration) error` (`SET acme-cooldown:{ca} 1 EX d` — TTL IS the
   cooldown), `CACooldown(ctx, ca string) (remaining time.Duration, err)` (PTTL read; 0 = not cooling),
   `BumpCAFailures(ctx, ca string, window time.Duration) (consecutive int, err)` (INCR + TTL in-script —
@@ -849,8 +849,8 @@ names never consume it. The issuance counter is
 likewise consumed only on SUCCESS (via `IssuanceRecord`), never at the gate.
 
 ### Task 3.4: Unit tests
-- [ ] **Task 3.4 complete**
-- [ ] **File**: `internal/router/nodes_test.go`, `internal/router/registry_test.go` (extend),
+- [x] **Task 3.4 complete**
+- [x] **File**: `internal/router/nodes_test.go`, `internal/router/registry_test.go` (extend),
   `internal/limit/credit_test.go`, `traffic_test.go`, `issuance_test.go`, `acme_budget_test.go`
 **Setup**: miniredis; fake clock where the fixed-window helpers accept one.
 
@@ -872,12 +872,12 @@ likewise consumed only on SUCCESS (via `IssuanceRecord`), never at the gate.
 | `ReleaseLEOrder refunds` | A reserve followed by a release restores the remaining budget |
 
 ### Definition of Done
-- [ ] Node registry; additive `BindRoute`/`LookupRoute` (node+connID+fpr+startedAt) with the P1
+- [x] Node registry; additive `BindRoute`/`LookupRoute` (node+connID+fpr+startedAt) with the P1
   `Bind`/`Lookup` untouched until US13; teardown/refresh stay owner-conditional.
-- [ ] Batch-credit bandwidth, day+week traffic, per-week issuance (read-only check + success-only
+- [x] Batch-credit bandwidth, day+week traffic, per-week issuance (read-only check + success-only
   record), per-CA cooldown/backoff primitives, and the weekly LE budget (reserve/refund) — all TTL'd,
   `EVALSHA`-cached (or `SET EX` for the cooldown).
-- [ ] US3 unit tables (miniredis) authored/committed (execution in US16).
+- [x] US3 unit tables (miniredis) authored/committed (execution in US16).
 
 ---
 
