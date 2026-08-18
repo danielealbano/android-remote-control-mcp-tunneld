@@ -87,7 +87,7 @@ sequenceDiagram
 
 The entry node accounts bytes (day/week traffic), paces bandwidth from the shared batch-credit bucket,
 and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
-Pebble/WebPKI cert — tunneld never sees plaintext.
+WebPKI cert (a hermetic Pebble CA stands in for the test tiers) — tunneld never sees plaintext.
 
 ## 3. Enrollment, issuance, renewal
 

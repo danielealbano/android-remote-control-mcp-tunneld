@@ -2737,3 +2737,38 @@ gates, and validate all touched Mermaid diagrams.
   - **Commit convention:** four earlier branch commits deviate from `<type>(<scope>)` (a bare `docs:`,
     a bare `deps:`, and two multi-scope commits) — acknowledged; published history is NOT rewritten
     (amending requires explicit permission); all subsequent commits conform.
+- **Third review wave (adversarial review round 3; code-comment hygiene + coverage of sacred paths):**
+  - **Comment hygiene (all packages):** every code comment referencing plan numbers, user-story IDs, or
+    plan artifacts ("Plan 3", "Plan-1", "US13", "see the plan's Deviations", `docs/plans/...`) was
+    rewritten to cite ONLY the canonical docs or deleted; stale claims describing removed code (the
+    "Plan-1 flags/codec/packages remain until the US13 teardown" family, "per-process bandwidth
+    buckets", the recorder's "ingress/WS handlers (§7)", admin's "requests" counter) were corrected to
+    the as-built design. `TestRemovedP1FlagsRejected` was renamed `TestRemovedLegacyFlagsRejected`.
+  - **US10 (dead `requests` counter surface removed):** `admin.TunnelStat.Requests` and the `requests`
+    field handling had no writer since the bytes-only recorder change — `/admin/tunnels` emitted a
+    permanently-zero field. Removed.
+  - **US8 (sacred-path tests added):** listener-level negative tests for the mesh-role-cert rejection
+    and the malformed-CN rejection (the phone listener's role-separation invariant), plus the
+    `HeartbeatMissing` → epoch-preserving self-heal manager test — the plan-claimed rows now have real
+    coverage.
+  - **US11 (JA4 verified against an external vector + a real capture):** `computeJA4` is now asserted
+    byte-for-byte against the FoxIO JA4 specification's worked example
+    (`t13d1516h2_8daaf6152771_e5627efa2ab1`), and a REAL captured curl (OpenSSL 3.0.13) ClientHello is
+    committed as `internal/edge/testdata/curl_clienthello.bin` with field-extraction assertions
+    (SNI/ALPN/version) and a JA4 regression pin.
+  - **Error-discard justifications:** every `_`-discarded error now carries its documented
+    justification (pre-validated config parses, crypto/rand-only failure modes, fixed-struct marshals,
+    heartbeat-retried best-effort self-heal) per the Go error-handling rules.
+  - **Doc accuracy:** `docs/ARCHITECTURE.md` no longer names Pebble in the production TLS statement
+    (Pebble is the hermetic test-tier CA).
+  - **Unrecorded test/file-shape deviations now recorded:** (a) the integration tier's
+    rejected-evidence subtest drives the enroll service directly with a rejecting verifier stub (the
+    assembled server boots with `--attestation-optional` throughout the integration tier; the
+    attestation-required path of the REAL verifier is covered by the attest unit matrix and the
+    adb-gated e2e test); (b) the adb-gated attestation e2e test requires an operator-supplied probe via
+    `TUNNELD_ATTEST_PROBE`/`TUNNELD_ATTEST_SIGNER_FILE` (no probe APK is committed to this repo — the
+    Android client lives out of scope) and skips cleanly otherwise; (c) `EvictBanned`/`OpenStream` live
+    in `phoneconn/manager.go` rather than the planned `evict.go`/`dialback.go` split (same package,
+    same API). Also correcting the second-wave entry: FIVE earlier commits deviate from the
+    `<type>(<scope>)` convention, not four — the fifth is `deploy(deploy): ...` (an invalid `deploy`
+    type); history stays unrewritten, all later commits conform.
