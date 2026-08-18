@@ -1978,32 +1978,32 @@ are already implemented), NOT a "fix" that deletes code to hide a failure. RETAI
 
 ## User Story 14: Test harness (integration + e2e + adb-gated real attestation)
 
-- [ ] **User Story 14 complete**
+- [x] **User Story 14 complete**
 
 Build the integration tier (real assembled server + Valkey + MinIO + a local ACME test CA) and the e2e
 tier (testcontainers: two replicas + Valkey + MinIO + ACME test CA, raw-TLS clients), plus an
 adb-gated subtest that runs the REAL attestation path when a device is connected locally.
 
 ### Acceptance Criteria
-- [ ] Integration tests (`//go:build integration`) run the REAL `server.Run` on loopback with a
+- [x] Integration tests (`//go:build integration`) run the REAL `server.Run` on loopback with a
   **Valkey container**, a MinIO container, and **Pebble** as the ACME server (all via testcontainers —
   the tier already requires Docker; miniredis stays UNIT-tier only); enrollment + issuance + a data
   roundtrip pass in `--attestation-optional` mode with the fixture chain; real-MinIO behavior is
   asserted (registry + conn-log objects, BOTH lifecycle rules read back, a rejected-enrollment
   evidence object from an attestation-required rejection subtest, and CONCURRENT enrollments racing a
   forced name collision — exactly one claimant wins the write-verify protocol, the loser redraws).
-- [ ] E2E tests (`//go:build e2e`) start two `tunneld` replicas + Valkey + MinIO + the ACME test CA via
+- [x] E2E tests (`//go:build e2e`) start two `tunneld` replicas + Valkey + MinIO + the ACME test CA via
   testcontainers and exercise: enroll → phone connect (bind) → frontend TLS roundtrip through the mesh
   (cross-node), the fast path (same node), eviction under saturation, quota exhaustion, and CA spillover
   (primary ACME forced to fail → fallback).
-- [ ] An **adb-gated** subtest detects a connected device and runs the real attestation capture+verify
+- [x] An **adb-gated** subtest detects a connected device and runs the real attestation capture+verify
   end to end; absent a device it `t.Skip`s. NEVER wired to CI with a device.
-- [ ] All infra is ephemeral (testcontainers) and torn down; no shared long-lived infra. Tests NEVER hit
+- [x] All infra is ephemeral (testcontainers) and torn down; no shared long-lived infra. Tests NEVER hit
   real LE/GTS/ZeroSSL.
 
 ### Task 14.1: Integration tier
-- [ ] **Task 14.1 complete**
-- [ ] **File**: `internal/tunneltest/containers.go` — `//go:build integration || e2e`. The shared
+- [x] **Task 14.1 complete**
+- [x] **File**: `internal/tunneltest/containers.go` — `//go:build integration || e2e`. The shared
   testcontainers harness. Shared test infrastructure — full implementation:
 ```go
 // StartValkey, StartMinIO, and StartPebble each start an ephemeral container via
@@ -2078,7 +2078,7 @@ func StartPebble(t *testing.T) (directoryURL string, roots *x509.CertPool) {
 (`valkeyImage`/`minioImage`/`pebbleImage` are pinned tag constants; `pebbleRoots` extracts Pebble's
 test CA. DNS-01 in tests uses Pebble's companion challenge test server / an in-test `DNSProvider`
 fake — pin the exact mechanism at implementation time per the lego⇄Pebble note below.)
-- [ ] **File**: `internal/server/integration_test.go` — `//go:build integration`. Stand up the real
+- [x] **File**: `internal/server/integration_test.go` — `//go:build integration`. Stand up the real
   server with the Valkey, MinIO, and Pebble containers; enroll a
   FakePhone (US12) in attestation-optional mode; open a frontend TLS connection to the assigned SNI and
   assert an echo roundtrip; assert the name-registry object + connection-log objects exist in MinIO;
@@ -2093,8 +2093,8 @@ fake — pin the exact mechanism at implementation time per the lego⇄Pebble no
 profiles + ARI; if a gap exists, record it in `## Deviations` and use the closest supported path.
 
 ### Task 14.2: E2E tier (testcontainers)
-- [ ] **Task 14.2 complete**
-- [ ] **File**: `e2e/e2e_test.go` (+ testcontainers helpers) — `//go:build e2e`. Two replicas + Valkey +
+- [x] **Task 14.2 complete**
+- [x] **File**: `e2e/e2e_test.go` (+ testcontainers helpers) — `//go:build e2e`. Two replicas + Valkey +
   MinIO + Pebble. Scenarios: cross-node mesh roundtrip (phone on B, frontend on A), fast-path roundtrip
   (both on the same replica), eviction (saturate a tunnel's streams → least-active evicted), quota
   exhaustion (drive past `--limit-traffic-day` → refusal), CA spillover (primary ACME fails → fallback
@@ -2102,8 +2102,8 @@ profiles + ARI; if a gap exists, record it in `## Deviations` and use the closes
   directly to a replica's :443 (no proxy container anywhere).
 
 ### Task 14.3: adb-gated real-attestation subtest
-- [ ] **Task 14.3 complete**
-- [ ] **File**: `e2e/device_attestation_test.go` — `//go:build e2e` (the discussion placed the
+- [x] **Task 14.3 complete**
+- [x] **File**: `e2e/device_attestation_test.go` — `//go:build e2e` (the discussion placed the
   real-device attestation path in the e2e tier). If `adb devices`
   shows a device, invoke a helper (the spike approach: build+install a tiny probe or reuse a committed
   probe, generate a key with a server nonce, pull the chain, verify with the REAL `Verifier` against the
@@ -2112,19 +2112,19 @@ profiles + ARI; if a gap exists, record it in `## Deviations` and use the closes
 NEVER a CI-with-device gate. Farm-vs-dedicated-device deferred.
 
 ### Task 14.4: Makefile tiers
-- [ ] **Task 14.4 complete**
-- [ ] **File**: `Makefile` — ensure `test-unit` (`-short -race`), `test-integration` (`-tags=integration
+- [x] **Task 14.4 complete**
+- [x] **File**: `Makefile` — ensure `test-unit` (`-short -race`), `test-integration` (`-tags=integration
   -race`), `test-e2e` (`-tags=e2e -race`), `test-all` cover the new packages; add MinIO + Pebble
   container wiring notes.
 
 ### Definition of Done
-- [ ] Integration tier: real server + Valkey + MinIO + Pebble (shared containers harness in
+- [x] Integration tier: real server + Valkey + MinIO + Pebble (shared containers harness in
   `tunneltest`); enroll + issue + roundtrip + renewal in attestation-optional mode; MinIO objects,
   lifecycle rules, and rejected-evidence assertions.
-- [ ] E2E tier: two replicas via testcontainers; cross-node, fast-path, eviction, quota, spillover;
+- [x] E2E tier: two replicas via testcontainers; cross-node, fast-path, eviction, quota, spillover;
   Traefik removed.
-- [ ] adb-gated real-attestation subtest (skips without a device; never CI-with-device).
-- [ ] Makefile tiers cover the new packages.
+- [x] adb-gated real-attestation subtest (skips without a device; never CI-with-device).
+- [x] Makefile tiers cover the new packages.
 
 ---
 

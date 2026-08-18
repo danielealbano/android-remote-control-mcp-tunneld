@@ -29,6 +29,11 @@ govulncheck:
 test-unit:
 	go test -short -race -count=1 $(GO_PACKAGES)
 
+# The integration + e2e tiers start ephemeral containers via testcontainers-go and require a working
+# Docker daemon: Valkey, MinIO (a plain-S3 stand-in), and a hermetic ACME test CA (Pebble +
+# pebble-challtestsrv). No env/config is needed — the tiers provision everything (see
+# internal/tunneltest/containers.go). The e2e tier also has an adb-gated real-attestation test that
+# SKIPS unless a device + an operator probe are present (never wired to CI-with-device).
 test-integration:
 	go test -tags=integration -race -count=1 -timeout 30m -v ./...
 
