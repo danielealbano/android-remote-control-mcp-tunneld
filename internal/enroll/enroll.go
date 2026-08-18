@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -92,12 +94,16 @@ type Config struct {
 	ClaimTimeout   time.Duration
 	ClaimSettle    time.Duration
 	AttestOptional bool
+	Recorder       observ.Recorder // rejection/attestation metrics (defaults to observ.Nop)
+	Logger         *slog.Logger    // best-effort store-write failures are LOGGED, never swallowed
 }
 
 // Service runs the enrollment flow.
 type Service struct {
 	cfg     Config
 	rdb     redis.UniversalClient
+	rec     observ.Recorder
+	logger  *slog.Logger
 	now     func() time.Time
 	sleep   func(time.Duration)
 	nameGen func() (string, error)
@@ -105,7 +111,13 @@ type Service struct {
 
 // NewService builds the enrollment service (injectable clock/sleep for tests).
 func NewService(cfg Config) *Service {
-	s := &Service{cfg: cfg, rdb: cfg.RDB, now: time.Now, sleep: time.Sleep}
+	s := &Service{cfg: cfg, rdb: cfg.RDB, rec: cfg.Recorder, logger: cfg.Logger, now: time.Now, sleep: time.Sleep}
+	if s.rec == nil {
+		s.rec = observ.Nop{}
+	}
+	if s.logger == nil {
+		s.logger = slog.New(slog.DiscardHandler)
+	}
 	s.nameGen = func() (string, error) {
 		return ca.GenerateName(s.cfg.NamePrefix, s.cfg.NameLength, s.cfg.ExtraReserved...)
 	}
@@ -140,7 +152,8 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	}
 
 	// Attestation gate (skipped only in the fail-closed test-only optional mode) + key binding.
-	if e := s.attestAndBind(ctx, ip, req); e != nil {
+	att, e := s.attestAndBind(ctx, ip, req)
+	if e != nil {
 		return Result{}, e
 	}
 
@@ -154,10 +167,10 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
 		s.rollback(ctx, true, name)
-		return Result{}, &Error{Reason: "identity_sign_failed"}
+		return Result{}, signError(err)
 	}
 
-	s.recordIdentity(ctx, name, claimNonce, req)
+	s.recordIdentity(ctx, name, claimNonce, req, att.Device)
 	return Result{Name: name, IdentityCert: identityPEM}, nil
 }
 
@@ -169,7 +182,8 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil || !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
-	if e := s.attestAndBind(ctx, ip, req); e != nil {
+	att, e := s.attestAndBind(ctx, ip, req)
+	if e != nil {
 		return Result{}, e
 	}
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
@@ -179,6 +193,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "unauthorized"}
 	}
 	if !csrMatchesTunnel(req.TLSCSR, name, s.cfg.TunnelDomain) {
+		s.rec.Reject("csr-mismatch", name, ip)
 		return Result{}, &Error{Reason: "csr_domain_mismatch"}
 	}
 
@@ -194,35 +209,45 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 	if !allowed {
+		s.rec.Reject("issuance-cap", name, ip)
 		return Result{}, &Error{Reason: "issuance_cap", Retryable: true, RetryAfter: 7 * 24 * time.Hour}
 	}
 
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
-		return Result{}, &Error{Reason: "identity_sign_failed"}
+		return Result{}, signError(err)
 	}
 
 	// Public cert: Obtain on the FIRST issuance for this name (full spillover), Renew afterwards
-	// (CA-pinning / LE-migrating).
+	// (LE-first opportunistic migration).
 	var (
 		pubChain []byte
 		info     store.CertInfo
 	)
-	if cur.Cert.CA == "" {
-		pubChain, info, err = s.cfg.Issuer.Obtain(ctx, req.TLSCSR, name)
-	} else {
+	renewal := cur.Cert.CA != ""
+	if renewal {
 		pubChain, info, err = s.cfg.Issuer.Renew(ctx, req.TLSCSR, name, cur.Cert)
+	} else {
+		pubChain, info, err = s.cfg.Issuer.Obtain(ctx, req.TLSCSR, name)
 	}
 	if err != nil {
+		s.rec.Reject("acme-failed", name, ip)
+		if renewal {
+			s.rec.ACMERenew("all", "fail")
+		}
 		return Result{}, classifyIssuerError(err)
+	}
+	if renewal {
+		s.rec.ACMERenew(info.CA, "ok")
 	}
 
 	// Count this SUCCESSFUL issuance, then LWW-record the cert metadata (preserving the claim nonce).
 	if err := s.cfg.Limiter.IssuanceRecord(ctx, name); err != nil {
-		_ = err // non-fatal: the cert is issued; the counter is best-effort here.
+		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
+		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
 	}
-	s.recordCert(ctx, name, req, info)
+	s.recordCert(ctx, name, req, info, att.Device)
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
 }
@@ -230,26 +255,38 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 // attestAndBind runs the seven-point attestation gate (skipped only in the fail-closed test-only optional
 // mode) and the identity-key binding + CSR proof-of-possession: the identity CSR signature MUST verify
 // and — when attestation ran — the identity key MUST equal the attested TEE key (closes the software-key
-// bypass). On any failure it records rejection evidence and returns an unauthorized error.
-func (s *Service) attestAndBind(ctx context.Context, ip string, req Request) *Error {
-	var attestedKey crypto.PublicKey
+// bypass). On any failure it records rejection evidence + the rejection metric and returns an
+// unauthorized error; on success it returns the attestation result (device scalars + attested key).
+func (s *Service) attestAndBind(ctx context.Context, ip string, req Request) (attest.Result, *Error) {
+	var att attest.Result
 	if !s.cfg.AttestOptional {
 		res, err := s.cfg.Verifier.Verify(req.AttestChain, req.Nonce, s.now())
 		if err != nil {
+			s.rec.AttestVerify(attestReason(err))
 			s.recordRejection(ctx, ip, attestReason(err), req)
-			return &Error{Reason: "unauthorized"}
+			return attest.Result{}, &Error{Reason: "unauthorized"}
 		}
-		attestedKey = res.LeafPublicKey
+		s.rec.AttestVerify("ok")
+		att = res
 	}
 	if err := req.IdentityCSR.CheckSignature(); err != nil {
 		s.recordRejection(ctx, ip, "csr-mismatch", req)
-		return &Error{Reason: "unauthorized"}
+		return attest.Result{}, &Error{Reason: "unauthorized"}
 	}
-	if attestedKey != nil && !publicKeyEqual(req.IdentityCSR.PublicKey, attestedKey) {
+	if att.LeafPublicKey != nil && !publicKeyEqual(req.IdentityCSR.PublicKey, att.LeafPublicKey) {
 		s.recordRejection(ctx, ip, "csr-mismatch", req)
-		return &Error{Reason: "unauthorized"}
+		return attest.Result{}, &Error{Reason: "unauthorized"}
 	}
-	return nil
+	return att, nil
+}
+
+// signError maps a SignIdentity failure to its structured reason (a non-P256 key is the phone's error,
+// distinct from an internal signing failure).
+func signError(err error) *Error {
+	if errors.Is(err, ca.ErrUnsupportedKeyType) {
+		return &Error{Reason: "unsupported_key_type"}
+	}
+	return &Error{Reason: "identity_sign_failed"}
 }
 
 // csrMatchesTunnel reports whether csr requests exactly <name>.<tunnelDomain> (CN or a SAN).
@@ -315,25 +352,26 @@ func (s *Service) rollback(ctx context.Context, initial bool, name string) {
 	}
 }
 
-// recordIdentity writes the Phase-1 registry record (name claimed, bootstrap identity signed) preserving
-// the claim nonce, with NO cert info yet (the public cert lands at Issue). Best-effort: the claimName PUT
-// already created the record.
-func (s *Service) recordIdentity(ctx context.Context, name, claimNonce string, req Request) {
+// recordIdentity writes the Phase-1 registry record (name claimed, bootstrap identity signed, attested
+// device scalars) preserving the claim nonce, with NO cert info yet (the public cert lands at Issue).
+// Best-effort: the claimName PUT already created the record; a failure is logged, never silent.
+func (s *Service) recordIdentity(ctx context.Context, name, claimNonce string, req Request, dev store.DeviceInfo) {
 	rec := store.NameRecord{
 		Schema: 1, EnrolledAt: s.now().UTC(), LastRenewedAt: s.now().UTC(), ClaimNonce: claimNonce,
+		Device: dev,
 	}
 	if req.IdentityCSR != nil {
 		rec.IdentityKeyFP = keyFingerprint(req.IdentityCSR.PublicKey)
 	}
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
-		_ = err
+		s.logger.Warn("registry identity record write failed", "tunnel", name, "err", err)
 	}
 }
 
-// recordCert LWW-updates the registry record with the issued cert + rotated identity-key fingerprint,
-// preserving the claim nonce. A failure here is non-fatal: the certs are issued and the next Issue's LWW
-// refreshes it.
-func (s *Service) recordCert(ctx context.Context, name string, req Request, info store.CertInfo) {
+// recordCert LWW-updates the registry record with the issued cert + rotated identity-key fingerprint +
+// the freshly-attested device scalars, preserving the claim nonce. A failure here is non-fatal (the
+// certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
+func (s *Service) recordCert(ctx context.Context, name string, req Request, info store.CertInfo, dev store.DeviceInfo) {
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
 		rec = store.NameRecord{Schema: 1, EnrolledAt: s.now().UTC()}
@@ -346,13 +384,19 @@ func (s *Service) recordCert(ctx context.Context, name string, req Request, info
 	if req.IdentityCSR != nil {
 		rec.IdentityKeyFP = keyFingerprint(req.IdentityCSR.PublicKey)
 	}
+	if dev != (store.DeviceInfo{}) {
+		rec.Device = dev // refresh from the renewal's fresh attestation; keep prior when attestation was optional
+	}
 	rec.SetCert(info)
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
-		_ = err
+		s.logger.Warn("registry cert record write failed", "tunnel", name, "err", err)
 	}
 }
 
+// recordRejection bumps the rejection metric (reason is an observ.RejectReasons label) and persists the
+// rejected-enrollment evidence (best-effort — a store failure is logged and never masks the rejection).
 func (s *Service) recordRejection(ctx context.Context, ip, reason string, req Request) {
+	s.rec.Reject(reason, "", ip)
 	pkg, digest := claimedIdentity(req.AttestChain)
 	ev := store.RejectedEnrollment{
 		TS:              s.now().UTC(),
@@ -364,7 +408,9 @@ func (s *Service) recordRejection(ctx context.Context, ip, reason string, req Re
 		NonceHex:        hex.EncodeToString(req.Nonce),
 	}
 	if s.cfg.Evidence != nil {
-		_ = s.cfg.Evidence.PutRejectedEnrollment(ctx, ev) // best-effort; never masks the rejection
+		if err := s.cfg.Evidence.PutRejectedEnrollment(ctx, ev); err != nil {
+			s.logger.Warn("rejected-enrollment evidence write failed", "reason", reason, "src_ip", ip, "err", err)
+		}
 	}
 }
 
@@ -375,10 +421,12 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	}
 	okMin, ra, err := limit.Allow(ctx, s.rdb, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
 	if err == nil && !okMin {
+		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
 	okHour, ra, err := limit.Allow(ctx, s.rdb, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err == nil && !okHour {
+		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
 	return nil

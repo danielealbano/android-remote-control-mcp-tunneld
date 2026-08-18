@@ -42,17 +42,26 @@ func (f fakeVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (atte
 type fakeIssuer struct {
 	obtainErr error
 	ca        string
+	obtains   int
+	renews    int
+	lastCur   store.CertInfo // the cur passed to the last Renew
 }
 
-func (f fakeIssuer) Obtain(_ context.Context, _ *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
+func (f *fakeIssuer) Obtain(_ context.Context, _ *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
+	f.obtains++
 	if f.obtainErr != nil {
 		return nil, store.CertInfo{}, f.obtainErr
 	}
 	return []byte("PUBLIC-CERT-PEM"), store.CertInfo{CA: f.ca, Serial: "01", NotBefore: time.Now(), NotAfter: time.Now().Add(160 * time.Hour)}, nil
 }
 
-func (f fakeIssuer) Renew(_ context.Context, _ *x509.CertificateRequest, name string, _ store.CertInfo) ([]byte, store.CertInfo, error) {
-	return f.Obtain(context.Background(), nil, name)
+func (f *fakeIssuer) Renew(_ context.Context, _ *x509.CertificateRequest, name string, cur store.CertInfo) ([]byte, store.CertInfo, error) {
+	f.renews++
+	f.lastCur = cur
+	if f.obtainErr != nil {
+		return nil, store.CertInfo{}, f.obtainErr
+	}
+	return []byte("PUBLIC-CERT-PEM"), store.CertInfo{CA: f.ca, Serial: "02", NotBefore: time.Now(), NotAfter: time.Now().Add(160 * time.Hour)}, nil
 }
 
 type rateLimitedErr struct{}
@@ -167,7 +176,7 @@ func TestEnrollHappyPath(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
 	})
 	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
 	if ee != nil {
@@ -189,7 +198,7 @@ func TestIssueHappyPath(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
 	})
 	name := doEnroll(t, svc, idCSR)
 	tlsCSR := newTLSCSR(t, name+".example.test")
@@ -215,7 +224,7 @@ func TestIssueRejectsWrongDomain(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
 	})
 	name := doEnroll(t, svc, idCSR)
 	tlsCSR := newTLSCSR(t, "attacker.example.test") // wrong name
@@ -232,7 +241,7 @@ func TestEnrollAttestationRejectRecordsEvidence(t *testing.T) {
 	idCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{err: attest.ErrSignerNotAllowed}, Issuer: fakeIssuer{},
+		Verifier: fakeVerifier{err: attest.ErrSignerNotAllowed}, Issuer: &fakeIssuer{},
 	})
 	nonce := mintNonce(t, svc)
 	_, ee := svc.Enroll(context.Background(), "9.9.9.9", Request{Nonce: nonce, IdentityCSR: idCSR})
@@ -250,7 +259,7 @@ func TestEnrollKeyBindingMismatch(t *testing.T) {
 	_, otherPub := newCSR(t) // attested key differs from the identity CSR key
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: otherPub}, Issuer: fakeIssuer{},
+		Verifier: fakeVerifier{key: otherPub}, Issuer: &fakeIssuer{},
 	})
 	nonce := mintNonce(t, svc)
 	_, ee := svc.Enroll(context.Background(), "1.1.1.1", Request{Nonce: nonce, IdentityCSR: idCSR})
@@ -269,7 +278,7 @@ func TestIssueAcmeFailure(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{obtainErr: rateLimitedErr{}},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{obtainErr: rateLimitedErr{}},
 	})
 	name := doEnroll(t, svc, idCSR)
 	tlsCSR := newTLSCSR(t, name+".example.test")
@@ -289,7 +298,7 @@ func TestClaimZombiePutLoserRedraws(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "gts"},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "gts"},
 	})
 	// A competitor's record + nonce lands between our PUT and our verify GET, so our verify sees a
 	// different nonce → we redraw and still succeed with a different name.
@@ -316,7 +325,7 @@ func TestEnrollInvalidNonce(t *testing.T) {
 	idCSR, idPub := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
 	})
 	_, ee := svc.Enroll(context.Background(), "4.4.4.4", Request{Nonce: []byte("never-issued"), IdentityCSR: idCSR})
 	if ee == nil || ee.Reason != "invalid_nonce" {

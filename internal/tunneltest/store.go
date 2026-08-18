@@ -19,10 +19,12 @@ type Store struct {
 	// FailNextPut, when non-nil, is returned by the next PutName call WITHOUT writing (a clean PUT
 	// failure). ZombieNextPut simulates a timed-out-but-landed PUT: the record IS written, the error
 	// IS returned. BeforeVerifyGet runs before each GetName so a test can land a competing/zombie
-	// write between a claimant's PUT and its verify.
+	// write between a claimant's PUT and its verify. RejectedErr, when non-nil, fails every
+	// PutRejectedEnrollment (evidence-store outage).
 	FailNextPut     error
 	ZombieNextPut   error
 	BeforeVerifyGet func(name string)
+	RejectedErr     error
 }
 
 // NewStore builds an empty fake.
@@ -77,12 +79,22 @@ func (s *Store) PutConnLog(_ context.Context, ev store.Event) error {
 	return nil
 }
 
-// PutRejectedEnrollment captures rejected-enrollment evidence.
+// PutRejectedEnrollment captures rejected-enrollment evidence (honoring the RejectedErr hook).
 func (s *Store) PutRejectedEnrollment(_ context.Context, ev store.RejectedEnrollment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.RejectedErr != nil {
+		return s.RejectedErr
+	}
 	s.Rejected = append(s.Rejected, ev)
 	return nil
+}
+
+// NameCount reports how many name records exist (rollback assertions).
+func (s *Store) NameCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.names)
 }
 
 // EnsureLifecycles is a no-op in the fake (real semantics are covered by the US14 MinIO tests).

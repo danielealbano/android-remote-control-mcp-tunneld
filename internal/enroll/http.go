@@ -119,6 +119,16 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		return
 	}
 
+	// Mint the single-use nonce for the follow-up mTLS POST /issue (Phase 2) BEFORE enrolling: a mint
+	// failure must fail the request before any name is claimed (an unused nonce simply expires by TTL,
+	// while a name claimed without a deliverable response would be orphaned).
+	issueNonce, nerr := h.svc.Nonce(r.Context())
+	if nerr != nil {
+		h.rec.EnrollmentResult("internal")
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+
 	res, ee := h.svc.Enroll(r.Context(), ip, Request{
 		Nonce:          nonce,
 		AttestChainPEM: []byte(req.AttestChainPEM),
@@ -128,14 +138,6 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	if ee != nil {
 		h.rec.EnrollmentResult(ee.Reason)
 		writeErr(w, ee, statusForError(ee))
-		return
-	}
-
-	// Mint the single-use nonce for the follow-up mTLS POST /issue (Phase 2).
-	issueNonce, nerr := h.svc.Nonce(r.Context())
-	if nerr != nil {
-		h.rec.EnrollmentResult("internal")
-		http.Error(w, "internal", http.StatusInternalServerError)
 		return
 	}
 
