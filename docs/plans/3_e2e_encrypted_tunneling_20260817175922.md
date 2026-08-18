@@ -2772,3 +2772,10 @@ gates, and validate all touched Mermaid diagrams.
     same API). Also correcting the second-wave entry: FIVE earlier commits deviate from the
     `<type>(<scope>)` convention, not four — the fifth is `deploy(deploy): ...` (an invalid `deploy`
     type); history stays unrewritten, all later commits conform.
+- **Fourth review wave (adversarial review round 4; registry schema alignment):** `NameRecord.Cert`
+  reused the shared `CertInfo` type, so the durable JSON emitted a duplicate `cert.ca` alongside the
+  authoritative top-level `ca` — contradicting the agreed Task 2.2 schema ("the CA lives top-level,
+  NOT inside the `cert` sub-object"). The registry now stores a CA-less `store.CertRecord` sub-object;
+  `NameRecord.SetCert`/`NameRecord.CertInfo()` convert to/from the shared `CertInfo` at the call sites
+  (renewal detection reads the authoritative top-level `CA`). The round-trip test now asserts the
+  `cert` sub-object contains NO `ca` key, exactly as its plan row claims.

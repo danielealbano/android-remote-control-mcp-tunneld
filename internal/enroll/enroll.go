@@ -229,9 +229,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		pubChain []byte
 		info     store.CertInfo
 	)
-	renewal := cur.Cert.CA != ""
+	renewal := cur.CA != ""
 	if renewal {
-		pubChain, info, err = s.cfg.Issuer.Renew(ctx, req.TLSCSR, name, cur.Cert)
+		pubChain, info, err = s.cfg.Issuer.Renew(ctx, req.TLSCSR, name, cur.CertInfo())
 	} else {
 		pubChain, info, err = s.cfg.Issuer.Obtain(ctx, req.TLSCSR, name)
 	}

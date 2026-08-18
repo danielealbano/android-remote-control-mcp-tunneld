@@ -39,6 +39,12 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 	if _, ok := raw["ca"]; !ok {
 		t.Error("ca must be a top-level field")
 	}
+	// The schema keeps the CA ONLY at the top level — the cert sub-object must not repeat it.
+	if certObj, ok := raw["cert"].(map[string]any); !ok {
+		t.Error("cert sub-object missing")
+	} else if _, dup := certObj["ca"]; dup {
+		t.Error("ca must NOT appear inside the cert sub-object")
+	}
 	if raw["claim_nonce"] != "0011223344556677" {
 		t.Errorf("claim_nonce missing/wrong: %v", raw["claim_nonce"])
 	}

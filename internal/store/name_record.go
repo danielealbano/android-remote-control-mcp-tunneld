@@ -25,6 +25,15 @@ type CertInfo struct {
 	ARIID     string    `json:"ari_id"`
 }
 
+// CertRecord is the registry's cert sub-object. Per the durable schema, the issuing CA lives
+// TOP-LEVEL on NameRecord — NEVER inside cert.
+type CertRecord struct {
+	Serial    string    `json:"serial"`
+	NotBefore time.Time `json:"not_before"`
+	NotAfter  time.Time `json:"not_after"`
+	ARIID     string    `json:"ari_id"`
+}
+
 // NameRecord is the names/<name> registry object. The issuing CA lives TOP-LEVEL (sibling of cert);
 // claim_nonce is the write-verify claim discriminator (16 crypto-random bytes hex), written at claim
 // time and PRESERVED on every LWW update. It NEVER stores cert PEM, private keys, or attestation
@@ -35,13 +44,18 @@ type NameRecord struct {
 	LastRenewedAt time.Time  `json:"last_renewed_at"`
 	IdentityKeyFP string     `json:"identity_key_fpr"`
 	ClaimNonce    string     `json:"claim_nonce"`
-	CA            string     `json:"ca"` // top-level issuing CA (mirrors Cert.CA for quick listing)
-	Cert          CertInfo   `json:"cert"`
+	CA            string     `json:"ca"` // top-level issuing CA — the ONLY place the CA is stored
+	Cert          CertRecord `json:"cert"`
 	Device        DeviceInfo `json:"device"`
 }
 
 // SetCert populates the top-level CA and the cert sub-object from an issuer's CertInfo.
 func (r *NameRecord) SetCert(info CertInfo) {
 	r.CA = info.CA
-	r.Cert = info
+	r.Cert = CertRecord{Serial: info.Serial, NotBefore: info.NotBefore, NotAfter: info.NotAfter, ARIID: info.ARIID}
+}
+
+// CertInfo reassembles the shared cert metadata from the top-level CA + the cert sub-object.
+func (r *NameRecord) CertInfo() CertInfo {
+	return CertInfo{CA: r.CA, Serial: r.Cert.Serial, NotBefore: r.Cert.NotBefore, NotAfter: r.Cert.NotAfter, ARIID: r.Cert.ARIID}
 }

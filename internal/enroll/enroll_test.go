@@ -186,7 +186,7 @@ func TestEnrollHappyPath(t *testing.T) {
 		t.Errorf("phase 1 must return name + identity cert and NO public cert: %+v", res)
 	}
 	rec, err := st.GetName(context.Background(), res.Name)
-	if err != nil || rec.IdentityKeyFP == "" || rec.Cert.CA != "" {
+	if err != nil || rec.IdentityKeyFP == "" || rec.CA != "" {
 		t.Errorf("phase-1 record must carry the identity fingerprint and NO cert: %+v %v", rec, err)
 	}
 }
@@ -212,7 +212,7 @@ func TestIssueHappyPath(t *testing.T) {
 		t.Errorf("issue must regenerate identity + public certs: %+v", res)
 	}
 	rec, err := st.GetName(context.Background(), name)
-	if err != nil || rec.CA != "letsencrypt" || rec.Cert.CA != "letsencrypt" {
+	if err != nil || rec.CA != "letsencrypt" || rec.Cert.Serial == "" {
 		t.Errorf("record must carry the issued cert: %+v %v", rec, err)
 	}
 }

@@ -226,7 +226,7 @@ func (w *renewalWatcher) tick(ctx context.Context) {
 			w.logger.Warn("renewal watcher: name record read failed", "tunnel", name, "err", err)
 			continue
 		}
-		due, at, err := w.chain.ShouldRenew(ctx, rec.Cert)
+		due, at, err := w.chain.ShouldRenew(ctx, rec.CertInfo())
 		if err != nil {
 			w.logger.Warn("renewal watcher: ShouldRenew failed", "tunnel", name, "err", err)
 			continue

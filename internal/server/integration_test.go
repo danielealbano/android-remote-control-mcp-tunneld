@@ -213,7 +213,7 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 
 	// MinIO: the name registry object carries the issued cert, and a connection-log object landed.
 	rec, err := env.st.GetName(ctx, ident.Name)
-	if err != nil || rec.Cert.CA == "" {
+	if err != nil || rec.CA == "" {
 		t.Errorf("name record missing/incomplete in MinIO: %+v %v", rec, err)
 	}
 	if !waitBool(15*time.Second, func() bool {
