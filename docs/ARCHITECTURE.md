@@ -54,7 +54,7 @@ flowchart TD
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
-| `internal/limit` | rate windows, enroll quota, global stream counter, per-process bandwidth buckets, ACME cooldown |
+| `internal/limit` | rate windows, enroll quota, global stream counter, batch-credit bandwidth bucket, ACME cooldown |
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
@@ -85,8 +85,8 @@ sequenceDiagram
     P-->>C: TLS response (opaque, spliced back)
 ```
 
-The entry node accounts bytes (day/week traffic), paces per-process bandwidth, and enforces the
-connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
+The entry node accounts bytes (day/week traffic), paces bandwidth from the shared batch-credit bucket,
+and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
 Pebble/WebPKI cert — tunneld never sees plaintext.
 
 ## 3. Enrollment, issuance, renewal
@@ -101,11 +101,13 @@ certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on
 
 ## 4. Bandwidth model
 
-Per-tunnel, per-direction token buckets are **per-PROCESS** (cross-replica exactness was rejected — it
-would put a synchronous Valkey call on every 32 KiB slice). The edge paced body-reader and the bridge
-share ONE `BucketRegistry`; byte ACCOUNTING (day/week) is recorded for every chunk via a TTL'd Lua
-INCR. The blocking `WaitN` is never held under a write mutex. `wire.ChunkSize` = 32768 is the paced-copy
-slice size.
+Per-tunnel, per-direction pacing draws from ONE **global Valkey token bucket** (`bw:{name}:{dir}`,
+refilled in-script) in **~1 MB batches** into a per-stream local credit — the data plane hits the
+control plane about once per megabyte moved, never per 32 KiB slice (a synchronous per-slice Valkey
+call was rejected). An empty bucket blocks the copy in short refill waits (that wait IS the pacing); a
+Valkey ERROR fails open so pacing never hard-depends on the control plane. Byte ACCOUNTING (day/week
+traffic) is recorded per chunk via a TTL'd Lua INCR; an exhausted window refuses NEW streams at
+admission and closes in-flight streams. `wire.ChunkSize` = 32768 is the paced-copy slice size.
 
 ## 5. Valkey state (all transient — TTL atomic with the write, single Lua)
 
@@ -138,9 +140,24 @@ The internal listener serves `/metrics` (custom registry, aggregate families onl
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
-`ban`, `no-route`, `conn-rate`, `max-clients`, `handshake-timeout`, `stream-cap`, plus the enrollment
-rejection labels (attestation + `csr-mismatch`) recorded as durable evidence. Every reason label has
-exactly the writers the code emits — never abbreviate or invent reason strings at call sites.
+The label set is EXACTLY `observ.RejectReasons` (pre-registered; `PromRecorder.Reject` refuses any
+other string, so labels cannot be invented at call sites). The writers:
+
+| Reason(s) | Writer |
+|---|---|
+| `ban` | edge accept, enroll handler, phone control handler (each ban gate) |
+| `no-route`, `handshake-timeout`, `conn-rate`, `max-clients` | edge accept/dispatch |
+| `quota-day`, `quota-week` | bridge admission (one per NEW stream refused on an exhausted window) |
+| `stream-cap` | bridge (global per-tunnel stream counter refusal) |
+| `attest-*`, `csr-mismatch`, `enroll-limit`, `issuance-cap`, `acme-failed` | enroll/issuance service |
+
+Distinct signals, no double-counting: `QuotaExhausted(tunnel, window)` fires when an IN-FLIGHT stream
+hits the window (its LOG is caplog-deduped), and forced closures of existing connections (`min-rate`,
+`evicted`, `idle-timeout`, `quota-exhausted`, …) are recorded via `PublicConnClose(reason)` /
+`PhoneConnClose(reason)` — never via `Reject`. `tunneld_enrollments_total{result}` carries the
+enrollment outcome; `tunneld_attest_verify_total{result}` the attestation verdicts; and
+`tunneld_acme_renew_total{ca,result}` the tunnel-cert renewal outcomes (`ca="all"` on a failure, since
+every CA in the chain declined).
 
 ## 9. Shutdown
 

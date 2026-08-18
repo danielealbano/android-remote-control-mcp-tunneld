@@ -122,10 +122,12 @@ MUST NOT be relaxed without explicit user direction.
   future Kotlin client conforms to the spec, not to the Go source).
 
 ### Bandwidth model
-- Per-tunnel, per-direction token buckets are **per-PROCESS** (cross-replica exactness was REJECTED: it
-  would put a synchronous Valkey call per 32 KiB slice on the data plane). The edge paced body-reader
-  and the bridge share ONE `BucketRegistry`; byte ACCOUNTING (day/week) is still recorded per chunk. The
-  blocking `WaitN` MUST NEVER be held under a connection write mutex.
+- Per-tunnel, per-direction pacing draws from ONE global Valkey token bucket (`bw:{name}:{dir}`) in
+  **~1 MB batches** into a per-stream local credit — the data plane hits the control plane ~once/MB
+  (a synchronous per-32 KiB-slice Valkey call was REJECTED). An empty bucket blocks the copy in short
+  refill waits; a Valkey ERROR fails open. Byte ACCOUNTING (day/week) is still recorded per chunk; an
+  exhausted window refuses NEW streams at admission. The blocking refill wait MUST NEVER be held under
+  a connection write mutex.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry

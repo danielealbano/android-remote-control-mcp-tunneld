@@ -145,19 +145,20 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
 ### Certificates & CAs
 - Public certs issued via **automatic spillover chain: Let's Encrypt → Google Trust Services →
   ZeroSSL** (all from day one; not break-glass).
-  - LE primary: `shortlived` profile (160h), ARI-driven renewal (renewals exempt from LE rate limits),
-    renew at T-48h floor honoring earlier ARI windows.
+  - LE primary: `shortlived` profile (160h); renewals are exempt from LE rate limits; renew at the
+    `NotAfter − --acme-renew-margin` (T-48h) floor. (An earlier-ARI-window pull was planned but is NOT
+    implementable server-side — see the Deviations entry "LE ARI margin floor".)
   - GTS secondary: EAB-bound to a Google Cloud project; 1–90 day validity (we request 7d); per-project
     quotas (adjustable). No documented per-registered-domain limit. GTS renewals are NOT exempt.
   - ZeroSSL tertiary: EAB; 90-day validity (misfit accepted — a banned name's cert is useless because
     DNS + SNI router refuse it). Sectigo-rooted.
-  - **Uniform ~4.7-day rotation cadence regardless of issuer**: LE names renew via ARI with the T-48h
-    floor; GTS/ZeroSSL names (ARI support unverified there) renew on a FIXED schedule at
-    `NotBefore + (160h − --acme-renew-margin)` (~112h after issuance) — a ZeroSSL 90-day cert's unused
-    validity is deliberately discarded so every tunnel rotates on the same cadence.
-- Library: **lego v4** (`ObtainForCSR` for phone CSRs, `GetRenewalInfo`/`ShouldRenewAt` for ARI,
-  `Profile` for `shortlived`). Validation is **DNS-01** against the tunnel domain's zone via a lego DNS
-  provider (the scoped DNS API token is a crown-jewel secret).
+  - **Uniform ~4.7-day rotation cadence regardless of issuer**: LE names renew at the T-48h floor
+    (`NotAfter − margin` = NotBefore+112h for a 160h shortlived cert); GTS/ZeroSSL names renew on a
+    FIXED schedule at `NotBefore + (160h − --acme-renew-margin)` (~112h after issuance) — a ZeroSSL
+    90-day cert's unused validity is deliberately discarded so every tunnel rotates on the same cadence.
+- Library: **lego v4** (`ObtainForCSR` for phone CSRs, `Profile` for `shortlived`). Validation is
+  **DNS-01** against the tunnel domain's zone via a lego DNS provider (the scoped DNS API token is a
+  crown-jewel secret).
 - One operator ACME account per CA. Rate-limit protection is **REACTIVE per-CA cooldown + backoff**
   (agreed, replacing an earlier proactive order-counter design): on a CA "rate limited" answer, store a
   per-CA cooldown in Valkey (honoring the ACME `Retry-After`, floor `--acme-cooldown-default`) and skip
@@ -402,9 +403,9 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 | `--acme-backoff-initial` | duration | `1m` | First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure) |
 | `--acme-backoff-max` | duration | `6h` | Ceiling for the exponential per-CA failure backoff |
 | `--acme-renew-margin` | duration | `48h` | Renew floor before public-cert expiry (ARI may pull earlier) |
-| `--issue-per-week` | int | `3` | Max SUCCESSFUL public-cert issuances per tunnel per rolling 7d |
-| `--limit-traffic-day` | string | `1gb` | Per-tunnel bytes/day, both directions combined (BINARY) |
-| `--limit-traffic-week` | string | `4gb` | Per-tunnel bytes/rolling-7d, both directions combined (BINARY) |
+| `--issue-per-week` | int | `3` | Max SUCCESSFUL public-cert issuances per tunnel per 7d window (anchored at the first issuance) |
+| `--limit-traffic-day` | string | `1gb` | Per-tunnel bytes per 24h window (anchored at the first byte), both directions combined (BINARY) |
+| `--limit-traffic-week` | string | `4gb` | Per-tunnel bytes per 7d window (anchored at the first byte), both directions combined (BINARY) |
 | `--limit-conn-rate` | int | `10` | New public TCP connections/sec per source IP |
 | `--limit-stream-pending` | int | `64` | Max concurrent pre-bind phone control handshakes per node |
 | `--limit-conn-idle` | duration | `120s` | Close a public connection idle (no bytes either direction) this long |
@@ -1160,7 +1161,7 @@ miniredis for nonces + limits.
 
 ---
 
-## User Story 6: ACME issuance chain (LE → GTS → ZeroSSL) with ARI renewal + opportunistic LE migration
+## User Story 6: ACME issuance chain (LE → GTS → ZeroSSL) with margin-floor renewal + opportunistic LE migration
 
 - [x] **User Story 6 complete**
 
@@ -1173,15 +1174,15 @@ the spillover and the opportunistic at-renewal migration onto LE. NO order-count
 - [x] `internal/acme` provides a `chainIssuer` implementing `enroll.PublicIssuer` (BOTH `Obtain` —
   initial spillover — and `Renew` — the SAME LE-first order, so every renewal opportunistically
   migrates the name to LE) plus `ShouldRenew(ctx context.Context, cur store.CertInfo) (bool, time.Time,
-  error)` — ctx-first because for LE names it makes an ARI network call via the internal
-  `caIssuer.shouldRenew(ctx, cur)` it wraps (the US11 renewal watcher propagates its drain ctx),
-  recording which CA succeeded.
+  error)` — ctx-first (dispatched via the internal `caIssuer.shouldRenew(ctx, cur)` it wraps; the US11
+  renewal watcher propagates its drain ctx), recording which CA succeeded.
 - [x] Issuance uses `ObtainForCSR` (phone CSR), the LE `shortlived` profile, and DNS-01 via the
   configured lego provider behind our own `DNSProvider` interface.
-- [x] Renewal timing preserves the UNIFORM ~4.7-day rotation cadence: LE names use lego
-  `GetRenewalInfo`/`ShouldRenewAt` (ARI) floored at `--acme-renew-margin`; GTS/ZeroSSL names (ARI
-  unverified there) use NO ARI call — they renew on the FIXED schedule `NotBefore + (160h −
-  --acme-renew-margin)`, so a 90-day ZeroSSL cert still rotates every ~4.7 days.
+- [x] Renewal timing preserves the UNIFORM ~4.7-day rotation cadence: LE names renew at the
+  `NotAfter − --acme-renew-margin` floor (the planned earlier-ARI-window pull is not implementable
+  server-side — see the Deviations entry "LE ARI margin floor"); GTS/ZeroSSL names renew on the FIXED
+  schedule `NotBefore + (160h − --acme-renew-margin)`, so a 90-day ZeroSSL cert still rotates every
+  ~4.7 days.
 - [x] Rate-limit protection is REACTIVE: a CA in cooldown (`limit.CACooldown` > 0) is SKIPPED by the
   spillover; an `ErrRateLimited` answer sets `limit.SetCACooldown(max(RetryAfter,
   --acme-cooldown-default))`; any other failure bumps `limit.BumpCAFailures` and sets a cooldown of
@@ -1218,10 +1219,10 @@ var ErrPermanent   = errors.New("acme: permanent")
   from `--acme-account-dir` + optional EAB + DNS-01 provider). `obtain` calls
   `certificate.ObtainForCSR(ObtainForCSRRequest{CSR: csr, Profile: <profile>, Bundle: true})` (LE →
   `shortlived`; GTS → `--acme-gts-validity` window; ZeroSSL → 90d default). `shouldRenew` is SPLIT: the
-  LE client uses `GetRenewalInfo` + `RenewalInfoResponse.ShouldRenewAt(now, --acme-renew-margin)`; the
-  GTS and ZeroSSL clients make NO ARI call and return true once `now ≥ cur.NotBefore + (160h −
-  --acme-renew-margin)` (the fixed uniform cadence). Classify lego/ACME `*acme.ProblemDetails` into
-  `ErrRateLimited` (with Retry-After) / `ErrTransient` / `ErrPermanent`.
+  LE client returns true once `now ≥ cur.NotAfter − --acme-renew-margin` (the T-48h floor — see the
+  Deviations entry "LE ARI margin floor"); the GTS and ZeroSSL clients return true once `now ≥
+  cur.NotBefore + (160h − --acme-renew-margin)` (the fixed uniform cadence). Classify lego/ACME
+  `*acme.ProblemDetails` into `ErrRateLimited` (with Retry-After) / `ErrTransient` / `ErrPermanent`.
 **Context**: accounts are registered once and persisted under `--acme-account-dir` (EAB for GTS +
 ZeroSSL). If lego needs a specific registration/storage shape not covered here, record it in `##
 Deviations` and use the closest supported path.
@@ -1267,7 +1268,7 @@ ACME issuance is covered by the integration tier (US14, Pebble).
 | `rate-limited spills and sets retry-after` | LE rate-limited (Retry-After 30m) → LE retry-after set, order spills to GTS |
 | `renew tries LE first` | `Renew` with `cur.CA == gts` → LE tried FIRST (migration), `info.CA == letsencrypt`, GTS not called |
 | `renew spills when LE cooling` | `Renew` with `cur.CA == gts` + LE cooling → LE skipped, renews on GTS |
-| `ShouldRenew LE via ARI` | LE cert: ARI earlier than T-48h → renew earlier; else at margin |
+| `ShouldRenew LE margin floor` | LE cert: due at `NotAfter − margin` (= NotBefore+112h for a 160h cert); not due before |
 | `ShouldRenew fixed cadence GTS/ZeroSSL` | GTS/ZeroSSL cert: renews at `NotBefore + 112h` regardless of remaining validity; NO ARI call made |
 | `error classification` | Sample ACME problem docs map to ErrRateLimited/Transient/Permanent |
 | `ObtainSelf self-cert` | Produces a server-side key + cert for a reserved host; does NOT consume the per-tunnel issuance counter; IS subject to per-CA cooldowns |
@@ -2612,3 +2613,83 @@ gates, and validate all touched Mermaid diagrams.
   `TestAllCoolingMessageIsQuotaExhausted`. The per-tunnel `--issue-per-week` cap and the per-process
   bandwidth buckets (distinct controls) are UNCHANGED. `docs/PROJECT.md`, `docs/ARCHITECTURE.md`, and
   `.claude/rules/project.md` de-scoped every "weekly LE budget" mention to "per-CA cooldown/retry-after".
+- **Full-review remediation wave (post-PR adversarial review findings; US4/US6/US8/US10/US11 + docs):**
+  a fresh full-branch adversarial review surfaced subsystems that existed but were never WIRED, plus
+  capacity/availability defects. All were fixed to ALIGN the code with what this plan already specified
+  (no design change unless noted):
+  - **US4 (attestation refreshers wired; fail-closed construction):** `RootSet.Refresh`,
+    `StatusList.Refresh` (at `--attest-refresh`) and `SignerAllowlist.Watch` (at `--ban-poll`) are now
+    started on the server errgroup — previously they were never called, so the status-staleness gate
+    (`--attest-status-max-stale`, 24h) would have permanently refused all enrollment/issuance after 24h
+    of uptime. `NewRootSet`/`NewStatusList` now ALWAYS return non-nil fail-closed objects on an initial
+    fetch failure (empty pool / zero snapshot) instead of nil (which panicked on the first enrollment);
+    `Verify` additionally refuses a nil root pool (nil `x509.VerifyOptions.Roots` would silently verify
+    against SYSTEM roots — fail-open). A signer-allowlist LOAD failure is now FATAL at startup (local
+    operator config fails fast). Tests: `refreshers_test.go` (swap + last-known-good + fail-closed).
+  - **US8 (stream-pending semantics, liveness, IP ban, /data 404):** the `--limit-stream-pending`
+    semaphore is now released once the route BIND completes — it bounds concurrent PRE-BIND handshakes
+    as documented, no longer capping TOTAL phones per node at 64. Missed-PONG liveness is implemented
+    (readPump stamps PONGs; the ping loop tears down after 3 missed intervals with close reason
+    `liveness-timeout`; a malformed frame closes as `protocol-error`) — in `listener.go`, not the
+    planned separate `liveness.go`. The phone control handler now runs the plan-mandated peer-IP ban
+    check FIRST. `serveData` no longer writes a premature 200: an undeliverable stream gets a real 404
+    (the response commits on the bridge's first write). Dead code removed (`var _ = x509…`, unused
+    `mustConnID` param).
+  - **US11 (quota admission, accept order, mesh retry, max-clients scope, idle timeouts):** the bridge
+    now REFUSES each new stream on an exhausted day/week window (`Reject("quota-day"|"quota-week")`,
+    per the US10 writer map) via the new read-only `limit.TrafficExhausted`; a `ClaimTraffic`
+    control-plane ERROR now fails open instead of killing live streams as quota-exhausted; the
+    PROTOCOL §5 one-fresh-route-lookup retry is implemented at the edge (retry once when the fresh
+    route differs, re-checking the ban on its fingerprint); the accept checks run in the documented
+    order (ban → conn-rate → max-clients); reserved-host (enroll/control) connections now HOLD their
+    `--max-clients` slot for their whole lifetime (`heldConn`); the enroll server gained
+    `ReadTimeout`/`IdleTimeout` and the control server an `IdleTimeout` (4× ping interval) so
+    unauthenticated idle TLS connections cannot accumulate; the node-registry heartbeat now survives
+    transient Valkey errors (it previously exited permanently, breaking cross-node routing until
+    restart); `EnsureLifecycles` retries every 5m until the retention rules land; mesh per-peer pools
+    are reaped after 10m idle (`mesh.Client.Run` janitor).
+  - **US3/US11 (bandwidth batch credit — plan Task 3.3 honored):** the pacer now draws ~1 MB batches
+    (`bwBatch`) of credit from the shared `bw:{name}:{dir}` bucket into a per-stream local credit
+    (Valkey hit ~once/MB, never per 32 KiB chunk), an EMPTY bucket blocks in short refill waits (the
+    wait IS the pacing — previously a drained bucket silently disabled pacing), and a Valkey ERROR
+    fails open. `docs/ARCHITECTURE.md` §4, `docs/PROJECT.md`, and `project.md` were rewritten to this
+    as-built model (they had described the US13-deleted per-process `BucketRegistry`/`WaitN`).
+  - **US3 (traffic windows are TTL-anchored):** `ClaimTraffic` keys lost their calendar anchor
+    (previously UTC-midnight/epoch-week `Truncate`, which the docs mis-called "rolling"): each counter
+    now carries its window as the TTL set on first write (24h/7d — the same anchored-at-first-use
+    idiom as the issuance and enroll counters). Flag help, `PROJECT.md`, and the US1 table now say
+    "per 24h/7d window (anchored at the first byte)".
+  - **US10 (observability aligned to the plan's writer map):** `tunneld_enrollments_total` gained its
+    `{result}` label; the rejection family pre-registers EXACTLY `observ.RejectReasons` and
+    `PromRecorder.Reject` refuses unknown labels; the enroll/issuance service (not just the handler)
+    now writes `attest-*`/`csr-mismatch`/`enroll-limit`/`issuance-cap`/`acme-failed` Rejects and
+    `AttestVerify{result}`; `ACMERenew{ca,result}` is recorded on the tunnel renewal outcome in
+    `enroll.Issue` (`ca="all"` on failure — no single CA failed); `QuotaExhausted` logs are
+    caplog-deduped. `ARCHITECTURE.md` §8 now lists the full reason→writer map. `enroll.Service` gained
+    `Recorder`/`Logger` DI; every best-effort store write (registry records, evidence, conn logs,
+    unbind) is now LOGGED on failure, teardown writes are bounded (10s), and the S3 client carries a
+    30s per-request HTTP timeout.
+  - **US6 ("LE ARI margin floor"):** the planned lego `GetRenewalInfo`/`ShouldRenewAt` ARI pull is NOT
+    implementable server-side: lego's `GetRenewalInfo` requires the issued LEAF certificate
+    (`RenewalInfoRequest{Cert}`, verified at v4.35.2), and the name registry MUST NEVER store certs
+    (agreed invariant — the phone holds them). LE renewal therefore fires at the `NotAfter −
+    --acme-renew-margin` floor (= NotBefore+112h for a 160h shortlived cert — the SAME uniform ~4.7d
+    cadence). Plan §Design/US6 text + test rows and all docs/comments were re-aligned; tests
+    `lego_client_test.go` cover the floor + the error classification.
+  - **US11 (JA4 ALPN component corrected to spec):** the ALPN component now uses the FIRST and LAST
+    alphanumeric characters of the first ALPN value (hex-edge fallback), per the FoxIO JA4 spec —
+    previously the first two characters ("http/1.1" → "ht" instead of "h1"), which would not match
+    external JA4 intel.
+  - **US5/US8 (protocol reasons):** `ca.ErrUnsupportedKeyType` now maps to the documented
+    `unsupported_key_type` (400) instead of `identity_sign_failed`; the enroll handler mints the
+    Phase-2 issue nonce BEFORE claiming a name, so a mint failure can no longer orphan a claimed name;
+    `validNameFunc` tightened to EXACTLY the generator's shape (prefix + `--name-length` base32).
+  - **Test coverage (plan tables made true):** authored the missing table-claimed tests — US2
+    `s3 client single-attempt`; US4 refresher rows; US5 claim collision/timeout/settle-order,
+    sign-failure rollback, final-record non-fatal, evidence best-effort, nonce single-use,
+    attestation-optional, per-IP limit, issuance record/cap, renewal-calls-Renew, device scalars, the
+    `http_test.go` handler rows (decode/structured/nonce-rate/ban-first) and `SignMesh role marker`;
+    US6 `ObtainSelf`, classification, LE floor; US8 pending-slot release/refusal, liveness, PONG pump,
+    IP ban, /data 404; US11 quota admission, fresh-route retry, fail-open traffic errors, batch/empty
+    bucket pacing, ban-before-max-clients, JA4 ALPN table, idle-timeout splice, trickled-ClientHello
+    timeout, heartbeat resilience, name validation, mesh pool reap, metrics label/validation/dedup rows.

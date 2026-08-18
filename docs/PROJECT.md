@@ -58,7 +58,7 @@ of the raw TCP connection.
   tunneld re-verifies attestation, and issues the **public WebPKI cert** via server-run ACME. See
   [`PROTOCOL.md`](PROTOCOL.md) §2.
 - **Server-run ACME chain**: Let's Encrypt → Google Trust Services → ZeroSSL, with automatic spillover,
-  DNS-01, and short-lived certs renewed on a fixed cadence / ARI. The phone holds the TLS private key;
+  DNS-01, and short-lived certs renewed on a uniform ~4.7-day cadence. The phone holds the TLS private key;
   only CSRs leave it.
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
@@ -90,8 +90,8 @@ own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
 | Cap | Flag | Default |
 |---|---|---|
 | Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` (≥ 32768 B/s) |
-| Traffic / tunnel / day (both directions) | `--limit-traffic-day` | `1gb` |
-| Traffic / tunnel / rolling 7d | `--limit-traffic-week` | `4gb` |
+| Traffic / tunnel / 24h window (both directions) | `--limit-traffic-day` | `1gb` |
+| Traffic / tunnel / 7d window | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
 | New public TCP connections / source IP | `--limit-conn-rate` | `10`/s |
 | Enrollments / source IP | `--limit-enroll-hour` + `--limit-enroll-minute` | `20`/h AND `2`/min |
@@ -151,6 +151,6 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 
 No database / persistent server-side identity store (the phone holds its cert). No authentication of
 relayed traffic (it is opaque TLS; the app authenticates). No per-path cap exceptions or bulk transfers.
-No CRL (bans are the only revocation). No cross-replica exact bandwidth accounting (per-process buckets).
+No CRL (bans are the only revocation). No per-slice-exact bandwidth accounting (batch-credit draws).
 No server-side content storage or caching. No TLS mutual auth on the public side. The Android (Kotlin)
 client lives with the app, not here.
