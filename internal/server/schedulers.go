@@ -126,12 +126,14 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise 
 }
 
 // renewalWatcher periodically scans this node's connected tunnels and nudges the phone to renew any cert
-// the chain says is due (ARI-driven for LE, fixed cadence otherwise). The nudge is best-effort: the
-// phone drives the actual renewal exchange (RENEW_REQUEST → challenge → submit).
+// the chain says is due (ARI-driven for LE, fixed cadence otherwise). The nudge carries a fresh single-use
+// challenge nonce and is best-effort: the phone drives the actual renewal by calling the mTLS POST /issue
+// endpoint with a fresh attestation over that nonce.
 type renewalWatcher struct {
 	mgr    *phoneconn.Manager
 	names  store.NameStore
 	chain  acmeChain
+	nonce  func(ctx context.Context) (string, error) // mints the single-use renewal challenge nonce
 	logger *slog.Logger
 }
 
@@ -161,6 +163,11 @@ func (w *renewalWatcher) tick(ctx context.Context) {
 		if err != nil || !due {
 			continue
 		}
-		w.mgr.SendRenewNudge(name, at.UTC().Format(time.RFC3339))
+		nonceHex, err := w.nonce(ctx)
+		if err != nil {
+			w.logger.Warn("renewal nonce mint failed", "tunnel", name, "err", err)
+			continue
+		}
+		w.mgr.SendRenewNudge(name, nonceHex, at.UTC().Format(time.RFC3339))
 	}
 }

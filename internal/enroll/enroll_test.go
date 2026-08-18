@@ -136,41 +136,106 @@ func mintNonce(t *testing.T, svc *Service) []byte {
 	return n
 }
 
+// doEnroll runs Phase 1 (identity enrollment) and returns the assigned name.
+func doEnroll(t *testing.T, svc *Service, idCSR *x509.CertificateRequest) string {
+	t.Helper()
+	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
+	if ee != nil {
+		t.Fatalf("enroll (phase 1) failed: %v", ee)
+	}
+	return res.Name
+}
+
+// newTLSCSR builds a public-cert CSR requesting exactly fqdn (CN + SAN).
+func newTLSCSR(t *testing.T, fqdn string) *x509.CertificateRequest {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn},
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _ := x509.ParseCertificateRequest(der)
+	return csr
+}
+
+// TestEnrollHappyPath covers Phase 1: attestation + name claim + bootstrap identity cert, with NO public
+// cert yet (the record carries the identity fingerprint but no cert info).
 func TestEnrollHappyPath(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st,
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
 		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
 	})
-	nonce := mintNonce(t, svc)
-	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
-		Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tlsCSR,
-	})
+	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
 	if ee != nil {
 		t.Fatalf("enroll failed: %v", ee)
 	}
-	if res.Name == "" || res.CA != "letsencrypt" || len(res.IdentityCert) == 0 || len(res.PublicCert) == 0 {
-		t.Errorf("bad result: %+v", res)
+	if res.Name == "" || len(res.IdentityCert) == 0 || len(res.PublicCert) != 0 {
+		t.Errorf("phase 1 must return name + identity cert and NO public cert: %+v", res)
 	}
-	// The claimed name has a durable record carrying the identity fingerprint.
 	rec, err := st.GetName(context.Background(), res.Name)
-	if err != nil || rec.IdentityKeyFP == "" || rec.CA != "letsencrypt" {
-		t.Errorf("record missing/incomplete: %+v %v", rec, err)
+	if err != nil || rec.IdentityKeyFP == "" || rec.Cert.CA != "" {
+		t.Errorf("phase-1 record must carry the identity fingerprint and NO cert: %+v %v", rec, err)
+	}
+}
+
+// TestIssueHappyPath covers Phase 2: an enrolled tunnel obtains its public cert (regenerating the
+// identity cert too) for <name>.<tunnel-domain>; the record then carries the issued cert.
+func TestIssueHappyPath(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+	})
+	name := doEnroll(t, svc, idCSR)
+	tlsCSR := newTLSCSR(t, name+".example.test")
+	res, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
+	})
+	if ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	if res.CA != "letsencrypt" || len(res.IdentityCert) == 0 || len(res.PublicCert) == 0 {
+		t.Errorf("issue must regenerate identity + public certs: %+v", res)
+	}
+	rec, err := st.GetName(context.Background(), name)
+	if err != nil || rec.CA != "letsencrypt" || rec.Cert.CA != "letsencrypt" {
+		t.Errorf("record must carry the issued cert: %+v %v", rec, err)
+	}
+}
+
+// TestIssueRejectsWrongDomain covers the server-dictated public identity: a TLS CSR that does not request
+// <name>.<tunnel-domain> is refused.
+func TestIssueRejectsWrongDomain(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
+	})
+	name := doEnroll(t, svc, idCSR)
+	tlsCSR := newTLSCSR(t, "attacker.example.test") // wrong name
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
+	})
+	if ee == nil || ee.Reason != "csr_domain_mismatch" {
+		t.Fatalf("expected csr_domain_mismatch, got %v", ee)
 	}
 }
 
 func TestEnrollAttestationRejectRecordsEvidence(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, _ := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{err: attest.ErrSignerNotAllowed}, Issuer: fakeIssuer{},
 	})
 	nonce := mintNonce(t, svc)
-	_, ee := svc.Enroll(context.Background(), "9.9.9.9", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tlsCSR})
+	_, ee := svc.Enroll(context.Background(), "9.9.9.9", Request{Nonce: nonce, IdentityCSR: idCSR})
 	if ee == nil || ee.Reason != "unauthorized" {
 		t.Fatalf("expected unauthorized, got %v", ee)
 	}
@@ -182,14 +247,13 @@ func TestEnrollAttestationRejectRecordsEvidence(t *testing.T) {
 func TestEnrollKeyBindingMismatch(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, _ := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	_, otherPub := newCSR(t) // attested key differs from the identity CSR key
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{key: otherPub}, Issuer: fakeIssuer{},
 	})
 	nonce := mintNonce(t, svc)
-	_, ee := svc.Enroll(context.Background(), "1.1.1.1", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tlsCSR})
+	_, ee := svc.Enroll(context.Background(), "1.1.1.1", Request{Nonce: nonce, IdentityCSR: idCSR})
 	if ee == nil || ee.Reason != "unauthorized" {
 		t.Fatalf("mismatched identity key should be unauthorized, got %v", ee)
 	}
@@ -198,29 +262,31 @@ func TestEnrollKeyBindingMismatch(t *testing.T) {
 	}
 }
 
-func TestEnrollAcmeFailureRollsBack(t *testing.T) {
+// TestIssueAcmeFailure covers a rate-limited public-cert issuance at Phase 2: it surfaces a retryable
+// acme_rate_limited error and the enrolled name record persists (Phase 2 is retryable — never rolled back).
+func TestIssueAcmeFailure(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st,
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
 		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{obtainErr: rateLimitedErr{}},
 	})
-	nonce := mintNonce(t, svc)
-	_, ee := svc.Enroll(context.Background(), "2.2.2.2", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tlsCSR})
+	name := doEnroll(t, svc, idCSR)
+	tlsCSR := newTLSCSR(t, name+".example.test")
+	_, ee := svc.Issue(context.Background(), name, "2.2.2.2", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
+	})
 	if ee == nil || ee.Reason != "acme_rate_limited" || !ee.Retryable {
 		t.Fatalf("expected retryable acme_rate_limited, got %v", ee)
 	}
-	// The claimed name was rolled back (no orphaned record) — the fake captured a Put then a Delete.
-	if len(st.ConnLogs) != 0 {
-		t.Error("no conn logs expected")
+	if _, err := st.GetName(context.Background(), name); err != nil {
+		t.Errorf("the enrolled name must persist after a retryable issuance failure: %v", err)
 	}
 }
 
 func TestClaimZombiePutLoserRedraws(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "gts"},
@@ -236,7 +302,7 @@ func TestClaimZombiePutLoserRedraws(t *testing.T) {
 		_ = st.PutName(context.Background(), name, store.NameRecord{Schema: 1, ClaimNonce: "competitor-nonce"})
 	}
 	nonce := mintNonce(t, svc)
-	res, ee := svc.Enroll(context.Background(), "3.3.3.3", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tlsCSR})
+	res, ee := svc.Enroll(context.Background(), "3.3.3.3", Request{Nonce: nonce, IdentityCSR: idCSR})
 	if ee != nil {
 		t.Fatalf("should redraw and succeed: %v", ee)
 	}
@@ -248,12 +314,11 @@ func TestClaimZombiePutLoserRedraws(t *testing.T) {
 func TestEnrollInvalidNonce(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)
-	tlsCSR, _ := newCSR(t)
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{key: idPub}, Issuer: fakeIssuer{ca: "letsencrypt"},
 	})
-	_, ee := svc.Enroll(context.Background(), "4.4.4.4", Request{Nonce: []byte("never-issued"), IdentityCSR: idCSR, TLSCSR: tlsCSR})
+	_, ee := svc.Enroll(context.Background(), "4.4.4.4", Request{Nonce: []byte("never-issued"), IdentityCSR: idCSR})
 	if ee == nil || ee.Reason != "invalid_nonce" {
 		t.Fatalf("expected invalid_nonce, got %v", ee)
 	}

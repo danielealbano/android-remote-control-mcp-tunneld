@@ -16,7 +16,6 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // serveTLS runs srv on ln until ctx is cancelled, then closes the listener. The listener is already a
@@ -107,47 +106,48 @@ func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string,
 	return nil
 }
 
-// renewFunc adapts the enroll service's renewal path to the phone control handler's OnRenew callback:
-// it parses the phone's submitted attestation chain + rotated CSRs and runs the same attested-enrollment
-// flow in renewal mode (existing name, no per-IP enroll limit), returning the rotated certs to push.
-func renewFunc(svc *enroll.Service) phoneconn.RenewFunc {
-	return func(ctx context.Context, name, nonceHex, ip string, sub wire.RenewSubmitPayload) (wire.CertPushPayload, error) {
-		nonce, err := hex.DecodeString(nonceHex)
+// issueFunc adapts the enroll service's Issue path to the phone control handler's mTLS POST /issue
+// endpoint: it parses the phone's fresh attestation chain + rotated CSRs and runs the attested issuance
+// (name from the mTLS client-cert CN, validated by the handler), returning the regenerated identity +
+// public certs. It serves BOTH the initial public cert and every renewal.
+func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
+	return func(ctx context.Context, name, _, ip string, req phoneconn.IssueRequest) (phoneconn.IssueResponse, *phoneconn.IssueError) {
+		nonce, err := hex.DecodeString(req.Nonce)
 		if err != nil {
-			return wire.CertPushPayload{}, err
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_nonce"}
 		}
-		chainPEM := []byte(sub.AttestationChainPEM)
+		chainPEM := []byte(req.AttestationChainPEM)
 		attestChain, err := parseCertChainPEM(chainPEM)
 		if err != nil {
-			return wire.CertPushPayload{}, err
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_attestation"}
 		}
-		idCSR, err := parseCSRPEM(sub.IdentityCSR)
+		idCSR, err := parseCSRPEM(req.IdentityCSR)
 		if err != nil {
-			return wire.CertPushPayload{}, err
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_identity_csr"}
 		}
-		tlsCSR, err := parseCSRPEM(sub.TLSCSR)
+		tlsCSR, err := parseCSRPEM(req.TLSCSR)
 		if err != nil {
-			return wire.CertPushPayload{}, err
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
 		}
-		res, eerr := svc.Enroll(ctx, ip, enroll.Request{
-			Renewal: true, Name: name, Nonce: nonce,
-			AttestChainPEM: chainPEM, AttestChain: attestChain,
+		res, eerr := svc.Issue(ctx, name, ip, enroll.Request{
+			Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: attestChain,
 			IdentityCSR: idCSR, TLSCSR: tlsCSR,
 		})
 		if eerr != nil {
-			return wire.CertPushPayload{}, eerr
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{
+				Reason: eerr.Reason, Retryable: eerr.Retryable, Unauthorized: eerr.Reason == "unauthorized",
+			}
 		}
-		return wire.CertPushPayload{
-			IdentityCertPEM: string(res.IdentityCert),
-			PublicCertPEM:   string(res.PublicCert),
+		return phoneconn.IssueResponse{
+			IdentityCert: string(res.IdentityCert), PublicCert: string(res.PublicCert), CA: res.CA,
 		}, nil
 	}
 }
 
-// challengeFunc adapts the enroll service's single-use nonce minting to the control handler's renewal
-// challenge: the renewal nonce is a real enroll nonce (Valkey-stored), so the submission validates
-// through the exact same attestation path as an initial enrollment.
-func challengeFunc(svc *enroll.Service) phoneconn.ChallengeFunc {
+// challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the
+// renewal nudge, so the phone's follow-up POST /issue validates through the same attestation path as an
+// initial issuance.
+func challengeFunc(svc *enroll.Service) func(ctx context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		nonce, err := svc.Nonce(ctx)
 		if err != nil {

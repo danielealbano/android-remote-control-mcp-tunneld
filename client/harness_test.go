@@ -23,10 +23,10 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 const testControlHost = "connect.example.test"
+const testTunnelDomain = "example.test"
 const testName = "abcdef23456x"
 
 type testCA struct {
@@ -104,23 +104,30 @@ func startTestServer(t *testing.T) *testServer {
 		NodeID: "node-test", NodeHost: "host-test", NodeStart: "start", RouteTTL: 30 * time.Second,
 	})
 
-	// onRenew signs a fresh identity cert from the submitted CSR (realistic: cert pubkey == fresh key).
-	onRenew := func(_ context.Context, name, _, _ string, sub wire.RenewSubmitPayload) (wire.CertPushPayload, error) {
-		block, _ := pem.Decode([]byte(sub.IdentityCSR))
-		csr, err := x509.ParseCertificateRequest(block.Bytes)
+	// onIssue signs a fresh identity cert (from the identity CSR) and a public cert (from the TLS CSR,
+	// SAN = <name>.<tunnel-domain>) — the mTLS certificate-generation endpoint for initial + renewal.
+	onIssue := func(_ context.Context, name, _, _ string, req phoneconn.IssueRequest) (phoneconn.IssueResponse, *phoneconn.IssueError) {
+		idBlock, _ := pem.Decode([]byte(req.IdentityCSR))
+		idCSR, err := x509.ParseCertificateRequest(idBlock.Bytes)
 		if err != nil {
-			return wire.CertPushPayload{}, err
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_identity_csr"}
 		}
-		newCert := ca.signLeaf(t, name, csr.PublicKey, false, nil)
-		return wire.CertPushPayload{IdentityCertPEM: string(newCert), PublicCertPEM: string(newCert)}, nil
+		tlsBlock, _ := pem.Decode([]byte(req.TLSCSR))
+		tlsCSR, err := x509.ParseCertificateRequest(tlsBlock.Bytes)
+		if err != nil {
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
+		}
+		fqdn := name + "." + testTunnelDomain
+		idCert := ca.signLeaf(t, name, idCSR.PublicKey, false, nil)
+		pubCert := ca.signLeaf(t, fqdn, tlsCSR.PublicKey, true, []string{fqdn})
+		return phoneconn.IssueResponse{IdentityCert: string(idCert), PublicCert: string(pubCert), CA: "test"}, nil
 	}
-	challenge := func(context.Context) (string, error) { return "deadbeef", nil }
 
 	handler := phoneconn.NewHandler(phoneconn.HandlerConfig{
 		Manager:      mgr,
 		ValidName:    func(n string) bool { return n == testName },
 		BanTunnel:    func(string, string) bool { return false },
-		PingInterval: time.Hour, StreamPending: 64, OnRenew: onRenew, Challenge: challenge,
+		PingInterval: time.Hour, StreamPending: 64, OnIssue: onIssue,
 	})
 
 	// Server cert for the control host.
@@ -154,7 +161,7 @@ func (ts *testServer) newClient(t *testing.T, backend Backend) *Client {
 	idKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	idCertPEM := ts.ca.signLeaf(t, testName, &idKey.PublicKey, false, nil)
 	ident := &Identity{Name: testName, IdentityCertPEM: idCertPEM, IdentityKey: idKey, CA: "test"}
-	c, err := New(ts.dialAdr, testControlHost, ts.ca.pool, ident, backend)
+	c, err := New(ts.dialAdr, testControlHost, testTunnelDomain, ts.ca.pool, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}

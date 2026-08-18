@@ -3,8 +3,10 @@ package phoneconn
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -32,20 +34,41 @@ type Handler struct {
 	banTunnel     BanTunnel
 	pingInterval  time.Duration
 	streamPending int
-	onRenew       RenewFunc
-	challenge     ChallengeFunc
+	onIssue       IssueFunc
+	issueBody     int64
 
 	sem chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
 }
 
-// RenewFunc handles a renewal submission, returning the pushed certs or an error. nonceHex is the
-// server-minted renewal challenge (a real single-use enroll nonce) the phone echoed in its fresh
-// attestation; ip is the phone's peer address (from the peeked ConnMeta) for rejection evidence.
-type RenewFunc func(ctx context.Context, name, nonceHex, ip string, sub wire.RenewSubmitPayload) (wire.CertPushPayload, error)
+// IssueRequest is the POST /issue body: a fresh attestation over the enroll/nudge nonce plus rotated
+// identity and TLS CSRs. It is the SINGLE certificate-generation request for BOTH the initial public
+// cert (right after enrollment) and every renewal — it regenerates the identity + public certs together.
+type IssueRequest struct {
+	Nonce               string `json:"nonce"`             // hex
+	AttestationChainPEM string `json:"attestation_chain"` // PEM bundle
+	IdentityCSR         string `json:"identity_csr"`      // PEM
+	TLSCSR              string `json:"tls_csr"`           // PEM (SAN = <name>.<tunnel-domain>)
+}
 
-// ChallengeFunc mints a fresh single-use renewal challenge nonce (hex), stored server-side (Valkey)
-// exactly like an initial-enrollment nonce so the renewal submission validates through the same path.
-type ChallengeFunc func(ctx context.Context) (nonceHex string, err error)
+// IssueResponse returns the regenerated identity + public certs.
+type IssueResponse struct {
+	IdentityCert string `json:"identity_cert"`
+	PublicCert   string `json:"public_cert"`
+	CA           string `json:"ca"`
+}
+
+// IssueError is a structured issuance failure (mapped to an HTTP status by serveIssue).
+type IssueError struct {
+	Reason       string
+	Retryable    bool
+	Unauthorized bool
+}
+
+func (e *IssueError) Error() string { return "phoneconn: " + e.Reason }
+
+// IssueFunc regenerates the identity + public certs for an mTLS-authenticated tunnel (name from the
+// client-cert CN). fp is the identity-cert fingerprint; ip is the phone's peer address for evidence.
+type IssueFunc func(ctx context.Context, name, fp, ip string, req IssueRequest) (IssueResponse, *IssueError)
 
 // HandlerConfig wires the Handler.
 type HandlerConfig struct {
@@ -54,8 +77,8 @@ type HandlerConfig struct {
 	BanTunnel     BanTunnel
 	PingInterval  time.Duration
 	StreamPending int
-	OnRenew       RenewFunc
-	Challenge     ChallengeFunc
+	OnIssue       IssueFunc
+	IssueBody     int64 // max POST /issue body (bytes); defaults to 256 KiB
 }
 
 // NewHandler builds the phone control handler.
@@ -63,11 +86,14 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.StreamPending < 1 {
 		cfg.StreamPending = 64
 	}
+	if cfg.IssueBody < 1 {
+		cfg.IssueBody = 256 * 1024
+	}
 	return &Handler{
 		mgr: cfg.Manager, validName: cfg.ValidName, banTunnel: cfg.BanTunnel,
-		pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending, onRenew: cfg.OnRenew,
-		challenge: cfg.Challenge,
-		sem:       make(chan struct{}, cfg.StreamPending),
+		pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending,
+		onIssue: cfg.OnIssue, issueBody: cfg.IssueBody,
+		sem: make(chan struct{}, cfg.StreamPending),
 	}
 }
 
@@ -103,9 +129,64 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveControl(w, r, name, fp)
 	case "/data":
 		h.serveData(w, r, name)
+	case "/issue":
+		h.serveIssue(w, r, name, fp)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// serveIssue is the mTLS certificate-generation endpoint (initial public cert AND every renewal): it
+// reads the tunnel name from the authenticated client-cert CN, hands the request to OnIssue, and returns
+// the regenerated identity + public certs. POST only.
+func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name, fp string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.onIssue == nil {
+		http.Error(w, "issuance unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, h.issueBody))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	var req IssueRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	resp, ierr := h.onIssue(r.Context(), name, fp, peerIP(r), req)
+	if ierr != nil {
+		status := http.StatusBadRequest
+		if ierr.Retryable {
+			status = http.StatusServiceUnavailable
+		}
+		if ierr.Unauthorized {
+			status = http.StatusUnauthorized
+		}
+		writeJSON(w, status, map[string]any{"reason": ierr.Reason, "retryable": ierr.Retryable})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// peerIP returns the connecting phone's IP (host part of RemoteAddr).
+func peerIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// writeJSON writes v as a JSON response with the given status.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 // serveControl runs the long-lived bidirectional control stream: it writes queued frames to the
@@ -142,7 +223,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 	flusher.Flush()
 
 	go h.mgr.heartbeatLoop(ctx, c)
-	go h.readPump(ctx, r.Body, c)
+	go h.readPump(r.Body, c)
 
 	ping := time.NewTicker(h.pingInterval)
 	defer ping.Stop()
@@ -165,26 +246,20 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 	}
 }
 
-// readPump decodes incoming control frames from the phone (length-framed) and dispatches them.
-func (h *Handler) readPump(ctx context.Context, body io.Reader, c *conn) {
+// readPump drains incoming control frames from the phone (length-framed). The phone→server direction
+// now carries only PONG liveness (certificate work moved to the mTLS POST /issue endpoint); any decode
+// failure or EOF tears the connection down.
+func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {
 		frame, err := readControlFrame(body)
 		if err != nil {
 			c.close("phone-close")
 			return
 		}
-		ct, payload, derr := wire.DecodeControl(frame)
-		if derr != nil {
+		if _, _, derr := wire.DecodeControl(frame); derr != nil {
 			continue
 		}
-		switch ct {
-		case wire.CtrlPong:
-			// liveness ok
-		case wire.CtrlRenewRequest:
-			h.sendRenewChallenge(ctx, c)
-		case wire.CtrlRenewSubmit:
-			h.handleRenewSubmit(ctx, c, payload)
-		}
+		// Only CtrlPong is expected; it is liveness-only, so no dispatch is needed.
 	}
 }
 

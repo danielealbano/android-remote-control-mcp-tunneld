@@ -49,15 +49,30 @@ type nonceResponse struct {
 	Nonce string `json:"nonce"`
 }
 
+// enrollRequestBody is the Phase-1 POST /enroll body (identity only — no TLS CSR).
 type enrollRequestBody struct {
+	Nonce          string `json:"nonce"`
+	AttestChainPEM string `json:"attestation_chain"`
+	IdentityCSR    string `json:"identity_csr"`
+}
+
+// enrollResponse is the Phase-1 reply: name + bootstrap identity cert + the follow-up issue nonce.
+type enrollResponse struct {
+	Name         string `json:"name"`
+	IdentityCert string `json:"identity_cert"`
+	IssueNonce   string `json:"issue_nonce"`
+}
+
+// issueRequestBody is the Phase-2 (and renewal) POST /issue body (mTLS).
+type issueRequestBody struct {
 	Nonce          string `json:"nonce"`
 	AttestChainPEM string `json:"attestation_chain"`
 	IdentityCSR    string `json:"identity_csr"`
 	TLSCSR         string `json:"tls_csr"`
 }
 
-type enrollResponse struct {
-	Name         string `json:"name"`
+// issueResponseBody is the POST /issue reply: the regenerated identity + public certs.
+type issueResponseBody struct {
 	IdentityCert string `json:"identity_cert"`
 	PublicCert   string `json:"public_cert"`
 	CA           string `json:"ca"`
@@ -79,22 +94,69 @@ type EnrollError struct {
 
 func (e *EnrollError) Error() string { return fmt.Sprintf("enroll: %s (status %d)", e.Reason, e.Status) }
 
-// Enroll performs attestation-optional enrollment against the enroll host reachable at dialAddr with
-// SNI/Host enrollHost, trusting caPool. It generates the identity + public keys and CSRs and a throwaway
-// self-signed "attestation" chain (accepted because the server also runs --attestation-optional).
-func Enroll(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertPool) (*Identity, error) {
+// Enroll performs the two-phase attestation-optional enrollment: Phase 1 (server-TLS POST /enroll on
+// enrollHost) attests the identity key and returns the assigned name + bootstrap identity cert + a
+// follow-up issue nonce; Phase 2 (mTLS POST /issue on controlHost) regenerates the identity cert and
+// obtains the public WebPKI cert for <name>.<tunnelDomain> together. It uses a throwaway self-signed
+// "attestation" chain (accepted because the server runs --attestation-optional). dialAddr is the shared
+// raw :443 edge (SNI routes enrollHost/controlHost to their listeners).
+func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain string, caPool *x509.CertPool) (*Identity, error) {
+	// --- Phase 1: identity enrollment (server-TLS) ---
 	hc := &http.Client{Transport: serverTLSTransport(dialAddr, enrollHost, caPool)}
-
 	nonce, err := fetchNonce(ctx, hc, enrollHost)
 	if err != nil {
 		return nil, err
 	}
+	bootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	idCSR, err := csrPEM(bootKey)
+	if err != nil {
+		return nil, err
+	}
+	attest, err := dummyAttestationPEM(bootKey)
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)})
+	resp, err := post(ctx, hc, "https://"+enrollHost+"/enroll", body)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var er errorResponse
+		_ = json.Unmarshal(raw, &er)
+		return nil, &EnrollError{Status: resp.StatusCode, Reason: er.Reason, Retryable: er.Retryable,
+			RetryAfter: time.Duration(er.RetryAfter) * time.Second}
+	}
+	var er enrollResponse
+	if err := json.Unmarshal(raw, &er); err != nil {
+		return nil, fmt.Errorf("enroll: decode response: %w", err)
+	}
 
+	// --- Phase 2: cert generation (mTLS POST /issue) ---
+	bootIdent := &Identity{Name: er.Name, IdentityCertPEM: []byte(er.IdentityCert), IdentityKey: bootKey}
+	bootCert, err := bootIdent.tlsCertificate()
+	if err != nil {
+		return nil, err
+	}
+	mtls := &http.Client{Transport: newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert })}
+	return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", er.IssueNonce)
+}
+
+// issueCerts performs the mTLS POST /issue exchange over hc: it generates a FRESH identity + TLS keypair,
+// builds the CSRs (TLS SAN = <name>.<tunnelDomain>) and a throwaway attestation over nonceHex, and
+// returns a new Identity carrying the regenerated identity + public certs and their fresh keys. It backs
+// both Phase 2 of enrollment and every renewal. caFallback is used when the server omits the CA field.
+func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelDomain, caFallback, nonceHex string) (*Identity, error) {
 	idKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	pubKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tlsKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +164,7 @@ func Enroll(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertP
 	if err != nil {
 		return nil, err
 	}
-	tlsCSR, err := csrPEM(pubKey)
+	tlsCSR, err := tlsCSRForTunnel(tlsKey, name, tunnelDomain)
 	if err != nil {
 		return nil, err
 	}
@@ -110,11 +172,10 @@ func Enroll(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertP
 	if err != nil {
 		return nil, err
 	}
-
-	body, _ := json.Marshal(enrollRequestBody{
-		Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR), TLSCSR: string(tlsCSR),
+	body, _ := json.Marshal(issueRequestBody{
+		Nonce: nonceHex, AttestChainPEM: string(attest), IdentityCSR: string(idCSR), TLSCSR: string(tlsCSR),
 	})
-	resp, err := post(ctx, hc, "https://"+enrollHost+"/enroll", body)
+	resp, err := post(ctx, hc, "https://"+controlHost+"/issue", body)
 	if err != nil {
 		return nil, err
 	}
@@ -126,14 +187,31 @@ func Enroll(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertP
 		return nil, &EnrollError{Status: resp.StatusCode, Reason: er.Reason, Retryable: er.Retryable,
 			RetryAfter: time.Duration(er.RetryAfter) * time.Second}
 	}
-	var er enrollResponse
-	if err := json.Unmarshal(raw, &er); err != nil {
-		return nil, fmt.Errorf("enroll: decode response: %w", err)
+	var ir issueResponseBody
+	if err := json.Unmarshal(raw, &ir); err != nil {
+		return nil, fmt.Errorf("issue: decode response: %w", err)
+	}
+	caID := ir.CA
+	if caID == "" {
+		caID = caFallback
 	}
 	return &Identity{
-		Name: er.Name, IdentityCertPEM: []byte(er.IdentityCert), IdentityKey: idKey,
-		PublicCertPEM: []byte(er.PublicCert), PublicKey: pubKey, CA: er.CA,
+		Name: name, IdentityCertPEM: []byte(ir.IdentityCert), IdentityKey: idKey,
+		PublicCertPEM: []byte(ir.PublicCert), PublicKey: tlsKey, CA: caID,
 	}, nil
+}
+
+// tlsCSRForTunnel builds a PKCS#10 CSR for the public cert requesting exactly <name>.<tunnelDomain>
+// (CN + SAN), signed by key.
+func tlsCSRForTunnel(key *ecdsa.PrivateKey, name, tunnelDomain string) ([]byte, error) {
+	fqdn := name + "." + tunnelDomain
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn},
+	}, key)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil
 }
 
 func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string, error) {

@@ -2459,3 +2459,79 @@ gates, and validate all touched Mermaid diagrams.
 - **US1 `cmd/tunneld/main_test.go`:** the dispatch test now supplies the full required-for-serve flag
   set and asserts `S3Bucket` instead of the removed-from-Validate `ClientIPHeader` (the field still
   exists until US13; only the assertion target changed).
+
+- **US14 Task 14.1 (DNS-resolver seam for the hermetic Pebble tier):** two production config flags were
+  ADDED — `--acme-dns-resolver` (repeatable; `ACMEDNSResolvers []string`) and
+  `--acme-dns-skip-propagation-check` (`ACMEDNSSkipPropagationCheck bool`) — threaded through
+  `buildACMEChain` → `acme.LegoConfig` → `NewLegoClient`'s `SetDNS01Provider(provider, opts...)` call as
+  lego `dns01.AddRecursiveNameservers(...)` + `dns01.DisableAuthoritativeNssPropagationRequirement()`
+  options. Reason: lego's default DNS-01 solver enforces an authoritative-nameserver propagation
+  pre-check whose recursive resolvers come ONLY from the host `/etc/resolv.conf` (no env override exists
+  in lego v4.35.2 — verified from source), so a hermetic Pebble + `pebble-challtestsrv` serving
+  `<name>.example.test` can never satisfy it through the unmodified production chain. The flags are a
+  genuine production feature (split-horizon / internal-DNS deployments need exactly this) and default to
+  off (empty resolvers, check enabled), preserving prior behavior. The integration/e2e tiers set them to
+  point the pre-check at challtestsrv. User decision (this session): the automated tiers use hermetic
+  Pebble (NOT real Let's Encrypt).
+- **US14 Task 14.1 (lego⇄Pebble coverage gaps):** verified against Pebble 2.10.1's authoritative default
+  `test/config/pebble-config.json` — it DEFINES the `shortlived` profile, so the LE client keeps
+  `--acme-le-profile=shortlived` and real `ObtainForCSR`-with-profile IS exercised. NOT exercised by the
+  Pebble tier (documented gaps): ACME ARI (`GetRenewalInfo` is never called by the code — `shouldRenew`
+  for `UseARI` is margin-based, so this is a non-gap in practice) and EAB (Pebble default config sets
+  `externalAccountBindingRequired:false`; GTS/ZeroSSL EAB registration is left unexercised). Real-CA
+  fidelity for ARI/EAB/rate-limit behavior remains an operator pre-go-live concern (US15 doc), not a CI
+  tier.
+- **US14 Task 14.1 (DNS-01 publish bridge):** the hermetic tier selects the lego-native `httpreq` DNS
+  provider (`--acme-dns-provider=httpreq`, `HTTPREQ_ENDPOINT` set to an in-test shim) and an in-process
+  shim translates lego's `POST /present {fqdn,value}` → challtestsrv `POST /set-txt {host,value}` (and
+  `/cleanup` → `/clear-txt`). `httpreq` publishes `info.EffectiveFQDN` (already trailing-dotted), matching
+  challtestsrv's required `_acme-challenge.<domain>.` host form. This is the "in-test DNSProvider /
+  companion challenge server" mechanism the plan left to pin at implementation time.
+- **US14 Task 14.1 (`enroll.Service` name-generator seam):** a `SetNameGen(func() (string, error))` seam
+  was added to `enroll.Service` (mirroring the existing `SetClock` seam) so the concurrent-claim subtest
+  can force two enrollments onto the same first candidate name. Default behavior is unchanged
+  (`ca.GenerateName` with the configured prefix/length/reserved set). The concurrent-claim subtest drives
+  the real write-verify claim protocol against real MinIO with a real (non-instant) settle wait and a
+  lightweight fake `PublicIssuer` (the subtest asserts the STORE race outcome, not issuance), so it needs
+  no Pebble order.
+
+- **US5/US6/US7/US8/US12 (two-phase enrollment redesign — SACRED wire-contract correction):** the
+  original single-phase enrollment (US5) issued the public cert during `POST /enroll` from a phone TLS
+  CSR generated BEFORE the server assigned the name. Verified against lego v4.35.2: `ObtainForCSR`
+  derives the ACME order domains STRICTLY from the CSR's CN/SAN (`certcrypto.ExtractDomainsCSR`), and the
+  server cannot rebuild+re-sign the CSR (only the phone holds the TLS key). So the public cert could
+  never carry the required server-dictated `<name>.<tunnel-domain>` SAN — the enrollment path as planned
+  was unbuildable against real ACME (the acme unit tests masked it with a `fakeCA` that ignores the CSR).
+  **User decision this session: the plan's single-phase design was wrong; enrollment is two-phase.**
+  Changes made (code + `docs/PROTOCOL.md` §1/§2/§3 rewritten + validated Mermaid):
+  - **Enroll split (`internal/enroll`):** `Enroll` is now Phase 1 only — attestation + key binding +
+    write-verify name claim + a **bootstrap identity cert** (CN = the server-assigned name); it issues NO
+    public cert and takes NO TLS CSR. A new **`Issue(ctx, name, ip, req)`** is Phase 2 AND every renewal:
+    it re-verifies the seven-point attestation on a FRESH chain over the nonce, validates the TLS CSR
+    requests exactly `<name>.<tunnel-domain>` (`csrMatchesTunnel`, using the new `Config.TunnelDomain`),
+    checks the issuance cap, rotates the identity cert, and `Obtain`s (first) / `Renew`s (subsequent) the
+    public cert — regenerating the identity + public certs TOGETHER. `Request` lost `Renewal`/`Name`;
+    `TLSCSR` is Issue-only. `recordSuccess`→`recordIdentity` (Phase 1, no cert) + `recordCert` (Issue);
+    `resolveName` removed (Enroll always claims). `POST /enroll` now returns `{name, identity_cert,
+    issue_nonce}` (the follow-up nonce, minted via `svc.Nonce`).
+  - **Wire v2 (`internal/wire`):** removed `CtrlRenewRequest/RenewChallenge/RenewSubmit/CertPush` +
+    `RenewChallengePayload/RenewSubmitPayload/CertPushPayload`; `RenewNudgePayload` now carries `Nonce`.
+    No golden fixtures existed yet (`testdata/` empty), so the enum renumber is safe.
+  - **Phone control plane (`internal/phoneconn`):** new mTLS **`POST /issue`** route (`serveIssue` +
+    `IssueRequest`/`IssueResponse`/`IssueError`/`IssueFunc`); `HandlerConfig.OnIssue` replaces
+    `OnRenew`+`Challenge`; `SendRenewNudge(name, nonceHex, ariWindow)`; the stream renewal handlers
+    (`sendRenewChallenge`/`handleRenewSubmit`/`decodeRenewSubmit`) and the per-conn challenge-nonce state
+    were removed; `readPump` now only drains PONG liveness.
+  - **Server wiring (`internal/server`):** `serve.go` `renewFunc`→`issueFunc` (adapts `OnIssue` to
+    `enroll.Issue`); `challengeFunc` retained as the renewal-nudge nonce minter; `renewalWatcher` gained a
+    `nonce` minter and sends `SendRenewNudge(name, nonce, ariWindow)`; `server.Run` wires
+    `enroll.Config.TunnelDomain`, `OnIssue`, and the watcher nonce.
+  - **Go client (`client/`):** `Enroll(dialAddr, enrollHost, controlHost, tunnelDomain, caPool)` runs both
+    phases (Phase 1 `/enroll` → bootstrap identity → mTLS Phase 2 `/issue`); `New(..., tunnelDomain, ...)`;
+    `issueCerts` + `tlsCSRForTunnel` (TLS CSR SAN = `<name>.<tunnel-domain>`) + factored
+    `newMTLSTransport`; `renew` answers `RENEW_NUDGE{nonce}` by calling `/issue`; the old
+    `submitRenewal`/`installCerts` + `pendingID`/`pendingTL` were removed.
+  This preserves BOTH sacred invariants: the server still assigns the name randomly (written into the
+  identity-cert CN — `ca.SignIdentity` already ignores the CSR subject) and the phone still holds the TLS
+  private key (only CSRs leave it). The identity cert is deliberately re-minted at Phase 2 seconds after
+  enrollment — the accepted cost of ONE uniform `/issue` code path for initial + renewal (user-confirmed).

@@ -98,7 +98,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Enrollment service + handler.
 	enrollSvc := enroll.NewService(enroll.Config{
 		RDB: rdb, CA: caObj, Names: st, Evidence: st, Verifier: verifier, Limiter: lim, Issuer: chain,
-		NamePrefix: cfg.NamePrefix, NameLength: cfg.NameLength,
+		TunnelDomain: cfg.TunnelDomain,
+		NamePrefix:   cfg.NamePrefix, NameLength: cfg.NameLength,
 		ExtraReserved: []string{firstLabel(cfg.EnrollHost), firstLabel(cfg.ControlHost)},
 		IssuePerWeek:  cfg.IssuePerWeek, EnrollHour: cfg.LimitEnrollHour, EnrollMinute: cfg.LimitEnrollMinute,
 		ClaimTimeout: cfg.RegistryClaimTimeout, ClaimSettle: cfg.RegistryClaimSettle,
@@ -115,7 +116,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
 		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanTunnel: banTunnel,
 		PingInterval: cfg.ControlPingInterval, StreamPending: cfg.LimitStreamPending,
-		OnRenew: renewFunc(enrollSvc), Challenge: challengeFunc(enrollSvc),
+		OnIssue: issueFunc(enrollSvc),
 	})
 
 	// Mesh cert (hot-swappable) + client + listener.
@@ -198,7 +199,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error { meshCert.rotateLoop(gctx, caObj); return nil })
 	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
 	g.Go(func() error {
-		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, logger: logger}
+		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, nonce: challengeFunc(enrollSvc), logger: logger}
 		return rw.run(gctx, renewalScanInterval)
 	})
 

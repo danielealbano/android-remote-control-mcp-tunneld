@@ -15,11 +15,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		{CtrlClose, ClosePayload{StreamID: "aabbccddee", Reason: "client-close"}},
 		{CtrlPing, nil},
 		{CtrlPong, nil},
-		{CtrlRenewNudge, RenewNudgePayload{ARIWindow: "2026-08-20T00:00:00Z"}},
-		{CtrlRenewRequest, nil},
-		{CtrlRenewChallenge, RenewChallengePayload{Nonce: "00112233"}},
-		{CtrlRenewSubmit, RenewSubmitPayload{AttestationChainPEM: "PEM", IdentityCSR: "ID", TLSCSR: "TLS"}},
-		{CtrlCertPush, CertPushPayload{IdentityCertPEM: "IC", PublicCertPEM: "PC"}},
+		{CtrlRenewNudge, RenewNudgePayload{Nonce: "00112233", ARIWindow: "2026-08-20T00:00:00Z"}},
 		{CtrlError, ErrorPayload{Reason: "rate_limited", Retryable: true, RetryAfter: 3600}},
 	}
 	for _, tc := range cases {

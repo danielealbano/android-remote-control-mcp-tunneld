@@ -2,12 +2,9 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"testing"
 	"time"
-
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // TestControlConnectBindAndDuplex covers: control connect + bind, dial-back opens a data stream, and a
@@ -49,24 +46,10 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 	}
 }
 
-// TestCertPushSwap covers CERT_PUSH updating the client's active identity.
-func TestCertPushSwap(t *testing.T) {
-	ts := startTestServer(t)
-	c := ts.newClient(t, func(io.ReadWriteCloser) {})
-	original := string(c.Identity().IdentityCertPEM)
-
-	// A CERT_PUSH carrying a new cert for the same name must swap the active identity.
-	newCertPEM := ts.ca.signLeaf(t, testName, &c.Identity().IdentityKey.PublicKey, false, nil)
-	push, _ := json.Marshal(wire.CertPushPayload{IdentityCertPEM: string(newCertPEM), PublicCertPEM: string(newCertPEM)})
-	c.installCerts(push)
-
-	if got := string(c.Identity().IdentityCertPEM); got == original {
-		t.Fatal("CERT_PUSH must swap the client's active identity cert")
-	}
-}
-
-// TestRenewExchange covers RENEW_NUDGE → RENEW_REQUEST/CHALLENGE/SUBMIT → CERT_PUSH end to end.
-func TestRenewExchange(t *testing.T) {
+// TestRenewViaNudgeAndIssue covers the renewal flow: RENEW_NUDGE{nonce} on the control stream → the client
+// calls the mTLS POST /issue endpoint → the server regenerates the identity + public certs → the client
+// swaps in the rotated identity (both certs change).
+func TestRenewViaNudgeAndIssue(t *testing.T) {
 	ts := startTestServer(t)
 	c := ts.newClient(t, func(io.ReadWriteCloser) {})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -76,15 +59,16 @@ func TestRenewExchange(t *testing.T) {
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
 		t.Fatal("control must bind before renewal")
 	}
-	original := string(c.Identity().IdentityCertPEM)
+	originalID := string(c.Identity().IdentityCertPEM)
 
-	if !ts.mgr.SendRenewNudge(testName, "") {
+	if !ts.mgr.SendRenewNudge(testName, "00112233", "") {
 		t.Fatal("SendRenewNudge should reach the live connection")
 	}
 
 	if !waitFor(t, 5*time.Second, func() bool {
-		return string(c.Identity().IdentityCertPEM) != original && len(c.Identity().IdentityCertPEM) > 0
+		id := c.Identity()
+		return string(id.IdentityCertPEM) != originalID && len(id.PublicCertPEM) > 0
 	}) {
-		t.Fatal("renewal exchange must install the pushed cert (identity should change)")
+		t.Fatal("renewal must call /issue and swap in the regenerated identity + public certs")
 	}
 }

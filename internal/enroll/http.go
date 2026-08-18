@@ -22,19 +22,19 @@ type nonceResponse struct {
 	Nonce string `json:"nonce"` // hex
 }
 
-// enrollRequestBody is the POST /enroll body.
+// enrollRequestBody is the POST /enroll body (Phase 1: identity only — NO TLS CSR).
 type enrollRequestBody struct {
 	Nonce          string `json:"nonce"`             // hex
 	AttestChainPEM string `json:"attestation_chain"` // PEM bundle
-	IdentityCSR    string `json:"identity_csr"`      // base64 DER? we accept PEM
-	TLSCSR         string `json:"tls_csr"`
+	IdentityCSR    string `json:"identity_csr"`      // PEM
 }
 
+// enrollResponse returns the assigned name, the bootstrap identity cert, and a fresh single-use
+// issue_nonce the phone echoes in the fresh attestation of its follow-up POST /issue (Phase 2).
 type enrollResponse struct {
 	Name         string `json:"name"`
 	IdentityCert string `json:"identity_cert"` // PEM
-	PublicCert   string `json:"public_cert"`   // PEM chain
-	CA           string `json:"ca"`
+	IssueNonce   string `json:"issue_nonce"`   // hex
 }
 
 type errorResponse struct {
@@ -118,38 +118,45 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		http.Error(w, "bad identity csr", http.StatusBadRequest)
 		return
 	}
-	tlsCSR, err := parseCSR([]byte(req.TLSCSR))
-	if err != nil {
-		http.Error(w, "bad tls csr", http.StatusBadRequest)
-		return
-	}
 
 	res, ee := h.svc.Enroll(r.Context(), ip, Request{
 		Nonce:          nonce,
 		AttestChainPEM: []byte(req.AttestChainPEM),
 		AttestChain:    chain,
 		IdentityCSR:    idCSR,
-		TLSCSR:         tlsCSR,
 	})
 	if ee != nil {
 		h.rec.EnrollmentResult(ee.Reason)
-		status := http.StatusBadRequest
-		if ee.Retryable {
-			status = http.StatusServiceUnavailable
-		}
-		if ee.Reason == "unauthorized" {
-			status = http.StatusUnauthorized
-		}
-		writeErr(w, ee, status)
+		writeErr(w, ee, statusForError(ee))
 		return
 	}
+
+	// Mint the single-use nonce for the follow-up mTLS POST /issue (Phase 2).
+	issueNonce, nerr := h.svc.Nonce(r.Context())
+	if nerr != nil {
+		h.rec.EnrollmentResult("internal")
+		http.Error(w, "internal", http.StatusInternalServerError)
+		return
+	}
+
 	h.rec.EnrollmentResult("ok")
 	writeJSON(w, http.StatusOK, enrollResponse{
 		Name:         res.Name,
 		IdentityCert: string(res.IdentityCert),
-		PublicCert:   string(res.PublicCert),
-		CA:           res.CA,
+		IssueNonce:   hex.EncodeToString(issueNonce),
 	})
+}
+
+// statusForError maps an enrollment/issuance Error to its HTTP status.
+func statusForError(e *Error) int {
+	switch {
+	case e.Reason == "unauthorized":
+		return http.StatusUnauthorized
+	case e.Retryable:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadRequest
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

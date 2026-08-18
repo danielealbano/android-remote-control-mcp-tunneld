@@ -1,20 +1,10 @@
 package phoneconn
 
 import (
-	"context"
 	"encoding/binary"
-	"encoding/json"
 	"io"
 	"sync"
-
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
-
-func decodeRenewSubmit(payload []byte) (wire.RenewSubmitPayload, error) {
-	var s wire.RenewSubmitPayload
-	err := json.Unmarshal(payload, &s)
-	return s, err
-}
 
 // httpDataStream splices one dial-back data stream: Read pulls phone→client bytes from the /data
 // request body; Write pushes client→phone bytes to the /data response body (flushed). Close signals the
@@ -60,61 +50,3 @@ func readControlFrame(r io.Reader) ([]byte, error) {
 	return frame, nil
 }
 
-// sendRenewChallenge mints a fresh single-use renewal challenge nonce (a real enroll nonce, stored
-// server-side via the Challenge callback) and relays it to the phone, which echoes it in the fresh
-// attestation of its RENEW_SUBMIT. The nonce is retained on the connection for validation at submit.
-func (h *Handler) sendRenewChallenge(ctx context.Context, c *conn) {
-	if h.onRenew == nil || h.challenge == nil {
-		return
-	}
-	nonceHex, err := h.challenge(ctx)
-	if err != nil {
-		ef, _ := wire.EncodeControl(wire.CtrlError, wire.ErrorPayload{Reason: "renew_challenge_failed", Retryable: true})
-		select {
-		case c.send <- ef:
-		case <-ctx.Done():
-		}
-		return
-	}
-	c.setChallengeNonce(nonceHex)
-	frame, _ := wire.EncodeControl(wire.CtrlRenewChallenge, wire.RenewChallengePayload{Nonce: nonceHex})
-	select {
-	case c.send <- frame:
-	case <-ctx.Done():
-	}
-}
-
-// handleRenewSubmit runs the renewal via OnRenew and pushes the result (or an ERROR) to the phone. The
-// connection stays up on the OLD certs on failure.
-func (h *Handler) handleRenewSubmit(ctx context.Context, c *conn, payload []byte) {
-	if h.onRenew == nil {
-		return
-	}
-	sub, err := decodeRenewSubmit(payload)
-	if err != nil {
-		return
-	}
-	nonceHex := c.takeChallengeNonce()
-	if nonceHex == "" {
-		ef, _ := wire.EncodeControl(wire.CtrlError, wire.ErrorPayload{Reason: "renew_no_challenge", Retryable: true})
-		select {
-		case c.send <- ef:
-		case <-ctx.Done():
-		}
-		return
-	}
-	push, err := h.onRenew(ctx, c.name, nonceHex, c.meta.SrcIP, sub)
-	if err != nil {
-		ef, _ := wire.EncodeControl(wire.CtrlError, wire.ErrorPayload{Reason: "renew_failed", Retryable: true})
-		select {
-		case c.send <- ef:
-		case <-ctx.Done():
-		}
-		return
-	}
-	pf, _ := wire.EncodeControl(wire.CtrlCertPush, push)
-	select {
-	case c.send <- pf:
-	case <-ctx.Done():
-	}
-}

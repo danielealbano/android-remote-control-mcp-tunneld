@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -24,16 +23,15 @@ type Backend func(stream io.ReadWriteCloser)
 // Client is the HTTP/2 phone control client. It holds a hot-swappable identity (rotated by CERT_PUSH)
 // and opens dial-back data streams to a caller-supplied backend.
 type Client struct {
-	dialAddr    string
-	controlHost string
-	caPool      *x509.CertPool
-	backend     Backend
+	dialAddr     string
+	controlHost  string
+	tunnelDomain string
+	caPool       *x509.CertPool
+	backend      Backend
 
-	mu        sync.Mutex
-	ident     *Identity
-	cert      *tls.Certificate
-	pendingID *ecdsa.PrivateKey // fresh identity key awaiting a renewal CERT_PUSH
-	pendingTL *ecdsa.PrivateKey // fresh public key awaiting a renewal CERT_PUSH
+	mu    sync.Mutex
+	ident *Identity
+	cert  *tls.Certificate
 
 	hc *http.Client
 
@@ -42,28 +40,36 @@ type Client struct {
 }
 
 // New builds a control client that dials dialAddr, negotiates TLS with SNI/Host controlHost (trusting
-// caPool), presents ident as the mTLS client cert, and serves dial-back streams to backend.
-func New(dialAddr, controlHost string, caPool *x509.CertPool, ident *Identity, backend Backend) (*Client, error) {
-	c := &Client{dialAddr: dialAddr, controlHost: controlHost, caPool: caPool, backend: backend, ident: ident}
+// caPool), presents ident as the mTLS client cert, serves dial-back streams to backend, and renews via
+// the mTLS POST /issue endpoint (needing tunnelDomain to request <name>.<tunnelDomain>).
+func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend) (*Client, error) {
+	c := &Client{
+		dialAddr: dialAddr, controlHost: controlHost, tunnelDomain: tunnelDomain,
+		caPool: caPool, backend: backend, ident: ident,
+	}
 	cert, err := ident.tlsCertificate()
 	if err != nil {
 		return nil, err
 	}
 	c.cert = &cert
-	tr := &http2.Transport{
+	c.hc = &http.Client{Transport: newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert)}
+	return c, nil
+}
+
+// newMTLSTransport builds an HTTP/2 transport that dials dialAddr, negotiates TLS with SNI/Host
+// controlHost (trusting caPool), and presents the identity cert returned by getCert as the mTLS client
+// cert (getCert is re-invoked per handshake, so a rotated identity is picked up on reconnect).
+func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCert func() *tls.Certificate) *http2.Transport {
+	return &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
 			d := &tls.Dialer{Config: &tls.Config{
-				ServerName: c.controlHost, RootCAs: c.caPool, MinVersion: tls.VersionTLS12,
-				NextProtos: []string{"h2"},
-				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-					return c.currentCert(), nil
-				},
+				ServerName: controlHost, RootCAs: caPool, MinVersion: tls.VersionTLS12,
+				NextProtos:           []string{"h2"},
+				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return getCert(), nil },
 			}}
-			return d.DialContext(ctx, network, c.dialAddr)
+			return d.DialContext(ctx, network, dialAddr)
 		},
 	}
-	c.hc = &http.Client{Transport: tr}
-	return c, nil
 }
 
 func (c *Client) currentCert() *tls.Certificate {
@@ -116,11 +122,7 @@ func (c *Client) Run(ctx context.Context) error {
 		case wire.CtrlPing:
 			c.sendControl(wire.CtrlPong, nil)
 		case wire.CtrlRenewNudge:
-			c.sendControl(wire.CtrlRenewRequest, nil)
-		case wire.CtrlRenewChallenge:
-			c.submitRenewal(payload)
-		case wire.CtrlCertPush:
-			c.installCerts(payload)
+			go c.renew(ctx, payload)
 		case wire.CtrlError:
 			// A structured server error (e.g. a failed renewal): the connection stays on the old certs.
 		}

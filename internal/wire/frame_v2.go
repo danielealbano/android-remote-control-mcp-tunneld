@@ -19,19 +19,17 @@ import (
 type ControlType byte
 
 const (
-	CtrlOpen           ControlType = iota + 1 // server→phone dial-back for ONE public connection {streamID}
-	CtrlClose                                 // {streamID, reason}
-	CtrlPing                                  // liveness
-	CtrlPong                                  // liveness
-	CtrlRenewNudge                            // server→phone {ariWindow}
-	CtrlRenewRequest                          // phone→server (initiate renewal)
-	CtrlRenewChallenge                        // server→phone {nonce}
-	CtrlRenewSubmit                           // phone→server {attestationChainPEM, identityCSR, tlsCSR}
-	CtrlCertPush                              // server→phone {identityCertPEM, publicCertPEM}
-	CtrlError                                 // {reason, retryable, retryAfter}
+	CtrlOpen       ControlType = iota + 1 // server→phone dial-back for ONE public connection {streamID}
+	CtrlClose                             // {streamID, reason}
+	CtrlPing                              // liveness
+	CtrlPong                              // liveness
+	CtrlRenewNudge                        // server→phone {nonce, ariWindow}: "renew now" — the phone answers by calling POST /issue (mTLS)
+	CtrlError                             // {reason, retryable, retryAfter}
 )
 
-// maxControlPayload bounds a control-frame payload (renewal frames carry PEM chains + CSRs).
+// maxControlPayload bounds a control-frame payload. The v2 control stream carries only small frames
+// (dial-back announcements, liveness, the renewal nudge); certificate material (attestation chains,
+// CSRs, issued certs) travels over the mTLS POST /issue endpoint, NOT the stream.
 const maxControlPayload = 1 << 20 // 1 MiB
 
 // ChunkSize is the max body bytes per data slice for bandwidth pacing and the WS read-limit sizing
@@ -53,27 +51,12 @@ type ClosePayload struct {
 	Reason   string `json:"reason,omitempty"`
 }
 
-// RenewNudgePayload prompts an early renewal (ARI-driven or migrate-to-LE).
+// RenewNudgePayload prompts a renewal: the phone answers by calling POST /issue (mTLS) with a fresh
+// attestation over Nonce plus rotated identity + TLS CSRs. Nonce is a single-use, server-minted challenge
+// (Valkey-stored, like an initial-enrollment nonce); ARIWindow is the advisory suggested renewal time.
 type RenewNudgePayload struct {
+	Nonce     string `json:"nonce"` // hex
 	ARIWindow string `json:"ari_window,omitempty"`
-}
-
-// RenewChallengePayload carries the fresh attestation nonce for a renewal.
-type RenewChallengePayload struct {
-	Nonce string `json:"nonce"` // hex
-}
-
-// RenewSubmitPayload is the phone's renewal submission (fresh attestation + rotated keys).
-type RenewSubmitPayload struct {
-	AttestationChainPEM string `json:"attestation_chain"`
-	IdentityCSR         string `json:"identity_csr"` // PEM
-	TLSCSR              string `json:"tls_csr"`      // PEM
-}
-
-// CertPushPayload delivers the renewal/issuance result to the phone.
-type CertPushPayload struct {
-	IdentityCertPEM string `json:"identity_cert"`
-	PublicCertPEM   string `json:"public_cert"`
 }
 
 // ErrorPayload is a structured control-stream error.
