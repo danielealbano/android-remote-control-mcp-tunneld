@@ -12,17 +12,9 @@ import (
 type Metrics struct {
 	reg *prometheus.Registry
 
-	tunnelsConnected    prometheus.Gauge
-	enrollments         prometheus.Counter
-	wsConnects          prometheus.Counter
-	wsDisconnects       *prometheus.CounterVec // {reason}
-	httpRequests        *prometheus.CounterVec // {class, code}
-	httpDuration        prometheus.Histogram
-	httpInflight        prometheus.Gauge
-	rejections          *prometheus.CounterVec // {reason}
-	bytesTotal          *prometheus.CounterVec // {direction}
-	pubsubPublishErrors prometheus.Counter
-	requestTimeouts     prometheus.Counter
+	enrollments prometheus.Counter
+	rejections  *prometheus.CounterVec // {reason}
+	bytesTotal  *prometheus.CounterVec // {direction}
 
 	// --- Plan 3 (E2E) families ---
 	publicConnsUp  prometheus.Gauge
@@ -42,27 +34,8 @@ func NewMetrics() *Metrics {
 	reg := prometheus.NewRegistry()
 	m := &Metrics{
 		reg: reg,
-		tunnelsConnected: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "tunneld_tunnels_connected", Help: "Currently connected tunnels.",
-		}),
 		enrollments: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "tunneld_enrollments_total", Help: "Total enrollments.",
-		}),
-		wsConnects: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tunneld_ws_connects_total", Help: "Total WebSocket connects.",
-		}),
-		wsDisconnects: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tunneld_ws_disconnects_total", Help: "WebSocket disconnects by reason.",
-		}, []string{"reason"}),
-		httpRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tunneld_http_requests_total", Help: "Forwarded HTTP requests by class and code.",
-		}, []string{"class", "code"}),
-		httpDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "tunneld_http_request_duration_seconds", Help: "Forwarded request duration.",
-			Buckets: prometheus.DefBuckets,
-		}),
-		httpInflight: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "tunneld_http_inflight", Help: "In-flight forwarded requests.",
 		}),
 		rejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tunneld_rejections_total", Help: "Rejections by reason.",
@@ -70,12 +43,6 @@ func NewMetrics() *Metrics {
 		bytesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tunneld_bytes_total", Help: "Bridged bytes by direction.",
 		}, []string{"direction"}),
-		pubsubPublishErrors: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tunneld_pubsub_publish_errors_total", Help: "Redis publish errors.",
-		}),
-		requestTimeouts: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tunneld_request_timeouts_total", Help: "Request timeouts.",
-		}),
 		publicConnsUp: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "tunneld_public_connections", Help: "Currently open public connections.",
 		}),
@@ -108,9 +75,7 @@ func NewMetrics() *Metrics {
 		}),
 	}
 	reg.MustRegister(
-		m.tunnelsConnected, m.enrollments, m.wsConnects, m.wsDisconnects,
-		m.httpRequests, m.httpDuration, m.httpInflight, m.rejections,
-		m.bytesTotal, m.pubsubPublishErrors, m.requestTimeouts,
+		m.enrollments, m.rejections, m.bytesTotal,
 		m.publicConnsUp, m.phoneConnsUp, m.streamsActive, m.quotaExhausted,
 		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
 		collectors.NewGoCollector(),

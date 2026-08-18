@@ -3,7 +3,6 @@ package metrics
 import (
 	"context"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -29,7 +28,6 @@ type PromRecorder struct {
 }
 
 type aggEntry struct {
-	requests int64
 	bytesIn  int64
 	bytesOut int64
 }
@@ -47,14 +45,6 @@ func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
 	p.caplog.Hit(tunnelName, reason, clientIP)
 }
 
-// Request bumps the request counter + duration histogram and accumulates the per-tunnel requests
-// counter in-process (flushed async — never a synchronous Redis write on the data plane).
-func (p *PromRecorder) Request(tunnelName, class string, code int, dur time.Duration) {
-	p.m.httpRequests.WithLabelValues(class, strconv.Itoa(code)).Inc()
-	p.m.httpDuration.Observe(dur.Seconds())
-	p.accum(tunnelName, func(e *aggEntry) { e.requests++ })
-}
-
 // Bytes bumps the direction counter and accumulates the per-tunnel byte counters.
 func (p *PromRecorder) Bytes(tunnelName, direction string, n int64) {
 	p.m.bytesTotal.WithLabelValues(direction).Add(float64(n))
@@ -66,21 +56,6 @@ func (p *PromRecorder) Bytes(tunnelName, direction string, n int64) {
 		}
 	})
 }
-
-func (p *PromRecorder) WSConnect() {
-	p.m.wsConnects.Inc()
-	p.m.tunnelsConnected.Inc()
-}
-
-func (p *PromRecorder) WSDisconnect(reason string) {
-	p.m.wsDisconnects.WithLabelValues(reason).Inc()
-	p.m.tunnelsConnected.Dec()
-}
-
-func (p *PromRecorder) Enrollment()           { p.m.enrollments.Inc() }
-func (p *PromRecorder) InflightAdd(delta int) { p.m.httpInflight.Add(float64(delta)) }
-func (p *PromRecorder) Timeout()              { p.m.requestTimeouts.Inc() }
-func (p *PromRecorder) PublishError()         { p.m.pubsubPublishErrors.Inc() }
 
 // --- Plan 3 (E2E) event set (real implementations). ---
 
@@ -146,11 +121,6 @@ func (p *PromRecorder) flush(ctx context.Context) {
 	p.mu.Unlock()
 
 	for name, e := range drained {
-		if e.requests != 0 {
-			if err := p.admin.Incr(ctx, name, "requests", e.requests); err != nil {
-				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "requests", "err", err)
-			}
-		}
 		if e.bytesIn != 0 {
 			if err := p.admin.Incr(ctx, name, "bytes_in", e.bytesIn); err != nil {
 				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_in", "err", err)

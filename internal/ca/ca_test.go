@@ -6,10 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -35,7 +33,7 @@ func genCAMaterial(t *testing.T, isCA bool) ([]byte, *ecdsa.PrivateKey) {
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  isCA,
-		MaxPathLenZero:        isCA, // MaxPathLen is only valid on a CA cert
+		MaxPathLenZero:        isCA,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -82,7 +80,18 @@ func p256Key(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
-func makeCSR(t *testing.T, key crypto.Signer) []byte {
+// csrFor builds a parsed CSR (with an attacker-controlled subject/SAN, to prove the CA discards them).
+func csrFor(t *testing.T, key crypto.Signer) *x509.CertificateRequest {
+	t.Helper()
+	der := csrDER(t, key)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csr
+}
+
+func csrDER(t *testing.T, key crypto.Signer) []byte {
 	t.Helper()
 	tmpl := &x509.CertificateRequest{
 		Subject:  pkix.Name{CommonName: "attacker-controlled-cn"},
@@ -95,35 +104,10 @@ func makeCSR(t *testing.T, key crypto.Signer) []byte {
 	return der
 }
 
-// signLeaf issues a leaf cert directly with the CA material (white-box) so tests can set arbitrary
-// validity windows (expired / not-yet-valid).
-func signLeaf(t *testing.T, ca *CA, notBefore, notAfter time.Time, cn string, pub crypto.PublicKey) *x509.Certificate {
-	t.Helper()
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(time.Now().UnixNano()),
-		Subject:               pkix.Name{CommonName: cn},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return cert
-}
-
 func TestLoadRejectsBadCAMaterial(t *testing.T) {
-	// Missing files.
 	if _, err := Load("/nope/ca.pem", "/nope/ca-key.pem", testValidity); err == nil {
 		t.Error("missing files must error")
 	}
-	// Corrupt cert.
 	dir := t.TempDir()
 	badCert := filepath.Join(dir, "bad.pem")
 	_ = os.WriteFile(badCert, []byte("not a pem"), 0o600)
@@ -132,7 +116,6 @@ func TestLoadRejectsBadCAMaterial(t *testing.T) {
 	if _, err := Load(badCert, keyPath, testValidity); err == nil {
 		t.Error("corrupt cert must error")
 	}
-	// Non-CA cert.
 	der, k := genCAMaterial(t, false)
 	cp, kp := writeCAFiles(t, der, k)
 	if _, err := Load(cp, kp, testValidity); err == nil {
@@ -140,7 +123,6 @@ func TestLoadRejectsBadCAMaterial(t *testing.T) {
 	}
 }
 
-// mustDER re-issues a CA cert DER for the given key (helper for the corrupt-cert case).
 func mustDER(t *testing.T, key *ecdsa.PrivateKey, isCA bool) []byte {
 	t.Helper()
 	tmpl := &x509.Certificate{
@@ -155,10 +137,9 @@ func mustDER(t *testing.T, key *ecdsa.PrivateKey, isCA bool) []byte {
 	return der
 }
 
-func TestSignThenVerifyRoundTrips(t *testing.T) {
+func TestSignIdentityRoundTripsAndChainsToCA(t *testing.T) {
 	ca := newTestCA(t)
-	key := p256Key(t)
-	leafPEM, err := ca.SignCSR(makeCSR(t, key), "abc2345678")
+	leafPEM, err := ca.SignIdentity(csrFor(t, p256Key(t)), "abc2345678")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,30 +148,33 @@ func TestSignThenVerifyRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name, fp, err := VerifyEnrolledCert(cert, ca.Pool())
-	if err != nil {
-		t.Fatal(err)
+	if cert.Subject.CommonName != "abc2345678" {
+		t.Errorf("CN = %q, want abc2345678", cert.Subject.CommonName)
 	}
-	if name != "abc2345678" {
-		t.Errorf("CN = %q, want abc2345678", name)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: ca.Pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		t.Errorf("identity cert must chain to the CA: %v", err)
 	}
-	if fp == "" {
+	if Fingerprint(cert) == "" {
 		t.Error("fingerprint empty")
 	}
 }
 
-func TestSignRejectsBadCSRSignature(t *testing.T) {
+func TestSignIdentityRejectsBadCSRSignature(t *testing.T) {
 	ca := newTestCA(t)
-	csr := makeCSR(t, p256Key(t))
-	csr[len(csr)-1] ^= 0xff // tamper the signature tail
-	if _, err := ca.SignCSR(csr, "name123456"); err == nil {
+	der := csrDER(t, p256Key(t))
+	der[len(der)-1] ^= 0xff // tamper the signature tail
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err) // structurally still parses; the signature check is what must fail
+	}
+	if _, err := ca.SignIdentity(csr, "name123456"); err == nil {
 		t.Error("tampered CSR must be rejected")
 	}
 }
 
-func TestSignIgnoresCSRSubjectExtensions(t *testing.T) {
+func TestSignIdentityIgnoresCSRSubject(t *testing.T) {
 	ca := newTestCA(t)
-	leafPEM, err := ca.SignCSR(makeCSR(t, p256Key(t)), "servername")
+	leafPEM, err := ca.SignIdentity(csrFor(t, p256Key(t)), "servername")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,106 +188,21 @@ func TestSignIgnoresCSRSubjectExtensions(t *testing.T) {
 	}
 }
 
-func TestSignRejectsNonP256Key(t *testing.T) {
+func TestSignIdentityRejectsNonP256Key(t *testing.T) {
 	ca := newTestCA(t)
 	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	if _, err := ca.SignCSR(makeCSR(t, rsaKey), "n123456789"); err != ErrUnsupportedKeyType {
+	if _, err := ca.SignIdentity(csrFor(t, rsaKey), "n123456789"); err != ErrUnsupportedKeyType {
 		t.Errorf("RSA CSR: err = %v, want ErrUnsupportedKeyType", err)
 	}
 	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if _, err := ca.SignCSR(makeCSR(t, p384), "n123456789"); err != ErrUnsupportedKeyType {
+	if _, err := ca.SignIdentity(csrFor(t, p384), "n123456789"); err != ErrUnsupportedKeyType {
 		t.Errorf("P-384 CSR: err = %v, want ErrUnsupportedKeyType", err)
-	}
-}
-
-func TestPossessionRejectsNonECCert(t *testing.T) {
-	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "rsa"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &rsaKey.PublicKey, rsaKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, _ := x509.ParseCertificate(der)
-	if err := VerifyPossession(cert, []byte("nonce"), []byte("sig")); err != ErrNotEC {
-		t.Errorf("RSA cert possession: err = %v, want ErrNotEC", err)
-	}
-}
-
-func TestParseB64DERRoundTrips(t *testing.T) {
-	ca := newTestCA(t)
-	leafPEM, _ := ca.SignCSR(makeCSR(t, p256Key(t)), "roundtrip1")
-	block, _ := pem.Decode(leafPEM)
-	b64 := base64.StdEncoding.EncodeToString(block.Bytes)
-	cert, err := ParseCertB64DER(b64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(cert.Raw) != string(block.Bytes) {
-		t.Error("round-tripped cert differs")
-	}
-	if _, err := ParseCertB64DER("!!!not base64!!!"); err == nil {
-		t.Error("garbage b64 must error")
-	}
-}
-
-func TestVerifyRejectsUnknownCA(t *testing.T) {
-	ca1 := newTestCA(t)
-	ca2 := newTestCA(t)
-	leaf := signLeaf(t, ca2, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), "cross", &p256Key(t).PublicKey)
-	if _, _, err := VerifyEnrolledCert(leaf, ca1.Pool()); err == nil {
-		t.Error("cert from another CA must not verify")
-	}
-}
-
-func TestVerifyRejectsExpiredCert(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := signLeaf(t, ca, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour), "expired", &p256Key(t).PublicKey)
-	if _, _, err := VerifyEnrolledCert(leaf, ca.Pool()); err == nil {
-		t.Error("expired cert must not verify")
-	}
-}
-
-func TestVerifyRejectsNotYetValidCert(t *testing.T) {
-	ca := newTestCA(t)
-	leaf := signLeaf(t, ca, time.Now().Add(time.Hour), time.Now().Add(2*time.Hour), "future", &p256Key(t).PublicKey)
-	if _, _, err := VerifyEnrolledCert(leaf, ca.Pool()); err == nil {
-		t.Error("not-yet-valid cert must not verify")
-	}
-}
-
-func TestPossessionSignatureRoundTrips(t *testing.T) {
-	ca := newTestCA(t)
-	key := p256Key(t)
-	leafPEM, _ := ca.SignCSR(makeCSR(t, key), "possession1")
-	block, _ := pem.Decode(leafPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
-
-	nonce := []byte("a-server-chosen-random-nonce-32b")
-	digest := sha256.Sum256(append([]byte(ConnectAuthContext), nonce...))
-	sig, err := ecdsa.SignASN1(rand.Reader, key, digest[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := VerifyPossession(cert, nonce, sig); err != nil {
-		t.Fatalf("valid possession signature rejected: %v", err)
-	}
-	// Wrong key.
-	otherKey := p256Key(t)
-	digest2 := sha256.Sum256(append([]byte(ConnectAuthContext), nonce...))
-	badSig, _ := ecdsa.SignASN1(rand.Reader, otherKey, digest2[:])
-	if err := VerifyPossession(cert, nonce, badSig); err == nil {
-		t.Error("signature by a different key must fail")
-	}
-	// Wrong/stale nonce.
-	otherNonce := []byte("a-DIFFERENT-server-nonce-value!!")
-	if err := VerifyPossession(cert, otherNonce, sig); err == nil {
-		t.Error("signature over a different nonce must fail (no replay)")
 	}
 }
 
 func TestFingerprintStableAndPrefixed(t *testing.T) {
 	ca := newTestCA(t)
-	leafPEM, _ := ca.SignCSR(makeCSR(t, p256Key(t)), "fp12345678")
+	leafPEM, _ := ca.SignIdentity(csrFor(t, p256Key(t)), "fp12345678")
 	block, _ := pem.Decode(leafPEM)
 	cert, _ := x509.ParseCertificate(block.Bytes)
 	f1 := Fingerprint(cert)
@@ -327,45 +226,11 @@ func (c constReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestVerifyEnrolledCert_RejectsCAAndNoDigSig(t *testing.T) {
-	ca := newTestCA(t)
-	key := p256Key(t)
-
-	caTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(10), Subject: pkix.Name{CommonName: "caleaf1234"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true, MaxPathLenZero: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, caTmpl, ca.cert, &key.PublicKey, ca.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	caLeaf, _ := x509.ParseCertificate(der)
-	if _, _, err := VerifyEnrolledCert(caLeaf, ca.Pool()); err == nil {
-		t.Error("a CA-flagged leaf must be rejected")
-	}
-
-	kuTmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(11), Subject: pkix.Name{CommonName: "kuleaf1234"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageKeyEncipherment, BasicConstraintsValid: true,
-	}
-	der2, err := x509.CreateCertificate(rand.Reader, kuTmpl, ca.cert, &key.PublicKey, ca.key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kuLeaf, _ := x509.ParseCertificate(der2)
-	if _, _, err := VerifyEnrolledCert(kuLeaf, ca.Pool()); err == nil {
-		t.Error("a leaf lacking digitalSignature key usage must be rejected")
-	}
-}
-
 func TestGenerateName_ReservesEnrollLabel(t *testing.T) {
 	produced, err := generateName("", 10, constReader(0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Passing that label as an extra reserved label (the enroll host's first label) must prevent it.
 	if _, err := generateName("", 10, constReader(0), produced); err == nil {
 		t.Error("the extra-reserved (enroll host) label must never be produced")
 	}
@@ -381,22 +246,9 @@ func TestGenerateName_ReservedSkipAndExhaustion(t *testing.T) {
 	}
 }
 
-func TestAuthCertSizeCap(t *testing.T) {
-	ca := newTestCA(t)
-	leafPEM, _ := ca.SignCSR(makeCSR(t, p256Key(t)), "sizetest12")
-	block, _ := pem.Decode(leafPEM)
-	b64 := base64.StdEncoding.EncodeToString(block.Bytes)
-	if _, err := ParseCertB64DERLimited(b64, 4096); err != nil {
-		t.Fatalf("a normal leaf under the cap must parse: %v", err)
-	}
-	if _, err := ParseCertB64DERLimited(b64, 8); err == nil {
-		t.Error("a cert exceeding the cap must be rejected before parse")
-	}
-}
-
 func TestGenerateNameShapeAndReservedSkip(t *testing.T) {
 	re := regexp.MustCompile(`^[a-z2-7]{10}$`)
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		name, err := GenerateName("", 10)
 		if err != nil {
 			t.Fatal(err)

@@ -53,14 +53,13 @@ func TestAdminTunnelsHandler(t *testing.T) {
 
 func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
 	_, rec, store, _, _ := setup(t)
-	rec.Request("t1", "mcp", 200, time.Millisecond)
 	rec.Bytes("t1", "in", 500)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = rec.RunFlusher(ctx, 20*time.Millisecond) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if stats, _ := store.TopN(context.Background(), 10); len(stats) == 1 && stats[0].Requests == 1 && stats[0].BytesIn == 500 {
+		if stats, _ := store.TopN(context.Background(), 10); len(stats) == 1 && stats[0].BytesIn == 500 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -92,17 +91,17 @@ func TestHealthz503WhenRedisDown(t *testing.T) {
 func TestMetricsEndpointExposesFamilies(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	// Exercise each family so CounterVecs emit at least one series (Prometheus omits empty families).
-	rec.WSConnect()
-	rec.Reject("rate_rps", "t", "1.1.1.1")
+	rec.Reject("ban", "t", "1.1.1.1")
 	rec.Bytes("t", "in", 10)
-	rec.Request("t", "mcp", 200, time.Millisecond)
+	rec.AttestVerify("ok")
+	rec.QuotaExhausted("t", "day")
 	h := Handler(m.Registry(), rdb, store, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
 	for _, name := range []string{
-		"tunneld_tunnels_connected", "tunneld_ws_connects_total",
-		"tunneld_rejections_total", "tunneld_bytes_total", "tunneld_http_requests_total",
+		"tunneld_rejections_total", "tunneld_bytes_total",
+		"tunneld_attest_verify_total", "tunneld_quota_exhausted_total",
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("/metrics missing %s", name)
@@ -112,7 +111,6 @@ func TestMetricsEndpointExposesFamilies(t *testing.T) {
 
 func TestNoPerTunnelMetricLabels(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
-	rec.Request("secret-tunnel-name", "mcp", 200, time.Millisecond)
 	rec.Bytes("secret-tunnel-name", "in", 100)
 	h := Handler(m.Registry(), rdb, store, discardLog())
 	rr := httptest.NewRecorder()
@@ -139,7 +137,6 @@ func TestRejectionIncrementsReasonCounter(t *testing.T) {
 
 func TestPromRecorderFlushesTcnt(t *testing.T) {
 	_, rec, store, _, _ := setup(t)
-	rec.Request("tunA", "mcp", 200, time.Millisecond)
 	rec.Bytes("tunA", "in", 100)
 	rec.Bytes("tunA", "out", 50)
 	rec.flush(context.Background()) // the real async write path, driven synchronously in the test
@@ -150,7 +147,7 @@ func TestPromRecorderFlushesTcnt(t *testing.T) {
 	if len(stats) != 1 || stats[0].Name != "tunA" {
 		t.Fatalf("expected tunA stats, got %+v", stats)
 	}
-	if stats[0].Requests != 1 || stats[0].BytesIn != 100 || stats[0].BytesOut != 50 {
+	if stats[0].BytesIn != 100 || stats[0].BytesOut != 50 {
 		t.Errorf("flushed counters wrong: %+v", stats[0])
 	}
 }

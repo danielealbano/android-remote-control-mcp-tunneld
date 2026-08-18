@@ -83,12 +83,3 @@ func TestControlRejectsOversizeAndMalformed(t *testing.T) {
 		t.Error("length/payload mismatch should error")
 	}
 }
-
-func TestP1EnvelopesIntact(t *testing.T) {
-	// The Plan-1 codec must still compile + round-trip (removed only in US13).
-	f := EncodeFrame(CHALLENGE, []byte(`{"nonce":"x"}`), nil)
-	ft, hdr, body, err := DecodeFrame(f)
-	if err != nil || ft != CHALLENGE || len(body) != 0 || len(hdr) == 0 {
-		t.Errorf("P1 frame round-trip broken: ft=%d err=%v", ft, err)
-	}
-}

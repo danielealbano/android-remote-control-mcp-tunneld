@@ -2,7 +2,6 @@ package limit
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -34,34 +33,3 @@ func freezeClock(t *testing.T) {
 	t.Cleanup(func() { nowFunc = time.Now })
 }
 
-// fakeClock is a manually-advanced clock for bucket/registry tests.
-type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-func newFakeClock() *fakeClock { return &fakeClock{t: time.Unix(1_700_000_000, 0)} }
-
-func (c *fakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.t
-}
-
-func (c *fakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	c.t = c.t.Add(d)
-	c.mu.Unlock()
-}
-
-// advancingSleep returns a sleep func that advances the fake clock by the requested duration (so the
-// next bucket refill observes the elapsed time deterministically).
-func (c *fakeClock) advancingSleep() func(context.Context, time.Duration) error {
-	return func(ctx context.Context, d time.Duration) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		c.Advance(d)
-		return nil
-	}
-}

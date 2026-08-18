@@ -65,10 +65,6 @@ func TestBindLookupRouteRoundTrip(t *testing.T) {
 	if !got.Equal(start) {
 		t.Errorf("startedAt = %v, want %v", got, start)
 	}
-	// P1 Lookup remains functional (untouched).
-	if _, _, ok2, _ := reg.Lookup(ctx, "abc"); !ok2 {
-		t.Error("P1 Lookup must still resolve the route")
-	}
 }
 
 func TestBindRouteFingerprintGuard(t *testing.T) {

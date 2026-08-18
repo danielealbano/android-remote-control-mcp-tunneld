@@ -421,3 +421,23 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 		t.Errorf("log twin = %v", cli.Serve.Log)
 	}
 }
+
+// TestRemovedP1FlagsRejected asserts the Plan-1 flags deleted in the E2E teardown are no longer
+// accepted (parsing them yields an unknown-flag error).
+func TestRemovedP1FlagsRejected(t *testing.T) {
+	for _, flag := range []string{
+		"--client-ip-header=X-Real-Ip", "--limit-body=1mb", "--limit-rps=10", "--ping-interval=30s",
+		"--limit-request-timeout=60s", "--connect-auth-timeout=5s", "--limit-connect-pending=64",
+	} {
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), kong.DefaultEnvars("TUNNELD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse([]string{"serve", flag}); err == nil {
+			t.Errorf("removed flag %q must be rejected as unknown", flag)
+		}
+	}
+}

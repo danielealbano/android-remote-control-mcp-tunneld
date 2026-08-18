@@ -1,22 +1,19 @@
-// Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the raw
-// coder/websocket FakePhone, reused across the transport, ingress, and wsconn test suites.
+// Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the durable
+// store fake, reused across the E2E package test suites.
 package tunneltest
 
 import (
 	"sync"
-	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
 
 // RecCall is one captured Recorder invocation.
 type RecCall struct {
-	Kind, Reason, Tunnel, IP, Class, Direction string
-	Code                                       int
-	N                                          int64
-	Dur                                        time.Duration
-	CA, Result, Window, Peer                   string
-	Size                                       int
+	Kind, Reason, Tunnel, IP, Direction string
+	N                                   int64
+	CA, Result, Window, Peer            string
+	Size                                int
 }
 
 // Recorder is a thread-safe capturing observ.Recorder for assertions.
@@ -33,20 +30,9 @@ func (r *Recorder) Reject(reason, tunnel, ip string) {
 	r.add(RecCall{Kind: "reject", Reason: reason, Tunnel: tunnel, IP: ip})
 }
 
-func (r *Recorder) Request(tunnel, class string, code int, d time.Duration) {
-	r.add(RecCall{Kind: "request", Tunnel: tunnel, Class: class, Code: code, Dur: d})
-}
-
 func (r *Recorder) Bytes(tunnel, dir string, n int64) {
 	r.add(RecCall{Kind: "bytes", Tunnel: tunnel, Direction: dir, N: n})
 }
-
-func (r *Recorder) WSConnect()                 { r.add(RecCall{Kind: "wsconnect"}) }
-func (r *Recorder) WSDisconnect(reason string) { r.add(RecCall{Kind: "wsdisconnect", Reason: reason}) }
-func (r *Recorder) Enrollment()                { r.add(RecCall{Kind: "enrollment"}) }
-func (r *Recorder) InflightAdd(delta int)      { r.add(RecCall{Kind: "inflight", Code: delta}) }
-func (r *Recorder) Timeout()                   { r.add(RecCall{Kind: "timeout"}) }
-func (r *Recorder) PublishError()              { r.add(RecCall{Kind: "publisherror"}) }
 
 // --- Plan 3 (E2E) event set ---
 

@@ -1884,13 +1884,13 @@ renewal handling, and an attestation-optional enrollment path for tests.
 
 ## User Story 13: Legacy teardown (remove HTTP-mode subsystems)
 
-- [ ] **User Story 13 complete**
+- [x] **User Story 13 complete**
 
 Remove the Plan-1 HTTP-mode subsystems now fully superseded, in one deliberate story, AFTER the new
 stack is in place. No half-amputated intermediate state.
 
 ### Acceptance Criteria
-- [ ] Removed: `internal/ingress` (allowlist, header sanitizer, public pipeline, old enroll HTTP handler),
+- [x] Removed: `internal/ingress` (allowlist, header sanitizer, public pipeline, old enroll HTTP handler),
   `internal/clientip`, `internal/wsconn`, the Redis pub/sub `internal/transport`, the ENTIRE P1 v1 wire
   surface — pub/sub envelopes, the v1 frame codec, the v1 golden fixtures — (removed HERE, together
   with ALL their consumers: transport, ingress, wsconn, the P1 `tunneltest` FakePhone, which is deleted
@@ -1900,21 +1900,21 @@ stack is in place. No half-amputated intermediate state.
   `router.Lookup`/`Bind`/`BindIfAbsentOrOwner` (their consumers die here; the new stack uses the
   `*Route` variants), and the P1 Host-dispatch
   mux `internal/server/routes.go` + `routes_test.go`.
-- [ ] Removed WITH their consumers (the additive-until-teardown surfaces deferred from US1/US5): the P1
+- [x] Removed WITH their consumers (the additive-until-teardown surfaces deferred from US1/US5): the P1
   config flags (`--client-ip-header`, `--limit-body`, `--limit-response`, `--limit-headers`,
   `--limit-header-single`, `--limit-request-timeout`, `--limit-rps`, `--limit-rpm`, `--ping-interval`,
   `--connect-auth-timeout`, `--limit-connect-pending`) + their env twins + the Cloudflare-specific
   `Validate()` checks; and the P1 `observ.Recorder` methods (`Request`, `WSConnect`, `WSDisconnect`,
   `Enrollment()`, `InflightAdd`, `Timeout`, `PublishError`) from the interface, `Nop`, the
   `tunneltest` fake, and the US10 `PromRecorder`.
-- [ ] No remaining references to the removed packages/flags/methods; the module (including all tests)
+- [x] No remaining references to the removed packages/flags/methods; the module (including all tests)
   compiles.
-- [ ] Commit scopes (`project.md`) updated: drop scopes for deleted packages, add new ones (`store`,
+- [x] Commit scopes (`project.md`) updated: drop scopes for deleted packages, add new ones (`store`,
   `attest`, `acme`, `enroll`, `edge`, `mesh`, `phoneconn`).
 
 ### Task 13.1: Remove superseded packages + P1 envelopes
-- [ ] **Task 13.1 complete**
-- [ ] **File**: delete `internal/ingress/`, `internal/clientip/`, `internal/wsconn/`,
+- [x] **Task 13.1 complete**
+- [x] **File**: delete `internal/ingress/`, `internal/clientip/`, `internal/wsconn/`,
   `internal/transport/` (and their tests). Remove the ENTIRE P1 v1 wire surface from `internal/wire` in
   one change: the pub/sub envelopes (`envelope.go` + `envelope_test.go`), the v1 frame codec that
   consumes them (`frame.go` CHALLENGE/AUTH/REQUEST_*/RESPONSE_* types,
@@ -1932,7 +1932,7 @@ stack is in place. No half-amputated intermediate state.
   uses `SignIdentity` and mTLS-handshake certs instead. Delete the P1 Host-dispatch mux
   `internal/server/routes.go` + `routes_test.go` (imports only config/net/http, so the import sweep
   would miss it; its `NewMux` role is replaced by the US11 SNI edge).
-- [ ] **File**: `internal/config/config.go` — delete the P1 flags listed in the AC + their
+- [x] **File**: `internal/config/config.go` — delete the P1 flags listed in the AC + their
   Cloudflare-specific `Validate()` checks; in `internal/config/config_test.go` DELETE the P1 test
   rows/functions that reference the removed fields (the removed-flag struct-literal fields, the
   client-IP-header/Cloudflare-check/zero-check/size-parse rows for deleted flags) and ADD a
@@ -1942,13 +1942,13 @@ stack is in place. No half-amputated intermediate state.
   one of the retained required flags it already supplies since US1 (e.g. `--s3-bucket`), keeping the
   full required-for-serve set so the test PASSES `Validate()` (the package-import sweep would miss this
   file — it imports only `internal/config`).
-- [ ] **File**: `internal/observ/recorder.go`, `internal/tunneltest/recorder.go`,
+- [x] **File**: `internal/observ/recorder.go`, `internal/tunneltest/recorder.go`,
   `internal/metrics/recorder.go` — strip the P1 Recorder methods from the interface, `Nop`, the
   capturing fake, and the PromRecorder in one change (their last consumers die in this story).
-- [ ] **File**: `internal/router/registry.go` — remove the P1 four-value `Lookup`, five-arg `Bind`, and
+- [x] **File**: `internal/router/registry.go` — remove the P1 four-value `Lookup`, five-arg `Bind`, and
   `BindIfAbsentOrOwner` (+ their test rows); the new stack already uses
   `BindRoute`/`LookupRoute`/`BindRouteIfAbsentOrOwner` exclusively.
-- [ ] **File**: delete the P1-only `internal/limit` surfaces whose last consumers die in this story:
+- [x] **File**: delete the P1-only `internal/limit` surfaces whose last consumers die in this story:
   `bucket.go` + `bucket_test.go` (the per-process token bucket — the new bridge paces from the
   remaining Valkey batch-credit grant directly, no local token bucket) and `registry.go` +
   `registry_test.go` (`BucketRegistry` — consumers: ingress/wsconn/the P1 server assembly).
@@ -1963,16 +1963,16 @@ are already implemented), NOT a "fix" that deletes code to hide a failure. RETAI
 `internal/wire` (v2 only).
 
 ### Task 13.2: Reference sweep + scope update
-- [ ] **Task 13.2 complete**
-- [ ] **File**: grep the tree for imports of the removed packages; remove dead wiring. Update `project.md`
+- [x] **Task 13.2 complete**
+- [x] **File**: grep the tree for imports of the removed packages; remove dead wiring. Update `project.md`
   Commit Scopes: remove `ingress`, `clientip`, `wsconn`, `transport` rows; add `store`, `attest`, `acme`,
   `enroll`, `edge`, `mesh`, `phoneconn`.
 
 ### Definition of Done
-- [ ] Superseded packages + P1 pub/sub envelopes + P1 flags/checks + P1 Recorder methods +
+- [x] Superseded packages + P1 pub/sub envelopes + P1 flags/checks + P1 Recorder methods +
   possession-proof code removed; module (incl. tests) compiles.
-- [ ] No lingering references; commit scopes updated in `project.md`.
-- [ ] The `removed flags are gone` config test row added (execution in US16).
+- [x] No lingering references; commit scopes updated in `project.md`.
+- [x] The `removed flags are gone` config test row added (execution in US16).
 
 ---
 
@@ -2266,6 +2266,40 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US13 Task 13.1 (shared scripts preserved):** the plan said remove the P1 `acquireScript` (limit) and
+  the P1 `bindScript`/`selfHealScript` (router), but the retained E2E methods reuse them: `AcquireStream`
+  reuses `acquireScript` (+ `releaseScript`), so ONLY the P1 `Acquire` FUNCTION was removed and both
+  scripts KEPT. The router's `bindScript`/`selfHealScript` were genuinely orphaned (the E2E variants have
+  their own `bindRouteScript`/`selfHealRouteScript`) and WERE removed. `internal/limit`
+  `registry.go`/`bucket.go` (BucketRegistry + in-process TokenBucket) deleted — the E2E bridge paces from
+  the Valkey batch-credit grant (`ClaimBandwidth`) directly.
+
+- **US13 Task 13.1 (`ca` teardown — `ErrUnsupportedKeyType` preserved):** the plan grouped
+  `ErrUnsupportedKeyType` with the removed `SignCSR`, but the retained `SignIdentity` uses it to enforce
+  the ECDSA-P256-only invariant (`400 unsupported_key_type`), so the error is KEPT and only `SignCSR`
+  (+ `VerifyEnrolledCert`, `VerifyPossession`, `ParseCertB64DER[Limited]`, `ConnectAuthContext`,
+  `ErrNotEC`) were removed. `ca_test.go` rewrote the `SignCSR` round-trip/reject/subject/non-P256 tests
+  onto `SignIdentity` (verifying the leaf chains to the CA) and deleted the possession/B64DER/
+  VerifyEnrolledCert tests (that verification is now the TLS-handshake path, covered by US14).
+
+- **US13 Task 13.1 (`router` test rewrite):** `registry_test.go` tested the RETAINED `Heartbeat`/`Unbind`
+  via the P1 `Bind`/`Lookup` API; since no `route_e2e_test.go` existed, it was rewritten onto
+  `BindRoute`/`LookupRoute`/`BindRouteIfAbsentOrOwner` (preserving every three-state/conn-conditional
+  assertion and ADDING startedAt-epoch coverage the P1 tests lacked).
+
+- **US13 Task 13.2 (`metrics` P1 families):** removing the P1 Recorder methods orphaned the P1 metric
+  FIELDS too (`httpRequests`/`httpDuration`/`httpInflight`/`wsConnects`/`wsDisconnects`/
+  `tunnelsConnected`/`requestTimeouts`/`pubsubPublishErrors`) — all removed from `Metrics` + registration;
+  `enrollments` KEPT (shared with the E2E `EnrollmentResult`). The per-tunnel `aggEntry.requests`
+  accumulation was removed (the opaque-splice edge records no per-request count); `/admin/tunnels` now
+  surfaces bytes only. `metrics_test.go` re-pointed at retained/E2E families.
+
+- **US13 Task 13.2 (`project.md` scope table only):** US13 updates ONLY the commit-scope table (drop
+  `clientip`/`transport`/`wsconn`/`ingress`; add `store`/`attest`/`acme`/`enroll`/`edge`/`mesh`/
+  `phoneconn`). The broader `project.md` architecture/invariant prose that still references deleted P1
+  code (`clientip.TrustedIP`, the ingress allowlist, `BucketRegistry`) is rewritten in US15 Task 15.3
+  (the plan sequences the doc rewrite there), together with the canonical `docs/` updates.
 
 - **US12 Task 12.3 (attestation-optional enrollment material):** the client submits a THROWAWAY
   self-signed cert as the "attestation chain" rather than a committed fixture chain — the attest fixtures

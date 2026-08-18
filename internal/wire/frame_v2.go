@@ -34,6 +34,11 @@ const (
 // maxControlPayload bounds a control-frame payload (renewal frames carry PEM chains + CSRs).
 const maxControlPayload = 1 << 20 // 1 MiB
 
+// ChunkSize is the max body bytes per data slice for bandwidth pacing and the WS read-limit sizing
+// (both peers set the read limit to ChunkSize + 64 KiB). The data stream itself is an opaque, unframed
+// splice (see the package overview); ChunkSize governs the paced copy slice size at the edge.
+const ChunkSize = 32 * 1024
+
 // --- payloads ---
 
 // OpenPayload announces an incoming public connection to dial back; streamID is the per-public-

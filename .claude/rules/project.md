@@ -173,20 +173,23 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `config` | `internal/config`: kong flag surface, `Validate()`, size/bitrate parsing |
 | `logging` | `internal/logging`: slog fan-out, composite `--log` sinks |
 | `ban` | `internal/ban`: parser, LPM engine, DB-IP expansion, watcher |
-| `limit` | `internal/limit`: rate windows, enroll quota, concurrency, token buckets |
-| `ca` | `internal/ca`: CA signer, name generation, cert/possession verification |
-| `clientip` | `internal/clientip`: trusted source-IP extraction |
-| `router` | `internal/router`: Redis routing registry (bind/heartbeat/unbind/lookup) |
-| `transport` | `internal/transport`: pub/sub round trip + node serve loop |
-| `wire` | `internal/wire`: frame codec, envelopes, golden fixtures |
-| `wsconn` | `internal/wsconn`: /connect handshake, connection manager, heartbeat |
-| `ingress` | `internal/ingress`: public pipeline, allowlist, header sanitizer, enroll |
-| `server` | `internal/server`: assembly (`Run`), Host-dispatch mux, lifecycle |
+| `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, batch-credit bandwidth, ACME budget |
+| `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
+| `router` | `internal/router`: Redis routing registry (route bind/heartbeat/unbind/lookup) + node registry |
+| `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
+| `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
+| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01, cooldown/backoff, LE budget) |
+| `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
+| `wire` | `internal/wire`: v2 control-frame codec + mesh stream header |
+| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back, renewal, eviction) |
+| `edge` | `internal/edge`: raw :443 SNI edge (ClientHello peek + JA4), bridge, connection policy |
+| `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 mesh (per-pair pools, connID-checked delivery) |
+| `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
 | `admin` | `internal/admin`: per-tunnel counters + `/admin/tunnels` |
 | `caplog` | `internal/caplog`: deduped cap-hit logger |
 | `observ` | `internal/observ`: the Recorder interface |
-| `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, FakePhone) |
+| `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
 | `client` | `client/`: the Go tunnel client library |
 | `e2e` | `e2e/`: testcontainers harness + scenarios |
 | `deploy` | `deploy/`: compose, Traefik, observability provisioning, fetcher |
@@ -197,7 +200,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `deps` | dependency-only updates (`go.mod`, `go.sum`) |
 
 ```
-fix(wsconn): clamp untrusted phone-supplied response status
+fix(phoneconn): supersede a stale connection on rebind without clobbering the route
 ```
 
 ---

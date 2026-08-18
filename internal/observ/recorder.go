@@ -1,14 +1,7 @@
 // Package observ defines a dependency-free observability interface so the enroll, edge, phoneconn,
 // acme and mesh sites can record metrics + cap-hit logs WITHOUT importing the Prometheus/caplog
 // implementations. metrics.PromRecorder is the concrete implementation, injected in server.Run.
-//
-// Plan 3 (E2E) EXTENDS this interface with the E2E event set below while KEEPING the Plan-1 methods
-// (their legacy consumers still compile) until the US13 teardown strips them together. New events use
-// non-colliding names where a P1 name is still occupied (e.g. EnrollmentResult vs the P1 no-arg
-// Enrollment()).
 package observ
-
-import "time"
 
 // RejectReasons is the exact tunneld_rejections_total{reason} label set: every rejection writer
 // (enroll, edge, phoneconn, acme) uses ONLY these values and US10 registers the family against them.
@@ -45,15 +38,6 @@ type Recorder interface {
 	QuotaExhausted(tunnelName, window string) // "day" | "week"
 	ACMECooldown(ca string)                   // a per-CA cooldown/backoff was set
 	MeshPool(peer string, size int)
-
-	// --- Plan-1 methods KEPT until the US13 teardown (legacy consumers still compile). ---
-	Request(tunnelName, class string, code int, dur time.Duration)
-	WSConnect()
-	WSDisconnect(reason string)
-	Enrollment()
-	InflightAdd(delta int)
-	Timeout()
-	PublishError()
 }
 
 // Nop is a no-op Recorder for unit tests / defaults.
@@ -77,11 +61,3 @@ func (Nop) ACMERenew(ca, result string)              {}
 func (Nop) QuotaExhausted(tunnelName, window string) {}
 func (Nop) ACMECooldown(ca string)                   {}
 func (Nop) MeshPool(peer string, size int)           {}
-
-func (Nop) Request(tunnelName, class string, code int, d time.Duration) {}
-func (Nop) WSConnect()                                                  {}
-func (Nop) WSDisconnect(reason string)                                  {}
-func (Nop) Enrollment()                                                 {}
-func (Nop) InflightAdd(delta int)                                       {}
-func (Nop) Timeout()                                                    {}
-func (Nop) PublishError()                                               {}

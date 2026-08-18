@@ -124,19 +124,6 @@ type ServeCmd struct {
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Graceful-drain deadline on ctx cancel."`
 
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
-
-	// --- Plan-1 flags KEPT until the US13 teardown (their legacy consumers still compile). ---
-	ConnectAuthTimeout  time.Duration `name:"connect-auth-timeout" default:"5s" help:"[legacy] removed in the E2E teardown."`
-	ClientIPHeader      string        `name:"client-ip-header" default:"" help:"[legacy] removed in the E2E teardown."`
-	LimitRPS            int           `name:"limit-rps" default:"10" help:"[legacy] removed in the E2E teardown."`
-	LimitRPM            int           `name:"limit-rpm" default:"100" help:"[legacy] removed in the E2E teardown."`
-	LimitConnectPending int           `name:"limit-connect-pending" default:"64" help:"[legacy] removed in the E2E teardown."`
-	LimitBody           string        `name:"limit-body" default:"1mb" help:"[legacy] removed in the E2E teardown."`
-	LimitResponse       string        `name:"limit-response" default:"10mb" help:"[legacy] removed in the E2E teardown."`
-	LimitHeaders        string        `name:"limit-headers" default:"16kb" help:"[legacy] removed in the E2E teardown."`
-	LimitHeaderSingle   string        `name:"limit-header-single" default:"8kb" help:"[legacy] removed in the E2E teardown."`
-	LimitRequestTimeout time.Duration `name:"limit-request-timeout" default:"60s" help:"[legacy] removed in the E2E teardown."`
-	PingInterval        time.Duration `name:"ping-interval" default:"30s" help:"[legacy] removed in the E2E teardown."`
 }
 
 // Validate is invoked automatically by kong for the selected `serve` command. It enforces every
