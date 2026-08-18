@@ -6,6 +6,9 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,5 +261,59 @@ func TestPeekClientHelloTimesOutOnTrickle(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("timeout not honored, took %s", time.Since(start))
+	}
+}
+
+// TestParseRealCurlClientHello parses a REAL captured curl (OpenSSL) ClientHello committed as a
+// fixture: field extraction against known ground truth, plus the full JA4 as a regression pin (its
+// per-component correctness is anchored by TestJA4SpecVector's external vector).
+func TestParseRealCurlClientHello(t *testing.T) {
+	data, err := os.ReadFile("testdata/curl_clienthello.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := parseClientHello(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.SNI != "curl-fixture.example.test" {
+		t.Errorf("SNI = %q", info.SNI)
+	}
+	if info.TLSVersion != "1.3" {
+		t.Errorf("TLSVersion = %q", info.TLSVersion)
+	}
+	if info.ALPN != "h2" {
+		t.Errorf("ALPN = %q", info.ALPN)
+	}
+	if info.JA4 != "t13d3112h2_e8f1e7e78f70_b26ce05bbdd6" {
+		t.Errorf("JA4 drifted for the committed capture: %q", info.JA4)
+	}
+}
+
+// TestJA4SpecVector validates computeJA4 byte-for-byte against the FoxIO JA4 specification's worked
+// example (an EXTERNAL known-good vector): 15 ciphers, 16 extensions (SNI+ALPN counted, excluded from
+// the hash), the spec's signature-algorithm order, ALPN h2 → t13d1516h2_8daaf6152771_e5627efa2ab1.
+func TestJA4SpecVector(t *testing.T) {
+	hexes := func(s string) []uint16 {
+		var out []uint16
+		for _, h := range strings.Split(s, ",") {
+			v, err := strconv.ParseUint(h, 16, 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, uint16(v))
+		}
+		return out
+	}
+	ciphers := hexes("002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9")
+	// The 14 hashed extensions from the spec example + SNI(0000) + ALPN(0010) = the 16 counted ones.
+	exts := hexes("0005,000a,000b,000d,0012,0015,0017,001b,0023,002b,002d,0033,4469,ff01,0000,0010")
+	sigAlgs := hexes("0403,0804,0401,0503,0805,0501,0806,0601")
+
+	got := computeJA4(ClientHelloInfo{TLSVersion: "1.3", SNI: "x.example.test", ALPN: "h2"},
+		ciphers, exts, sigAlgs)
+	const want = "t13d1516h2_8daaf6152771_e5627efa2ab1"
+	if got != want {
+		t.Fatalf("JA4 spec vector mismatch:\n got %s\nwant %s", got, want)
 	}
 }
