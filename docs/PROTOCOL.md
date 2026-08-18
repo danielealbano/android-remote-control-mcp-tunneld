@@ -1,124 +1,115 @@
-# tunneld wire protocol
+# tunneld Wire Protocol (v2 — End-to-End Encrypted)
 
-This document specifies the tunneld protocols precisely enough to implement a matching client from
-scratch (the Go client in `tunneld/client` and the future Kotlin client MUST both conform). Golden
-byte fixtures live in [`../internal/wire/testdata/`](../internal/wire/testdata/).
+This is the CANONICAL wire contract for the E2E-encrypted tunnel. The Go client in `client/` and the
+Android (Kotlin) client both conform to THIS document, not to the Go source. `internal/wire` holds the
+frame codec.
 
-## 1. Enrollment
+tunneld relays **opaque TLS bytes** and can NEVER read tunnel traffic: external clients establish TLS
+directly with the phone, which holds a publicly-trusted (WebPKI) certificate for its assigned hostname.
+tunneld is the internet edge (raw TCP `:443`), peeks the ClientHello (SNI/ALPN/version/JA4), routes on
+SNI, and splices the encrypted byte stream to the phone over an internal HTTP/2 mesh.
 
-`POST https://<enroll-host>/enroll`
+## 1. Identity & authentication
 
-- Request body: a PEM-encoded PKCS#10 **CSR** (`-----BEGIN CERTIFICATE REQUEST-----`). The key MUST
-  be **ECDSA P-256** — any other key type is rejected `400 {"error":"unsupported_key_type"}`.
-- The server ignores ALL CSR subject/extension fields except the public key; it assigns a random
-  tunnel name and signs a leaf certificate (CN = name, lifetime `--cert-validity`).
-- Response `200 application/json`:
-  ```json
-  {
-    "name": "<10 base32 chars>",
-    "hostname": "<name>.<tunnel-domain>",
-    "connect_url": "wss://<name>.<tunnel-domain>/connect",
-    "certificate_pem": "-----BEGIN CERTIFICATE-----\n…",
-    "expires_at": 1893456000
-  }
-  ```
-- Abuse controls: source IP from `--client-ip-header` (ban-checked first → `403`); enrollment quota
-  `--limit-enroll-hour` AND `--limit-enroll-minute` → `429` + `Retry-After` + a clear JSON message;
-  body bounded by `--limit-enroll-body` → `413`. No identity is persisted in Redis (only transient
-  quota counters).
+- **No TLS mutual auth on the public side.** The phone authenticates to tunneld with an internal-CA
+  **identity client certificate** over its outbound HTTP/2 **control connection** (mTLS). The assigned
+  tunnel name is the certificate's **CN**; the server DERIVES the name from the CN (the phone dials the
+  single shared `--control-host`, so there is no per-tunnel Host on the control connection).
+- **Two TEE keys per tunnel**: the identity key (mTLS) and the TLS key (the public WebPKI cert). Both
+  are generated in the phone's hardware keystore; only CSRs leave the phone.
+- **Enrollment is gated by Android hardware key attestation** (seven-point predicate, §2) PLUS a
+  **key-binding** check: the enrolled identity key MUST equal the attested TEE key, and both CSR
+  signatures are verified (proof-of-possession). This closes the "attest a real key, enroll a software
+  key" bypass.
+- **Revocation is the ban engine ONLY** (no CRL): tunnel-name / identity-fingerprint bans are enforced
+  at the phone control connection, at the public SNI edge on the resolved route, and by live eviction
+  on ban reload.
 
-## 2. `/connect` — application-layer challenge-response (NOT TLS mutual auth)
+## 2. Enrollment
 
-`GET wss://<name>.<tunnel-domain>/connect` (an ordinary WSS upgrade — Cloudflare-proxyable). A
-non-WebSocket request to `/connect` is answered `426 Upgrade Required`.
+The phone calls the server-TLS `--enroll-host` endpoint (no client cert — the phone has no identity
+yet). The name registry uses a **write-verify claim** over plain S3 (no conditional writes), so it runs
+on any S3 provider.
 
-Before the upgrade the server ban-checks the source IP (`403`), acquires a bounded pre-auth semaphore
-(`503` if full), then applies a per-IP connect-attempt limit (`429`). The semaphore is taken BEFORE
-the rate-limit Redis call so unauthenticated connect work — including that Redis round trip — is
-bounded by `--limit-connect-pending`; the ban check stays first. After the upgrade:
-
-1. **Server → phone `CHALLENGE`**: header `{"nonce":"<base64 of 32 random bytes>"}`, no body.
-2. **Phone → server `AUTH`**: header
-   `{"cert":"<base64 DER leaf cert>","signature":"<base64 ECDSA-P256 signature>"}`, no body.
-   The signature is `ECDSA-P256-SHA256` over `SHA-256("tunneld-connect-v1" ‖ nonce)`.
-3. The server verifies: the cert chains to the tunnel CA and is within its validity window; the
-   signature verifies for the cert's public key over the context-prefixed nonce; and `CN == <name>`
-   from the Host. Any failure (or no AUTH within `--connect-auth-timeout`) closes the WS with no bind.
-
-**Security invariant — possession proof.** The certificate is public; presenting it alone is NOT
-sufficient. Possession of the private key is proven by signing a server-chosen fresh nonce (the
-app-layer equivalent of TLS `CertificateVerify`). A captured cert+signature CANNOT be replayed on a
-new connection (each connection uses a fresh nonce).
-
-**Fingerprint guard / revocation.** `route:{name}` records the cert fingerprint
-(`"sha256:"+hex(sha256(cert.Raw))`); a `/connect` for a name already bound to a *different*
-fingerprint is refused. A `tunnel-name`/`tunnel-fingerprint` ban is the ONLY revocation mechanism
-(no CRL): it is enforced at `/connect` (after auth, before bind), at public ingress (on the resolved
-route), and live via the ban-reload eviction hook.
-
-## 3. WebSocket binary frames
-
-Every WS binary message is one frame:
-
-```
-[ type : 1 byte ][ headerLen : 4 bytes big-endian ][ header : headerLen bytes of JSON ][ body : raw bytes ]
+```mermaid
+sequenceDiagram
+    participant PhoneApp as Phone app
+    participant EP as tunneld enroll endpoint
+    participant AT as Attestation verifier
+    participant REG as Name registry (S3)
+    participant ACME as ACME chain
+    PhoneApp->>EP: GET nonce
+    EP-->>PhoneApp: challenge nonce
+    PhoneApp->>PhoneApp: generate TEE identity key K1 and TLS key T1
+    PhoneApp->>EP: attestation chain for K1 plus identity CSR plus TLS CSR
+    EP->>AT: verify seven point predicate
+    AT-->>EP: pass plus attested leaf key
+    EP->>EP: key binding (identity CSR key equals attested key) plus CSR proof-of-possession
+    EP->>REG: claim name (GET absent, PUT with nonce, settle wait, GET verify nonce)
+    REG-->>EP: claim verified
+    EP->>EP: issuance read-only check on the claimed name
+    EP->>EP: sign internal identity cert for K1
+    EP->>ACME: obtain WebPKI cert for T1 (LE then GTS then ZeroSSL)
+    ACME-->>EP: public cert L1
+    EP->>EP: record successful issuance
+    EP-->>PhoneApp: assigned name plus identity cert plus public cert
 ```
 
-| type | name | header JSON | body |
-|---|---|---|---|
-| 1 | `CHALLENGE` | `{nonce}` | — |
-| 2 | `AUTH` | `{cert, signature}` | — |
-| 3 | `REQUEST_HEAD` | `{reqid, method, path, rawquery, host, header}` | — |
-| 4 | `REQUEST_BODY_CHUNK` | `{reqid}` | ≤ `ChunkSize` |
-| 5 | `REQUEST_END` | `{reqid}` | — |
-| 6 | `RESPONSE_HEAD` | `{reqid, status, header}` | — |
-| 7 | `RESPONSE_BODY_CHUNK` | `{reqid}` | ≤ `ChunkSize` |
-| 8 | `RESPONSE_END` | `{reqid}` | — |
-| 9 | `ERROR` | `{reqid, message}` | — |
+**Seven-point attestation predicate** (ALL mandatory): chain roots at a Google attestation root ∧
+`attestationChallenge == nonce` ∧ signing digest ∈ the hot-reloadable allowlist ∧ `securityLevel ≥
+TrustedEnvironment` (Software rejected; StrongBox not required) ∧ `verifiedBootState == Verified` ∧
+`deviceLocked == true` ∧ not revoked (status list refreshed with last-known-good; refused if `> 24h`
+stale).
 
-- `ChunkSize` = **32768** bytes. Both peers set the WS read limit to `ChunkSize + 64 KiB`.
-- The request and response paths are **symmetric**: `REQUEST_HEAD`/`RESPONSE_HEAD` carry headers and
-  NO body; the body follows as `*_BODY_CHUNK` frames; `REQUEST_END`/`RESPONSE_END` is the dispatch
-  trigger. The receiver MUST NOT dispatch until the `*_END` frame.
-- **Empty body = ZERO body-chunk frames** — the canonical encoding in BOTH directions. Receivers MUST
-  also tolerate a zero-length `*_BODY_CHUNK` frame (append nothing).
-- EVERY `REQUEST_*`/`RESPONSE_*`/`ERROR` frame carries `reqid`, so up to `--limit-concurrent`
-  in-flight requests multiplex over one WebSocket and are demultiplexed by `reqid`. The phone copies
-  the request's `reqid` into every response frame. `CHALLENGE`/`AUTH` carry no `reqid`.
-- `ERROR{reqid, message}` resolves that request as a synthetic `502` (the phone could not fulfil it).
-  An `ERROR` with an unknown/stale `reqid` is dropped.
-- Bodies are appended RAW (never base64 — base64 would add ~33% under the bandwidth cap). Response
-  body chunks are bandwidth-paced (per-tunnel token bucket); request body chunks are paced on ingress.
-- Keepalive uses the WebSocket library's native control **pings** (`--ping-interval`), not app frames.
+**Write-verify claim invariant**: the settle wait MUST strictly exceed the claim-PUT timeout, and
+registry writes disable SDK auto-retries (a retried claim PUT would be a self-inflicted zombie write).
 
-## 4. Redis transport (frontend ⇄ WS-holding node)
+## 3. Phone control connection (HTTP/2 + mTLS)
 
-- Channels: `req:{node}` (frontend → node), `resp:{reqid}` (node → frontend). Routing:
-  `route:{name}` = `{node, fingerprint, connID}` with a heartbeat-refreshed TTL (`--route-ttl`).
-- A frontend generates a `reqid`, SUBSCRIBES to `resp:{reqid}` **before** publishing the request to
-  `req:{node}` (so a fast response is never missed); on `--limit-request-timeout` with no response →
-  `504`.
-- Envelope encoding: `[4-byte BE header-len][JSON of all fields except Body][raw Body]` — the same
-  raw-body, length-prefixed scheme as the WS frames (golden fixtures: `req_envelope.bin`,
-  `resp_envelope.bin`).
-- **No permanent Redis state, ever.** Every key (routing, rate-limit windows, concurrency counters,
-  per-tunnel counters) carries a TTL set atomically with its increment.
+The phone opens ONE outbound HTTP/2 connection to `--control-host`. It carries:
 
-## 5. Liveness / heartbeat
+- a long-lived **control stream** with length-framed control messages (below), and
+- one **data stream per public connection**, opened by the phone via **dial-back** (the server announces
+  an incoming connection on the control stream; the phone opens the data stream — HTTP/2 streams are
+  always client-initiated).
 
-- The WS-holding node refreshes `route:{name}` every `--route-ttl/3`. `Heartbeat` is owner-conditional
-  on `connID` and returns `refreshed` / `not-owner` (superseded — the phone re-bound elsewhere) /
-  `missing` (TTL lapsed → the node self-heals by re-binding). A dead WS (failed native ping) drops
-  its routing entry.
+Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`.
 
-## 6. Security invariants (summary)
+| Frame | Direction | Payload |
+|---|---|---|
+| `OPEN` | server→phone | `{stream_id}` — dial back for one public connection |
+| `CLOSE` | either | `{stream_id, reason}` |
+| `PING` / `PONG` | either | (none) — application liveness |
+| `RENEW_NUDGE` | server→phone | `{ari_window}` — renew early (ARI or migrate-to-LE) |
+| `RENEW_REQUEST` | phone→server | (none) — initiate a renewal |
+| `RENEW_CHALLENGE` | server→phone | `{nonce}` — fresh attestation nonce |
+| `RENEW_SUBMIT` | phone→server | `{attestation_chain, identity_csr, tls_csr}` |
+| `CERT_PUSH` | server→phone | `{identity_cert, public_cert}` |
+| `ERROR` | server→phone | `{reason, retryable, retry_after_seconds}` |
 
-- Possession proof is the app-layer signature over the server nonce; the certificate alone is public
-  and NOT sufficient; a captured cert/signature cannot be replayed (fresh nonce).
-- **Source-IP trust**: with orange-cloud, `Cf-Connecting-Ip` is trustworthy ONLY because the origin is
-  reachable exclusively via Cloudflare (Traefik IPAllowList of Cloudflare ranges + optional
-  Authenticated Origin Pulls) — "origin only reachable from Cloudflare" is a SECURITY invariant (the
-  orange-cloud form of "never publish tunneld's port"). Grey-cloud uses `X-Real-Ip` with Traefik as
-  the edge.
-- Cloudflare Free constraints the protocol depends on: WS idle timeout 100 s → `--ping-interval` < 100 s
-  (default 30 s); origin 524 timeout 100 s → `--limit-request-timeout` < 100 s (default 60 s).
+**Renewal rotates the identity key**: `RENEW_REQUEST → RENEW_CHALLENGE → RENEW_SUBMIT → CERT_PUSH`
+re-runs the full seven-point predicate + key binding on a FRESH identity key + fresh TLS key + fresh
+attestation, as one event; the connection stays up on the old certs until `CERT_PUSH`.
+
+## 4. Data stream (opaque splice)
+
+Once the phone opens the data stream in response to `OPEN{stream_id}` (matched by `stream_id`), it is a
+**raw, bidirectional, opaque byte splice** carrying the client↔phone TLS session. It has NO framing —
+HTTP/2 provides the framing and `END_STREAM` is the teardown signal. `wire.ChunkSize` (32768) is the
+bandwidth-pacing slice size the bridge reads, NOT a wire frame.
+
+## 5. Replica mesh
+
+When the accepting edge node is not the node holding the phone, it bridges to the owner over an internal
+HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). The mesh data stream is prefixed with ONE
+`StreamOpen` header: `[len:4 BE][ {tunnel, conn_id, stream_id} JSON ]`. The owner verifies `conn_id`
+against its live phone connection before bridging (one fresh route lookup + retry on mismatch, then
+close). Everything after the header is the opaque splice.
+
+## 6. Security invariants
+
+- E2E: forward-secret TLS 1.3 between client and phone; tunneld holds no tunnel cert key, ever.
+- No reverse proxy anywhere; tunneld is the raw `:443` edge; the trusted client IP is the TCP peer.
+- Caps are UNIFORM (no per-path exceptions); rate limiting is global across replicas via Valkey.
+- `ChunkSize == 32768`; both peers set the HTTP/2 read limits accordingly.
+- No secrets, key material, or tunnel payloads are ever logged.

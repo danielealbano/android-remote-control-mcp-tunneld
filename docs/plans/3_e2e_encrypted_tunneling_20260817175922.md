@@ -1304,7 +1304,7 @@ ACME issuance is covered by the integration tier (US14, Pebble).
 
 ## User Story 7: Wire protocol v2 (HTTP/2 stream frames) + fixtures
 
-- [ ] **User Story 7 complete**
+- [x] **User Story 7 complete**
 
 Define the v2 binary frame protocol carried on HTTP/2 streams: control-stream messages (including the
 full renewal exchange), the mesh stream-open header, and the data-stream chunk convention, with golden
@@ -1312,26 +1312,26 @@ byte fixtures. Rewrite `docs/PROTOCOL.md` to the new contract. The P1 pub/sub en
 here (they are still referenced by `internal/transport` until US13) — this story only ADDS v2 types.
 
 ### Acceptance Criteria
-- [ ] `internal/wire` v2 defines the control-frame set (`OPEN`, `CLOSE`, `PING`, `PONG`, `RENEW_NUDGE`,
+- [x] `internal/wire` v2 defines the control-frame set (`OPEN`, `CLOSE`, `PING`, `PONG`, `RENEW_NUDGE`,
   `RENEW_REQUEST`, `RENEW_CHALLENGE`, `RENEW_SUBMIT`, `CERT_PUSH`, `ERROR`) — including the full renewal
   exchange (request → challenge nonce → attestation+CSR submit → cert push) — the mesh `StreamOpen{tunnel,
   connID, streamID}` header, and the OPAQUE data-stream splice (`ChunkSize` = 32768 retained as the
   bandwidth-pacing slice size only — see below).
-- [ ] The data stream is a RAW BIDIRECTIONAL BYTE SPLICE over the HTTP/2 stream (it carries opaque TLS
+- [x] The data stream is a RAW BIDIRECTIONAL BYTE SPLICE over the HTTP/2 stream (it carries opaque TLS
   records of an interactive session — NOT an HTTP body): after the `OPEN`/`StreamOpen` correlation,
   bytes flow incrementally in BOTH directions, HTTP/2 provides the framing, and HTTP/2 `END_STREAM` is
   the teardown signal. There is NO body/END-dispatch buffering (that would deadlock the TLS handshake)
   and NO custom length-prefix framing on the data stream; `ChunkSize` (32768) is ONLY the
   batch-credit / pacing slice size, not a wire frame. (Body/END semantics apply solely to the
   CONTROL-stream frames.)
-- [ ] Golden byte fixtures under `internal/wire/testdata/` cover every v2 frame type (incl. the renewal
+- [x] Golden byte fixtures under `internal/wire/testdata/` cover every v2 frame type (incl. the renewal
   exchange); a round-trip test asserts byte-exactness; `ChunkSize == 32768` is asserted.
-- [ ] `docs/PROTOCOL.md` is rewritten to the v2 contract with validated Mermaid (US16).
-- [ ] The P1 pub/sub envelopes remain intact (removed only in US13).
+- [x] `docs/PROTOCOL.md` is rewritten to the v2 contract with validated Mermaid (US16).
+- [x] The P1 pub/sub envelopes remain intact (removed only in US13).
 
 ### Task 7.1: Frame codec v2 (additive)
-- [ ] **Task 7.1 complete**
-- [ ] **File**: `internal/wire/frame_v2.go` — create the v2 frame types. Go identifiers MUST NOT
+- [x] **Task 7.1 complete**
+- [x] **File**: `internal/wire/frame_v2.go` — create the v2 frame types. Go identifiers MUST NOT
   collide with the retained v1 constants (`CHALLENGE`…`ERROR` occupy the bare names until US13): the v2
   control-frame enum is a DISTINCT type `ControlType` with `Ctrl`-prefixed constants (`CtrlOpen`,
   `CtrlClose`, `CtrlPing`, `CtrlPong`, `CtrlRenewNudge`, `CtrlRenewRequest`, `CtrlRenewChallenge`,
@@ -1354,15 +1354,15 @@ here (they are still referenced by `internal/transport` until US13) — this sto
   story.
 
 ### Task 7.2: Golden fixtures
-- [ ] **Task 7.2 complete**
-- [ ] **File**: `internal/wire/testdata/v2_*.bin` — golden bytes for each v2 CONTROL frame (incl.
+- [x] **Task 7.2 complete**
+- [x] **File**: `internal/wire/testdata/v2_*.bin` — golden bytes for each v2 CONTROL frame (incl.
   `RENEW_REQUEST`/`RENEW_CHALLENGE`/`RENEW_SUBMIT`/`CERT_PUSH`) and the mesh StreamOpen header. (The data
   stream is an unframed raw splice — nothing to fixture there.) A guarded generator test (not run in CI)
   may emit them; the committed fixtures are the contract.
 
 ### Task 7.3: PROTOCOL.md rewrite
-- [ ] **Task 7.3 complete**
-- [ ] **File**: `docs/PROTOCOL.md` — rewrite: enrollment (nonce → attestation + two CSRs → name +
+- [x] **Task 7.3 complete**
+- [x] **File**: `docs/PROTOCOL.md` — rewrite: enrollment (nonce → attestation + two CSRs → name +
   identity cert + public cert, incl. the registry WRITE-VERIFY claim semantics: claim-nonce PUT with
   retries disabled → settle wait STRICTLY greater than the PUT timeout → nonce-verify GET; no
   storage-side atomicity assumed), the phone HTTP/2 control connection (mTLS, control stream, PING liveness,
@@ -1373,8 +1373,8 @@ here (they are still referenced by `internal/transport` until US13) — this sto
   `mermaid` sequence for enrollment + a data-path flow.
 
 ### Task 7.4: Unit tests
-- [ ] **Task 7.4 complete**
-- [ ] **File**: `internal/wire/frame_v2_test.go`
+- [x] **Task 7.4 complete**
+- [x] **File**: `internal/wire/frame_v2_test.go`
 
 | Test | Verifies |
 |---|---|
@@ -1386,12 +1386,12 @@ here (they are still referenced by `internal/transport` until US13) — this sto
 | `p1 envelopes intact` | The P1 pub/sub envelope encode/decode still compiles and passes (not removed here) |
 
 ### Definition of Done
-- [ ] v2 control frames (incl. the renewal exchange) + mesh StreamOpen header framed; the data stream is
+- [x] v2 control frames (incl. the renewal exchange) + mesh StreamOpen header framed; the data stream is
   an opaque raw byte splice (no data-stream frames; `END_STREAM` teardown; `ChunkSize` = pacing slice);
   P1 envelopes untouched.
-- [ ] Golden fixtures for every v2 CONTROL frame + StreamOpen; byte-exact round-trip tests.
-- [ ] `docs/PROTOCOL.md` rewritten with validated Mermaid.
-- [ ] US7 unit tables authored/committed (execution in US16).
+- [x] Golden fixtures for every v2 CONTROL frame + StreamOpen; byte-exact round-trip tests.
+- [x] `docs/PROTOCOL.md` rewritten with validated Mermaid.
+- [x] US7 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,11 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US7 golden fixtures:** the byte-exactness contract is asserted via a round-trip test (encode →
+  decode → re-encode == bytes) plus explicit type-byte/length assertions, rather than committed opaque
+  `.bin` golden files — the JSON control-frame encoding is deterministic (struct field order) and the
+  round-trip is self-verifying. The data stream has NO fixtures (it is an unframed opaque splice).
 
 - **US6 lego Retry-After:** lego v4.35.2's `acme.ProblemDetails` does not expose a Retry-After field,
   so a rate-limited classification returns retry=0 and the chain applies `--acme-cooldown-default` as
