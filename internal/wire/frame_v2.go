@@ -1,6 +1,6 @@
 // Package wire is the v2 (E2E) wire contract: the length-framed control-stream codec (dial-back, ping,
-// renewal nudge, error), the mesh StreamOpen header, and ChunkSize (the opaque data-splice pacing size).
-// See docs/PROTOCOL.md — the canonical contract both the Go and Kotlin clients conform to.
+// renewal nudge) and ChunkSize (the opaque data-splice pacing size). See docs/PROTOCOL.md — the
+// canonical contract both the Go and Kotlin clients conform to.
 package wire
 
 import (
@@ -11,8 +11,9 @@ import (
 
 // Wire protocol v2 (Plan 3, E2E). The phone's HTTP/2 CONTROL stream carries length-framed control
 // messages defined here. The DATA stream is an OPAQUE raw byte splice (it carries interactive TLS
-// records; HTTP/2 END_STREAM is teardown), so it has NO framing — ChunkSize (retained from frame.go)
-// is only the bandwidth-pacing slice size. The mesh stream is prefixed with ONE StreamOpen header.
+// records; HTTP/2 END_STREAM is teardown), so it has NO framing — ChunkSize is only the
+// bandwidth-pacing slice size. The mesh stream identifies itself via HTTP/2 request
+// headers (X-Tunnel / X-Conn-Id / X-Stream-Id — docs/PROTOCOL.md §5); its body is the opaque splice.
 //
 // These v2 types are ADDED alongside the Plan-1 frame codec (kept until the US13 teardown). To avoid
 // colliding with the still-present v1 constants (CHALLENGE…ERROR), the v2 control-frame enum is a
@@ -23,11 +24,9 @@ type ControlType byte
 
 const (
 	CtrlOpen       ControlType = iota + 1 // server→phone dial-back for ONE public connection {streamID}
-	CtrlClose                             // {streamID, reason}
 	CtrlPing                              // liveness
 	CtrlPong                              // liveness
 	CtrlRenewNudge                        // server→phone {nonce, ariWindow}: "renew now" — the phone answers by calling POST /issue (mTLS)
-	CtrlError                             // {reason, retryable, retryAfter}
 )
 
 // maxControlPayload bounds a control-frame payload. The v2 control stream carries only small frames
@@ -48,33 +47,12 @@ type OpenPayload struct {
 	StreamID string `json:"stream_id"`
 }
 
-// ClosePayload tears down one dial-back stream.
-type ClosePayload struct {
-	StreamID string `json:"stream_id"`
-	Reason   string `json:"reason,omitempty"`
-}
-
 // RenewNudgePayload prompts a renewal: the phone answers by calling POST /issue (mTLS) with a fresh
 // attestation over Nonce plus rotated identity + TLS CSRs. Nonce is a single-use, server-minted challenge
 // (Valkey-stored, like an initial-enrollment nonce); ARIWindow is the advisory suggested renewal time.
 type RenewNudgePayload struct {
 	Nonce     string `json:"nonce"` // hex
 	ARIWindow string `json:"ari_window,omitempty"`
-}
-
-// ErrorPayload is a structured control-stream error.
-type ErrorPayload struct {
-	Reason     string `json:"reason"`
-	Retryable  bool   `json:"retryable"`
-	RetryAfter int64  `json:"retry_after_seconds,omitempty"`
-}
-
-// StreamOpenHeader prefixes a mesh data stream: connID (the phone connection's route id, for owner
-// verification) + streamID (the public connection).
-type StreamOpenHeader struct {
-	Tunnel   string `json:"tunnel"`
-	ConnID   string `json:"conn_id"`
-	StreamID string `json:"stream_id"`
 }
 
 var (
@@ -114,34 +92,4 @@ func DecodeControl(data []byte) (ControlType, []byte, error) {
 		return 0, nil, ErrControlMalformed
 	}
 	return ControlType(data[0]), data[5:], nil
-}
-
-// EncodeStreamOpen encodes the mesh StreamOpen header (length-prefixed JSON) prepended to a mesh data
-// stream.
-func EncodeStreamOpen(h StreamOpenHeader) ([]byte, error) {
-	body, err := json.Marshal(h)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, 4+len(body))
-	binary.BigEndian.PutUint32(out[0:4], uint32(len(body)))
-	copy(out[4:], body)
-	return out, nil
-}
-
-// DecodeStreamOpen parses a mesh StreamOpen header from the front of a stream, returning the header and
-// the number of bytes consumed.
-func DecodeStreamOpen(data []byte) (StreamOpenHeader, int, error) {
-	if len(data) < 4 {
-		return StreamOpenHeader{}, 0, ErrControlMalformed
-	}
-	n := binary.BigEndian.Uint32(data[0:4])
-	if n > maxControlPayload || len(data) < 4+int(n) {
-		return StreamOpenHeader{}, 0, ErrControlMalformed
-	}
-	var h StreamOpenHeader
-	if err := json.Unmarshal(data[4:4+n], &h); err != nil {
-		return StreamOpenHeader{}, 0, ErrControlMalformed
-	}
-	return h, 4 + int(n), nil
 }

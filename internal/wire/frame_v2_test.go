@@ -12,11 +12,9 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		payload any
 	}{
 		{CtrlOpen, OpenPayload{StreamID: "aabbccddee"}},
-		{CtrlClose, ClosePayload{StreamID: "aabbccddee", Reason: "client-close"}},
 		{CtrlPing, nil},
 		{CtrlPong, nil},
 		{CtrlRenewNudge, RenewNudgePayload{Nonce: "00112233", ARIWindow: "2026-08-20T00:00:00Z"}},
-		{CtrlError, ErrorPayload{Reason: "rate_limited", Retryable: true, RetryAfter: 3600}},
 	}
 	for _, tc := range cases {
 		enc, err := EncodeControl(tc.ct, tc.payload)
@@ -42,24 +40,14 @@ func TestControlFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMeshStreamOpenRoundTrip(t *testing.T) {
-	h := StreamOpenHeader{Tunnel: "k7m2x9qwp4", ConnID: "1122334455", StreamID: "aabbccddee"}
-	enc, err := EncodeStreamOpen(h)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, n, err := DecodeStreamOpen(enc)
-	if err != nil || n != len(enc) {
-		t.Fatalf("decode: n=%d err=%v", n, err)
-	}
-	if got != h {
-		t.Errorf("round-trip mismatch: %+v vs %+v", got, h)
-	}
-	// A data payload following the header is not consumed by the decoder.
-	withData := append(enc, []byte("RAW-TLS-BYTES")...)
-	_, consumed, _ := DecodeStreamOpen(withData)
-	if consumed != len(enc) {
-		t.Errorf("decoder consumed %d, should stop at the header boundary %d", consumed, len(enc))
+// TestControlTypeValuesFrozen pins the numeric wire values of the v2 frame set — docs/PROTOCOL.md §3
+// is the canonical contract the Kotlin client conforms to, so these bytes must never drift.
+func TestControlTypeValuesFrozen(t *testing.T) {
+	want := map[ControlType]byte{CtrlOpen: 1, CtrlPing: 2, CtrlPong: 3, CtrlRenewNudge: 4}
+	for ct, v := range want {
+		if byte(ct) != v {
+			t.Errorf("frame type value drifted: %d != %d", byte(ct), v)
+		}
 	}
 }
 

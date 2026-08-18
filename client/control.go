@@ -123,8 +123,6 @@ func (c *Client) Run(ctx context.Context) error {
 			c.sendControl(wire.CtrlPong, nil)
 		case wire.CtrlRenewNudge:
 			go c.renew(ctx, payload)
-		case wire.CtrlError:
-			// A structured server error (e.g. a failed renewal): the connection stays on the old certs.
 		}
 	}
 }

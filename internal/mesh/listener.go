@@ -21,7 +21,8 @@ type OwnerCheck func(tunnel, connID string) bool
 
 // Handler is the mesh listener handler. It requires a mesh-role peer cert — the mTLS config verifies the
 // chain to the internal CA (RequireAndVerifyClientCert) and this handler enforces the mesh-role marker
-// (an identity-role cert is rejected). It reads the StreamOpen headers, verifies the connID against the
+// (an identity-role cert is rejected). It reads the stream identity from the X-Tunnel / X-Conn-Id /
+// X-Stream-Id request headers (docs/PROTOCOL.md §5), verifies the connID against the
 // live phone connection, and bridges to the phone. (The peer's node-id SAN is NOT checked against the
 // node registry: chain-to-CA + mesh-role + the connID delivery check + short-lived mesh certs are the
 // mesh's authentication; see the plan's Deviations.)
