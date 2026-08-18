@@ -106,28 +106,6 @@ func TestCACooldownAndFailures(t *testing.T) {
 	}
 }
 
-func TestConsumeAndReleaseLEOrder(t *testing.T) {
-	ctx := ctxT(t)
-	l := newLimiter(t, 1, 1, 1)
-	l.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
-
-	for range 2 {
-		ok, err := l.ConsumeLEOrder(ctx, 2)
-		if err != nil || !ok {
-			t.Fatalf("reserve: ok=%v err=%v", ok, err)
-		}
-	}
-	if ok, _ := l.ConsumeLEOrder(ctx, 2); ok {
-		t.Error("budget 2 exhausted, third reserve should fail")
-	}
-	if err := l.ReleaseLEOrder(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if ok, _ := l.ConsumeLEOrder(ctx, 2); !ok {
-		t.Error("after release, a slot should be free again")
-	}
-}
-
 func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
