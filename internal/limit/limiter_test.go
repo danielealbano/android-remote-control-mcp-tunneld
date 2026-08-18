@@ -125,3 +125,25 @@ func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 		t.Error("after release, a slot should be free")
 	}
 }
+
+func TestTrafficExhaustedReadOnly(t *testing.T) {
+	ctx := ctxT(t)
+	l := newLimiter(t, 1, 10, 20) // day cap 10, week cap 20
+
+	day, week, err := l.TrafficExhausted(ctx, "t")
+	if err != nil || day || week {
+		t.Fatalf("fresh tunnel must not be exhausted: %v %v %v", day, week, err)
+	}
+	if _, _, err := l.ClaimTraffic(ctx, "t", 10); err != nil { // exactly at the day cap
+		t.Fatal(err)
+	}
+	day, week, err = l.TrafficExhausted(ctx, "t")
+	if err != nil || !day || week {
+		t.Fatalf("at-cap day window must report exhausted (day=%v week=%v err=%v)", day, week, err)
+	}
+	// Read-only: the check itself must not move the counters.
+	day2, _, _ := l.TrafficExhausted(ctx, "t")
+	if day2 != day {
+		t.Fatal("TrafficExhausted must be read-only")
+	}
+}

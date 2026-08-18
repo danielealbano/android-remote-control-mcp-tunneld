@@ -73,8 +73,10 @@ func (l *Limiter) ClaimBandwidth(ctx context.Context, name, dir string, want int
 	return granted, nil
 }
 
-// claimTrafficScript INCRBYs both the day and week counters (TTL'd in-script) and reports per-window
-// exhaustion against the caps.
+// claimTrafficScript INCRBYs both the day and week counters and reports per-window exhaustion against
+// the caps. The TTL — set in-script on the FIRST write — IS the window: each counter measures a 24h/7d
+// span anchored at the first byte after the previous window expired (the same TTL-anchored-window
+// semantics as the issuance and enroll counters), never a calendar-aligned bucket.
 var claimTrafficScript = redis.NewScript(`
 local n = tonumber(ARGV[1])
 local dayCap = tonumber(ARGV[2])
@@ -92,20 +94,43 @@ if w > weekCap then weekOK = 0 end
 return {dayOK, weekOK}
 `)
 
+func trafficKeys(name string) (dayKey, weekKey string) {
+	return "traf:" + name + ":day", "traf:" + name + ":week"
+}
+
 // ClaimTraffic adds n bytes to the combined day+week counters (both directions) and reports whether
 // each window is still within its cap AFTER the add.
 func (l *Limiter) ClaimTraffic(ctx context.Context, name string, n int64) (dayOK, weekOK bool, err error) {
-	now := l.now().UTC()
-	dayStart := now.Truncate(24 * time.Hour)
-	weekStart := now.Truncate(7 * 24 * time.Hour)
-	dayKey := "traf:" + name + ":day:" + strconv.FormatInt(dayStart.Unix(), 10)
-	weekKey := "traf:" + name + ":week:" + strconv.FormatInt(weekStart.Unix(), 10)
+	dayKey, weekKey := trafficKeys(name)
 	res, err := claimTrafficScript.Run(ctx, l.rdb, []string{dayKey, weekKey},
-		n, l.dayCap, l.weekCap, (48 * time.Hour).Milliseconds(), (8 * 24 * time.Hour).Milliseconds()).Slice()
+		n, l.dayCap, l.weekCap, (24 * time.Hour).Milliseconds(), (7 * 24 * time.Hour).Milliseconds()).Slice()
 	if err != nil {
 		return false, false, err
 	}
 	d, _ := res[0].(int64)
 	w, _ := res[1].(int64)
 	return d == 1, w == 1, nil
+}
+
+// TrafficExhausted reports whether either traffic window is already AT or over its cap, WITHOUT
+// mutating the counters — the admission-time quota gate: a new stream is refused when no further byte
+// could be accepted.
+func (l *Limiter) TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error) {
+	dayKey, weekKey := trafficKeys(name)
+	vals, err := l.rdb.MGet(ctx, dayKey, weekKey).Result()
+	if err != nil {
+		return false, false, err
+	}
+	parse := func(v any) int64 {
+		s, ok := v.(string)
+		if !ok {
+			return 0
+		}
+		n, perr := strconv.ParseInt(s, 10, 64)
+		if perr != nil {
+			return 0
+		}
+		return n
+	}
+	return parse(vals[0]) >= l.dayCap, parse(vals[1]) >= l.weekCap, nil
 }
