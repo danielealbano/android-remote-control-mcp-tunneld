@@ -15,8 +15,8 @@ import (
 const flushShutdownTimeout = 5 * time.Second
 
 // PromRecorder implements observ.Recorder by combining the metric registry, the cap-hit deduping
-// logger, and the async per-tunnel counter flusher. It is the single object injected into the ingress,
-// enroll, and WS handlers (docs/ARCHITECTURE.md §7).
+// logger, and the async per-tunnel counter flusher. It is the single recorder injected into the
+// enroll, edge, and phone-control handlers (docs/ARCHITECTURE.md §8).
 type PromRecorder struct {
 	m      *Metrics
 	caplog *caplog.Logger
@@ -79,7 +79,7 @@ func (p *PromRecorder) Bytes(tunnelName, direction string, n int64) {
 	})
 }
 
-// --- Plan 3 (E2E) event set (real implementations). ---
+// --- E2E event set (real implementations). ---
 
 func (p *PromRecorder) PublicConnOpen()               { p.m.publicConnsUp.Inc() }
 func (p *PromRecorder) PublicConnClose(reason string) { p.m.publicConnsUp.Dec() }

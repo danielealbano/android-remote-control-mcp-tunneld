@@ -29,7 +29,7 @@ type ClassifiedIssuerError interface {
 	RetryAfter() time.Duration
 }
 
-// PublicIssuer is the consumer-side view of the ACME chain (implemented by internal/acme, US6). Obtain
+// PublicIssuer is the consumer-side view of the ACME chain (implemented by internal/acme). Obtain
 // runs the initial LE→GTS→ZeroSSL spillover; Renew renews an existing name using the same LE-first order,
 // so every renewal opportunistically migrates the name to LE.
 type PublicIssuer interface {
@@ -460,7 +460,7 @@ func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 
 func newClaimNonce() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails (it panics internally on a broken source)
 	return hex.EncodeToString(b[:])
 }
 

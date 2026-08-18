@@ -97,5 +97,5 @@ func (s *Store) NameCount() int {
 	return len(s.names)
 }
 
-// EnsureLifecycles is a no-op in the fake (real semantics are covered by the US14 MinIO tests).
+// EnsureLifecycles is a no-op in the fake (real semantics are covered by the MinIO integration tests).
 func (s *Store) EnsureLifecycles(_ context.Context, _, _ int) error { return nil }

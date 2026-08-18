@@ -10,7 +10,7 @@ import (
 )
 
 // Bridge splices a mesh-arriving client stream to the local phone for (tunnel, streamID). It is
-// implemented by the edge bridge (US11) wrapping phoneconn.OpenStream + the paced copy. Returning an
+// implemented by the edge bridge wrapping phoneconn.OpenStream + the paced copy. Returning an
 // error means the owner could not deliver (the entry node closes the frontend connection).
 type Bridge interface {
 	BridgeMesh(ctx context.Context, tunnel, streamID string, client io.ReadWriteCloser) error
@@ -25,7 +25,7 @@ type OwnerCheck func(tunnel, connID string) bool
 // X-Stream-Id request headers (docs/PROTOCOL.md §5), verifies the connID against the
 // live phone connection, and bridges to the phone. (The peer's node-id SAN is NOT checked against the
 // node registry: chain-to-CA + mesh-role + the connID delivery check + short-lived mesh certs are the
-// mesh's authentication; see the plan's Deviations.)
+// mesh's authentication.)
 type Handler struct {
 	owns   OwnerCheck
 	bridge Bridge

@@ -8,10 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// The Plan-3 route methods ADD a startedAt field (the tunnel-session start = the phone control
-// connection's establishment time, unix nanos) to the route record. startedAt is the conn-id epoch:
+// The route record carries a startedAt field (the tunnel-session start = the phone control
+// connection's establishment time, unix nanos). startedAt is the conn-id epoch:
 // any edge node minting a public conn id for a tunnel reads it from the LookupRoute it already does.
-// These are added ALONGSIDE the Plan-1 Bind/Lookup/BindIfAbsentOrOwner (kept until the US13 teardown).
 
 var bindRouteScript = redis.NewScript(`
 local fp = redis.call('HGET', KEYS[1], 'fingerprint')
@@ -42,8 +41,8 @@ return 'bound'
 `)
 
 // BindRoute writes route:{name} with node, fingerprint, per-connection connID, and the tunnel-session
-// startedAt (fingerprint guard → ErrNameHeldByOther). Heartbeat/Unbind are shared with Plan-1 and
-// stay owner-conditional on connID.
+// startedAt (fingerprint guard → ErrNameHeldByOther). Heartbeat/Unbind stay owner-conditional on
+// connID.
 func (r *Registry) BindRoute(ctx context.Context, name, nodeID, fingerprint, connID string, startedAt time.Time) error {
 	res, err := bindRouteScript.Run(ctx, r.rdb, []string{key(name)},
 		nodeID, fingerprint, connID, strconv.FormatInt(startedAt.UnixNano(), 10), r.ttl.Milliseconds()).Text()

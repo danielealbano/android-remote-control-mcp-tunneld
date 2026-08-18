@@ -281,7 +281,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 				c.close("liveness-timeout")
 				return
 			}
-			pf, _ := wire.EncodeControl(wire.CtrlPing, nil)
+			pf, _ := wire.EncodeControl(wire.CtrlPing, nil) // nil payload cannot fail to marshal
 			if _, err := w.Write(pf); err != nil {
 				return
 			}

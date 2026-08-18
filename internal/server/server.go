@@ -1,8 +1,8 @@
 // Package server assembles and runs the E2E tunneld process: Valkey, internal CA, ban engine, routing
 // registry + node registry, the limiter, the durable store, the attestation verifier, the ACME chain,
 // the enrollment service + handler, the phone control plane, the replica mesh, the public SNI edge, the
-// internal metrics/admin server, and the background schedulers — with graceful shutdown. It replaces
-// the Plan-1 assembly (US11); the Plan-1 packages remain compilable until the US13 teardown.
+// internal metrics/admin server, and the background schedulers — with graceful shutdown. See
+// docs/ARCHITECTURE.md for the system map.
 package server
 
 import (
@@ -69,6 +69,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Control-plane primitives.
 	reg := router.NewRegistry(rdb, cfg.RouteTTL)
+	// These flags were already parsed + range-checked by cfg.Validate() at startup; a parse error
+	// here is impossible, so the errors are intentionally ignored (same for every mustBytes call).
 	bwRate, _ := config.ParseBitrate(cfg.LimitBandwidth)
 	dayCap, _ := config.ParseByteSize(cfg.LimitTrafficDay)
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
@@ -110,7 +112,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		AttestOptional: cfg.AttestationOptional,
 		Recorder:       rec, Logger: logger,
 	})
-	enrollBody, _ := config.ParseByteSize(cfg.LimitEnrollBody)
+	enrollBody, _ := config.ParseByteSize(cfg.LimitEnrollBody) // pre-validated by cfg.Validate()
 	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody)
 
 	// Phone control plane.
@@ -248,4 +250,5 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	return nil
 }
 
+// mustBytes parses a byte-size flag ALREADY validated by cfg.Validate() — a parse error is impossible.
 func mustBytes(s string) int64 { n, _ := config.ParseByteSize(s); return n }

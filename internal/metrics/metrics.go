@@ -24,7 +24,7 @@ type Metrics struct {
 	rejections  *prometheus.CounterVec // {reason} — labels pre-registered from observ.RejectReasons
 	bytesTotal  *prometheus.CounterVec // {direction}
 
-	// --- Plan 3 (E2E) families ---
+	// --- E2E families ---
 	publicConnsUp  prometheus.Gauge
 	phoneConnsUp   prometheus.Gauge
 	streamsActive  prometheus.Gauge

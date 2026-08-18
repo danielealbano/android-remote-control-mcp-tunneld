@@ -9,15 +9,13 @@ import (
 	"errors"
 )
 
-// Wire protocol v2 (Plan 3, E2E). The phone's HTTP/2 CONTROL stream carries length-framed control
+// Wire protocol v2 (the E2E contract). The phone's HTTP/2 CONTROL stream carries length-framed control
 // messages defined here. The DATA stream is an OPAQUE raw byte splice (it carries interactive TLS
 // records; HTTP/2 END_STREAM is teardown), so it has NO framing — ChunkSize is only the
 // bandwidth-pacing slice size. The mesh stream identifies itself via HTTP/2 request
 // headers (X-Tunnel / X-Conn-Id / X-Stream-Id — docs/PROTOCOL.md §5); its body is the opaque splice.
 //
-// These v2 types are ADDED alongside the Plan-1 frame codec (kept until the US13 teardown). To avoid
-// colliding with the still-present v1 constants (CHALLENGE…ERROR), the v2 control-frame enum is a
-// DISTINCT type ControlType with permanent Ctrl-prefixed names.
+// The control-frame enum is a DISTINCT type ControlType with permanent Ctrl-prefixed names.
 
 // ControlType identifies a v2 control-stream frame. Layout: [type:1][payloadLen:4 BE][payload JSON].
 type ControlType byte

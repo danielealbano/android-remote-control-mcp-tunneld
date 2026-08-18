@@ -1,5 +1,4 @@
-// The P1 integration server_test.go (which drove the superseded HTTP-mode assembly) is replaced here by
-// the US11 unit lifecycle test; the new real-server integration tier lands in US14
+// The unit lifecycle test; the real-server coverage lives in the integration tier
 // (internal/server/integration_test.go, //go:build integration).
 package server
 
@@ -143,7 +142,7 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 
 // TestRun_Lifecycle boots the full E2E assembly on loopback (degraded ACME/attestation/S3), lets the
 // listeners + schedulers start, then cancels and asserts a clean drain. It exercises the wiring, not the
-// data plane (that is the US14 integration tier).
+// data plane (that is the integration tier).
 func TestRun_Lifecycle(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := lifecycleConfig(t, mr.Addr())

@@ -2,7 +2,7 @@
 // logs, on any PLAIN S3 provider. It uses ONLY plain GetObject/PutObject/DeleteObject — no
 // conditional-write / atomic-PUT feature — so it runs on any S3 (production targets a plain S3 such as
 // OVH; MinIO is a local/e2e stand-in). Name uniqueness comes from the write-verify claim protocol in
-// internal/enroll, not from storage semantics. See docs/PROTOCOL.md and the Plan-3 design record.
+// internal/enroll, not from storage semantics. See docs/PROTOCOL.md and docs/ARCHITECTURE.md §5.
 package store
 
 import (

@@ -8,10 +8,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Limiter holds the E2E control-plane rate/quota primitives (Plan 3), added alongside the Plan-1 free
-// functions (Allow/Acquire). It carries the Valkey client, the per-tunnel/per-direction bandwidth rate,
-// and the day/week traffic caps, with an injectable clock for tests. Every key's TTL is set in the SAME
-// Lua script as its mutation (or SET EX for the cooldown/budget windows).
+// Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
+// per-tunnel/per-direction bandwidth rate, and the day/week traffic caps, with an injectable clock for
+// tests. Every key's TTL is set in the SAME Lua script as its mutation (or SET EX for the cooldown
+// windows).
 type Limiter struct {
 	rdb     redis.UniversalClient
 	bwRate  int64 // bytes/sec per tunnel per direction

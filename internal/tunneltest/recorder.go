@@ -34,7 +34,7 @@ func (r *Recorder) Bytes(tunnel, dir string, n int64) {
 	r.add(RecCall{Kind: "bytes", Tunnel: tunnel, Direction: dir, N: n})
 }
 
-// --- Plan 3 (E2E) event set ---
+// --- E2E event set ---
 
 func (r *Recorder) PublicConnOpen() { r.add(RecCall{Kind: "publicconnopen"}) }
 func (r *Recorder) PublicConnClose(reason string) {

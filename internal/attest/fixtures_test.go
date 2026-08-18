@@ -17,7 +17,7 @@ import (
 // chainParams tunes a synthetic attestation chain so the full seven-point predicate can be exercised
 // positively and (one field at a time) negatively — WITHOUT depending on Google's short-lived
 // intermediates. A REAL Realme T70 chain fixture, when captured on-device, is validated separately by
-// the adb-gated e2e test (US14); the predicate LOGIC is covered here in full.
+// the adb-gated e2e test; the predicate LOGIC is covered here in full.
 type chainParams struct {
 	challenge     []byte
 	signerDigest  []byte // the SHA-256 the allowlist will contain (unless overridden)

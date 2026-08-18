@@ -3,7 +3,14 @@ package phoneconn
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -11,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -208,7 +217,7 @@ func waitCond(t *testing.T, cond func() bool) {
 	t.Fatal("condition not reached in time")
 }
 
-// TestBanGatesRecordRejection: both phone-control ban gates are `ban` rejection writers (the US10
+// TestBanGatesRecordRejection: both phone-control ban gates are `ban` rejection writers (the
 // writer map): the peer-IP gate with no tunnel, the tunnel gate with the name.
 func TestBanGatesRecordRejection(t *testing.T) {
 	m, _, _, _ := newMgr(t)
@@ -230,4 +239,100 @@ func TestBanGatesRecordRejection(t *testing.T) {
 	if len(got) != 1 || got[0] != [2]string{"ban", ""} {
 		t.Fatalf("the IP ban gate must record Reject(ban, \"\"), got %v", got)
 	}
+}
+
+// selfSignedCert builds a self-signed leaf with the given CN and optional mesh-role OU marker — the
+// handler-level identity check inspects only the leaf (chain trust is the TLS layer's job).
+func selfSignedCert(t *testing.T, cn string, meshRole bool) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subj := pkix.Name{CommonName: cn}
+	if meshRole {
+		subj.OrganizationalUnit = []string{ca.MeshRoleOU}
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: subj,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
+}
+
+func tlsRequest(t *testing.T, path string, leaf *x509.Certificate) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest("GET", path, nil)
+	req.RemoteAddr = "198.51.100.50:40000"
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+	return req
+}
+
+// TestServeHTTPRejectsMeshRoleCert covers the SACRED role separation on the phone listener: a
+// mesh-role client cert MUST be refused even with a well-formed CN.
+func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		ValidName: func(string) bool { return true }})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tlsRequest(t, "/control", selfSignedCert(t, "abcdef234567", true)))
+	if rec.Code != 403 {
+		t.Fatalf("a mesh-role cert must be refused on the phone listener, got %d", rec.Code)
+	}
+	if m.HasConn("abcdef234567") {
+		t.Fatal("a mesh-role cert must never bind a phone connection")
+	}
+}
+
+// TestServeHTTPRejectsInvalidCN covers the CN gate: a malformed/reserved CN is refused before any
+// route bind.
+func TestServeHTTPRejectsInvalidCN(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		ValidName: func(name string) bool { return name == "goodname234567" }})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tlsRequest(t, "/control", selfSignedCert(t, "Not A Valid Name!", false)))
+	if rec.Code != 403 {
+		t.Fatalf("a malformed CN must be refused, got %d", rec.Code)
+	}
+}
+
+// TestHeartbeatMissingSelfHeals covers the three-state heartbeat's missing branch: a lapsed route is
+// re-bound via the epoch-preserving self-heal (the original sessionStart survives).
+func TestHeartbeatMissingSelfHeals(t *testing.T) {
+	m, fr, _, _ := newMgr(t)
+	fr.hbResult = router.HeartbeatMissing
+	c := newConn("selfheal01")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.cancel = cancel
+	if _, err := m.register(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the TTL lapse: drop the route, then let the heartbeat loop observe "missing".
+	fr.mu.Lock()
+	delete(fr.bound, "selfheal01")
+	fr.mu.Unlock()
+
+	m.routeTTL = 3 * time.Millisecond
+	go m.heartbeatLoop(ctx, c)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, ok := fr.boundAt("selfheal01"); ok {
+			if !got.Equal(c.sessionStart) {
+				t.Fatalf("self-heal must PRESERVE the session epoch: got %v want %v", got, c.sessionStart)
+			}
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("a missing route must be self-healed by the heartbeat loop")
 }

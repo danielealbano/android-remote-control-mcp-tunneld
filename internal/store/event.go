@@ -76,7 +76,7 @@ func LogKey(ev Event) string {
 
 // NewConnID mints a 10-lowercase-hex connection id = 3 big-endian bytes of
 // int(now.Sub(sessionStart).Seconds()) & 0xFFFFFF (seconds since the tunnel-session start) ‖ 2
-// crypto/rand bytes. Both callers (US8 phone connections and US11 public connections) seed sessionStart
+// crypto/rand bytes. Both callers (phone control connections and public connections) seed sessionStart
 // with the SAME per-tunnel epoch — the phone control connection's establishment time — so every conn id
 // of one tunnel session counts from the same origin.
 func NewConnID(sessionStart, now time.Time) (string, error) {

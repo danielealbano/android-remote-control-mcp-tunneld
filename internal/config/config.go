@@ -1,9 +1,6 @@
 // Package config defines the tunneld `serve` command's flag surface (kong) and its validation.
-// Every flag has an automatic TUNNELD_* env twin via kong.DefaultEnvars("TUNNELD") in main.
-//
-// Plan 3 (E2E) reworks this surface ADDITIVELY: the new families below are added while the Plan-1
-// proxy/HTTP-inspection flags remain (their legacy consumers still compile) until the US13 teardown
-// removes them together with those consumers. See docs/plans/3_e2e_encrypted_tunneling_*.md.
+// Every flag has an automatic TUNNELD_* env twin via kong.DefaultEnvars("TUNNELD") in main; Validate()
+// enforces every cross-field invariant fail-fast at startup. See docs/ARCHITECTURE.md §10.
 package config
 
 import (

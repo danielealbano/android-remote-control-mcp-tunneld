@@ -110,6 +110,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		return
 	}
 
+	// NewConnID fails only if crypto/rand fails (practically impossible); a zero id would still be
+	// delivered/matched consistently, so the error is intentionally ignored.
 	streamID, _ := store.NewConnID(startedAt, e.now())
 
 	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
@@ -137,7 +139,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	if ferr != nil {
 		n2, fp2, c2, s2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) && (e.banTun == nil || !e.banTun(name, fp2)) {
-			streamID, _ = store.NewConnID(s2, e.now())
+			streamID, _ = store.NewConnID(s2, e.now()) // same crypto/rand-only failure mode as above
 			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
 		}
 	}

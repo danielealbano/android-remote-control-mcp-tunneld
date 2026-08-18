@@ -2,7 +2,7 @@
 // parser, the seven-point predicate, background root-set + revocation-status refreshers (last-known-
 // good), and a hot-reloadable signer-digest allowlist. Enrollment and every renewal require a valid
 // attestation; this package makes generic hosting/abuse structurally impossible rather than merely
-// policy-forbidden. See docs/PROTOCOL.md and the Plan-3 design record.
+// policy-forbidden. See docs/PROTOCOL.md §2.
 package attest
 
 import (

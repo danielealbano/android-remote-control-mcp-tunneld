@@ -1,7 +1,7 @@
 // Package edge is the raw TCP :443 public edge: it peeks the TLS ClientHello (SNI/ALPN/version + a
 // stable JA4 fingerprint), applies accept-time checks (ban-first, per-IP connection rate,
 // --max-clients), routes reserved SNIs to the local TLS terminators and tunnel SNIs to the bridge
-// (local fast path or mesh), and enforces the frontend connection policy. See the Plan-3 record.
+// (local fast path or mesh), and enforces the frontend connection policy. See docs/ARCHITECTURE.md §2.
 package edge
 
 import (

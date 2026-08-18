@@ -72,7 +72,7 @@ func TestCLIServeDispatch(t *testing.T) {
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
 	// The E2E Validate requires the S3/mesh/attestation/ACME families; supply the full set so the
-	// dispatch seam is reached (the P1 --client-ip-header is gone from Validate as of US1).
+	// dispatch seam is reached (the legacy --client-ip-header flag no longer exists).
 	os.Args = []string{
 		"tunneld", "serve",
 		"--ca-cert", cert,

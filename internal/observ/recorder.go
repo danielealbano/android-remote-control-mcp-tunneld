@@ -4,7 +4,8 @@
 package observ
 
 // RejectReasons is the exact tunneld_rejections_total{reason} label set: every rejection writer
-// (enroll, edge, phoneconn, acme) uses ONLY these values and US10 registers the family against them.
+// (enroll, edge, phoneconn, acme) uses ONLY these values; the metrics registration pre-registers the
+// family against this exact set (docs/ARCHITECTURE.md §8).
 var RejectReasons = []string{
 	"ban", "no-route", "handshake-timeout", "conn-rate", "max-clients", "quota-day", "quota-week",
 	"stream-cap", "attest-untrusted", "attest-challenge", "attest-signer", "attest-security-level",
@@ -16,7 +17,7 @@ var RejectReasons = []string{
 // (per-tunnel-label-free) Prometheus families AND writes the per-tunnel tcnt:{name} Valkey counters
 // that back /admin/tunnels.
 type Recorder interface {
-	// --- Shared with Plan-1 (identical signatures) ---
+	// --- Core rejection/byte events ---
 	// Reject bumps tunneld_rejections_total{reason} (reason ∈ RejectReasons) and emits a deduped
 	// cap-hit log. clientIP is a string ("" when no valid IP exists on the path).
 	Reject(reason, tunnelName, clientIP string)
@@ -24,7 +25,7 @@ type Recorder interface {
 	// "in"/"out" from the peer's perspective.
 	Bytes(tunnelName, direction string, n int64)
 
-	// --- E2E event set (Plan 3) ---
+	// --- E2E event set ---
 	PublicConnOpen()
 	PublicConnClose(reason string)
 	PhoneConnOpen()

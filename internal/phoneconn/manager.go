@@ -179,6 +179,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 				c.close("phone-close") // superseded — do NOT unbind the new owner's route
 				return
 			case router.HeartbeatMissing:
+				// Best-effort self-heal: a transient error/loss here is retried on the next heartbeat tick.
 				_, _ = m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.fingerprint, c.connID, c.sessionStart)
 			}
 		}
@@ -187,7 +188,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 
 // OpenStream sends a dial-back OPEN{streamID} on the control stream and waits for the phone's data
 // stream (correlated by streamID), returning a bidirectional splice handle. Used by the local bridge
-// (US11) and the mesh handler (US9). Times out if the phone fails to dial back.
+// and the mesh handler. Times out if the phone fails to dial back.
 func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataStream, error) {
 	c, ok := m.lookup(name)
 	if !ok {
@@ -202,6 +203,7 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	c.pending[streamID] = waiter
 	c.mu.Unlock()
 
+	// EncodeControl fails only on a non-marshalable payload; OpenPayload is a fixed struct of strings.
 	frame, _ := wire.EncodeControl(wire.CtrlOpen, wire.OpenPayload{StreamID: streamID})
 	select {
 	case c.send <- frame:

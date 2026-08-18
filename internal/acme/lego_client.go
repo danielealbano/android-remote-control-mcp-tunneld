@@ -77,7 +77,7 @@ type legoClient struct {
 var _ caIssuer = (*legoClient)(nil)
 
 // NewLegoClient constructs and registers (or EAB-registers) the per-CA account and wires the DNS-01
-// provider. Network-touching; exercised by the US14 Pebble integration tier.
+// provider. Network-touching; exercised by the Pebble-backed integration tier.
 func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 	key := cfg.AccountKey
 	if key == nil {
@@ -144,8 +144,8 @@ func (l *legoClient) obtain(_ context.Context, csr *x509.CertificateRequest, _ s
 func (l *legoClient) shouldRenew(_ context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
 	if l.cfg.UseARI {
 		// LE renews at the NotAfter−margin floor. A live ARI window pull is NOT possible here: lego's
-		// GetRenewalInfo requires the issued LEAF certificate, which the registry must never store (the
-		// phone holds the cert) — see the Plan-3 Deviations entry "LE ARI margin floor".
+		// GetRenewalInfo requires the issued LEAF certificate, which the name registry must never store
+		// (the phone holds it — see docs/ARCHITECTURE.md §3).
 		at := cur.NotAfter.Add(-l.cfg.RenewMargin)
 		return !now.Before(at), at, nil
 	}
