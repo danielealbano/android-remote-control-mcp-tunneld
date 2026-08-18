@@ -86,6 +86,9 @@ func (a *SignerAllowlist) Allowed(digestHex string) bool {
 // reload error keeps the last-known-good snapshot (logged by the caller via the returned error channel
 // is intentionally avoided; a transient read error simply retries next tick).
 func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
+	if poll <= 0 {
+		poll = 10 * time.Second
+	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {

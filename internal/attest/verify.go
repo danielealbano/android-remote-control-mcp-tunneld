@@ -65,13 +65,18 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 		seen[k] = struct{}{}
 	}
 
-	// (1) Chain roots at a Google attestation root, valid at `now`.
+	// (1) Chain roots at a Google attestation root, valid at `now`. A nil pool MUST fail closed —
+	// x509.VerifyOptions treats nil Roots as the SYSTEM pool, which would silently fail OPEN.
+	roots := v.roots.Pool()
+	if roots == nil {
+		return Result{}, ErrChainUntrusted
+	}
 	inter := x509.NewCertPool()
 	for _, c := range chain[1:] {
 		inter.AddCert(c)
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         v.roots.Pool(),
+		Roots:         roots,
 		Intermediates: inter,
 		CurrentTime:   now,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},

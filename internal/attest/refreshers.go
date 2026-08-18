@@ -19,13 +19,15 @@ type RootSet struct {
 	pool   atomic.Pointer[x509.CertPool]
 }
 
-// NewRootSet fetches the initial root pool (a failure at startup is fatal — the caller cannot verify
-// anything without roots).
+// NewRootSet fetches the initial root pool. The returned RootSet is ALWAYS non-nil: on a fetch
+// failure it holds an EMPTY pool (every chain verify fails — fail-closed) and the error reports the
+// failure so the caller can log it; a later Refresh success self-heals the pool.
 func NewRootSet(ctx context.Context, url string, client *http.Client) (*RootSet, error) {
 	r := &RootSet{url: url, client: client}
 	pool, err := r.fetch(ctx)
 	if err != nil {
-		return nil, err
+		r.pool.Store(x509.NewCertPool()) // fail-closed until Refresh succeeds
+		return r, err
 	}
 	r.pool.Store(pool)
 	return r, nil
@@ -63,6 +65,9 @@ func (r *RootSet) fetch(ctx context.Context) (*x509.CertPool, error) {
 
 // Refresh periodically refetches the root pool, keeping the last-known-good pool on any failure.
 func (r *RootSet) Refresh(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Hour
+	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
@@ -98,12 +103,14 @@ type statusResponse struct {
 	} `json:"entries"`
 }
 
-// NewStatusList fetches the initial status list (a failure at startup is fatal).
+// NewStatusList fetches the initial status list. The returned StatusList is ALWAYS non-nil: on a
+// fetch failure it holds no snapshot (Revoked reports true and FetchedAt is zero, so the staleness
+// gate refuses — fail-closed) and the error reports the failure; a later Refresh success self-heals.
 func NewStatusList(ctx context.Context, url string, client *http.Client) (*StatusList, error) {
 	s := &StatusList{url: url, client: client, now: time.Now}
 	snap, err := s.fetch(ctx)
 	if err != nil {
-		return nil, err
+		return s, err
 	}
 	s.snap.Store(snap)
 	return s, nil
@@ -146,6 +153,9 @@ func (s *StatusList) FetchedAt() time.Time {
 
 // Refresh periodically refetches the status list, keeping the last-known-good snapshot on failure.
 func (s *StatusList) Refresh(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Hour
+	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
