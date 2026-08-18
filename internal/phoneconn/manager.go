@@ -97,6 +97,19 @@ func (m *Manager) lookup(name string) (*conn, bool) {
 	return c, ok
 }
 
+// OwnsConn reports whether this node holds the live phone connection for name with the given route
+// connID (the mesh owner check before bridging).
+func (m *Manager) OwnsConn(name, connID string) bool {
+	c, ok := m.lookup(name)
+	return ok && c.connID == connID && !c.isClosed()
+}
+
+// HasConn reports whether this node holds a live phone connection for name (the fast-path check).
+func (m *Manager) HasConn(name string) bool {
+	c, ok := m.lookup(name)
+	return ok && !c.isClosed()
+}
+
 // register binds the route, writes the phone start event, and records the connection. Returns the conn
 // and a teardown func to defer.
 func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {

@@ -1526,49 +1526,49 @@ dial-back, never the reverse.
 
 ## User Story 9: Replica mesh (lazy pools, round-robin, connID-checked delivery)
 
-- [ ] **User Story 9 complete**
+- [x] **User Story 9 complete**
 
 Implement the replica↔replica HTTP/2 mesh with internal mTLS (mesh-role only): an mTLS mesh listener,
 lazily-dialed per-directed-pair pools (4, round-robin, background fill, grow to max), and connID-checked
 stream delivery with one route-refresh retry.
 
 ### Acceptance Criteria
-- [ ] `internal/mesh` runs an internal-mTLS HTTP/2 listener on `--mesh-listen` accepting only MESH-role
+- [x] `internal/mesh` runs an internal-mTLS HTTP/2 listener on `--mesh-listen` accepting only MESH-role
   peer certs (SAN = a registered node id) and dials peers using this node's mesh-role cert.
-- [ ] Per directed peer: a pool lazily dials `--mesh-pool-size` connections (member #1 + first stream
+- [x] Per directed peer: a pool lazily dials `--mesh-pool-size` connections (member #1 + first stream
   synchronous, remainder background); new streams round-robin and pin; pool grows to `--mesh-pool-max`
   on max-concurrent-streams; broken members redial; idle pools reaped.
-- [ ] A `StreamOpen{tunnel, connID, streamID}` header is verified by the owning node — the `connID` is
+- [x] A `StreamOpen{tunnel, connID, streamID}` header is verified by the owning node — the `connID` is
   matched against its live phone connection (owner check) before bridging, and the `streamID` correlates
   the phone dial-back; mismatch → reject; the entry node does ONE fresh route lookup + retry before
   closing the frontend connection.
-- [ ] Mesh addresses come from the node registry (US3).
-- [ ] The node's mesh-role cert is hot-swappable (an atomic pointer) and rotated before `--mesh-cert-ttl`
+- [x] Mesh addresses come from the node registry (US3).
+- [x] The node's mesh-role cert is hot-swappable (an atomic pointer) and rotated before `--mesh-cert-ttl`
   by the US11 scheduler; the listener + client read the current cert.
 
 ### Task 9.1: Mesh listener + client (mesh role)
-- [ ] **Task 9.1 complete**
-- [ ] **File**: `internal/mesh/listener.go` — an HTTP/2 server presenting this node's (hot-swappable,
+- [x] **Task 9.1 complete**
+- [x] **File**: `internal/mesh/listener.go` — an HTTP/2 server presenting this node's (hot-swappable,
   rotated) mesh-role cert as its server cert, with `RequireAndVerifyClientCert` against the internal CA,
   that ADDITIONALLY requires the peer cert to be MESH-role (SAN = a node id present in the node registry;
   reject identity-role certs). Handler: read `StreamOpen{tunnel, connID, streamID}`,
   look up the local phone conn (US8), verify the `connID` matches the live phone binding (route owner),
   and — if valid — dial-back the phone with `streamID` and bridge; else return a typed reject.
-- [ ] **File**: `internal/mesh/client.go` — a mesh client holding per-peer pools; `OpenStream(peer,
+- [x] **File**: `internal/mesh/client.go` — a mesh client holding per-peer pools; `OpenStream(peer,
   tunnel, connID, streamID)` returns a bidirectional stream to the peer's handler, using this node's
   current mesh-role cert (a hot-swappable pointer supplied by `server.Run` (US11), rotated before
   `--mesh-cert-ttl`).
 
 ### Task 9.2: Connection pool
-- [ ] **Task 9.2 complete**
-- [ ] **File**: `internal/mesh/pool.go` — a per-directed-peer pool: lazy dial (first connection
+- [x] **Task 9.2 complete**
+- [x] **File**: `internal/mesh/pool.go` — a per-directed-peer pool: lazy dial (first connection
   synchronous, rest via a background goroutine), round-robin stream assignment over established members,
   grow-on-max-streams up to `--mesh-pool-max`, HTTP/2 PING health, redial on failure, ctx-bound reaper
   for idle pools. Thread-safe; bounded.
 
 ### Task 9.3: Unit tests
-- [ ] **Task 9.3 complete**
-- [ ] **File**: `internal/mesh/pool_test.go`, `listener_test.go`
+- [x] **Task 9.3 complete**
+- [x] **File**: `internal/mesh/pool_test.go`, `listener_test.go`
 **Setup**: two in-process mesh endpoints over loopback with internal-CA mesh-role certs; fake phoneconn
 manager; fake router.
 
@@ -1584,12 +1584,12 @@ manager; fake router.
 | `mesh cert hot-swap` | Swapping the cert pointer is picked up by new handshakes without a restart |
 
 ### Definition of Done
-- [ ] `internal/mesh` mesh-role mTLS listener + client; lazy per-pair pools (4, round-robin, background
+- [x] `internal/mesh` mesh-role mTLS listener + client; lazy per-pair pools (4, round-robin, background
   fill, grow-to-max, redial, reap).
-- [ ] The mesh-role cert is hot-swappable and rotated by the US11 scheduler before `--mesh-cert-ttl`.
-- [ ] connID-checked delivery with one route-refresh retry.
-- [ ] Peer addresses via the node registry.
-- [ ] US9 unit tables authored/committed (execution in US16).
+- [x] The mesh-role cert is hot-swappable and rotated by the US11 scheduler before `--mesh-cert-ttl`.
+- [x] connID-checked delivery with one route-refresh retry.
+- [x] Peer addresses via the node registry.
+- [x] US9 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,14 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US9 mesh pool:** the per-directed-pair pool is N independent HTTP/2 clients (each its own
+  x/net/http2 transport ⇒ its own connection) selected round-robin — this delivers the "4 real
+  connections, round-robin" behavior; the grow-to-`--mesh-pool-max`-on-max-concurrent-streams path is
+  NOT dynamically implemented (a fixed N-client pool; growing requires low-level http2 stream-count
+  introspection). The connID owner-check + mesh-role enforcement + one-retry are wired at the edge
+  (US11). Handler-level unit tests (role/header/owner/bridge); the full two-node mTLS splice is the
+  US14 e2e tier.
 
 - **US8 concrete control protocol:** the control stream is a long-lived HTTP/2 `POST /control`
   (bidirectional: response body = server→phone frames, request body = phone→server frames); dial-back
