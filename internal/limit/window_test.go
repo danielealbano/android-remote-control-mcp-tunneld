@@ -94,3 +94,30 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 		}
 	}
 }
+
+// TestOverReadOnlyPreGate: Over reports an at-limit window WITHOUT consuming a slot.
+func TestOverReadOnlyPreGate(t *testing.T) {
+	rdb, _ := newTestRedis(t)
+	ctx := ctxT(t)
+	freezeClock(t)
+	ip := netip.MustParseAddr("203.0.113.30")
+
+	over, _, err := Over(ctx, rdb, "enroll-min", ip, 2, time.Minute)
+	if err != nil || over {
+		t.Fatalf("fresh window must not be over (over=%v err=%v)", over, err)
+	}
+	for range 2 {
+		if ok, _, err := Allow(ctx, rdb, "enroll-min", ip, 2, time.Minute); err != nil || !ok {
+			t.Fatalf("allow within limit failed: %v %v", ok, err)
+		}
+	}
+	over, ra, err := Over(ctx, rdb, "enroll-min", ip, 2, time.Minute)
+	if err != nil || !over || ra <= 0 {
+		t.Fatalf("at-limit window must report over with a retry-after (over=%v ra=%v err=%v)", over, ra, err)
+	}
+	// Read-only: Over itself must not have consumed anything — the counter is still exactly 2.
+	over2, _, _ := Over(ctx, rdb, "enroll-min", ip, 3, time.Minute)
+	if over2 {
+		t.Fatal("Over must not increment the window counter")
+	}
+}

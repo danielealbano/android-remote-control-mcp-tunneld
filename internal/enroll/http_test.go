@@ -190,3 +190,31 @@ func hexEncode(b []byte) string {
 	}
 	return string(out)
 }
+
+// TestHandlerOverLimitDoesNotMintNonce: an over-limit POST /enroll is refused BEFORE the issue-nonce
+// mint — flooding the unauthenticated surface must not mint Valkey keys.
+func TestHandlerOverLimitDoesNotMintNonce(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, mr := newService(t, Config{CA: testCA(t), Names: st, Evidence: st, EnrollMinute: 1, EnrollHour: 100,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	h := newTestHandler(t, svc, nil)
+
+	// Exhaust the minute window for this IP.
+	if e := svc.enrollLimit(context.Background(), "203.0.113.19"); e != nil {
+		t.Fatalf("first limit draw must pass: %v", e)
+	}
+	keysBefore := len(mr.Keys())
+
+	b, _ := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
+	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req.RemoteAddr = "203.0.113.19:5000"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 503 {
+		t.Fatalf("over-limit enroll must be refused, got %d", rr.Code)
+	}
+	if got := len(mr.Keys()); got != keysBefore {
+		t.Fatalf("an over-limit enroll must NOT mint Valkey keys (%d -> %d)", keysBefore, got)
+	}
+}

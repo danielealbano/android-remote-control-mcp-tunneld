@@ -2,6 +2,7 @@ package limit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -42,4 +43,24 @@ func Allow(ctx context.Context, rdb redis.UniversalClient, scope string, ip neti
 		return false, winStart.Add(window).Sub(now), nil
 	}
 	return true, 0, nil
+}
+
+// Over is the READ-ONLY companion to Allow: it reports whether (scope, ip) has already reached its
+// window limit WITHOUT consuming a slot. Used as a pre-gate before side effects (e.g. minting a nonce
+// key) so an over-limit caller cannot trigger them; the authoritative consume still happens via Allow.
+func Over(ctx context.Context, rdb redis.UniversalClient, scope string, ip netip.Addr, limit int, window time.Duration) (over bool, retryAfter time.Duration, err error) {
+	now := nowFunc()
+	winStart := now.Truncate(window)
+	key := fmt.Sprintf("rl:%s:%s:%d", scope, ip.String(), winStart.Unix())
+	count, err := rdb.Get(ctx, key).Int64()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return false, 0, nil
+		}
+		return false, 0, err
+	}
+	if int(count) >= limit {
+		return true, winStart.Add(window).Sub(now), nil
+	}
+	return false, 0, nil
 }

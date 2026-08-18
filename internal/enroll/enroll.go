@@ -197,10 +197,14 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "csr_domain_mismatch"}
 	}
 
-	// The tunnel MUST already be enrolled (Phase 1 wrote the claim record).
+	// The tunnel MUST already be enrolled (Phase 1 wrote the claim record). Only a definitive
+	// not-found is name_unknown; a transient store error is retryable, never a permanent-looking 400.
 	cur, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
-		return Result{}, &Error{Reason: "name_unknown"}
+		if errors.Is(err, store.ErrNotFound) {
+			return Result{}, &Error{Reason: "name_unknown"}
+		}
+		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 
 	// Issuance read-only cap (keyed on the name).
@@ -426,6 +430,28 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	}
 	okHour, ra, err := limit.Allow(ctx, s.rdb, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err == nil && !okHour {
+		s.rec.Reject("enroll-limit", "", ip)
+		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
+	}
+	return nil
+}
+
+// enrollLimitCheck is the READ-ONLY pre-gate: it reports whether ip is already at either enroll
+// window's limit WITHOUT consuming a slot (the handler runs it BEFORE minting the issue nonce, so an
+// over-limit caller cannot mint Valkey keys; Enroll's enrollLimit remains the authoritative consume).
+// A control-plane error fails open — the authoritative check still runs.
+func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return &Error{Reason: "bad_source_ip"}
+	}
+	overMin, ra, err := limit.Over(ctx, s.rdb, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
+	if err == nil && overMin {
+		s.rec.Reject("enroll-limit", "", ip)
+		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
+	}
+	overHour, ra, err := limit.Over(ctx, s.rdb, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
+	if err == nil && overHour {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
