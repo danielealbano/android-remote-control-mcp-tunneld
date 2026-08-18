@@ -6,12 +6,45 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// captureHandler is a slog.Handler that records emitted records so tests can assert the refreshers log
+// their last-known-good failures at Warn.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) count(level slog.Level) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.records {
+		if r.Level == level {
+			n++
+		}
+	}
+	return n
+}
 
 // rootsEndpoint serves a switchable root-set response: a JSON {"roots":[pem]} document, or a 500.
 type switchServer struct {
@@ -51,7 +84,8 @@ func TestRootRefresherSwapAndLastKnownGood(t *testing.T) {
 	srv := httptest.NewServer(sw.handler())
 	defer srv.Close()
 
-	rs, err := NewRootSet(context.Background(), srv.URL, srv.Client())
+	ch := &captureHandler{}
+	rs, err := NewRootSet(context.Background(), srv.URL, srv.Client(), slog.New(ch))
 	if err != nil {
 		t.Fatalf("initial fetch: %v", err)
 	}
@@ -68,9 +102,9 @@ func TestRootRefresherSwapAndLastKnownGood(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return rs.Pool() != first })
 	swapped := rs.Pool()
 
-	// A failing refetch RETAINS the last-known-good pool.
+	// A failing refetch RETAINS the last-known-good pool AND logs the failure at Warn.
 	sw.fail.Store(true)
-	time.Sleep(30 * time.Millisecond)
+	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > 0 })
 	if rs.Pool() != swapped {
 		t.Fatal("a failing refetch must retain the last-known-good pool")
 	}
@@ -83,7 +117,7 @@ func TestRootSetInitialFailureFailsClosed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rs, err := NewRootSet(context.Background(), srv.URL, srv.Client())
+	rs, err := NewRootSet(context.Background(), srv.URL, srv.Client(), nil)
 	if err == nil {
 		t.Fatal("initial fetch failure must be reported")
 	}
@@ -117,7 +151,8 @@ func TestStatusRefresherSwapAndLastKnownGood(t *testing.T) {
 	srv := httptest.NewServer(sw.handler())
 	defer srv.Close()
 
-	sl, err := NewStatusList(context.Background(), srv.URL, srv.Client())
+	ch := &captureHandler{}
+	sl, err := NewStatusList(context.Background(), srv.URL, srv.Client(), slog.New(ch))
 	if err != nil {
 		t.Fatalf("initial fetch: %v", err)
 	}
@@ -139,9 +174,9 @@ func TestStatusRefresherSwapAndLastKnownGood(t *testing.T) {
 		t.Fatal("fetchedAt must advance on a successful refresh")
 	}
 
-	// A failing refetch RETAINS the last-known-good snapshot (fetchedAt does NOT advance).
+	// A failing refetch RETAINS the last-known-good snapshot (fetchedAt does NOT advance) AND logs Warn.
 	sw.fail.Store(true)
-	time.Sleep(30 * time.Millisecond)
+	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > 0 })
 	if !sl.FetchedAt().Equal(swapped) || !sl.Revoked("abcd") {
 		t.Fatal("a failing refetch must retain the last-known-good snapshot")
 	}
@@ -154,7 +189,7 @@ func TestStatusListInitialFailureFailsClosed(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sl, err := NewStatusList(context.Background(), srv.URL, srv.Client())
+	sl, err := NewStatusList(context.Background(), srv.URL, srv.Client(), nil)
 	if err == nil {
 		t.Fatal("initial fetch failure must be reported")
 	}

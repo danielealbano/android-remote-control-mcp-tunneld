@@ -6,24 +6,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
 )
+
+// orDiscard returns logger, or a sink logger when logger is nil, so the refreshers never nil-deref
+// while remaining usable without an explicit logger in tests.
+func orDiscard(logger *slog.Logger) *slog.Logger {
+	if logger != nil {
+		return logger
+	}
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // RootSet holds the current Google attestation root pool behind an atomic pointer, refreshed with
 // last-known-good retention.
 type RootSet struct {
 	url    string
 	client *http.Client
+	logger *slog.Logger
 	pool   atomic.Pointer[x509.CertPool]
 }
 
 // NewRootSet fetches the initial root pool. The returned RootSet is ALWAYS non-nil: on a fetch
 // failure it holds an EMPTY pool (every chain verify fails — fail-closed) and the error reports the
 // failure so the caller can log it; a later Refresh success self-heals the pool.
-func NewRootSet(ctx context.Context, url string, client *http.Client) (*RootSet, error) {
-	r := &RootSet{url: url, client: client}
+func NewRootSet(ctx context.Context, url string, client *http.Client, logger *slog.Logger) (*RootSet, error) {
+	r := &RootSet{url: url, client: client, logger: orDiscard(logger)}
 	pool, err := r.fetch(ctx)
 	if err != nil {
 		r.pool.Store(x509.NewCertPool()) // fail-closed until Refresh succeeds
@@ -77,6 +88,8 @@ func (r *RootSet) Refresh(ctx context.Context, every time.Duration) {
 		case <-ticker.C:
 			if pool, err := r.fetch(ctx); err == nil {
 				r.pool.Store(pool)
+			} else {
+				r.logger.Warn("attestation root refresh failed; keeping last-known-good pool (will retry)", "url", r.url, "err", err)
 			}
 		}
 	}
@@ -87,6 +100,7 @@ func (r *RootSet) Refresh(ctx context.Context, every time.Duration) {
 type StatusList struct {
 	url    string
 	client *http.Client
+	logger *slog.Logger
 	snap   atomic.Pointer[statusSnapshot]
 	now    func() time.Time
 }
@@ -106,8 +120,8 @@ type statusResponse struct {
 // NewStatusList fetches the initial status list. The returned StatusList is ALWAYS non-nil: on a
 // fetch failure it holds no snapshot (Revoked reports true and FetchedAt is zero, so the staleness
 // gate refuses — fail-closed) and the error reports the failure; a later Refresh success self-heals.
-func NewStatusList(ctx context.Context, url string, client *http.Client) (*StatusList, error) {
-	s := &StatusList{url: url, client: client, now: time.Now}
+func NewStatusList(ctx context.Context, url string, client *http.Client, logger *slog.Logger) (*StatusList, error) {
+	s := &StatusList{url: url, client: client, logger: orDiscard(logger), now: time.Now}
 	snap, err := s.fetch(ctx)
 	if err != nil {
 		return s, err
@@ -165,6 +179,8 @@ func (s *StatusList) Refresh(ctx context.Context, every time.Duration) {
 		case <-ticker.C:
 			if snap, err := s.fetch(ctx); err == nil {
 				s.snap.Store(snap)
+			} else {
+				s.logger.Warn("attestation status refresh failed; keeping last-known-good snapshot (staleness gate will refuse once too old)", "url", s.url, "err", err)
 			}
 		}
 	}

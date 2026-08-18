@@ -71,15 +71,15 @@ func TestE2E_DeviceAttestation(t *testing.T) {
 	}
 
 	// Build the PRODUCTION verifier against the LIVE Google root + status sets and the probe's allowlist.
-	signers, err := attest.LoadSignerAllowlist(signerFile)
+	signers, err := attest.LoadSignerAllowlist(signerFile, nil)
 	if err != nil {
 		t.Fatalf("load signer allowlist: %v", err)
 	}
-	roots, err := attest.NewRootSet(ctx, googleAttestRootURL, http.DefaultClient)
+	roots, err := attest.NewRootSet(ctx, googleAttestRootURL, http.DefaultClient, nil)
 	if err != nil {
 		t.Fatalf("fetch Google attestation roots: %v", err)
 	}
-	status, err := attest.NewStatusList(ctx, googleAttestStatusURL, http.DefaultClient)
+	status, err := attest.NewStatusList(ctx, googleAttestStatusURL, http.DefaultClient, nil)
 	if err != nil {
 		t.Fatalf("fetch Google attestation status: %v", err)
 	}

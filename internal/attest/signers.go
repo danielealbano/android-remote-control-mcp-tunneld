@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -16,15 +17,16 @@ import (
 // per line, '#' comments). It follows the ban-engine pattern: an atomic pointer to an immutable set,
 // swapped by an mtime watcher, so Allowed is a lock-free read.
 type SignerAllowlist struct {
-	path  string
-	set   atomic.Pointer[map[string]struct{}]
-	mtime atomic.Int64
+	path   string
+	logger *slog.Logger
+	set    atomic.Pointer[map[string]struct{}]
+	mtime  atomic.Int64
 }
 
 // LoadSignerAllowlist reads the file once and returns the allowlist (an unreadable/absent file is an
 // error at startup).
-func LoadSignerAllowlist(path string) (*SignerAllowlist, error) {
-	a := &SignerAllowlist{path: path}
+func LoadSignerAllowlist(path string, logger *slog.Logger) (*SignerAllowlist, error) {
+	a := &SignerAllowlist{path: path, logger: orDiscard(logger)}
 	if err := a.reload(); err != nil {
 		return nil, err
 	}
@@ -83,8 +85,9 @@ func (a *SignerAllowlist) Allowed(digestHex string) bool {
 }
 
 // Watch reloads the allowlist when its mtime changes, at the given poll cadence, until ctx is done. A
-// reload error keeps the last-known-good snapshot (logged by the caller via the returned error channel
-// is intentionally avoided; a transient read error simply retries next tick).
+// reload failure keeps the last-known-good snapshot and is logged at Warn (a corrupt replacement file
+// must surface to the operator, not silently keep serving the stale set); the reload is retried when
+// the file changes again.
 func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 	if poll <= 0 {
 		poll = 10 * time.Second
@@ -98,10 +101,12 @@ func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 		case <-ticker.C:
 			fi, err := os.Stat(a.path)
 			if err != nil {
-				continue // keep last-known-good
+				continue // keep last-known-good; a changed-then-failed reload is logged below
 			}
 			if fi.ModTime().UnixNano() != a.mtime.Load() {
-				_ = a.reload() // on error, the atomic set is left unchanged (last-known-good)
+				if rerr := a.reload(); rerr != nil {
+					a.logger.Warn("signer allowlist reload failed; keeping last-known-good set (will retry)", "path", a.path, "err", rerr)
+				}
 			}
 		}
 	}

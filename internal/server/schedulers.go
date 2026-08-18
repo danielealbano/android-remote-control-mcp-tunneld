@@ -24,18 +24,18 @@ import (
 // objects are non-nil and fail closed (rejecting everything) until a refresher self-heals. A signer-
 // allowlist load failure is FATAL — the file is local operator configuration, so a bad file fails fast.
 func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger) (*attest.Verifier, *attest.RootSet, *attest.StatusList, *attest.SignerAllowlist, error) {
-	signers, err := attest.LoadSignerAllowlist(cfg.AttestSignerDigestFile)
+	signers, err := attest.LoadSignerAllowlist(cfg.AttestSignerDigestFile, logger)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("attestation signer allowlist: %w", err)
 	}
 	// A hard per-request timeout: a black-holed root/status URL must never wedge a refresher tick —
 	// a stuck fetch would let the status snapshot exceed --attest-status-max-stale with no self-heal.
 	fetchClient := &http.Client{Timeout: 30 * time.Second}
-	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, fetchClient)
+	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, fetchClient, logger)
 	if err != nil {
 		logger.Warn("attestation root fetch failed (fail-closed until refresh)", "err", err)
 	}
-	status, err := attest.NewStatusList(ctx, cfg.AttestStatusURL, fetchClient)
+	status, err := attest.NewStatusList(ctx, cfg.AttestStatusURL, fetchClient, logger)
 	if err != nil {
 		logger.Warn("attestation status fetch failed (fail-closed until refresh)", "err", err)
 	}

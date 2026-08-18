@@ -2933,3 +2933,17 @@ gates, and validate all touched Mermaid diagrams.
   guard tests (`internal/metrics/deploy_test.go`) now fail the build if the dashboard references an
   unregistered family or an alert matches a reason outside `observ.RejectReasons`, so this drift
   cannot silently recur.
+
+- **Fourteenth review wave (adversarial review round, Fable reviewer; attestation-refresher staleness
+  observability):** Task 4.2 requires "last-known-good on failure; staleness metric/log", but the
+  periodic refreshers silently swallowed every failure after startup: `RootSet.Refresh` and
+  `StatusList.Refresh` dropped the fetch error, and `SignerAllowlist.Watch` discarded the reload error
+  (`_ = a.reload()`). A failing root/status fetch produced zero operator signal for up to
+  `--attest-status-max-stale` (then all enrollment/issuance hard-refuse with `attest-stale`, pointing
+  nowhere), and a persistent signer-allowlist reload failure (e.g. a corrupt digest file deploy) was
+  silent forever while serving the stale set. `RootSet`, `StatusList`, and `SignerAllowlist` now take an
+  injected `*slog.Logger` (nil defaults to a discard sink), and each logs its last-known-good retention
+  at `Warn` on a periodic failure — mirroring the ban watcher. The signer watcher's stat-error path
+  stays a silent `continue` (a permanently-missing file would otherwise log every poll tick); only a
+  changed-then-failed reload is logged. Tests assert the Warn fires on a failing root/status refetch and
+  on a corrupt signer reload while the last-known-good snapshot is retained.
