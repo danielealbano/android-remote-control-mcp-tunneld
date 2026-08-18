@@ -89,8 +89,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	capLogger := caplog.New(logger)
 	rec := metrics.NewPromRecorder(m, capLogger, adminStore, logger)
 
-	// Attestation verifier (fail-closed until the roots/status refreshers succeed).
-	verifier := buildVerifier(ctx, cfg, logger)
+	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
+	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
+	verifier, attRoots, attStatus, attSigners, err := buildVerifier(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
 
 	// ACME chain (lazy self-healing lego clients; DNS-01 provider selected by --acme-dns-provider).
 	chain := buildACMEChain(cfg, lim, rec, logger)
@@ -104,17 +108,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		IssuePerWeek:  cfg.IssuePerWeek, EnrollHour: cfg.LimitEnrollHour, EnrollMinute: cfg.LimitEnrollMinute,
 		ClaimTimeout: cfg.RegistryClaimTimeout, ClaimSettle: cfg.RegistryClaimSettle,
 		AttestOptional: cfg.AttestationOptional,
+		Recorder:       rec, Logger: logger,
 	})
 	enrollBody, _ := config.ParseByteSize(cfg.LimitEnrollBody)
 	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody)
 
 	// Phone control plane.
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: st, Recorder: rec, NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
+		Router: reg, Logs: st, Recorder: rec, Logger: logger,
+		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
 	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
-		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanTunnel: banTunnel,
+		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,
 		PingInterval: cfg.ControlPingInterval, StreamPending: cfg.LimitStreamPending,
 		OnIssue: issueFunc(enrollSvc),
 	})
@@ -137,16 +143,22 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
 	}, rdb, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: st, nodeHost: nodeHost, nodeStart: nodeStart}, rawLn.Addr())
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: st, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, rawLn.Addr())
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
 		chain.ObtainSelf, chain.ShouldRenew, cfg.ACMERenewMargin, logger)
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
+	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
+	// full-request read and keep-alive idling are tightly bounded (idle TLS conns must not accumulate).
 	enrollSrv := &http.Server{Handler: enrollHandler, ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute,
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.EnrollHost), MinVersion: tls.VersionTLS12}}
+	// The control server's idle timeout closes mTLS-authenticated HTTP/2 conns holding NO active stream
+	// (a bound phone always keeps its /control stream open, so real connections are never idle).
 	controlSrv := &http.Server{Handler: phoneHandler, ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout: 4 * cfg.ControlPingInterval,
 		ConnContext: phoneconn.ConnContext,
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.ControlHost),
 			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12}}
@@ -170,12 +182,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: metrics.Handler(m.Registry(), rdb, adminStore, logger)}
 
-	// Startup provisioning (best-effort; the process still starts if these fail).
-	if err := st.EnsureLifecycles(ctx, 90, 30); err != nil {
-		logger.Warn("ensure lifecycles failed", "err", err)
-	}
-
 	g, gctx := errgroup.WithContext(ctx)
+
+	// Startup provisioning (best-effort at boot, then retried until it lands — the 90d/30d retention
+	// rules are a documented compliance property, so one transient S3 error must not skip them).
+	g.Go(func() error { return ensureLifecyclesRetry(gctx, st, logger) })
 
 	// Reserved-host + mesh + internal servers.
 	g.Go(func() error {
@@ -195,8 +206,17 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Recorder flusher.
 	g.Go(func() error { return rec.RunFlusher(gctx, 5*time.Second) })
 
+	// Mesh pool janitor (reaps per-peer pools idle for 10m).
+	g.Go(func() error { return meshClient.Run(gctx, 10*time.Minute) })
+
+	// Attestation refreshers: root set + status list at --attest-refresh (last-known-good), and the
+	// signer-digest allowlist mtime watcher at the ban poll cadence.
+	g.Go(func() error { attRoots.Refresh(gctx, cfg.AttestRefresh); return nil })
+	g.Go(func() error { attStatus.Refresh(gctx, cfg.AttestRefresh); return nil })
+	g.Go(func() error { attSigners.Watch(gctx, cfg.BanPoll); return nil })
+
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
-	g.Go(func() error { return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, cfg.RouteTTL) })
+	g.Go(func() error { return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, cfg.RouteTTL, logger) })
 	g.Go(func() error { meshCert.rotateLoop(gctx, caObj); return nil })
 	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
 	g.Go(func() error {

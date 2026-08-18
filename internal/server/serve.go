@@ -40,22 +40,24 @@ func serveInternal(ctx context.Context, srv *http.Server, logger *slog.Logger) e
 	return nil
 }
 
-// validNameFunc validates a derived CN as a well-formed, non-reserved base32 tunnel name.
+// validNameFunc validates a derived CN as EXACTLY a server-generated tunnel name: the configured
+// prefix + --name-length lowercase-base32 ([a-z2-7]) characters, and not a reserved label. Only names
+// this server's generator can have produced pass — anything looser would accept CNs the CA never signs.
 func validNameFunc(cfg config.ServeCmd) func(string) bool {
 	el := firstLabel(cfg.EnrollHost)
 	cl := firstLabel(cfg.ControlHost)
 	return func(name string) bool {
-		if len(name) < 6 || len(name) > 63 {
+		if len(name) != len(cfg.NamePrefix)+cfg.NameLength {
+			return false
+		}
+		if name[:len(cfg.NamePrefix)] != cfg.NamePrefix {
 			return false
 		}
 		if name == el || name == cl {
 			return false
 		}
-		for _, c := range name {
-			lower := c >= 'a' && c <= 'z'
-			b32 := c >= '2' && c <= '7'
-			digit := c >= '0' && c <= '9'
-			if !lower && !b32 && !digit && c != '-' {
+		for _, c := range name[len(cfg.NamePrefix):] {
+			if (c < 'a' || c > 'z') && (c < '2' || c > '7') {
 				return false
 			}
 		}
@@ -63,9 +65,11 @@ func validNameFunc(cfg config.ServeCmd) func(string) bool {
 	}
 }
 
-// edgeLogSink converts an edge.PublicEvent into a store.Event and writes it to the connection log.
+// edgeLogSink converts an edge.PublicEvent into a store.Event and writes it to the connection log (a
+// failure is logged, never silent).
 type edgeLogSink struct {
 	st                  store.ConnLogStore
+	logger              *slog.Logger
 	nodeHost, nodeStart string
 }
 
@@ -83,7 +87,9 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 		e.BytesOut = ev.BytesOut
 		e.CloseReason = ev.CloseReason
 	}
-	_ = s.st.PutConnLog(ctx, e)
+	if err := s.st.PutConnLog(ctx, e); err != nil {
+		s.logger.Warn("public conn-log write failed", "tunnel", ev.Tunnel, "event", ev.Event, "err", err)
+	}
 }
 
 // bridgeAdapter implements mesh.Bridge on the OWNER node: it opens the local phone dial-back stream and

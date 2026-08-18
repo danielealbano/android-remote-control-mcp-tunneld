@@ -19,13 +19,14 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-// buildVerifier constructs the attestation verifier. A root/status fetch failure is non-fatal: the
-// verifier fails closed (rejecting everything) until a refresher self-heals; the signer allowlist is
-// hot-reloaded from disk.
-func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger) *attest.Verifier {
+// buildVerifier constructs the attestation verifier and returns its refreshable components so Run can
+// start their background refreshers. A root/status INITIAL fetch failure is non-fatal: the returned
+// objects are non-nil and fail closed (rejecting everything) until a refresher self-heals. A signer-
+// allowlist load failure is FATAL — the file is local operator configuration, so a bad file fails fast.
+func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger) (*attest.Verifier, *attest.RootSet, *attest.StatusList, *attest.SignerAllowlist, error) {
 	signers, err := attest.LoadSignerAllowlist(cfg.AttestSignerDigestFile)
 	if err != nil {
-		logger.Warn("attestation signer allowlist load failed", "err", err)
+		return nil, nil, nil, nil, fmt.Errorf("attestation signer allowlist: %w", err)
 	}
 	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, http.DefaultClient)
 	if err != nil {
@@ -35,7 +36,7 @@ func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger
 	if err != nil {
 		logger.Warn("attestation status fetch failed (fail-closed until refresh)", "err", err)
 	}
-	return attest.NewVerifier(roots, status, signers, cfg.AttestStatusMaxStale)
+	return attest.NewVerifier(roots, status, signers, cfg.AttestStatusMaxStale), roots, status, signers, nil
 }
 
 // meshCertHolder holds this node's hot-swappable mesh-role cert, re-minted before --mesh-cert-ttl.
@@ -142,9 +143,13 @@ func (h *meshCertHolder) rotateLoop(ctx context.Context, caObj *ca.CA) {
 }
 
 // heartbeatNode registers this node in the node registry and refreshes it at route-ttl/3 (matching the
-// route-entry TTL), until ctx is cancelled.
-func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise string, routeTTL time.Duration) error {
-	_ = reg.RegisterNode(ctx, nodeID, advertise, routeTTL)
+// route-entry TTL), until ctx is cancelled. A refresh error is transient (RefreshNode is a plain SET,
+// so the next tick re-registers): log and keep going — exiting would let node:{id} expire and break
+// cross-node routing to this node until restart.
+func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise string, routeTTL time.Duration, logger *slog.Logger) error {
+	if err := reg.RegisterNode(ctx, nodeID, advertise, routeTTL); err != nil {
+		logger.Warn("node register failed (retrying at heartbeat cadence)", "err", err)
+	}
 	interval := routeTTL / 3
 	if interval <= 0 {
 		interval = time.Second
@@ -157,14 +162,32 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise 
 			return nil
 		case <-t.C:
 			if err := reg.RefreshNode(ctx, nodeID, advertise, routeTTL); err != nil {
-				return nil
+				logger.Warn("node heartbeat refresh failed (will retry)", "err", err)
 			}
 		}
 	}
 }
 
+// ensureLifecyclesRetry applies the S3 retention lifecycle rules (conn logs 90d, rejected-enroll 30d),
+// retrying every 5 minutes until they land or ctx ends — retention is a documented compliance property
+// and must not be skipped for the whole process lifetime on one transient boot-time S3 error.
+func ensureLifecyclesRetry(ctx context.Context, st *store.S3Store, logger *slog.Logger) error {
+	for {
+		err := st.EnsureLifecycles(ctx, 90, 30)
+		if err == nil {
+			return nil
+		}
+		logger.Warn("ensure lifecycles failed (retrying in 5m)", "err", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(5 * time.Minute):
+		}
+	}
+}
+
 // renewalWatcher periodically scans this node's connected tunnels and nudges the phone to renew any cert
-// the chain says is due (ARI-driven for LE, fixed cadence otherwise). The nudge carries a fresh single-use
+// the chain says is due (NotAfter−margin floor for LE, fixed cadence otherwise). The nudge carries a fresh single-use
 // challenge nonce and is best-effort: the phone drives the actual renewal by calling the mTLS POST /issue
 // endpoint with a fresh attestation over that nonce.
 type renewalWatcher struct {
