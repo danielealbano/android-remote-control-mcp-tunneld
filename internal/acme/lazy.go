@@ -68,7 +68,7 @@ func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name 
 func (l *lazyCA) shouldRenew(ctx context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
 	c, err := l.resolve()
 	if err != nil {
-		// Cannot reach the CA to consult ARI: fall back to the fixed margin floor so renewal still fires.
+		// The CA client is unavailable: fall back to the fixed margin floor so renewal still fires.
 		at := cur.NotBefore.Add(160*time.Hour - 48*time.Hour)
 		return !now.Before(at), at, nil
 	}

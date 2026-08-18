@@ -44,7 +44,7 @@ type LegoConfig struct {
 	Validity     time.Duration     // requested validity (GTS); 0 = CA default
 	RenewMargin  time.Duration
 	Shortlived   time.Duration // 160h (fixed-cadence anchor for non-LE)
-	UseARI       bool          // LE only
+	UseARI       bool          // LE only: renew at the NotAfter−margin floor (vs the fixed non-LE cadence)
 	EABKID       string
 	EABHMAC      string
 	DNS          DNSProvider        // our neutral seam (tests, or a raw-TXT publisher)
@@ -143,8 +143,9 @@ func (l *legoClient) obtain(_ context.Context, csr *x509.CertificateRequest, _ s
 
 func (l *legoClient) shouldRenew(_ context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
 	if l.cfg.UseARI {
-		// ARI needs the issued cert; the caller passes only metadata here, so fall back to the ARI id if
-		// present, else the margin floor. GetRenewalInfo is best-effort — a failure floors at the margin.
+		// LE renews at the NotAfter−margin floor. A live ARI window pull is NOT possible here: lego's
+		// GetRenewalInfo requires the issued LEAF certificate, which the registry must never store (the
+		// phone holds the cert) — see the Plan-3 Deviations entry "LE ARI margin floor".
 		at := cur.NotAfter.Add(-l.cfg.RenewMargin)
 		return !now.Before(at), at, nil
 	}

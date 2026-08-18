@@ -201,3 +201,27 @@ func TestBackoffDoubles(t *testing.T) {
 		t.Error("large streak caps at max")
 	}
 }
+
+// TestObtainSelfSelfCert covers the plan's "ObtainSelf self-cert" row: a server-side key + cert for a
+// reserved host, subject to the per-CA cooldowns, and never touching per-tunnel issuance state.
+func TestObtainSelfSelfCert(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt}
+	gts := &fakeCA{caID: CAGTS}
+	ch, lim := newChain(t, ChainConfig{}, le, gts)
+	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour) // LE cooling → GTS
+
+	certPEM, keyPEM, info, err := ch.ObtainSelf(context.Background(), "enroll.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		t.Fatal("ObtainSelf must return a cert AND a server-side key")
+	}
+	if info.CA != CAGTS || le.calls != 0 {
+		t.Fatalf("a cooling LE must be skipped for the self cert, got CA=%s leCalls=%d", info.CA, le.calls)
+	}
+	// The per-tunnel issuance counter is untouched (it is keyed on tunnel names in enroll, not here).
+	if ok, _ := lim.IssuanceAllowed(context.Background(), "enroll.example.test", 1); !ok {
+		t.Fatal("ObtainSelf must not consume the per-tunnel issuance counter")
+	}
+}

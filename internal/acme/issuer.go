@@ -1,5 +1,5 @@
 // Package acme implements the public-cert issuance chain behind enroll.PublicIssuer: lego-backed
-// per-CA clients with automatic LE→GTS→ZeroSSL spillover, DNS-01, the split renewal timing (LE ARI /
+// per-CA clients with automatic LE→GTS→ZeroSSL spillover, DNS-01, the split renewal timing (LE NotAfter−margin floor /
 // fixed cadence for GTS+ZeroSSL), and reactive per-CA cooldown+backoff (a rate-limited CA gets a Valkey
 // retry-after; the spillover skips a cooling CA). Issue and renew share the same LE-first order, so every
 // renewal opportunistically migrates the name to LE. See docs/PROTOCOL.md and the Plan-3 record.
@@ -53,7 +53,7 @@ func permanent(err error) *IssuerError {
 type caIssuer interface {
 	// obtain issues a public cert for the phone CSR (name inferred from the CSR CN/SAN the caller sets).
 	obtain(ctx context.Context, csr *x509.CertificateRequest, name string) (pem []byte, info store.CertInfo, err error)
-	// shouldRenew reports whether cur should renew now, and the suggested time. LE uses ARI; GTS/ZeroSSL
+	// shouldRenew reports whether cur should renew now, and the suggested time. LE uses the NotAfter−margin floor; GTS/ZeroSSL
 	// use the fixed cadence.
 	shouldRenew(ctx context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error)
 	id() string

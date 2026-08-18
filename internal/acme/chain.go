@@ -135,7 +135,7 @@ func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (
 	return false
 }
 
-// ShouldRenew dispatches to the CA that issued cur (LE via ARI; GTS/ZeroSSL fixed cadence).
+// ShouldRenew dispatches to the CA that issued cur (LE: NotAfter−margin floor; GTS/ZeroSSL: fixed cadence).
 func (c *chainIssuer) ShouldRenew(ctx context.Context, cur store.CertInfo) (bool, time.Time, error) {
 	ca := c.byID(cur.CA)
 	if ca == nil {

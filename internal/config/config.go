@@ -99,12 +99,12 @@ type ServeCmd struct {
 	ACMECooldownDefault time.Duration `name:"acme-cooldown-default" default:"1h" help:"Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After (Retry-After wins when larger)."`
 	ACMEBackoffInitial  time.Duration `name:"acme-backoff-initial" default:"1m" help:"First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure)."`
 	ACMEBackoffMax      time.Duration `name:"acme-backoff-max" default:"6h" help:"Ceiling for the exponential per-CA failure backoff."`
-	ACMERenewMargin     time.Duration `name:"acme-renew-margin" default:"48h" help:"Renew floor before public-cert expiry (ARI may pull earlier)."`
-	IssuePerWeek        int           `name:"issue-per-week" default:"3" help:"Max SUCCESSFUL public-cert issuances per tunnel per rolling 7d."`
+	ACMERenewMargin     time.Duration `name:"acme-renew-margin" default:"48h" help:"Renew floor before public-cert expiry (LE renews at NotAfter minus this)."`
+	IssuePerWeek        int           `name:"issue-per-week" default:"3" help:"Max SUCCESSFUL public-cert issuances per tunnel per 7d window (anchored at the first issuance)."`
 
 	// --- Traffic / connection caps ---
-	LimitTrafficDay      string        `name:"limit-traffic-day" default:"1gb" help:"Per-tunnel bytes/day, both directions combined (BINARY)."`
-	LimitTrafficWeek     string        `name:"limit-traffic-week" default:"4gb" help:"Per-tunnel bytes/rolling-7d, both directions combined (BINARY)."`
+	LimitTrafficDay      string        `name:"limit-traffic-day" default:"1gb" help:"Per-tunnel bytes per 24h window (anchored at the first byte), both directions combined (BINARY)."`
+	LimitTrafficWeek     string        `name:"limit-traffic-week" default:"4gb" help:"Per-tunnel bytes per 7d window (anchored at the first byte), both directions combined (BINARY)."`
 	LimitConnRate        int           `name:"limit-conn-rate" default:"10" help:"New public TCP connections/sec per source IP."`
 	LimitStreamPending   int           `name:"limit-stream-pending" default:"64" help:"Max concurrent pre-bind phone control handshakes per node."`
 	LimitDialBackTimeout time.Duration `name:"limit-dialback-timeout" default:"10s" help:"Max wait for the phone to open the dial-back /data stream before failing the public connection and releasing its stream slot."`

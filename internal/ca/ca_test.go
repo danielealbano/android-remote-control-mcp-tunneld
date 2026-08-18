@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 )
@@ -259,5 +260,36 @@ func TestGenerateNameShapeAndReservedSkip(t *testing.T) {
 		if _, bad := reserved[name]; bad {
 			t.Fatalf("generated a reserved name %q", name)
 		}
+	}
+}
+
+// TestSignMeshRoleMarker covers the plan's "SignMesh role marker" row: SAN = nodeID, the mesh-role OU
+// marker, and the requested TTL validity.
+func TestSignMeshRoleMarker(t *testing.T) {
+	c := newTestCA(t)
+	certPEM, keyPEM, err := c.SignMesh("node-xyz", 48*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keyPEM) == 0 {
+		t.Fatal("mesh key PEM must be returned")
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("cert PEM malformed")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !HasMeshRole(cert) {
+		t.Fatal("mesh cert must carry the mesh-role OU marker")
+	}
+	found := slices.Contains(cert.DNSNames, "node-xyz")
+	if !found {
+		t.Fatalf("mesh cert SAN must carry the node id, got %v", cert.DNSNames)
+	}
+	if got := cert.NotAfter.Sub(cert.NotBefore); got < 47*time.Hour || got > 50*time.Hour {
+		t.Fatalf("mesh cert validity must be ~the requested TTL, got %s", got)
 	}
 }
