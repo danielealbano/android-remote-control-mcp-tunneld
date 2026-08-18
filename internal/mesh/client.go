@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/http2"
 )
@@ -70,6 +71,7 @@ type peerPool struct {
 	addr    string
 	clients []*http.Client
 	next    atomic.Uint64
+	lastUse atomic.Int64 // unix nanos of the last OpenStream through this pool (reap bookkeeping)
 }
 
 func (c *Client) pool(peer string) *peerPool {
@@ -86,7 +88,41 @@ func (c *Client) pool(peer string) *peerPool {
 			c.rec.MeshPool(peer, len(p.clients))
 		}
 	}
+	p.lastUse.Store(time.Now().UnixNano())
 	return p
+}
+
+// Run reaps per-peer pools that have been idle for reapAfter (closing their pooled connections and
+// zeroing the pool-size gauge), until ctx is done. A reaped peer's pool is lazily re-created on the
+// next OpenStream. Wired onto the server errgroup so idle pools never accumulate across peer churn.
+func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
+	if reapAfter <= 0 {
+		reapAfter = 10 * time.Minute
+	}
+	ticker := time.NewTicker(reapAfter / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			cutoff := time.Now().Add(-reapAfter).UnixNano()
+			c.mu.Lock()
+			for peer, p := range c.pools {
+				if p.lastUse.Load() >= cutoff {
+					continue
+				}
+				delete(c.pools, peer)
+				for _, hc := range p.clients {
+					hc.CloseIdleConnections()
+				}
+				if c.rec != nil {
+					c.rec.MeshPool(peer, 0)
+				}
+			}
+			c.mu.Unlock()
+		}
+	}
 }
 
 // newH2Client builds one HTTP/2 client backed by its own transport (so N clients ≈ N connections,

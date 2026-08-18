@@ -149,3 +149,30 @@ func TestClientReportsPoolSizeOnce(t *testing.T) {
 		t.Errorf("MeshPool = (%q,%d), want (10.0.0.2:9443, 4)", rec.calls[0].peer, rec.calls[0].size)
 	}
 }
+
+// TestClientReapsIdlePools covers the pool janitor: an idle per-peer pool is reaped (connections
+// closed, gauge zeroed) and lazily re-created on the next use.
+func TestClientReapsIdlePools(t *testing.T) {
+	rec := &poolRec{}
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, 4, WithRecorder(rec))
+	_ = c.pool("10.0.0.5:9443")
+	if len(c.pools) != 1 {
+		t.Fatal("pool must exist after first use")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx, 20*time.Millisecond) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		n := len(c.pools)
+		c.mu.Unlock()
+		if n == 0 {
+			return // reaped
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("an idle pool must be reaped")
+}
