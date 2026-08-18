@@ -1,365 +1,180 @@
-//go:build integration
-
-// The tests below boot the REAL assembled server (server.Run: public + internal listeners, node
-// pub/sub loop, ban watcher) on real TCP ports against miniredis and drive it end to end with the
-// tunneltest.FakePhone — integration tier, not unit.
+// The P1 integration server_test.go (which drove the superseded HTTP-mode assembly) is replaced here by
+// the US11 unit lifecycle test; the new real-server integration tier lands in US14
+// (internal/server/integration_test.go, //go:build integration).
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
-	"io"
-	"log/slog"
 	"math/big"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
-func bytesReaderT(b []byte) *bytes.Reader { return bytes.NewReader(b) }
-
-func freePort(t *testing.T) string {
+// writeCA generates a self-signed internal CA (cert + key) to temp files and returns their paths.
+func writeCA(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := l.Addr().String()
-	_ = l.Close()
-	return addr
-}
-
-func writeCA(t *testing.T) (certPath, keyPath string) {
-	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-ca"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign, BasicConstraintsValid: true, IsCA: true, MaxPathLenZero: true,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "tunneld-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
 	}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	certPath = filepath.Join(dir, "ca.pem")
 	keyPath = filepath.Join(dir, "ca-key.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, _ := x509.MarshalECPrivateKey(key)
-	_ = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
-	_ = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return certPath, keyPath
 }
 
-type running struct {
-	cfg      config.ServeCmd
-	publicA  string
-	internal string
-	mr       *miniredis.Miniredis
-	done     chan error
-	cancel   context.CancelFunc
+// lifecycleConfig builds a ServeCmd wired for a local, network-free lifecycle test: loopback listeners,
+// miniredis, unreachable ACME/attestation/S3 endpoints (so those paths fail fast and DEGRADE rather than
+// dialing the internet).
+func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
+	t.Helper()
+	caCert, caKey := writeCA(t)
+	acmeDir := t.TempDir()
+	signer := filepath.Join(t.TempDir(), "signers.txt")
+	if err := os.WriteFile(signer, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const unreachable = "http://127.0.0.1:1"
+	return config.ServeCmd{
+		RedisURL:       "redis://" + redisAddr,
+		Listen:         "127.0.0.1:0",
+		MeshListen:     "127.0.0.1:0",
+		InternalListen: "127.0.0.1:0",
+		MeshAdvertise:  "127.0.0.1:19443",
+		MeshPoolSize:   4,
+		MeshPoolMax:    8,
+		MeshCertTTL:    24 * time.Hour,
+
+		EnrollHost:   "enroll.example.test",
+		ControlHost:  "connect.example.test",
+		NameLength:   10,
+		CACert:       caCert,
+		CAKey:        caKey,
+		CertValidity: 4380 * time.Hour,
+
+		AttestSignerDigestFile: signer,
+		AttestRootURL:          unreachable + "/root",
+		AttestStatusURL:        unreachable + "/status",
+		AttestStatusMaxStale:   24 * time.Hour,
+		AttestationOptional:    true,
+
+		ACMEDirLE:           unreachable + "/dir",
+		ACMEDirGTS:          unreachable + "/dir",
+		ACMEDirZeroSSL:      unreachable + "/dir",
+		ACMEEmail:           "ops@example.test",
+		ACMELEProfile:       "shortlived",
+		ACMEGTSValidity:     168 * time.Hour,
+		ACMEAccountDir:      acmeDir,
+		ACMEDNSProvider:     "",
+		ACMECooldownDefault: time.Hour,
+		ACMEBackoffInitial:  time.Minute,
+		ACMEBackoffMax:      6 * time.Hour,
+		ACMELEWeeklyBudget:  50,
+		ACMERenewMargin:     48 * time.Hour,
+		IssuePerWeek:        3,
+
+		RouteTTL:            30 * time.Second,
+		ControlPingInterval: 30 * time.Second,
+		LimitStreamPending:  64,
+		LimitEnrollHour:     20,
+		LimitEnrollMinute:   2,
+		LimitEnrollBody:     "1mb",
+
+		MaxClients:           100,
+		LimitConnRate:        100,
+		LimitConcurrent:      8,
+		HandshakeTimeout:     5 * time.Second,
+		LimitConnIdle:        120 * time.Second,
+		LimitConnMinGrace:    10 * time.Second,
+		LimitConnEvictIdle:   30 * time.Second,
+		LimitConnMinRate:     "1kb",
+		LimitConnProtectRate: "10kb",
+		LimitBandwidth:       "1mbit",
+		LimitTrafficDay:      "1gb",
+		LimitTrafficWeek:     "4gb",
+
+		RegistryClaimTimeout: 3 * time.Second,
+		RegistryClaimSettle:  5 * time.Second,
+
+		BanPoll:       time.Second,
+		ShutdownGrace: 2 * time.Second,
+
+		S3Endpoint:     unreachable,
+		S3Region:       "us-east-1",
+		S3Bucket:       "tunneld-test",
+		S3AccessKey:    "test",
+		S3SecretKey:    "test-changeme",
+		S3ForcePathStyle: true,
+	}
 }
 
-func startServer(t *testing.T) *running {
-	t.Helper()
+// TestRun_Lifecycle boots the full E2E assembly on loopback (degraded ACME/attestation/S3), lets the
+// listeners + schedulers start, then cancels and asserts a clean drain. It exercises the wiring, not the
+// data plane (that is the US14 integration tier).
+func TestRun_Lifecycle(t *testing.T) {
 	mr := miniredis.RunT(t)
-	certPath, keyPath := writeCA(t)
-	cfg := config.ServeCmd{
-		Listen:              freePort(t),
-		InternalListen:      freePort(t),
-		TunnelDomain:        "example.test",
-		EnrollHost:          "enroll.example.test",
-		NameLength:          10,
-		RedisURL:            "redis://" + mr.Addr(),
-		CACert:              certPath,
-		CAKey:               keyPath,
-		CertValidity:        87600 * time.Hour,
-		ConnectAuthTimeout:  2 * time.Second,
-		ClientIPHeader:      "X-Real-Ip",
-		RouteTTL:            30 * time.Second,
-		BanPoll:             10 * time.Second,
-		LimitBandwidth:      "1mbit",
-		LimitRPS:            100,
-		LimitRPM:            1000,
-		LimitConcurrent:     4,
-		LimitConnectPending: 64,
-		LimitBody:           "1mb",
-		LimitResponse:       "10mb",
-		LimitHeaders:        "16kb",
-		LimitHeaderSingle:   "8kb",
-		LimitRequestTimeout: 10 * time.Second,
-		LimitEnrollHour:     100,
-		LimitEnrollMinute:   100,
-		LimitEnrollBody:     "16kb",
-		PingInterval:        30 * time.Second,
-		ShutdownGrace:       5 * time.Second,
-	}
+	cfg := lifecycleConfig(t, mr.Addr())
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, cfg, discardLog(), "test") }()
-	r := &running{cfg: cfg, publicA: cfg.Listen, internal: cfg.InternalListen, mr: mr, done: done, cancel: cancel}
-	r.waitHealthy(t)
-	return r
-}
+	go func() { done <- Run(ctx, cfg, testLogger(), "test") }()
 
-func (r *running) waitHealthy(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get("http://" + r.internal + "/healthz")
-		if err == nil {
-			_ = resp.Body.Close()
-			if resp.StatusCode == 200 {
-				return
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("server never became healthy")
-}
+	// Wait until the node heartbeat has registered this node (proves construction finished and the
+	// schedulers are running) before cancelling.
+	waitUntil(t, 5*time.Second, func() bool { return len(mr.DB(0).Keys()) > 0 })
 
-// stop cancels the server and waits for Run to return; returns (returned, runErr).
-func (r *running) stop() (bool, error) {
-	r.cancel()
+	cancel()
 	select {
-	case err := <-r.done:
-		return true, err
-	case <-time.After(10 * time.Second):
-		return false, nil
-	}
-}
-
-// enroll performs an enrollment and returns the assigned name, cert, and key.
-func (r *running) enroll(t *testing.T) (string, *x509.Certificate, *ecdsa.PrivateKey) {
-	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
-	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-
-	req, _ := http.NewRequest("POST", "http://"+r.publicA+"/enroll", bytesReaderT(csrPEM))
-	req.Host = r.cfg.EnrollHost
-	req.Header.Set("X-Real-Ip", "203.0.113.7")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("enroll status %d: %s", resp.StatusCode, body)
-	}
-	var out struct {
-		Name           string `json:"name"`
-		CertificatePEM string `json:"certificate_pem"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	block, _ := pem.Decode([]byte(out.CertificatePEM))
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out.Name, cert, key
-}
-
-func TestEnrollThenConnectThenRequest(t *testing.T) {
-	r := startServer(t)
-	defer func() { _, _ = r.stop() }()
-
-	name, cert, key := r.enroll(t)
-	phone, err := tunneltest.DialWithHeaders(context.Background(),
-		"ws://"+r.publicA+"/connect", name+".example.test",
-		http.Header{"X-Real-Ip": {"203.0.113.7"}}, cert, key,
-		http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) { _, _ = io.WriteString(w, "pong") }))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = phone.Close() }()
-
-	// Wait until the route is bound.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if r.mr.Exists("route:" + name) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// POST /mcp — retry to absorb the ServeNode subscription-readiness window.
-	var body string
-	var code int
-	rd := time.Now().Add(5 * time.Second)
-	for time.Now().Before(rd) {
-		req, _ := http.NewRequest("POST", "http://"+r.publicA+"/mcp", bytesReaderT([]byte(`{}`)))
-		req.Host = name + ".example.test"
-		req.Header.Set("X-Real-Ip", "203.0.113.7")
-		resp, err := http.DefaultClient.Do(req)
+	case err := <-done:
 		if err != nil {
-			time.Sleep(50 * time.Millisecond)
-			continue
+			t.Fatalf("Run returned an error on clean shutdown: %v", err)
 		}
-		b, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		code, body = resp.StatusCode, string(b)
-		if code == 200 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if code != 200 || body != "pong" {
-		t.Fatalf("POST /mcp = %d %q, want 200 pong", code, body)
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not drain within 15s of context cancellation")
 	}
 }
 
-func TestRequestToUnboundTunnel404(t *testing.T) {
-	r := startServer(t)
-	defer func() { _, _ = r.stop() }()
-	req, _ := http.NewRequest("POST", "http://"+r.publicA+"/mcp", bytesReaderT([]byte(`{}`)))
-	req.Host = "neverbound99.example.test"
-	req.Header.Set("X-Real-Ip", "203.0.113.7")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("unbound tunnel = %d, want 404", resp.StatusCode)
-	}
-}
-
-func TestDistinctNodeIDPerProcess(t *testing.T) {
-	a, b := newNodeID(), newNodeID()
-	if a == b {
-		t.Error("nodeIDs must be distinct per call (crypto/rand)")
-	}
-}
-
-func doMCP(publicAddr, name string) (int, string, error) {
-	req, _ := http.NewRequest("POST", "http://"+publicAddr+"/mcp", nil)
-	req.Host = name + ".example.test"
-	req.Header.Set("X-Real-Ip", "203.0.113.7")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	b, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	return resp.StatusCode, string(b), nil
-}
-
-func TestGracefulShutdownDrains(t *testing.T) {
-	r := startServer(t)
-	name, cert, key := r.enroll(t)
-	// A phone whose handler is SLOW, so a request stays in flight across the shutdown boundary.
-	slow := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		time.Sleep(700 * time.Millisecond)
-		_, _ = io.WriteString(w, "drained")
-	})
-	phone, err := tunneltest.DialWithHeaders(context.Background(),
-		"ws://"+r.publicA+"/connect", name+".example.test",
-		http.Header{"X-Real-Ip": {"203.0.113.7"}}, cert, key, slow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = phone.Close() }()
-
-	// Warm-up (retry to absorb bind + ServeNode-subscription readiness).
-	warm := time.Now().Add(6 * time.Second)
-	for {
-		if code, body, e := doMCP(r.publicA, name); e == nil && code == 200 && body == "drained" {
-			break
-		}
-		if time.Now().After(warm) {
-			t.Fatal("warm-up request never succeeded")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// Fire an in-flight request and let it reach the (sleeping) phone.
-	type res struct {
-		code int
-		body string
-	}
-	ch := make(chan res, 1)
-	go func() {
-		code, body, e := doMCP(r.publicA, name)
-		if e != nil {
-			ch <- res{0, e.Error()}
+func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
 			return
 		}
-		ch <- res{code, body}
-	}()
-	time.Sleep(250 * time.Millisecond)
-
-	// Begin shutdown WHILE the request is in flight.
-	r.cancel()
-
-	// The in-flight request MUST complete (drained), not be abandoned to a 504/502.
-	select {
-	case got := <-ch:
-		if got.code != 200 || got.body != "drained" {
-			t.Errorf("in-flight request not drained during shutdown: %d %q", got.code, got.body)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("in-flight request never completed during shutdown")
-	}
-
-	// New requests after shutdown started must be refused (the listener stopped accepting).
-	refused := false
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, _, e := doMCP(r.publicA, name); e != nil {
-			refused = true
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !refused {
-		t.Error("new requests must be refused once shutdown has begun")
-	}
-	<-r.done
-}
-
-func TestShutdownUnbindsAllRoutes(t *testing.T) {
-	r := startServer(t)
-	name, cert, key := r.enroll(t)
-	phone, err := tunneltest.DialWithHeaders(context.Background(),
-		"ws://"+r.publicA+"/connect", name+".example.test",
-		http.Header{"X-Real-Ip": {"203.0.113.7"}}, cert, key,
-		http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = phone.Close() }()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if r.mr.Exists("route:" + name) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !r.mr.Exists("route:" + name) {
-		t.Fatal("route never bound")
-	}
-	returned, err2 := r.stop()
-	if !returned {
-		t.Fatal("Run did not return after ctx cancel (graceful shutdown hung)")
-	}
-	if err2 != nil {
-		t.Errorf("Run returned error: %v", err2)
-	}
-	if r.mr.Exists("route:" + name) {
-		t.Error("route must be unbound after shutdown")
+		time.Sleep(20 * time.Millisecond)
 	}
 }
