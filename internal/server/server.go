@@ -122,7 +122,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Mesh cert (hot-swappable) + client + listener.
 	meshCert := newMeshCertHolder(caObj, nodeID, cfg.MeshCertTTL, logger)
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, cfg.MeshPoolMax, mesh.WithRecorder(rec))
-	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr})
+	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout})
 
 	// Public edge.
 	rawLn, err := net.Listen("tcp", cfg.Listen)

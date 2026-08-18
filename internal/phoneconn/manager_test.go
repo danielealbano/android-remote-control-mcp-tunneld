@@ -141,6 +141,32 @@ func TestOpenStreamDialbackCorrelates(t *testing.T) {
 	}
 }
 
+// TestOpenStreamTimesOut covers the bounded dial-back wait both the local (edge.openFar) and the mesh
+// (bridgeAdapter.BridgeMesh) paths rely on: a connected phone that never opens /data must make OpenStream
+// return within the caller's deadline and drop the pending waiter (releasing the caller's stream slot).
+func TestOpenStreamTimesOut(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("abc")
+	_, _ = m.register(context.Background(), c)
+	go func() { <-c.send }() // accept the OPEN frame, then never deliver a stream
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := m.OpenStream(ctx, "abc", "s1"); err == nil {
+		t.Fatal("OpenStream must fail when the phone never opens the dial-back stream")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("OpenStream did not honour the dial-back deadline")
+	}
+	c.mu.Lock()
+	_, pending := c.pending["s1"]
+	c.mu.Unlock()
+	if pending {
+		t.Error("a timed-out OpenStream must drop the pending waiter")
+	}
+}
+
 func TestHeartbeatNotOwnerCloses(t *testing.T) {
 	m, fr, _, _ := newMgr(t)
 	fr.hbResult = router.HeartbeatNotOwner

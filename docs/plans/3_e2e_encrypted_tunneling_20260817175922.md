@@ -2575,8 +2575,10 @@ gates, and validate all touched Mermaid diagrams.
   - **No dial-back timeout:** a connected phone that never opened the `/data` stream pinned the frontend
     connection + its stream slot until shutdown (the manager comment claimed a timeout that did not exist).
     Added the `--limit-dialback-timeout` config flag (default 10s; new — not in the original plan) and
-    bounded the local dial-back wait in `edge.openFar` with it (the mesh path is bounded by the owner
-    node's local dial-back). A follow-up review round (R3-001) found the bounded context newly exposed a
+    bounded the dial-back wait with it on BOTH the local fast path (`edge.openFar`) AND the cross-node
+    mesh path (`server.bridgeAdapter.BridgeMesh` wraps the owner-side `OpenStream`) — a mesh-forwarded
+    request never traverses the owner's `openFar`, so the owner bounds its own dial-back (fixed in review
+    round 3, R4-001). A follow-up review round (R3-001) found the bounded context newly exposed a
     dial-back cancel/deliver TOCTOU: `Manager.deliverStream` now sends the arriving stream to the waiter
     UNDER the connection lock (atomic with the delete), and `OpenStream`'s cancel path (`cancelPending`)
     drains + closes any stream delivered concurrently, so a raced delivery cannot orphan a `/data` handler

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/edge"
@@ -89,11 +90,21 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 // splices the incoming mesh stream to it. The entry node already accounted bytes + enforced caps, so the
 // owner only relays.
 type bridgeAdapter struct {
-	mgr *phoneconn.Manager
+	mgr             *phoneconn.Manager
+	dialBackTimeout time.Duration
 }
 
 func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string, client io.ReadWriteCloser) error {
-	ds, err := b.mgr.OpenStream(ctx, tunnel, streamID)
+	// Bound the owner-side dial-back wait (mirrors the local fast path in edge.openFar): a phone that never
+	// opens the /data stream fails fast so the entry node's held stream slot is released, rather than
+	// pinning it until the idle timeout.
+	timeout := b.dialBackTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	octx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel() // bounds ONLY the dial-back wait; the returned ds does not depend on octx
+	ds, err := b.mgr.OpenStream(octx, tunnel, streamID)
 	if err != nil {
 		return err
 	}
