@@ -4,21 +4,30 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -218,6 +227,29 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if lc["tunnel-logs/"] != 90 || lc["rejected-enroll/"] != 30 {
 		t.Errorf("lifecycle rules not applied (want tunnel-logs/=90, rejected-enroll/=30): %+v", lc)
 	}
+
+	// Renewal rotates the certs: inject a server-minted challenge nonce, trigger a renewal via the real
+	// mTLS POST /issue (the Renew path, since a cert already exists), and assert the identity cert changes.
+	oldIDCert := string(c.Identity().IdentityCertPEM)
+	nonceHex := randomHex(t)
+	if err := env.rdb.Set(ctx, "enroll-nonce:"+nonceHex, "1", 5*time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Renew(ctx, nonceHex); err != nil {
+		t.Fatalf("renewal via /issue failed: %v", err)
+	}
+	if string(c.Identity().IdentityCertPEM) == oldIDCert || len(c.Identity().PublicCertPEM) == 0 {
+		t.Error("renewal must rotate the identity + public certs")
+	}
+}
+
+func randomHex(t *testing.T) string {
+	t.Helper()
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", b[:])
 }
 
 // phoneServerTLS builds the phone's server-side TLS config from its Pebble-issued public cert + key.
@@ -291,3 +323,177 @@ type tunnelAddr struct{}
 
 func (tunnelAddr) Network() string { return "tunnel" }
 func (tunnelAddr) String() string  { return "tunnel" }
+
+// TestIntegration_Registry exercises the durable name registry against REAL MinIO with the real enroll
+// service (no full server / ACME needed): rejected-enrollment evidence, and the concurrent write-verify
+// name-claim race (exactly one claimant wins a forced collision; the loser redraws to a distinct name).
+func TestIntegration_Registry(t *testing.T) {
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	const bucket = "tunneld-registry"
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, bucket)
+	st := newS3Store(t, s3URL, access, secret, bucket)
+
+	t.Run("rejected-enrollment-evidence", func(t *testing.T) {
+		svc := enroll.NewService(enroll.Config{
+			RDB: newRedis(t, redisURL), CA: loadCA(t), Names: st, Evidence: st,
+			Verifier: rejectVerifier{}, Issuer: stubIssuer{},
+			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
+		})
+		nonce, err := svc.Nonce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, chainPEM := dummyAttChain(t)
+		_, ee := svc.Enroll(context.Background(), "9.9.9.9", enroll.Request{
+			Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: chain, IdentityCSR: identityCSR(t),
+		})
+		if ee == nil || ee.Reason != "unauthorized" {
+			t.Fatalf("attestation-required enrollment must be rejected: %v", ee)
+		}
+		if !waitBool(10*time.Second, func() bool {
+			return len(tunneltest.S3ListKeys(t, s3URL, access, secret, bucket, "rejected-enroll/")) > 0
+		}) {
+			t.Error("rejected-enrollment evidence object not written to MinIO")
+		}
+	})
+
+	t.Run("concurrent-claim-one-winner", func(t *testing.T) {
+		const fixed = "collide23456"
+		svc := enroll.NewService(enroll.Config{
+			RDB: newRedis(t, redisURL), CA: loadCA(t), Names: st, Evidence: st,
+			Verifier: stubVerifier{}, Issuer: stubIssuer{}, AttestOptional: true,
+			TunnelDomain: itTunnelDomain, NameLength: 12, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000,
+			ClaimTimeout: 200 * time.Millisecond, ClaimSettle: 600 * time.Millisecond,
+		})
+		var mu sync.Mutex
+		calls := 0
+		// The first candidate of each racer is the SAME name (forced collision); a loser redraws random.
+		svc.SetNameGen(func() (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			if calls <= 2 {
+				return fixed, nil
+			}
+			return ca.GenerateName("", 12)
+		})
+
+		type result struct {
+			name string
+			err  *enroll.Error
+		}
+		csrs := []*x509.CertificateRequest{identityCSR(t), identityCSR(t)}
+		out := make(chan result, 2)
+		for i := 0; i < 2; i++ {
+			csr := csrs[i]
+			go func() {
+				nonce, nerr := svc.Nonce(context.Background())
+				if nerr != nil {
+					out <- result{err: &enroll.Error{Reason: "nonce"}}
+					return
+				}
+				r, ee := svc.Enroll(context.Background(), "3.3.3.3", enroll.Request{Nonce: nonce, IdentityCSR: csr})
+				out <- result{name: r.Name, err: ee}
+			}()
+		}
+		a, b := <-out, <-out
+		if a.err != nil || b.err != nil {
+			t.Fatalf("both enrollments should succeed: %v / %v", a.err, b.err)
+		}
+		if a.name == b.name {
+			t.Fatalf("racers must end with distinct names, both got %q", a.name)
+		}
+		fixedWinners := 0
+		for _, n := range []string{a.name, b.name} {
+			if n == fixed {
+				fixedWinners++
+			}
+			if _, err := st.GetName(context.Background(), n); err != nil {
+				t.Errorf("claimed name %q missing its registry object: %v", n, err)
+			}
+		}
+		if fixedWinners != 1 {
+			t.Errorf("exactly one racer must win the collided name %q, got %d", fixed, fixedWinners)
+		}
+	})
+}
+
+func newRedis(t *testing.T, url string) *redis.Client {
+	t.Helper()
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := redis.NewClient(opts)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func newS3Store(t *testing.T, url, access, secret, bucket string) *store.S3Store {
+	t.Helper()
+	st, err := store.NewS3Store(context.Background(), store.S3Config{
+		Endpoint: url, Region: "us-east-1", Bucket: bucket, AccessKey: access, SecretKey: secret, ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func loadCA(t *testing.T) *ca.CA {
+	t.Helper()
+	certPath, keyPath := writeCA(t)
+	c, err := ca.Load(certPath, keyPath, 4380*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func identityCSR(t *testing.T) *x509.CertificateRequest {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "phone"}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _ := x509.ParseCertificateRequest(der)
+	return csr
+}
+
+func dummyAttChain(t *testing.T) ([]*x509.Certificate, []byte) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "att"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+	}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	c, _ := x509.ParseCertificate(der)
+	return []*x509.Certificate{c}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+type rejectVerifier struct{}
+
+func (rejectVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (attest.Result, error) {
+	return attest.Result{}, attest.ErrChainUntrusted
+}
+
+type stubVerifier struct{}
+
+func (stubVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (attest.Result, error) {
+	return attest.Result{}, nil
+}
+
+type stubIssuer struct{}
+
+func (stubIssuer) Obtain(context.Context, *x509.CertificateRequest, string) ([]byte, store.CertInfo, error) {
+	return []byte("cert"), store.CertInfo{CA: "letsencrypt"}, nil
+}
+
+func (stubIssuer) Renew(context.Context, *x509.CertificateRequest, string, store.CertInfo) ([]byte, store.CertInfo, error) {
+	return []byte("cert"), store.CertInfo{CA: "letsencrypt"}, nil
+}
