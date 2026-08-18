@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -19,8 +20,8 @@ const perConnMemEstimateBytes = 2 * wire.ChunkSize
 type Metrics struct {
 	reg *prometheus.Registry
 
-	enrollments prometheus.Counter
-	rejections  *prometheus.CounterVec // {reason}
+	enrollments *prometheus.CounterVec // {result}
+	rejections  *prometheus.CounterVec // {reason} — labels pre-registered from observ.RejectReasons
 	bytesTotal  *prometheus.CounterVec // {direction}
 
 	// --- Plan 3 (E2E) families ---
@@ -41,9 +42,9 @@ func NewMetrics() *Metrics {
 	reg := prometheus.NewRegistry()
 	m := &Metrics{
 		reg: reg,
-		enrollments: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tunneld_enrollments_total", Help: "Total enrollments.",
-		}),
+		enrollments: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tunneld_enrollments_total", Help: "Enrollment outcomes by result.",
+		}, []string{"result"}),
 		rejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tunneld_rejections_total", Help: "Rejections by reason.",
 		}, []string{"reason"}),
@@ -87,6 +88,11 @@ func NewMetrics() *Metrics {
 		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
 		collectors.NewGoCollector(),
 	)
+	// Pre-register the EXACT rejection-reason label set so the family always exposes every registered
+	// reason (and only those — PromRecorder.Reject refuses labels outside observ.RejectReasons).
+	for _, r := range observ.RejectReasons {
+		m.rejections.WithLabelValues(r)
+	}
 	m.perConnMem.Set(float64(perConnMemEstimateBytes))
 	return m
 }

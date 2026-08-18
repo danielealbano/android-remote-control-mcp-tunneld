@@ -34,13 +34,35 @@ type aggEntry struct {
 
 var _ observ.Recorder = (*PromRecorder)(nil)
 
-// NewPromRecorder builds the recorder.
+// knownRejectReasons is the observ.RejectReasons set as a lookup (Reject refuses anything else, so an
+// unregistered reason string can never be invented at a call site).
+var knownRejectReasons = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(observ.RejectReasons))
+	for _, r := range observ.RejectReasons {
+		set[r] = struct{}{}
+	}
+	return set
+}()
+
+// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink so the recorder
+// never carries nil collaborators.
 func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slog.Logger) *PromRecorder {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if cl == nil {
+		cl = caplog.New(log)
+	}
 	return &PromRecorder{m: m, caplog: cl, admin: store, log: log, agg: map[string]*aggEntry{}}
 }
 
-// Reject bumps the reason counter AND emits a deduped cap-hit log.
+// Reject bumps the reason counter AND emits a deduped cap-hit log. A reason outside
+// observ.RejectReasons is refused (logged as an error) so call sites cannot invent labels.
 func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
+	if _, ok := knownRejectReasons[reason]; !ok {
+		p.log.Error("unregistered rejection reason refused", "reason", reason, "tunnel", tunnelName)
+		return
+	}
 	p.m.rejections.WithLabelValues(reason).Inc()
 	p.caplog.Hit(tunnelName, reason, clientIP)
 }
@@ -59,14 +81,16 @@ func (p *PromRecorder) Bytes(tunnelName, direction string, n int64) {
 
 // --- Plan 3 (E2E) event set (real implementations). ---
 
-func (p *PromRecorder) PublicConnOpen()                { p.m.publicConnsUp.Inc() }
-func (p *PromRecorder) PublicConnClose(reason string)  { p.m.publicConnsUp.Dec() }
-func (p *PromRecorder) PhoneConnOpen()                 { p.m.phoneConnsUp.Inc() }
-func (p *PromRecorder) PhoneConnClose(reason string)   { p.m.phoneConnsUp.Dec() }
-func (p *PromRecorder) StreamOpen()                    { p.m.streamsActive.Inc() }
-func (p *PromRecorder) StreamClose()                   { p.m.streamsActive.Dec() }
-func (p *PromRecorder) EnrollmentResult(result string) { p.m.enrollments.Inc() }
-func (p *PromRecorder) AttestVerify(result string)     { p.m.attestVerify.WithLabelValues(result).Inc() }
+func (p *PromRecorder) PublicConnOpen()               { p.m.publicConnsUp.Inc() }
+func (p *PromRecorder) PublicConnClose(reason string) { p.m.publicConnsUp.Dec() }
+func (p *PromRecorder) PhoneConnOpen()                { p.m.phoneConnsUp.Inc() }
+func (p *PromRecorder) PhoneConnClose(reason string)  { p.m.phoneConnsUp.Dec() }
+func (p *PromRecorder) StreamOpen()                   { p.m.streamsActive.Inc() }
+func (p *PromRecorder) StreamClose()                  { p.m.streamsActive.Dec() }
+func (p *PromRecorder) EnrollmentResult(result string) {
+	p.m.enrollments.WithLabelValues(result).Inc()
+}
+func (p *PromRecorder) AttestVerify(result string) { p.m.attestVerify.WithLabelValues(result).Inc() }
 func (p *PromRecorder) ACMEIssue(ca, result string) {
 	p.m.acmeIssue.WithLabelValues(ca, result).Inc()
 }
@@ -75,6 +99,9 @@ func (p *PromRecorder) ACMERenew(ca, result string) {
 }
 func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {
 	p.m.quotaExhausted.WithLabelValues(window).Inc()
+	// The exhaustion LOG is deduped like any cap hit (first per (tunnel, window) immediately, then ≤1
+	// summary/min) — attacker-driven log flooding must stay impossible.
+	p.caplog.Hit(tunnelName, "quota-"+window, "")
 }
 func (p *PromRecorder) ACMECooldown(ca string) { p.m.acmeCooldown.WithLabelValues(ca).Inc() }
 func (p *PromRecorder) MeshPool(peer string, size int) {

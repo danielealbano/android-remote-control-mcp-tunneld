@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -146,12 +147,37 @@ func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 
 func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
-	rec.Reject("concurrency", "t", "1.1.1.1")
+	rec.Reject("stream-cap", "t", "1.1.1.1")
 	h := Handler(m.Registry(), rdb, store, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
-	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="concurrency"} 1`) {
+	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="stream-cap"} 1`) {
 		t.Errorf("rejection counter not incremented:\n%s", rr.Body.String())
+	}
+}
+
+func TestRejectRefusesUnregisteredReason(t *testing.T) {
+	m, rec, store, _, rdb := setup(t)
+	rec.Reject("made-up-reason", "t", "1.1.1.1")
+	h := Handler(m.Registry(), rdb, store, discardLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if strings.Contains(rr.Body.String(), "made-up-reason") {
+		t.Error("an unregistered rejection reason must be refused, not exported")
+	}
+}
+
+func TestEnrollmentResultLabelled(t *testing.T) {
+	m, rec, store, _, rdb := setup(t)
+	rec.EnrollmentResult("ok")
+	rec.EnrollmentResult("unauthorized")
+	h := Handler(m.Registry(), rdb, store, discardLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, `tunneld_enrollments_total{result="ok"} 1`) ||
+		!strings.Contains(body, `tunneld_enrollments_total{result="unauthorized"} 1`) {
+		t.Errorf("enrollments must be labelled by result:\n%s", body)
 	}
 }
 
@@ -169,5 +195,25 @@ func TestPromRecorderFlushesTcnt(t *testing.T) {
 	}
 	if stats[0].BytesIn != 100 || stats[0].BytesOut != 50 {
 		t.Errorf("flushed counters wrong: %+v", stats[0])
+	}
+}
+
+// TestQuotaExhaustedDedupedViaCaplog: the exhaustion LOG is caplog-deduped — the first hit per
+// (tunnel, window) logs immediately, an immediate repeat does not.
+func TestQuotaExhaustedDedupedViaCaplog(t *testing.T) {
+	m := NewMetrics()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	rec := NewPromRecorder(m, caplog.New(logger), nil, logger)
+
+	rec.QuotaExhausted("tunA", "day")
+	first := strings.Count(buf.String(), "quota-day")
+	rec.QuotaExhausted("tunA", "day")
+	second := strings.Count(buf.String(), "quota-day")
+	if first != 1 {
+		t.Fatalf("first exhaustion must log immediately, got %d lines", first)
+	}
+	if second != first {
+		t.Fatalf("an immediate repeat must be deduped (no new log), got %d lines", second)
 	}
 }
