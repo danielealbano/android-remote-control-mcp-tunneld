@@ -133,7 +133,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
 		NodeID: nodeID, NodeHost: nodeHost,
 		NodeStart: nodeStart, MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
-		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout,
+		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout, DialBackTimeout: cfg.LimitDialBackTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
 	}, rdb, banIP, banTunnel, rec,

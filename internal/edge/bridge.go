@@ -12,6 +12,11 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
+// rollingWindow is the window over which the connection-policy byte rate is measured (the --limit-conn-*
+// min-rate and protect-rate thresholds are per-window). Overridden by tests to observe the min-rate kill
+// without a real-time wait.
+var rollingWindow = time.Minute
+
 // activeStream tracks a live public stream for the connection policy (idle timeout, min-rate, and
 // eviction-on-saturation ranking).
 type activeStream struct {
@@ -162,10 +167,19 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 	return name, true
 }
 
-// openFar opens the phone data stream locally (fast path) or over the mesh.
+// openFar opens the phone data stream locally (fast path) or over the mesh. The local dial-back wait is
+// bounded by --limit-dialback-timeout so a connected phone that never opens the /data stream fails fast
+// and releases the stream slot rather than pinning it. On the mesh path the timeout is applied by the
+// OWNER node's local dial-back (where the phone is local).
 func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID string) (io.ReadWriteCloser, func(), error) {
 	if e.local != nil && e.local.HasConn(name) && e.local.OwnsConn(name, connID) {
-		ds, err := e.local.OpenStream(ctx, name, streamID)
+		timeout := e.cfg.DialBackTimeout
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+		octx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel() // bounds ONLY the dial-back wait; the returned stream does not depend on octx
+		ds, err := e.local.OpenStream(octx, name, streamID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -184,9 +198,10 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID strin
 }
 
 // splice copies bytes both directions with byte accounting (day/week traffic) + bandwidth pacing +
-// idle-timeout policy, returning the close reason. It waits for BOTH copy goroutines to exit before
-// returning (so no goroutine touches the stream or the byte counters after handleTunnel reads them); a
-// watcher closes both sides on ctx-cancel (eviction) or idle timeout, which unblocks the copies.
+// connection policy (idle timeout + min-rate kill past grace), returning the close reason. It waits for
+// BOTH copy goroutines to exit before returning (so no goroutine touches the stream or the byte counters
+// after handleTunnel reads them); a watcher closes both sides on ctx-cancel (eviction), idle timeout, or a
+// sub-min-rate connection, which unblocks the copies.
 func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.ReadWriteCloser, as *activeStream) string {
 	var reasonOnce sync.Once
 	reason := store.CloseClientClose
@@ -212,14 +227,19 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		done <- struct{}{}
 	}()
 
-	// Policy watcher: closes both sides on eviction (ctx cancel) or idle timeout, then exits; otherwise it
-	// exits once signalled after both copies finish.
+	// Policy watcher: closes both sides on eviction (ctx cancel), idle timeout, or a sub-min-rate
+	// connection past grace, then exits; otherwise it exits once signalled after both copies finish. It
+	// maintains a true rolling-window (rollingWindow, ~60s) byte total from clock-stamped cumulative-byte
+	// samples that feeds BOTH the min-rate kill here and the eviction protect-rate ranking (via as.recent).
 	stopWatch := make(chan struct{})
 	watchExited := make(chan struct{})
 	go func() {
 		defer close(watchExited)
-		idle := time.NewTicker(e.idlePoll())
-		defer idle.Stop()
+		ticker := time.NewTicker(e.idlePoll())
+		defer ticker.Stop()
+		type sample struct{ t, bytes int64 }
+		var samples []sample
+		window := int64(rollingWindow)
 		for {
 			select {
 			case <-stopWatch:
@@ -228,14 +248,35 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 				setReason(store.CloseEvicted)
 				closeBoth()
 				return
-			case <-idle.C:
-				last := as.lastAct.Load()
-				if e.cfg.IdleTimeout > 0 && e.now().UnixNano()-last > int64(e.cfg.IdleTimeout) {
+			case <-ticker.C:
+				now := e.now().UnixNano()
+				if e.cfg.IdleTimeout > 0 && now-as.lastAct.Load() > int64(e.cfg.IdleTimeout) {
 					setReason(store.CloseIdleTimeout)
 					closeBoth()
 					return
 				}
-				as.recent.Store(0) // reset the rolling window
+				total := atomic.LoadInt64(&as.bytesIn) + atomic.LoadInt64(&as.bytesOut)
+				samples = append(samples, sample{now, total})
+				// Drop samples older than the window, keeping the newest one at-or-before the cutoff so
+				// `rolling` measures bytes over exactly the last window.
+				cutoff := now - window
+				drop := 0
+				for drop < len(samples)-1 && samples[drop+1].t <= cutoff {
+					drop++
+				}
+				samples = samples[drop:]
+				rolling := total - samples[0].bytes
+				as.recent.Store(rolling)
+				// Min-rate kill: once the connection is older than the window AND past the grace period, a
+				// connection whose rolling-window traffic is below --limit-conn-min-rate is dropped
+				// (slow-drip / slowloris guard). The window-age guard keeps `rolling` from under-counting a
+				// young connection into a premature kill.
+				age := now - as.started.UnixNano()
+				if e.cfg.MinRate > 0 && age >= window && age > int64(e.cfg.MinGrace) && rolling < e.cfg.MinRate {
+					setReason(store.CloseMinRate)
+					closeBoth()
+					return
+				}
 			}
 		}
 	}()

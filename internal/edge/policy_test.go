@@ -1,9 +1,37 @@
 package edge
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
+
+// TestEdge_Splice_MinRateKill covers the min-rate connection policy: a connection whose rolling-window
+// traffic stays below --limit-conn-min-rate is dropped once past the grace period (idle disabled here so
+// the min-rate kill is unambiguously what fires). rollingWindow is shrunk so the test needs no real wait.
+func TestEdge_Splice_MinRateKill(t *testing.T) {
+	prev := rollingWindow
+	rollingWindow = 200 * time.Millisecond
+	t.Cleanup(func() { rollingWindow = prev })
+
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0 // disable idle so the min-rate kill is what fires
+	cfg.MinRate = 1000
+	cfg.MinGrace = 100 * time.Millisecond
+	te := newTestEdge(t, cfg, nil, nil)
+
+	client := newScriptConn("203.0.113.9", nil) // blocks on Read until closed → zero traffic
+	far := newScriptConn("203.0.113.9", nil)
+	as := &activeStream{tunnel: "t", started: time.Now(), cancel: func() {}}
+	as.lastAct.Store(time.Now().UnixNano())
+
+	reason := te.e.splice(context.Background(), "t", client, far, as)
+	if reason != store.CloseMinRate {
+		t.Fatalf("a sub-min-rate connection past grace must be killed with %q, got %q", store.CloseMinRate, reason)
+	}
+}
 
 func TestEdge_EvictLeastActive_AllProtected_NoVictim(t *testing.T) {
 	cfg := baseConfig()

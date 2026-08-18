@@ -59,6 +59,7 @@ type Config struct {
 	Concurrent   int
 
 	HandshakeTimeout time.Duration
+	DialBackTimeout  time.Duration
 	IdleTimeout      time.Duration
 	MinRate          int64
 	MinGrace         time.Duration

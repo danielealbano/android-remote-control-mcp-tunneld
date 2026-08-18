@@ -2561,6 +2561,27 @@ gates, and validate all touched Mermaid diagrams.
   `handleTunnel` then read; rewritten with a policy watcher (ctx-cancel/idle-timeout) that closes both
   sides + a wait-for-both-copies before return, and the counter reads in `handleTunnel` made atomic.
 
+- **Stage-4 review fixes (US11 connection policy + mesh):** the post-implementation `code-reviewer`
+  surfaced real defects that were NOT recorded deviations; all fixed:
+  - **Min-rate kill was unimplemented** (US11 marked it complete): `--limit-conn-min-rate` /
+    `--limit-conn-min-grace` were wired into `edge.Config` but never read, `store.CloseMinRate` was never
+    emitted, and no test existed. Implemented in `edge.splice`'s policy watcher: a clock-stamped
+    rolling-window byte total (window = `rollingWindow`, default 60s) drives a min-rate kill once the
+    connection is older than the window AND past `--limit-conn-min-grace`. Added `TestEdge_Splice_MinRateKill`
+    (uses a shrunk `rollingWindow` so it needs no real-time wait).
+  - **Eviction protect-rate** compared a ≤1s reset window against a 60s-scaled threshold, so no stream was
+    ever protectable. The same clock-stamped rolling-window total now feeds `as.recent`, so
+    `--limit-conn-protect-rate` compares like-for-like.
+  - **No dial-back timeout:** a connected phone that never opened the `/data` stream pinned the frontend
+    connection + its stream slot until shutdown (the manager comment claimed a timeout that did not exist).
+    Added the `--limit-dialback-timeout` config flag (default 10s; new — not in the original plan) and
+    bounded the local dial-back wait in `edge.openFar` with it (the mesh path is bounded by the owner
+    node's local dial-back).
+  - **Mesh peer verification comment/plan overstated** "SAN = a registered node id" enforcement: the mesh
+    listener actually verifies chain-to-CA (`RequireAndVerifyClientCert`) + the mesh-role marker — node
+    -registry membership of the SAN is NOT checked. Corrected the `mesh.Handler` comment; chain-to-CA +
+    mesh-role + the connID delivery check + short-lived (`--mesh-cert-ttl`) certs are the mesh's
+    authentication.
 - **US8/US9/US16 (stream write-after-handler-return `-race` fix):** the US16 `-race` e2e eviction run
   surfaced a data race — the edge splice's `pacedCopy` goroutine wrote the HTTP/2 response writer of the
   fast-path `/data` stream (`phoneconn.httpDataStream`), and symmetrically the `/mesh` stream

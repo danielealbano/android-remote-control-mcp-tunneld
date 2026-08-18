@@ -111,7 +111,7 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 		ACMELEWeeklyBudget: 50, ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
-		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, HandshakeTimeout: 5 * time.Second,
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
 		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 1 * time.Second,
 		LimitConnMinRate: "1kb", LimitConnProtectRate: "1mb", LimitBandwidth: "10mbit",
 		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",

@@ -108,6 +108,7 @@ type ServeCmd struct {
 	LimitTrafficWeek     string        `name:"limit-traffic-week" default:"4gb" help:"Per-tunnel bytes/rolling-7d, both directions combined (BINARY)."`
 	LimitConnRate        int           `name:"limit-conn-rate" default:"10" help:"New public TCP connections/sec per source IP."`
 	LimitStreamPending   int           `name:"limit-stream-pending" default:"64" help:"Max concurrent pre-bind phone control handshakes per node."`
+	LimitDialBackTimeout time.Duration `name:"limit-dialback-timeout" default:"10s" help:"Max wait for the phone to open the dial-back /data stream before failing the public connection and releasing its stream slot."`
 	LimitConnIdle        time.Duration `name:"limit-conn-idle" default:"120s" help:"Close a public connection idle (no bytes either direction) this long."`
 	LimitConnMinRate     string        `name:"limit-conn-min-rate" default:"2kb" help:"Min bytes per rolling 60s (past grace) before kill (BINARY)."`
 	LimitConnMinGrace    time.Duration `name:"limit-conn-min-grace" default:"60s" help:"Grace before the min-rate rule applies."`
@@ -239,6 +240,7 @@ func (c ServeCmd) Validate() error {
 		{"--limit-conn-idle", c.LimitConnIdle},
 		{"--limit-conn-min-grace", c.LimitConnMinGrace},
 		{"--limit-conn-evict-idle", c.LimitConnEvictIdle},
+		{"--limit-dialback-timeout", c.LimitDialBackTimeout},
 		{"--handshake-timeout", c.HandshakeTimeout},
 		{"--control-ping-interval", c.ControlPingInterval},
 	} {
