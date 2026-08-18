@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -49,6 +50,9 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 		// being replayed, and the LWW/GET/DELETE paths handle their own errors.
 		RetryMaxAttempts: 1,
 		Retryer:          aws.NopRetryer{},
+		// A hard per-request HTTP timeout: a hung S3 endpoint must never pin a caller (teardown paths
+		// write conn logs without their own deadline). A caller ctx with a SHORTER deadline still wins.
+		HTTPClient: awshttp.NewBuildableClient().WithTimeout(30 * time.Second),
 	})
 	return &S3Store{cli: cli, bucket: cfg.Bucket}, nil
 }
