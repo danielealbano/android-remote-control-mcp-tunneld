@@ -1818,50 +1818,50 @@ phoneconn/mesh/router/store/limit/ban; fake clock.
 
 ## User Story 12: Go test client (HTTP/2 phone client library)
 
-- [ ] **User Story 12 complete**
+- [x] **User Story 12 complete**
 
 Rewrite `client/` as the Go HTTP/2 tunnel client used by integration/e2e tests and as the
 reference (non-attesting) implementation: control connection (identity mTLS), dial-back data streams,
 renewal handling, and an attestation-optional enrollment path for tests.
 
 ### Acceptance Criteria
-- [ ] `client/` speaks wire v2 over HTTP/2: opens the identity-mTLS control connection, binds, answers
+- [x] `client/` speaks wire v2 over HTTP/2: opens the identity-mTLS control connection, binds, answers
   dial-back `OPEN` by opening data streams and serving a caller-supplied `net.Conn`/handler, responds to
   PING, handles CERT_PUSH + RENEW_NUDGE and the renewal exchange.
-- [ ] The client supports an enrollment path that in `--attestation-optional` mode supplies the fixture
+- [x] The client supports an enrollment path that in `--attestation-optional` mode supplies the fixture
   chain so tests enroll without a real device.
-- [ ] Full-duplex data streams work (verified pattern: `net/http` HTTP/2 client interleaves request-body
+- [x] Full-duplex data streams work (verified pattern: `net/http` HTTP/2 client interleaves request-body
   writes with response-body reads).
-- [ ] The client is the FakePhone used by integration (US14) tests.
+- [x] The client is the FakePhone used by integration (US14) tests.
 
 ### Task 12.1: Control client
-- [ ] **Task 12.1 complete**
-- [ ] **File**: `client/control.go` — dial `--control-host` over HTTP/2 with the internal-CA identity
+- [x] **Task 12.1 complete**
+- [x] **File**: `client/control.go` — dial `--control-host` over HTTP/2 with the internal-CA identity
   client cert; maintain the control stream; handle `OPEN` (spawn a data stream), `PING`→`PONG`,
   `CERT_PUSH` (swap certs), `RENEW_NUDGE` (trigger the renewal exchange), `ERROR`.
 
 ### Task 12.2: Data stream + duplex splice
-- [ ] **Task 12.2 complete**
-- [ ] **File**: `client/datastream.go` — on `OPEN{streamID}`, open an HTTP/2 data stream carrying the
+- [x] **Task 12.2 complete**
+- [x] **File**: `client/datastream.go` — on `OPEN{streamID}`, open an HTTP/2 data stream carrying the
   streamID, and splice it to the local target (the phone's own TLS terminator in production; a test-provided
   `net.Conn` in tests) using the verified full-duplex pattern (`io.Pipe` request body + concurrent
   response-body read).
 
 ### Task 12.3: Enrollment + renewal client
-- [ ] **Task 12.3 complete**
-- [ ] **File**: `client/enroll.go` — perform enrollment (nonce → attestation + two CSRs → certs) and the
+- [x] **Task 12.3 complete**
+- [x] **File**: `client/enroll.go` — perform enrollment (nonce → attestation + two CSRs → certs) and the
   renewal exchange (RENEW_REQUEST → RENEW_CHALLENGE → RENEW_SUBMIT → CERT_PUSH, over the control
   connection). In attestation-optional test mode, load the fixture chain + a matching identity key so the
   server (also in that mode) accepts it.
-- [ ] **File**: delete the P1 client and its suite in the SAME story as the rewrite that replaces them —
+- [x] **File**: delete the P1 client and its suite in the SAME story as the rewrite that replaces them —
   `client/client.go`, `client/client_test.go`, `client/client_unit_test.go` (the v1-wire/WS client; Task
   12.4's new `client/*_test.go` replaces the tests), plus the P1 e2e suite that consumed it:
   `e2e/harness_test.go`, `e2e/tunnel_e2e_test.go`, `e2e/testdata/traefik-e2e.yml` — so the default and
   `-tags=e2e` trees both compile at this story's boundary; US14 authors the replacement e2e suite.
 
 ### Task 12.4: Unit tests
-- [ ] **Task 12.4 complete**
-- [ ] **File**: `client/*_test.go`
+- [x] **Task 12.4 complete**
+- [x] **File**: `client/*_test.go`
 **Setup**: the real `server.Run` on loopback (minimal here; full flows in US14) or an in-process subset.
 
 | Test | Verifies |
@@ -1873,12 +1873,12 @@ renewal handling, and an attestation-optional enrollment path for tests.
 | `renew exchange` | RENEW_NUDGE → client runs RENEW_REQUEST/CHALLENGE/SUBMIT and installs the pushed certs |
 
 ### Definition of Done
-- [ ] `client/` rewritten to wire v2 over HTTP/2: control, dial-back data streams, duplex splice, PING,
+- [x] `client/` rewritten to wire v2 over HTTP/2: control, dial-back data streams, duplex splice, PING,
   CERT_PUSH, RENEW_NUDGE, enrollment + the renewal exchange.
-- [ ] Attestation-optional test enrollment via the fixture chain.
-- [ ] The P1 e2e suite + Traefik testdata deleted with the client rewrite (`-tags=e2e` compiles).
-- [ ] Serves as the integration/e2e FakePhone.
-- [ ] US12 unit tables authored/committed (execution in US16).
+- [x] Attestation-optional test enrollment via the fixture chain.
+- [x] The P1 e2e suite + Traefik testdata deleted with the client rewrite (`-tags=e2e` compiles).
+- [x] Serves as the integration/e2e FakePhone.
+- [x] US12 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,26 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US12 Task 12.3 (attestation-optional enrollment material):** the client submits a THROWAWAY
+  self-signed cert as the "attestation chain" rather than a committed fixture chain — the attest fixtures
+  are in-test fakes under `internal/attest` (not exported for `client/`), and in `--attestation-optional`
+  mode the server SKIPS verification, so a self-generated dummy is equivalent and keeps `client/`
+  self-contained. Real attestation is the US14 adb-gated path.
+
+- **US12 Task 12.2 (backend abstraction):** the dial-back target is modelled as
+  `Backend func(stream io.ReadWriteCloser)` (an echo in tests) rather than a `net.Conn`/`http.Handler` —
+  the data stream is an OPAQUE byte splice (US7), so `io.ReadWriteCloser` is the exact contract; a
+  `net.Conn` adapter would add nothing. Public API: free `Enroll(ctx, dialAddr, host, caPool)` +
+  `New(dialAddr, controlHost, caPool, ident, backend)` + `Run(ctx)`, with the DIAL address separated from
+  the SNI/Host so a test dials a loopback port while the edge still routes by SNI.
+
+- **US12 Task 12.4 (unit-test scope):** the US12 tests run against an IN-PROCESS SUBSET (the real
+  `phoneconn.Handler` over h2/mTLS + miniredis router + fake store/recorder), per the plan's "or an
+  in-process subset" allowance — covering the plan's table (control connect+bind, dial-back opens a data
+  stream, full-duplex echo, CERT_PUSH swap, and the full RENEW_NUDGE→REQUEST→CHALLENGE→SUBMIT→CERT_PUSH
+  exchange, -race clean). The enroll HTTP flow and the two-node data path are exercised by the US14
+  integration/e2e tiers (which use `client/` as the FakePhone).
 
 - **US11 Task 11.4 (ACME DNS-01 provider — reverses the earlier US6 `dns.go` removal):** honoring the
   committed `--acme-dns-provider` contract (its help text lists arbitrary providers, "e.g. cloudflare,
