@@ -49,6 +49,23 @@ type LegoConfig struct {
 	EABHMAC      string
 	DNS          DNSProvider        // our neutral seam (tests, or a raw-TXT publisher)
 	RawDNS       challenge.Provider // a lego-native DNS-01 provider (production, selected by --acme-dns-provider); preferred over DNS when set
+
+	// DNS-01 propagation pre-check tuning (--acme-dns-resolver / --acme-dns-skip-propagation-check).
+	// Empty/false preserve lego's defaults (system resolvers + authoritative-NS propagation required).
+	DNSResolvers            []string // recursive nameservers for the propagation pre-check (split-horizon / hermetic test CA)
+	DNSSkipPropagationCheck bool     // drop the authoritative-NS propagation requirement
+}
+
+// dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
+func (cfg LegoConfig) dnsChallengeOpts() []dns01.ChallengeOption {
+	var opts []dns01.ChallengeOption
+	if len(cfg.DNSResolvers) > 0 {
+		opts = append(opts, dns01.AddRecursiveNameservers(cfg.DNSResolvers))
+	}
+	if cfg.DNSSkipPropagationCheck {
+		opts = append(opts, dns01.DisableAuthoritativeNssPropagationRequirement())
+	}
+	return opts
 }
 
 // legoClient implements caIssuer via lego.
@@ -77,13 +94,14 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
 	}
+	dnsOpts := cfg.dnsChallengeOpts()
 	switch {
 	case cfg.RawDNS != nil:
-		if err := client.Challenge.SetDNS01Provider(cfg.RawDNS); err != nil {
+		if err := client.Challenge.SetDNS01Provider(cfg.RawDNS, dnsOpts...); err != nil {
 			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
 		}
 	case cfg.DNS != nil:
-		if err := client.Challenge.SetDNS01Provider(&legoDNSAdapter{p: cfg.DNS}); err != nil {
+		if err := client.Challenge.SetDNS01Provider(&legoDNSAdapter{p: cfg.DNS}, dnsOpts...); err != nil {
 			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
 		}
 	}

@@ -8,6 +8,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -88,6 +89,12 @@ type ServeCmd struct {
 	ACMEEABZeroSSLHMAC string `name:"acme-eab-zerossl-hmac" default:"" help:"ZeroSSL EAB HMAC key (secret)."`
 	ACMEAccountDir     string `name:"acme-account-dir" help:"Directory holding persisted per-CA ACME account keys + reserved-host self-certs. Required for serve."`
 	ACMEDNSProvider    string `name:"acme-dns-provider" help:"lego DNS-01 provider id (e.g. cloudflare, route53). Required for serve."`
+
+	// DNS-01 propagation pre-check tuning (split-horizon / internal-DNS deployments; also the hermetic
+	// ACME test tier). Defaults preserve lego's standard behaviour: system resolvers + authoritative-NS
+	// propagation required.
+	ACMEDNSResolvers            []string `name:"acme-dns-resolver" help:"Recursive nameserver(s) host[:port] used for the DNS-01 propagation pre-check; empty uses the system resolvers. Repeatable. Set for split-horizon/internal DNS or a hermetic ACME test server."`
+	ACMEDNSSkipPropagationCheck bool     `name:"acme-dns-skip-propagation-check" default:"false" help:"Skip the authoritative-nameserver DNS-01 propagation requirement (split-horizon/internal DNS, or a test ACME server that validates via its own resolver)."`
 
 	ACMECooldownDefault time.Duration `name:"acme-cooldown-default" default:"1h" help:"Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After (Retry-After wins when larger)."`
 	ACMEBackoffInitial  time.Duration `name:"acme-backoff-initial" default:"1m" help:"First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure)."`
@@ -183,6 +190,16 @@ func (c ServeCmd) Validate() error {
 	}
 	if c.MeshPoolSize < 1 || c.MeshPoolSize > c.MeshPoolMax {
 		return fmt.Errorf("--mesh-pool-size must be in [1, --mesh-pool-max=%d], got %d", c.MeshPoolMax, c.MeshPoolSize)
+	}
+	for _, r := range c.ACMEDNSResolvers {
+		if strings.TrimSpace(r) == "" {
+			return fmt.Errorf("--acme-dns-resolver entries must be non-empty host[:port]")
+		}
+		if strings.Contains(r, ":") {
+			if _, _, err := net.SplitHostPort(r); err != nil {
+				return fmt.Errorf("--acme-dns-resolver %q must be host[:port]: %w", r, err)
+			}
+		}
 	}
 	for _, il := range []struct {
 		name string

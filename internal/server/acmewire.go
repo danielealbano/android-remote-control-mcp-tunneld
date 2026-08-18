@@ -53,18 +53,21 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, 
 		AccountKey: loadAccountKey(accountsDir, acme.CALetsEncrypt, logger),
 		Profile:    cfg.ACMELEProfile, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		UseARI: true, RawDNS: dnsProvider,
+		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	gts := acme.LegoConfig{
 		CAID: acme.CAGTS, DirectoryURL: cfg.ACMEDirGTS, Email: cfg.ACMEEmail,
 		AccountKey: loadAccountKey(accountsDir, acme.CAGTS, logger),
 		Validity:   cfg.ACMEGTSValidity, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		EABKID: cfg.ACMEEABGTSKID, EABHMAC: cfg.ACMEEABGTSHMAC, RawDNS: dnsProvider,
+		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	zerossl := acme.LegoConfig{
 		CAID: acme.CAZeroSSL, DirectoryURL: cfg.ACMEDirZeroSSL, Email: cfg.ACMEEmail,
 		AccountKey: loadAccountKey(accountsDir, acme.CAZeroSSL, logger),
 		RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		EABKID: cfg.ACMEEABZeroSSLKID, EABHMAC: cfg.ACMEEABZeroSSLHMAC, RawDNS: dnsProvider,
+		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	return acme.NewChain(chainCfg, le, gts, zerossl)
 }
