@@ -140,6 +140,42 @@ func EnsureS3Bucket(t *testing.T, endpointURL, access, secret, bucket string) {
 	}
 }
 
+// S3ListKeys returns every object key under prefix (test assertions against real MinIO).
+func S3ListKeys(t *testing.T, endpointURL, access, secret, bucket, prefix string) []string {
+	t.Helper()
+	cli := s3TestClient(endpointURL, access, secret)
+	out, err := cli.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
+		Bucket: aws.String(bucket), Prefix: aws.String(prefix),
+	})
+	if err != nil {
+		t.Fatalf("list objects %q: %v", prefix, err)
+	}
+	keys := make([]string, 0, len(out.Contents))
+	for _, o := range out.Contents {
+		keys = append(keys, aws.ToString(o.Key))
+	}
+	return keys
+}
+
+// S3LifecyclePrefixes returns the bucket's lifecycle expiration rules as prefix→days (test assertions).
+func S3LifecyclePrefixes(t *testing.T, endpointURL, access, secret, bucket string) map[string]int32 {
+	t.Helper()
+	cli := s3TestClient(endpointURL, access, secret)
+	out, err := cli.GetBucketLifecycleConfiguration(context.Background(), &s3.GetBucketLifecycleConfigurationInput{
+		Bucket: aws.String(bucket),
+	})
+	if err != nil {
+		t.Fatalf("get bucket lifecycle: %v", err)
+	}
+	m := map[string]int32{}
+	for _, r := range out.Rules {
+		if r.Filter != nil && r.Filter.Prefix != nil && r.Expiration != nil && r.Expiration.Days != nil {
+			m[*r.Filter.Prefix] = *r.Expiration.Days
+		}
+	}
+	return m
+}
+
 func bucketAlreadyOwned(err error) bool {
 	var ae smithy.APIError
 	if errors.As(err, &ae) {

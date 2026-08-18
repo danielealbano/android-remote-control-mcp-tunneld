@@ -2535,3 +2535,12 @@ gates, and validate all touched Mermaid diagrams.
   identity-cert CN — `ca.SignIdentity` already ignores the CSR subject) and the phone still holds the TLS
   private key (only CSRs leave it). The identity cert is deliberately re-minted at Phase 2 seconds after
   enrollment — the accepted cost of ONE uniform `/issue` code path for initial + renewal (user-confirmed).
+
+- **US11/US14 (edge tunnel-name derivation fix):** the US11 edge resolved the route using the FULL public
+  SNI (`name := info.SNI`), but the phone binds its route under the BARE identity-cert CN (the assigned
+  name, e.g. `abcdef012345`), so every public connection resolved to `no-route` (a latent US11 bug the
+  US14 integration roundtrip surfaced — the edge unit tests used a mock router that matched any name).
+  Fixed: `edge.Config.TunnelDomain` added; `handleTunnel` derives the bare name via `tunnelName` (strip
+  `.<tunnel-domain>`; reject an SNI that is not a single label under the tunnel domain); `server.Run`
+  wires `cfg.TunnelDomain`. The edge unit `baseConfig()` gained `TunnelDomain` (its SNIs were already
+  FQDNs).

@@ -130,7 +130,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return fmt.Errorf("listen %s: %w", cfg.Listen, err)
 	}
 	ed := edge.New(edge.Config{
-		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, NodeID: nodeID, NodeHost: nodeHost,
+		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
+		NodeID: nodeID, NodeHost: nodeHost,
 		NodeStart: nodeStart, MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
 		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,

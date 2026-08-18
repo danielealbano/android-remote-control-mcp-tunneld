@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,7 +72,12 @@ func (e *Edge) evictLeastActive(tunnel string) bool {
 // handleTunnel resolves the route, enforces the ban + global stream cap (with one evict-and-retry),
 // opens the far side (local fast path or mesh), and splices with accounting + policy + conn logs.
 func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHelloInfo) {
-	name := info.SNI
+	name, ok := e.tunnelName(info.SNI)
+	if !ok {
+		e.rec.Reject("no-route", info.SNI, peerAddr(client))
+		_ = client.Close()
+		return
+	}
 	nodeID, fp, connID, startedAt, ok, err := e.router.LookupRoute(ctx, name)
 	if err != nil || !ok {
 		e.rec.Reject("no-route", name, peerAddr(client))
@@ -139,6 +145,21 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		e.logs.PutConnLogPublic(context.Background(), end)
 	}
 	_ = client.Close()
+}
+
+// tunnelName derives the bare tunnel name (the phone identity-cert CN, under which the route is bound)
+// from a public SNI `<name>.<tunnel-domain>`. It rejects an SNI that is not a single label under the
+// configured tunnel domain.
+func (e *Edge) tunnelName(sni string) (string, bool) {
+	suffix := "." + e.cfg.TunnelDomain
+	if e.cfg.TunnelDomain == "" || !strings.HasSuffix(sni, suffix) {
+		return "", false
+	}
+	name := strings.TrimSuffix(sni, suffix)
+	if name == "" || strings.Contains(name, ".") {
+		return "", false
+	}
+	return name, true
 }
 
 // openFar opens the phone data stream locally (fast path) or over the mesh.

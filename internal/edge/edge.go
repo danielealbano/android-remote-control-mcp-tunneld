@@ -48,14 +48,15 @@ type Recorder interface {
 
 // Config wires the Edge.
 type Config struct {
-	EnrollHost  string
-	ControlHost string
-	NodeID      string
-	NodeHost    string
-	NodeStart   string
-	MaxClients  int
-	ConnRate    int
-	Concurrent  int
+	EnrollHost   string
+	ControlHost  string
+	TunnelDomain string // the tunnel base domain; a public SNI is <name>.<TunnelDomain>
+	NodeID       string
+	NodeHost     string
+	NodeStart    string
+	MaxClients   int
+	ConnRate     int
+	Concurrent   int
 
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration

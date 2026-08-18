@@ -9,7 +9,7 @@ import (
 
 func baseConfig() Config {
 	return Config{
-		EnrollHost: "enroll.example.test", ControlHost: "connect.example.test",
+		EnrollHost: "enroll.example.test", ControlHost: "connect.example.test", TunnelDomain: "example.test",
 		MaxClients: 100, ConnRate: 100, Concurrent: 8, HandshakeTimeout: time.Second,
 	}
 }
