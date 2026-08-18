@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
@@ -488,14 +487,9 @@ func publicKeyEqual(a, b crypto.PublicKey) bool {
 	return ea.Equal(b)
 }
 
-func keyFingerprint(pub crypto.PublicKey) string {
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(der)
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
+// keyFingerprint delegates to the shared ca.KeyFingerprint so the registry and the phone conn-log
+// events always compute the SAME key identifier.
+func keyFingerprint(pub crypto.PublicKey) string { return ca.KeyFingerprint(pub) }
 
 // classifyIssuerError maps an ACME/issuer error to a structured user-facing Error, using the
 // ClassifiedIssuerError interface so no acme import is needed.

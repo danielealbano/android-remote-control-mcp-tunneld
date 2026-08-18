@@ -40,7 +40,9 @@ type DataStream interface {
 // conn is one live phone control connection.
 type conn struct {
 	name         string
-	fingerprint  string
+	fingerprint  string // identity-CERT fingerprint (ban/route bookkeeping)
+	keyFP        string // identity-KEY fingerprint (correlates conn-log events with the registry)
+	certSerial   string // identity-cert serial (hex, forensics)
 	connID       string
 	sessionStart time.Time
 	meta         ConnMeta
@@ -300,7 +302,8 @@ func (m *Manager) writeEvent(ctx context.Context, c *conn, event, reason string)
 		NodeHostname: m.nodeHost, NodeStart: m.nodeStart, TSStart: c.sessionStart,
 		SrcIP: c.meta.SrcIP, SrcPort: c.meta.SrcPort,
 		ALPN: c.meta.ALPN, TLSVersion: c.meta.TLSVersion, TLSFP: c.meta.JA4,
-		IdentityKeyFP: c.fingerprint,
+		IdentityKeyFP:      c.keyFP, // the KEY fingerprint — matches the registry's identity_key_fpr
+		IdentityCertSerial: c.certSerial,
 	}
 	if event == "end" {
 		ev.TSEnd = m.now().UTC()

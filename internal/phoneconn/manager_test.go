@@ -73,7 +73,8 @@ func newMgr(t *testing.T) (*Manager, *fakeRouter, *tunneltest.Store, *fakeRec) {
 }
 
 func newConn(name string) *conn {
-	return &conn{name: name, fingerprint: "sha256:fp", connID: "aabbccddee",
+	return &conn{name: name, fingerprint: "sha256:fp", keyFP: "sha256:keyfp", certSerial: "0a1b",
+		connID:       "aabbccddee",
 		sessionStart: time.Unix(1_700_000_000, 0), send: make(chan []byte, 8),
 		pending: map[string]chan DataStream{}, cancel: func() {}}
 }
@@ -93,6 +94,10 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	}
 	if len(st.ConnLogs) != 1 || st.ConnLogs[0].Event != "start" || st.ConnLogs[0].Type != "phone" {
 		t.Errorf("start event not written: %+v", st.ConnLogs)
+	}
+	// The event carries the KEY fingerprint (registry correlation) + the cert serial (forensics).
+	if st.ConnLogs[0].IdentityKeyFP != "sha256:keyfp" || st.ConnLogs[0].IdentityCertSerial != "0a1b" {
+		t.Errorf("phone event must carry identity_key_fpr + identity_cert_serial: %+v", st.ConnLogs[0])
 	}
 	teardown()
 	if !fr.wasUnbound("abc") {

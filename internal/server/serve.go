@@ -157,6 +157,7 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 		if eerr != nil {
 			return phoneconn.IssueResponse{}, &phoneconn.IssueError{
 				Reason: eerr.Reason, Retryable: eerr.Retryable, Unauthorized: eerr.Reason == "unauthorized",
+				RetryAfter: eerr.RetryAfter,
 			}
 		}
 		return phoneconn.IssueResponse{

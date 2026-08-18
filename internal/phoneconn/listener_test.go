@@ -79,7 +79,7 @@ func TestServeControlReleasesPendingSlotAfterBind(t *testing.T) {
 		req := httptest.NewRequest("GET", "/control", body).WithContext(ctx)
 		done := make(chan struct{})
 		go func() {
-			h.serveControl(newFlushRecorder(), req, name, "sha256:fp-"+name)
+			h.serveControl(newFlushRecorder(), req, phoneIdentity{name: name, fingerprint: "sha256:fp-" + name})
 			close(done)
 		}()
 		return body, cancel, done
@@ -108,7 +108,7 @@ func TestServeControlPendingCapRefuses(t *testing.T) {
 
 	rec := newFlushRecorder()
 	req := httptest.NewRequest("GET", "/control", newBlockedReader())
-	h.serveControl(rec, req, "phonec", "sha256:fp")
+	h.serveControl(rec, req, phoneIdentity{name: "phonec", fingerprint: "sha256:fp"})
 	if rec.code() != 503 {
 		t.Fatalf("saturated pre-bind semaphore must answer 503, got %d", rec.code())
 	}
@@ -126,7 +126,7 @@ func TestLivenessTimeoutCloses(t *testing.T) {
 	req := httptest.NewRequest("GET", "/control", body)
 	done := make(chan struct{})
 	go func() {
-		h.serveControl(newFlushRecorder(), req, "phoned", "sha256:fp")
+		h.serveControl(newFlushRecorder(), req, phoneIdentity{name: "phoned", fingerprint: "sha256:fp"})
 		close(done)
 	}()
 	waitCond(t, func() bool { return m.HasConn("phoned") })

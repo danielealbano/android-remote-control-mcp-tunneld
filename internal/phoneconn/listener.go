@@ -62,11 +62,14 @@ type IssueResponse struct {
 	CA           string `json:"ca"`
 }
 
-// IssueError is a structured issuance failure (mapped to an HTTP status by serveIssue).
+// IssueError is a structured issuance failure (mapped to an HTTP status by serveIssue). RetryAfter,
+// when set, is surfaced as retry_after_seconds so the phone can pace its retry (e.g. an ACME
+// rate-limit's cooldown).
 type IssueError struct {
 	Reason       string
 	Retryable    bool
 	Unauthorized bool
+	RetryAfter   time.Duration
 }
 
 func (e *IssueError) Error() string { return "phoneconn: " + e.Reason }
@@ -111,21 +114,34 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	}
 }
 
-// identity extracts and validates the identity-role client cert, returning the derived name + its
-// fingerprint. Rejects: no cert, mesh-role marker, malformed/reserved CN.
-func (h *Handler) identity(r *http.Request) (name, fingerprint string, ok bool) {
+// phoneIdentity is the validated identity extracted from the mTLS client cert: the derived tunnel
+// name, the cert fingerprint (ban/route bookkeeping), the KEY fingerprint (correlates conn-log events
+// with the registry record), and the cert serial (forensics).
+type phoneIdentity struct {
+	name        string
+	fingerprint string // sha256 of the cert (ban/route id)
+	keyFP       string // sha256 of the PKIX SPKI (registry correlation)
+	certSerial  string // hex
+}
+
+// identity extracts and validates the identity-role client cert. Rejects: no cert, mesh-role marker,
+// malformed/reserved CN.
+func (h *Handler) identity(r *http.Request) (phoneIdentity, bool) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return "", "", false
+		return phoneIdentity{}, false
 	}
 	leaf := r.TLS.PeerCertificates[0]
 	if ca.HasMeshRole(leaf) {
-		return "", "", false // mesh-role cert rejected on the phone listener
+		return phoneIdentity{}, false // mesh-role cert rejected on the phone listener
 	}
 	cn := leaf.Subject.CommonName
 	if h.validName != nil && !h.validName(cn) {
-		return "", "", false
+		return phoneIdentity{}, false
 	}
-	return cn, ca.Fingerprint(leaf), true
+	return phoneIdentity{
+		name: cn, fingerprint: ca.Fingerprint(leaf),
+		keyFP: ca.KeyFingerprint(leaf.PublicKey), certSerial: leaf.SerialNumber.Text(16),
+	}, true
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -138,23 +154,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	name, fp, ok := h.identity(r)
+	id, ok := h.identity(r)
 	if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if h.banTunnel != nil && h.banTunnel(name, fp) {
-		h.reject("ban", name, ip)
+	if h.banTunnel != nil && h.banTunnel(id.name, id.fingerprint) {
+		h.reject("ban", id.name, ip)
 		http.Error(w, "banned", http.StatusForbidden)
 		return
 	}
 	switch r.URL.Path {
 	case "/control":
-		h.serveControl(w, r, name, fp)
+		h.serveControl(w, r, id)
 	case "/data":
-		h.serveData(w, r, name)
+		h.serveData(w, r, id.name)
 	case "/issue":
-		h.serveIssue(w, r, name, fp)
+		h.serveIssue(w, r, id.name, id.fingerprint)
 	default:
 		http.NotFound(w, r)
 	}
@@ -191,7 +207,11 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name, fp st
 		if ierr.Unauthorized {
 			status = http.StatusUnauthorized
 		}
-		writeJSON(w, status, map[string]any{"reason": ierr.Reason, "retryable": ierr.Retryable})
+		body := map[string]any{"reason": ierr.Reason, "retryable": ierr.Retryable}
+		if ierr.RetryAfter > 0 {
+			body["retry_after_seconds"] = int64(ierr.RetryAfter.Seconds())
+		}
+		writeJSON(w, status, body)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -221,7 +241,7 @@ const livenessMissedPings = 3
 // response body and reads incoming frames (PONG liveness) from the request body. The pre-bind
 // semaphore (--limit-stream-pending) is held ONLY until the route bind completes — it bounds
 // concurrent pre-bind handshakes, never the number of bound phones.
-func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp string) {
+func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneIdentity) {
 	select {
 	case h.sem <- struct{}{}:
 	default:
@@ -245,7 +265,8 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, name, fp 
 	defer cancel()
 
 	c := &conn{
-		name: name, fingerprint: fp, connID: mustConnID(time.Now()),
+		name: id.name, fingerprint: id.fingerprint, keyFP: id.keyFP, certSerial: id.certSerial,
+		connID:       mustConnID(time.Now()),
 		sessionStart: h.mgr.now(), meta: metaFromRequest(r),
 		send: make(chan []byte, 32), cancel: cancel, pending: map[string]chan DataStream{},
 	}

@@ -32,9 +32,10 @@ const (
 // CSRs, issued certs) travels over the mTLS POST /issue endpoint, NOT the stream.
 const maxControlPayload = 1 << 20 // 1 MiB
 
-// ChunkSize is the max body bytes per data slice for bandwidth pacing (both peers size their HTTP/2
-// read limits accordingly — docs/PROTOCOL.md §6). The data stream itself is an opaque, unframed splice
-// (see the package overview); ChunkSize governs the paced copy slice size at the edge.
+// ChunkSize is the max body bytes per data slice for bandwidth pacing — the paced-copy slice size at
+// the edge, and nothing more: HTTP/2 framing and flow control use the library defaults
+// (docs/PROTOCOL.md §6). The data stream itself is an opaque, unframed splice (see the package
+// overview).
 const ChunkSize = 32 * 1024
 
 // --- payloads ---
