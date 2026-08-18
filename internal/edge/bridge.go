@@ -130,6 +130,9 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		_ = client.Close()
 		return
 	}
+	// A ReleaseStream error is intentionally ignored: the global conc:{name} counter self-heals at its
+	// TTL, so a transient Valkey failure here at worst delays freeing one slot — it never leaks
+	// permanently, and there is no logger on the edge's hot path.
 	defer func() { _ = e.lim.ReleaseStream(context.Background(), name) }()
 
 	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
@@ -243,17 +246,27 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	}
 
 	done := make(chan struct{}, 2)
-	// client → phone (in, from the peer's perspective).
+	// client → phone (in, from the peer's perspective): the source is the public client.
 	go func() {
-		if e.pacedCopy(ctx, name, "in", far, client, as, &as.bytesIn) == quotaHit {
+		switch e.pacedCopy(ctx, name, "in", far, client, as, &as.bytesIn) {
+		case quotaHit:
 			setReason(store.CloseQuotaExhausted)
+		case copySrcEOF:
+			setReason(store.CloseClientClose) // the public client closed its side
+		case copyWriteErr:
+			setReason(store.CloseError) // writing to the phone failed
 		}
 		done <- struct{}{}
 	}()
-	// phone → client (out).
+	// phone → client (out): the source is the phone (local dial-back or mesh stream).
 	go func() {
-		if e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut) == quotaHit {
+		switch e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut) {
+		case quotaHit:
 			setReason(store.CloseQuotaExhausted)
+		case copySrcEOF:
+			setReason(store.ClosePhoneClose) // the phone closed its side
+		case copyWriteErr:
+			setReason(store.CloseError) // writing to the public client failed
 		}
 		done <- struct{}{}
 	}()
@@ -320,7 +333,14 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	return reason
 }
 
-const quotaHit = -1
+// pacedCopy outcome codes: the source EOF'd (or was force-closed), a write to the destination failed,
+// or the per-tunnel traffic quota was hit. The FIRST direction to finish sets the close reason (via the
+// caller's reasonOnce); a subsequent force-closed direction's outcome is ignored.
+const (
+	copySrcEOF   = 0
+	quotaHit     = -1
+	copyWriteErr = -2
+)
 
 // bwBatch is the batch-credit draw size: the pacer pulls up to this much bandwidth credit from the
 // shared Valkey bucket at a time, so the data plane hits the control plane ~once per megabyte moved,
@@ -351,7 +371,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 				return quotaHit
 			}
 			if _, ew := dst.Write(buf[:nr]); ew != nil {
-				return 0
+				return copyWriteErr
 			}
 			atomic.AddInt64(counter, int64(nr))
 			e.rec.Bytes(name, dir, int64(nr))
@@ -359,7 +379,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			as.recent.Add(int64(nr))
 		}
 		if er != nil {
-			return 0
+			return copySrcEOF
 		}
 	}
 }

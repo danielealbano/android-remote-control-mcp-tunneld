@@ -2899,3 +2899,23 @@ gates, and validate all touched Mermaid diagrams.
     `poolMax` field promised a pool-growth mechanism the recorded US9 deviation had already
     established as not built (fixed N-client pools). The operator surface no longer describes unbuilt
     behavior; `--mesh-pool-size` validates as ≥ 1. `mesh.NewClient` drops the parameter.
+- **Twelfth review wave (adversarial review round 11, Fable reviewer; mesh teardown propagation +
+  forensic close-reason):**
+  - **US11 (mesh-path teardown propagates a phone close promptly):** on the mesh path, an abrupt
+    phone-side termination could leave the client→phone copy blocked in the mesh request-body read
+    with nothing to unblock it until the entry node's `--limit-conn-idle` (120s) fired — pinning the
+    public conn, its stream slot, and the mesh stream, and mis-recording `close_reason=idle-timeout`.
+    The teardown coordination is extracted to a testable `bridgeCopy` that returns as soon as EITHER
+    direction ends (closing both sides) while still guaranteeing the response-writer copy has stopped
+    before return; a regression test drives a blocked mesh read + an EOF'd phone and asserts prompt
+    return. The fast and mesh paths now tear down identically.
+  - **US2/US11 (accurate public close_reason):** `splice` defaulted every non-policy teardown to
+    `client-close`, so a phone-side or error-caused close of a public connection was durably
+    mis-attributed and the `phone-close`/`error` enum values had no public writer. `pacedCopy` now
+    distinguishes source-EOF from a destination write error, and each direction attributes the
+    reason (`client-close` / `phone-close` / `error`); a splice test covers phone-first vs
+    client-first close.
+  - **Comment/doc accuracy:** the shutdown comment and `ARCHITECTURE.md` §9 no longer claim "implicit
+    TTL deregistration" (the eleventh wave made node deregistration + route unbind explicit; TTL is
+    the crash backstop). The edge `ReleaseStream` discard carries its documented self-heals-at-TTL
+    justification.

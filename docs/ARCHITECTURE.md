@@ -166,7 +166,7 @@ flowchart LR
   cancel["ctx cancel"] --> close["close raw :443 listener (stop new public conns)"]
   close --> drain["Shutdown enroll / control / mesh / internal servers"]
   drain --> group["errgroup unwinds: schedulers + flusher + watchers on the drain ctx"]
-  group --> ttl["Valkey route/node entries expire by TTL (implicit deregistration)"]
+  group --> dereg["Node explicitly deregistered; phone routes owner-conditionally unbound (TTL = crash backstop)"]
 ```
 
 ## 10. Configuration

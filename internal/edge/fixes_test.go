@@ -381,3 +381,45 @@ func TestEdge_HandleTunnel_ConnLogStartEnd(t *testing.T) {
 		t.Errorf("end event BytesOut = %d, want %d", end.BytesOut, len("PONG-BYTES"))
 	}
 }
+
+// TestEdge_Splice_CloseReasonAttribution covers the durable close_reason: a phone-side EOF records
+// phone-close (not the client-close default), and a client-side EOF records client-close.
+func TestEdge_Splice_CloseReasonAttribution(t *testing.T) {
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0
+	cfg.MinRate = 0
+	te := newTestEdge(t, cfg, nil, nil)
+
+	t.Run("phone closes first", func(t *testing.T) {
+		client := newScriptConn("203.0.113.20", nil)                                            // blocks until closed
+		far := &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})} // EOF immediately
+		as := &activeStream{tunnel: "t", started: time.Now(), cancel: func() {}}
+		as.lastAct.Store(time.Now().UnixNano())
+		if got := te.e.splice(context.Background(), "t", client, far, as); got != store.ClosePhoneClose {
+			t.Fatalf("phone EOF must record %q, got %q", store.ClosePhoneClose, got)
+		}
+	})
+
+	t.Run("client closes first", func(t *testing.T) {
+		client := &closingConn{scriptConn: newScriptConn("203.0.113.21", nil), eof: true} // client read EOFs
+		far := newScriptConn("203.0.113.21", nil)                                         // phone blocks
+		as := &activeStream{tunnel: "t", started: time.Now(), cancel: func() {}}
+		as.lastAct.Store(time.Now().UnixNano())
+		if got := te.e.splice(context.Background(), "t", client, far, as); got != store.CloseClientClose {
+			t.Fatalf("client EOF must record %q, got %q", store.CloseClientClose, got)
+		}
+	})
+}
+
+// closingConn is a scriptConn whose Read returns EOF immediately (the public client closing its side).
+type closingConn struct {
+	*scriptConn
+	eof bool
+}
+
+func (c *closingConn) Read(p []byte) (int, error) {
+	if c.eof {
+		return 0, io.EOF
+	}
+	return c.scriptConn.Read(p)
+}

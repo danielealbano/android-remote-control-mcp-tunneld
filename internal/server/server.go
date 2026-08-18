@@ -236,7 +236,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	<-gctx.Done()
 	// Shutdown order: stop accepting new public connections → drain the HTTP servers → the schedulers +
-	// phone/mesh goroutines unwind on gctx. Route/node entries are TTL'd, so deregistration is implicit.
+	// phone/mesh goroutines unwind on gctx. Routes are owner-conditionally unbound at teardown and the
+	// node is explicitly deregistered below; the TTLs on both remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	_ = rawLn.Close()

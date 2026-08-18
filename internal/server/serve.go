@@ -114,17 +114,30 @@ func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string,
 	if err != nil {
 		return err
 	}
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(ds, client); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(client, ds); done <- struct{}{} }()
-	// Wait for BOTH copy directions to exit before returning: `client` is the mesh HTTP/2 response writer,
-	// which MUST NOT be written after the handler returns. The first direction to finish triggers ds.Close
-	// (cascading the phone side); the frontend teardown EOFs the request body, so the other copy exits too.
-	<-done
-	_ = ds.Close()
-	<-done
-	_ = client.Close()
+	bridgeCopy(ds, client)
 	return nil
+}
+
+// bridgeCopy splices the phone stream `ds` ↔ the mesh stream `client`, returning once the phone→client
+// direction (the ONLY one that writes to `client`, the mesh HTTP/2 response body) has fully stopped —
+// guaranteeing no write to the response writer after the caller returns. Teardown fires as soon as
+// EITHER direction ends, so an abrupt phone-side close (or an entry-side close) propagates PROMPTLY
+// instead of stalling until the entry's idle timeout: closing `ds` EOFs the phone→client copy, and
+// closing `client` marks the response writer done + unblocks the entry. The client→phone copy writes
+// solely to `ds` and never touches the response writer, so it may safely outlive the return by the
+// microseconds until the server closes the request body and unblocks its read.
+func bridgeCopy(ds, client io.ReadWriteCloser) {
+	inDone := make(chan struct{}, 1) // client→phone finished
+	respDone := make(chan struct{})  // phone→client finished (the one that writes the response body)
+	go func() { _, _ = io.Copy(ds, client); inDone <- struct{}{} }()
+	go func() { _, _ = io.Copy(client, ds); close(respDone) }()
+	select {
+	case <-respDone: // the phone (or a client write error) ended the response direction
+	case <-inDone: // the entry (or a phone write error) ended the request direction
+	}
+	_ = ds.Close()
+	_ = client.Close()
+	<-respDone // the response-writer copy has fully stopped — safe to return
 }
 
 // issueFunc adapts the enroll service's Issue path to the phone control handler's mTLS POST /issue
