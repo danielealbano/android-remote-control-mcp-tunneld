@@ -124,6 +124,26 @@ func TestNoPerTunnelMetricLabels(t *testing.T) {
 	}
 }
 
+func TestGoroutineAndMemGaugesPresent(t *testing.T) {
+	m, rec, store, _, rdb := setup(t)
+	rec.MeshPool("10.0.0.2:9443", 4) // populate the mesh-pool gauge
+	h := Handler(m.Registry(), rdb, store, discardLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	body := rr.Body.String()
+	if !strings.Contains(body, "go_goroutines") {
+		t.Error("/metrics must export go_goroutines")
+	}
+	// The per-conn memory estimate gauge is exported with a non-zero static estimate.
+	if !strings.Contains(body, "tunneld_per_conn_mem_bytes 65536") {
+		t.Errorf("/metrics must export the per-conn memory estimate (2*ChunkSize):\n%s", body)
+	}
+	// The mesh pool size is exported per peer once reported.
+	if !strings.Contains(body, `tunneld_mesh_pool_size{peer="10.0.0.2:9443"} 4`) {
+		t.Errorf("/metrics must export mesh pool size:\n%s", body)
+	}
+}
+
 func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("concurrency", "t", "1.1.1.1")

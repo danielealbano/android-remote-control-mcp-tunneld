@@ -6,7 +6,14 @@ package metrics
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
+
+// perConnMemEstimateBytes is the steady-state per-connection heap estimate a bridged public connection
+// holds: two directional paced-copy buffers of ~ChunkSize each. It is a capacity-planning ESTIMATE
+// (static), not a live measurement — the live process footprint is exported by the Go collector.
+const perConnMemEstimateBytes = 2 * wire.ChunkSize
 
 // Metrics holds the registered families and their custom registry.
 type Metrics struct {
@@ -80,6 +87,7 @@ func NewMetrics() *Metrics {
 		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
 		collectors.NewGoCollector(),
 	)
+	m.perConnMem.Set(float64(perConnMemEstimateBytes))
 	return m
 }
 

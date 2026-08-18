@@ -27,26 +27,43 @@ type Stream interface {
 	io.ReadWriteCloser
 }
 
+// Recorder is the consumer-side observability surface the mesh client needs: it reports each per-peer
+// pool's size when the pool is first created (satisfied by metrics.PromRecorder).
+type Recorder interface {
+	MeshPool(peer string, size int)
+}
+
+// Option configures the mesh Client.
+type Option func(*Client)
+
+// WithRecorder wires a Recorder so pool sizes are exported.
+func WithRecorder(r Recorder) Option { return func(c *Client) { c.rec = r } }
+
 // Client dials peer nodes over the mesh and opens connID-checked streams. It holds per-peer pools of
 // HTTP/2 clients (round-robin), each backed by its own transport/connection.
 type Client struct {
 	tlsConf  func() *tls.Config // hot-swappable mesh-role client cert
 	poolSize int
 	poolMax  int
+	rec      Recorder
 
 	mu    sync.Mutex
 	pools map[string]*peerPool // peer advertise addr → pool
 }
 
 // NewClient builds the mesh client. tlsConf returns the current mesh-role client tls.Config (rotated).
-func NewClient(tlsConf func() *tls.Config, poolSize, poolMax int) *Client {
+func NewClient(tlsConf func() *tls.Config, poolSize, poolMax int, opts ...Option) *Client {
 	if poolSize < 1 {
 		poolSize = 4
 	}
 	if poolMax < poolSize {
 		poolMax = poolSize
 	}
-	return &Client{tlsConf: tlsConf, poolSize: poolSize, poolMax: poolMax, pools: map[string]*peerPool{}}
+	c := &Client{tlsConf: tlsConf, poolSize: poolSize, poolMax: poolMax, pools: map[string]*peerPool{}}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
 }
 
 type peerPool struct {
@@ -65,6 +82,9 @@ func (c *Client) pool(peer string) *peerPool {
 			p.clients = append(p.clients, c.newH2Client())
 		}
 		c.pools[peer] = p
+		if c.rec != nil {
+			c.rec.MeshPool(peer, len(p.clients))
+		}
 	}
 	return p
 }

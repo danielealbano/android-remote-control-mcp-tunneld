@@ -122,3 +122,28 @@ func TestClientPoolRoundRobin(t *testing.T) {
 		t.Error("pool should be memoized per peer")
 	}
 }
+
+type poolRec struct{ calls []struct {
+	peer string
+	size int
+} }
+
+func (r *poolRec) MeshPool(peer string, size int) {
+	r.calls = append(r.calls, struct {
+		peer string
+		size int
+	}{peer, size})
+}
+
+func TestClientReportsPoolSizeOnce(t *testing.T) {
+	rec := &poolRec{}
+	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, 8, WithRecorder(rec))
+	c.pool("10.0.0.2:9443")
+	c.pool("10.0.0.2:9443") // memoized — must NOT re-report
+	if len(rec.calls) != 1 {
+		t.Fatalf("MeshPool calls = %d, want 1 (reported once at pool creation)", len(rec.calls))
+	}
+	if rec.calls[0].peer != "10.0.0.2:9443" || rec.calls[0].size != 4 {
+		t.Errorf("MeshPool = (%q,%d), want (10.0.0.2:9443, 4)", rec.calls[0].peer, rec.calls[0].size)
+	}
+}
