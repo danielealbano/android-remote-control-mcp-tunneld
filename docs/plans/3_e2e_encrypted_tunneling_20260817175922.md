@@ -2372,6 +2372,12 @@ gates, and validate all touched Mermaid diagrams.
   considered during assembly was REPLACED with the real `ObtainSelf` + persistence path above (no
   self-signed fallback ships).
 
+- **US11 (server package layout):** the E2E assembly is split across the plan-named `server.go` +
+  `node.go` PLUS `reserved.go` (reserved-cert manager), `acmewire.go` (ACME chain construction + account
+  keys), `serve.go` (HTTP serving + edge/mesh/renew adapters), and `schedulers.go` (verifier, mesh-cert
+  rotation, node heartbeat, renewal watcher) — same package, one concern per file; no behavioral change
+  from the plan's two-file sketch.
+
 - **US11 Task 11.5 (server tests):** the P1 `internal/server/server_test.go` (a `//go:build integration`
   suite driving the superseded HTTP-mode assembly) is replaced by an UNTAGGED US11 unit lifecycle test
   (boots the full E2E assembly on loopback with degraded ACME/attestation/S3, asserts clean start+drain)
