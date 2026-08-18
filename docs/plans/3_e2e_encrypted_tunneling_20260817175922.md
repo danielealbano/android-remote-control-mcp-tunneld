@@ -2561,6 +2561,22 @@ gates, and validate all touched Mermaid diagrams.
   `handleTunnel` then read; rewritten with a policy watcher (ctx-cancel/idle-timeout) that closes both
   sides + a wait-for-both-copies before return, and the counter reads in `handleTunnel` made atomic.
 
+- **US8/US9/US16 (stream write-after-handler-return `-race` fix):** the US16 `-race` e2e eviction run
+  surfaced a data race — the edge splice's `pacedCopy` goroutine wrote the HTTP/2 response writer of the
+  fast-path `/data` stream (`phoneconn.httpDataStream`), and symmetrically the `/mesh` stream
+  (`mesh.ownerStream`), AFTER the handler returned (the http2 library finalizes the response writer as the
+  handler returns). Fixed: both stream types guard `Write`/`Close` with a mutex + `closed` flag, so `Close`
+  (which releases the handler via `close(done)`) first drains any in-flight `Write` and blocks future ones
+  — no `Write` touches the response writer once the handler is released.
+- **US16 (lint at scale + gosec rule selection):** the plan-3 branch runs the quality gates only at US16;
+  the first `make lint` surfaced accumulated findings across US1–US15. All were fixed (gofmt, errcheck,
+  revive package-comments/`max` shadow, staticcheck SA4000, unused test members) EXCEPT four gosec rules
+  that fire only on this design's inherent, provably-safe patterns — G115 (bounded len/small-config
+  conversions), G304 (operator-configured file paths), G402 (the mesh's intentional non-hostname
+  verification), G602 (the guarded hand-rolled ClientHello parser) — which are excluded in `.golangci.yml`
+  as documented rule SELECTION (consistent with the existing revive curation + test-file gosec exclusion).
+  The mesh client switched to `VerifyConnection` (resumption-safe). `google.golang.org/grpc` bumped to
+  v1.82.1 (GO-2026-6061); the unused `coder/websocket` dep dropped by `go mod tidy`.
 - **US14 Task 14.2 (e2e replicas run in-process):** the e2e tier runs the two replicas as in-process
   `server.Run` instances sharing ONE testcontainers Valkey + MinIO + Pebble/challtestsrv (rather than
   building + running the `tunneld` Docker image via testcontainers). This gives identical cross-node mesh

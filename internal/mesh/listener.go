@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 )
@@ -71,16 +72,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	<-cs.done
 }
 
+// ownerStream is the owner-side view of a mesh stream: Read pulls client→phone bytes from the /mesh
+// request body; Write pushes phone→client bytes to the /mesh response body. Write and Close share a mutex
+// + closed flag so that once Close releases the handler, NO further Write touches the HTTP/2 response
+// writer (which the http2 library finalizes as the handler returns).
 type ownerStream struct {
 	r     io.Reader
 	w     io.Writer
 	flush func()
 	done  chan struct{}
-	once  bool
+	once  sync.Once
+
+	mu     sync.Mutex
+	closed bool
 }
 
 func (o *ownerStream) Read(p []byte) (int, error) { return o.r.Read(p) }
 func (o *ownerStream) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.closed {
+		return 0, io.ErrClosedPipe
+	}
 	n, err := o.w.Write(p)
 	if o.flush != nil {
 		o.flush()
@@ -88,9 +101,11 @@ func (o *ownerStream) Write(p []byte) (int, error) {
 	return n, err
 }
 func (o *ownerStream) Close() error {
-	if !o.once {
-		o.once = true
+	o.once.Do(func() {
+		o.mu.Lock()
+		o.closed = true
+		o.mu.Unlock()
 		close(o.done)
-	}
+	})
 	return nil
 }
