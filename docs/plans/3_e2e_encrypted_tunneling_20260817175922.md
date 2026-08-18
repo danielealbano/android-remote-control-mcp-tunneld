@@ -1397,7 +1397,7 @@ here (they are still referenced by `internal/transport` until US13) — this sto
 
 ## User Story 8: Phone control plane (HTTP/2 + mTLS listener, bind, dial-back, ban enforcement)
 
-- [ ] **User Story 8 complete**
+- [x] **User Story 8 complete**
 
 Implement the phone-facing HTTP/2 listener with internal-CA mTLS (identity-role only), the long-lived
 control stream, route bind/heartbeat/unbind (owner-conditional, carrying the fingerprint), start/end
@@ -1405,28 +1405,28 @@ connection-log events, dial-back, liveness, renewal-with-rotation, and tunnel-na
 enforcement + live eviction.
 
 ### Acceptance Criteria
-- [ ] `internal/phoneconn` replaces `internal/wsconn`: an HTTP/2 server requiring client certs signed by
+- [x] `internal/phoneconn` replaces `internal/wsconn`: an HTTP/2 server requiring client certs signed by
   the internal CA in the IDENTITY role (mesh-role marker OU REJECTED). The phone dials the ONE shared
   `--control-host`, so the tunnel name is DERIVED FROM the identity cert's CN (there is no per-tunnel
   Host on the shared control connection): the server reads the CN, validates it is a well-formed tunnel
   name (base32 charset + `--name-length`, not a reserved label), and uses it as the `route:{name}`
   binding key and the resolvable public SNI label `<name>.<tunnel-domain>`. Peer-IP ban check FIRST; a
   tunnel-name+fingerprint ban check after mTLS.
-- [ ] On a valid control connection the node binds `route:{name}` = (this node, connID, fingerprint,
+- [x] On a valid control connection the node binds `route:{name}` = (this node, connID, fingerprint,
   session start),
   writes a phone `start` connection-log event (carrying the edge-peeked ALPN/TLS-version/JA4 + peer
   address — JA4 on phone connections is the agreed anomaly tripwire), and heartbeats at `route-ttl/3`;
   on disconnect it writes a phone `end` event and unbinds (owner-conditional).
-- [ ] The control stream carries dial-back `OPEN`, `PING`/`PONG`, `RENEW_NUDGE`, and the renewal exchange
+- [x] The control stream carries dial-back `OPEN`, `PING`/`PONG`, `RENEW_NUDGE`, and the renewal exchange
   (`RENEW_REQUEST` → `RENEW_CHALLENGE` → `RENEW_SUBMIT` → `CERT_PUSH`/`ERROR`); renewal reuses the US5
   enroll service in renewal mode (rotation of identity + TLS keys, full seven-point predicate re-verified).
-- [ ] A ban-reload hook (`EvictBanned`) closes live phone connections whose name/fingerprint became
+- [x] A ban-reload hook (`EvictBanned`) closes live phone connections whose name/fingerprint became
   banned.
-- [ ] `--limit-stream-pending` bounds concurrent pre-bind handshakes; every goroutine is ctx-bound.
+- [x] `--limit-stream-pending` bounds concurrent pre-bind handshakes; every goroutine is ctx-bound.
 
 ### Task 8.1: mTLS HTTP/2 listener (identity role)
-- [ ] **Task 8.1 complete**
-- [ ] **File**: `internal/phoneconn/listener.go` — an HTTP/2 server on `--control-host` with
+- [x] **Task 8.1 complete**
+- [x] **File**: `internal/phoneconn/listener.go` — an HTTP/2 server on `--control-host` with
   `tls.Config{GetCertificate: <the publicly-trusted --control-host server cert supplied by server.Run
   US11>, ClientAuth: RequireAndVerifyClientCert, ClientCAs: internalCA}` — the phone validates tunneld's
   public server cert AND presents its own internal-CA identity client cert (mTLS). Handler: peer-IP ban
@@ -1437,7 +1437,7 @@ enforcement + live eviction.
   close.
 **Context**: fronted by the raw SNI edge (US11), which routes `--control-host` SNI to this local TLS
 terminator; the phone connection terminates at `tunneld` (our service, not E2E).
-- [ ] **File**: `internal/phoneconn/meta.go` — create the shared `ConnMeta` type the US11 edge hands to
+- [x] **File**: `internal/phoneconn/meta.go` — create the shared `ConnMeta` type the US11 edge hands to
   every local terminator and bridge:
 ```go
 type ConnMeta struct {
@@ -1451,8 +1451,8 @@ Defined HERE (not in `internal/edge`) so both `phoneconn` (phone connection-log 
 dial-back, never the reverse.
 
 ### Task 8.2: Connection manager + bind + start/end events + eviction
-- [ ] **Task 8.2 complete**
-- [ ] **File**: `internal/phoneconn/manager.go` — on control-stream establishment: record the
+- [x] **Task 8.2 complete**
+- [x] **File**: `internal/phoneconn/manager.go` — on control-stream establishment: record the
   establishment time as the tunnel-session start, generate the
   per-connection `connID` (via `store.NewConnID` seeded by it, per Task 2.3), compute the
   identity-cert fingerprint, `router.BindRoute(ctx, name, nodeID, fpr, connID, sessionStart)` (the TTL
@@ -1469,18 +1469,18 @@ dial-back, never the reverse.
   a read-pump for control frames. Maintain an
   in-memory `name → *conn` map (for the fast path + dial-back). On disconnect: write the phone `end`
   connection-log event, owner-conditional `Unbind`, cancel goroutines.
-- [ ] **File**: `internal/phoneconn/evict.go` — `EvictBanned(matcher)` iterating the in-memory map and
+- [x] **File**: `internal/phoneconn/evict.go` — `EvictBanned(matcher)` iterating the in-memory map and
   closing connections whose (name, fingerprint) match a ban; wired to the ban-reload hook in `server.Run`
   (US11). Records `ban-evict` as the close reason.
-- [ ] **File**: `internal/phoneconn/dialback.go` — `OpenStream(streamID)`: send `OPEN{streamID}` on the
+- [x] **File**: `internal/phoneconn/dialback.go` — `OpenStream(streamID)`: send `OPEN{streamID}` on the
   control stream, await the phone's data stream correlated by `streamID`, return a bidirectional handle to
   the bridge (US11); timeout + cleanup if the phone fails to dial back.
 
 ### Task 8.3: Liveness + renewal + cert push
-- [ ] **Task 8.3 complete**
-- [ ] **File**: `internal/phoneconn/liveness.go` — application `PING` at `--control-ping-interval`; missed
+- [x] **Task 8.3 complete**
+- [x] **File**: `internal/phoneconn/liveness.go` — application `PING` at `--control-ping-interval`; missed
   `PONG` past a bound tears down the connection (recorded reason).
-- [ ] **File**: `internal/phoneconn/renew.go` — handle the renewal exchange (US7 frames): on
+- [x] **File**: `internal/phoneconn/renew.go` — handle the renewal exchange (US7 frames): on
   `RENEW_REQUEST` reply with `RENEW_CHALLENGE{nonce}`; on `RENEW_SUBMIT{attestationChain, identityCSR,
   tlsCSR}` call `enroll.Enroll(ctx, "", Request{Renewal: true, Name: <the mTLS-authenticated tunnel
   name>, Nonce, AttestChain, IdentityCSR, TLSCSR})` (RE-VERIFY the full seven-point predicate on the NEW
@@ -1489,8 +1489,8 @@ dial-back, never the reverse.
   `RENEW_NUDGE` when the server-side ARI watcher (US11) says a name should renew early.
 
 ### Task 8.4: Unit tests
-- [ ] **Task 8.4 complete**
-- [ ] **File**: `internal/phoneconn/manager_test.go`, `evict_test.go`, `dialback_test.go`,
+- [x] **Task 8.4 complete**
+- [x] **File**: `internal/phoneconn/manager_test.go`, `evict_test.go`, `dialback_test.go`,
   `liveness_test.go`, `renew_test.go`
 **Setup**: an in-process HTTP/2 client with an internal-CA identity client cert as a fake phone; fake
 `router`/`store`/enroll/ban; fake clock.
@@ -1512,15 +1512,15 @@ dial-back, never the reverse.
 | `stream-pending cap` | Pre-bind handshakes beyond the cap rejected |
 
 ### Definition of Done
-- [ ] `internal/phoneconn` mTLS HTTP/2 listener (ban-first, identity-role, name derived from cert CN, mesh-role rejected),
+- [x] `internal/phoneconn` mTLS HTTP/2 listener (ban-first, identity-role, name derived from cert CN, mesh-role rejected),
   replacing `internal/wsconn`.
-- [ ] Bind/heartbeat/unbind owner-conditional with fingerprint; phone start+end connection-log events;
+- [x] Bind/heartbeat/unbind owner-conditional with fingerprint; phone start+end connection-log events;
   in-memory name→conn map; `EvictBanned`.
-- [ ] Control stream: dial-back OPEN, PING/PONG, RENEW_NUDGE, the renewal exchange (RENEW_REQUEST/
+- [x] Control stream: dial-back OPEN, PING/PONG, RENEW_NUDGE, the renewal exchange (RENEW_REQUEST/
   CHALLENGE/SUBMIT → CERT_PUSH/ERROR); renewal in rotation mode with full seven-point re-verify.
-- [ ] Tunnel-name+fingerprint ban enforced at connect; all goroutines ctx-bound; `--limit-stream-pending`
+- [x] Tunnel-name+fingerprint ban enforced at connect; all goroutines ctx-bound; `--limit-stream-pending`
   enforced.
-- [ ] US8 unit tables authored/committed (execution in US16).
+- [x] US8 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,15 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US8 concrete control protocol:** the control stream is a long-lived HTTP/2 `POST /control`
+  (bidirectional: response body = server→phone frames, request body = phone→server frames); dial-back
+  data streams are `POST /data` with an `X-Stream-Id` header (opaque splice: response body = client→
+  phone, request body = phone→client). This concretizes the plan's frame-level description into the
+  HTTP/2 request shape. The renewal challenge is relayed as a per-connection marker; server.Run wires
+  `OnRenew` to the enroll renewal path (US11). Full h2 dial-back/splice is exercised by the US12 client
+  + US14 integration tier; US8 unit tests cover bind+epoch, start/end events, eviction, dial-back
+  correlation, and the not-owner heartbeat close (-race clean).
 
 - **US7 golden fixtures:** the byte-exactness contract is asserted via a round-trip test (encode →
   decode → re-encode == bytes) plus explicit type-byte/length assertions, rather than committed opaque
