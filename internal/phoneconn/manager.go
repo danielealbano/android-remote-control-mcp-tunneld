@@ -188,7 +188,7 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	select {
 	case c.send <- frame:
 	case <-ctx.Done():
-		c.dropPending(streamID)
+		c.cancelPending(streamID, waiter)
 		return nil, ctx.Err()
 	}
 
@@ -196,25 +196,28 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	case ds := <-waiter:
 		return ds, nil
 	case <-ctx.Done():
-		c.dropPending(streamID)
+		c.cancelPending(streamID, waiter)
 		return nil, ctx.Err()
 	}
 }
 
-// deliverStream hands an arriving dial-back data stream to its waiter (called by the /data handler).
+// deliverStream hands an arriving dial-back data stream to its waiter (called by the /data handler). The
+// check + delete + send happen UNDER the connection lock so they are atomic with OpenStream's cancel
+// (cancelPending): a stream is therefore either delivered to a still-live waiter or reported undeliverable
+// (returns false → the caller closes it) — it can never be sent to an abandoned buffered waiter.
 func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 	c, ok := m.lookup(name)
 	if !ok {
 		return false
 	}
 	c.mu.Lock()
-	w := c.pending[streamID]
-	delete(c.pending, streamID)
-	c.mu.Unlock()
-	if w == nil {
-		return false
+	defer c.mu.Unlock()
+	w, ok := c.pending[streamID]
+	if !ok {
+		return false // the waiter was cancelled (dial-back deadline) before we arrived
 	}
-	w <- ds
+	delete(c.pending, streamID)
+	w <- ds // buffered (cap 1) → non-blocking even under the lock
 	return true
 }
 
@@ -293,10 +296,20 @@ func (c *conn) isClosed() bool {
 	return c.closed
 }
 
-func (c *conn) dropPending(streamID string) {
+// cancelPending abandons a pending dial-back waiter (the dial-back deadline fired or the send failed): it
+// removes the registration under the lock, then drains + closes any stream deliverStream raced in and
+// delivered to the buffered waiter, so an orphaned /data handler cannot leak. Because deliverStream
+// sends under the same lock, once the delete returns either a stream is already in `waiter` (drained
+// here) or deliverStream will observe the registration gone and report the stream undeliverable.
+func (c *conn) cancelPending(streamID string, waiter chan DataStream) {
 	c.mu.Lock()
 	delete(c.pending, streamID)
 	c.mu.Unlock()
+	select {
+	case ds := <-waiter:
+		_ = ds.Close()
+	default:
+	}
 }
 
 func (c *conn) close(reason string) {

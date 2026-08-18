@@ -2,6 +2,7 @@ package phoneconn
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -164,5 +165,36 @@ type fakeDataStream struct{}
 func (fakeDataStream) Read([]byte) (int, error)    { return 0, nil }
 func (fakeDataStream) Write(p []byte) (int, error) { return len(p), nil }
 func (fakeDataStream) Close() error                { return nil }
+
+// TestCancelPendingClosesRacedDelivery covers the dial-back cancel/deliver race (R3-001): when
+// deliverStream delivers a stream to the buffered waiter at the same moment the dial-back deadline fires,
+// cancelPending MUST close the orphaned stream (so its /data handler cannot leak) and drop the pending
+// registration.
+func TestCancelPendingClosesRacedDelivery(t *testing.T) {
+	c := newConn("abc")
+	waiter := make(chan DataStream, 1)
+	c.pending["s1"] = waiter
+	fake := &closeableStream{}
+	waiter <- fake // deliverStream raced in and delivered before OpenStream observed the cancel
+
+	c.cancelPending("s1", waiter)
+
+	if !fake.isClosed() {
+		t.Fatal("a stream delivered concurrently with the dial-back cancel must be closed, not orphaned")
+	}
+	if _, ok := c.pending["s1"]; ok {
+		t.Fatal("cancelPending must drop the pending registration")
+	}
+}
+
+type closeableStream struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (s *closeableStream) Read([]byte) (int, error)    { return 0, nil }
+func (s *closeableStream) Write(p []byte) (int, error) { return len(p), nil }
+func (s *closeableStream) Close() error                { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
+func (s *closeableStream) isClosed() bool              { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }
 
 var _ = store.Event{}
