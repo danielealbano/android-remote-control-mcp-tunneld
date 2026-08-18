@@ -90,8 +90,8 @@ func peekClientHello(conn net.Conn, deadline time.Duration) (ClientHelloInfo, *p
 	return info, &peekConn{Conn: conn, prefix: record}, nil
 }
 
-// acceptLoop accepts raw TCP connections, applies the accept-time checks, peeks the ClientHello, and
-// dispatches. It runs until ctx is done or the listener closes.
+// acceptLoop accepts raw TCP connections and hands each to handleConn (which applies the accept-time
+// checks in the documented order). It runs until ctx is done or the listener closes.
 func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -99,11 +99,6 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
-			continue
-		}
-		if !e.admit() {
-			e.rec.Reject("max-clients", "", peerAddr(conn))
-			_ = conn.Close()
 			continue
 		}
 		go e.handleConn(ctx, conn)
@@ -122,23 +117,51 @@ func (e *Edge) admit() bool {
 
 func (e *Edge) release() { e.clients.Add(-1) }
 
+// heldConn keeps the --max-clients slot held for the LIFETIME of a reserved-host (enroll/control)
+// connection handed to a local TLS terminator: the slot releases when the connection closes, so
+// long-lived phone control connections still count toward the global ceiling.
+type heldConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *heldConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
+
+// NetConn exposes the wrapped conn so phoneconn.ConnContext can unwrap through this holder.
+func (c *heldConn) NetConn() net.Conn { return c.Conn }
+
 func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
-	defer e.release()
 	ip := peerAddr(conn)
 	addr, addrErr := netip.ParseAddr(ip)
 
-	// Ban check FIRST.
+	// Accept-time checks in the documented order: ban FIRST, then the per-IP rate, then the global
+	// --max-clients ceiling (a banned IP must be recorded as banned even on a saturated node).
 	if addrErr == nil && e.ban != nil && e.ban(addr) {
 		e.rec.Reject("ban", "", ip)
 		_ = conn.Close()
 		return
 	}
-	// Per-IP TCP connection rate.
 	if addrErr == nil && !e.connRate(ctx, addr) {
 		e.rec.Reject("conn-rate", "", ip)
 		_ = conn.Close()
 		return
 	}
+	if !e.admit() {
+		e.rec.Reject("max-clients", "", ip)
+		_ = conn.Close()
+		return
+	}
+	released := false
+	defer func() {
+		if !released {
+			e.release()
+		}
+	}()
 
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
 	if err != nil {
@@ -147,16 +170,19 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// Reserved SNIs → local TLS terminators.
+	// Reserved SNIs → local TLS terminators. The max-clients slot moves to the pushed conn (heldConn
+	// releases it on Close) so reserved-host connections stay counted for their whole lifetime.
 	switch info.SNI {
 	case e.cfg.EnrollHost:
-		e.enrollLn.push(pc)
+		released = true
+		e.enrollLn.push(&heldConn{Conn: pc, release: e.release})
 		return
 	case e.cfg.ControlHost:
-		e.controlLn.push(withMeta(pc, info, conn))
+		released = true
+		e.controlLn.push(&heldConn{Conn: withMeta(pc, info, conn), release: e.release})
 		return
 	}
-	// Tunnel SNI.
+	// Tunnel SNI (the slot releases when handleTunnel returns — the splice runs within it).
 	e.handleTunnel(ctx, pc, info)
 }
 

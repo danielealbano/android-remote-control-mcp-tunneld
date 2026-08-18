@@ -95,6 +95,20 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		return
 	}
 
+	// Admission-time quota gate: an exhausted day/week window refuses every NEW stream (in-flight
+	// streams are closed by the splice's ClaimTraffic accounting). A control-plane error fails open,
+	// like connRate — never a hard outage.
+	dayOver, weekOver, qerr := e.lim.TrafficExhausted(ctx, name)
+	if qerr == nil && (dayOver || weekOver) {
+		reason := "quota-day"
+		if weekOver {
+			reason = "quota-week"
+		}
+		e.rec.Reject(reason, name, peerAddr(client))
+		_ = client.Close()
+		return
+	}
+
 	streamID, _ := store.NewConnID(startedAt, e.now())
 
 	// Global per-tunnel stream cap with one evict-and-retry.
@@ -111,8 +125,17 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	}
 	defer func() { _ = e.lim.ReleaseStream(context.Background(), name) }()
 
-	// Open the far side.
+	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
+	// owner/connID while we held stale values (docs/PROTOCOL.md §5: one fresh route lookup + retry, then
+	// close) — and retry once when the fresh route differs (re-checking the ban on its fingerprint).
 	far, closeFar, ferr := e.openFar(ctx, name, nodeID, connID, streamID)
+	if ferr != nil {
+		n2, fp2, c2, s2, ok2, lerr := e.router.LookupRoute(ctx, name)
+		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) && (e.banTun == nil || !e.banTun(name, fp2)) {
+			streamID, _ = store.NewConnID(s2, e.now())
+			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
+		}
+	}
 	if ferr != nil {
 		e.rec.Reject("no-route", name, peerAddr(client))
 		_ = client.Close()
@@ -292,15 +315,26 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 
 const quotaHit = -1
 
-// pacedCopy copies src→dst in ≤ChunkSize slices, drawing bandwidth credits and accounting day/week
-// traffic; on quota exhaustion it stops and returns quotaHit.
+// bwBatch is the batch-credit draw size: the pacer pulls up to this much bandwidth credit from the
+// shared Valkey bucket at a time, so the data plane hits the control plane ~once per megabyte moved,
+// never once per 32 KiB chunk.
+const bwBatch = 1 << 20
+
+// pacedCopy copies src→dst in ≤ChunkSize slices, consuming batch-drawn bandwidth credit and accounting
+// day/week traffic; on quota exhaustion it stops and returns quotaHit.
 func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, src io.Reader, as *activeStream, counter *int64) int64 {
 	buf := make([]byte, 32*1024)
+	var credit int64 // local batch credit (bytes already granted by the shared bucket)
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			e.pace(ctx, name, dir, int64(nr))
-			dayOK, weekOK, _ := e.lim.ClaimTraffic(ctx, name, int64(nr))
+			credit = e.pace(ctx, name, dir, credit, int64(nr))
+			dayOK, weekOK, terr := e.lim.ClaimTraffic(ctx, name, int64(nr))
+			if terr != nil {
+				// Control-plane blip: fail open like pace/connRate — never kill a live stream on a
+				// Valkey error (the next successful claim re-applies the caps).
+				dayOK, weekOK = true, true
+			}
 			if !dayOK || !weekOK {
 				win := "day"
 				if !weekOK {
@@ -323,24 +357,27 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 	}
 }
 
-// pace draws bandwidth credits for n bytes (best-effort; a control-plane error does not stall traffic).
-func (e *Edge) pace(ctx context.Context, name, dir string, n int64) {
-	remaining := n
-	for remaining > 0 {
-		granted, err := e.lim.ClaimBandwidth(ctx, name, dir, remaining)
-		if err != nil || granted <= 0 {
-			return // fail-open
+// pace consumes `need` bytes of bandwidth credit, drawing from the shared per-tunnel, per-direction
+// Valkey bucket in bwBatch batches, and returns the remaining local credit. A control-plane ERROR
+// fails open (pacing must never hard-depend on Valkey); an EMPTY bucket blocks in short refill waits —
+// that wait IS the pacing.
+func (e *Edge) pace(ctx context.Context, name, dir string, credit, need int64) int64 {
+	for credit < need {
+		granted, err := e.lim.ClaimBandwidth(ctx, name, dir, bwBatch)
+		if err != nil {
+			return credit // fail-open: this chunk proceeds unpaced
 		}
-		remaining -= granted
-		if remaining > 0 {
-			// Wait a short slice for the bucket to refill rather than spinning.
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(10 * time.Millisecond):
-			}
+		credit += granted
+		if credit >= need {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return credit // teardown — do not hold the copy hostage
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	return credit - need
 }
 
 func (e *Edge) idlePoll() time.Duration {

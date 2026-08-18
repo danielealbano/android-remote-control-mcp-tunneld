@@ -70,12 +70,22 @@ func TestEdge_HandleConn_ReservedSNI_Local(t *testing.T) {
 
 	select {
 	case c := <-te.e.controlLn.ch:
-		mc, ok := c.(*metaConn)
+		// The pushed conn is a heldConn (max-clients slot holder) wrapping the metaConn carrier.
+		hc, ok := c.(*heldConn)
 		if !ok {
-			t.Fatalf("pushed control conn must be a *metaConn carrying ConnMeta, got %T", c)
+			t.Fatalf("pushed control conn must be a *heldConn holding the max-clients slot, got %T", c)
+		}
+		mc, ok := hc.NetConn().(*metaConn)
+		if !ok {
+			t.Fatalf("held conn must wrap a *metaConn carrying ConnMeta, got %T", hc.NetConn())
 		}
 		if mc.meta.SNI != cfg.ControlHost || mc.meta.JA4 == "" {
 			t.Fatalf("pushed ConnMeta must carry SNI+JA4, got %+v", mc.meta)
+		}
+		before := te.e.clients.Load()
+		_ = c.Close()
+		if got := te.e.clients.Load(); got != before-1 {
+			t.Fatalf("closing the pushed conn must release its max-clients slot (%d -> %d)", before, got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("reserved control-host SNI must be pushed to the control listener")

@@ -81,7 +81,16 @@ func tcpAddr(host string) net.Addr {
 	return &net.TCPAddr{IP: ap.AsSlice(), Port: 51000}
 }
 
-// fakeRouter fakes edge.Router.
+// fakeRoute is one queued LookupRoute answer (for tests exercising the fresh-lookup retry).
+type fakeRoute struct {
+	nodeID, fp, connID string
+	startedAt          time.Time
+	ok                 bool
+	err                error
+}
+
+// fakeRouter fakes edge.Router. When `queue` is non-empty each LookupRoute consumes one entry;
+// otherwise the static fields answer.
 type fakeRouter struct {
 	nodeID, fp, connID string
 	startedAt          time.Time
@@ -89,9 +98,21 @@ type fakeRouter struct {
 	err                error
 	nodeAdv            string
 	nodeOK             bool
+
+	mu      sync.Mutex
+	queue   []fakeRoute
+	lookups int
 }
 
 func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, string, time.Time, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lookups++
+	if len(r.queue) > 0 {
+		q := r.queue[0]
+		r.queue = r.queue[1:]
+		return q.nodeID, q.fp, q.connID, q.startedAt, q.ok, q.err
+	}
 	return r.nodeID, r.fp, r.connID, r.startedAt, r.ok, r.err
 }
 func (r *fakeRouter) LookupNode(context.Context, string) (string, bool, error) {
@@ -113,15 +134,28 @@ func (l *fakeLocal) OpenStream(context.Context, string, string) (phoneconn.DataS
 	return l.ds, l.err
 }
 
-// fakeMesh fakes edge.MeshDialer.
+// fakeMesh fakes edge.MeshDialer. When `errQueue` is non-empty each OpenStream consumes one entry (a
+// nil entry means success); otherwise the static rwc/err answer.
 type fakeMesh struct {
-	rwc    io.ReadWriteCloser
-	err    error
-	opened int
+	rwc      io.ReadWriteCloser
+	err      error
+	opened   int
+	mu       sync.Mutex
+	errQueue []error
 }
 
 func (m *fakeMesh) OpenStream(context.Context, string, string, string, string) (io.ReadWriteCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.opened++
+	if len(m.errQueue) > 0 {
+		e := m.errQueue[0]
+		m.errQueue = m.errQueue[1:]
+		if e != nil {
+			return nil, e
+		}
+		return m.rwc, nil
+	}
 	return m.rwc, m.err
 }
 

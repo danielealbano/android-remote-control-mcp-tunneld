@@ -26,6 +26,11 @@ var errBadClientHello = errors.New("edge: malformed ClientHello")
 // isGREASE reports whether a 2-byte value is a GREASE value (0x?a?a) excluded from JA4.
 func isGREASE(v uint16) bool { return (v&0x0f0f) == 0x0a0a && (v>>8) == (v&0xff) }
 
+// isAlnum reports whether b is an ASCII alphanumeric byte (the JA4 ALPN-component character class).
+func isAlnum(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+}
+
 // parseClientHello parses a full TLS record containing a ClientHello and returns the routing info +
 // a JA4-style fingerprint (ciphers and extensions SORTED before hashing → stable under the
 // extension-order randomization that killed JA3).
@@ -235,11 +240,18 @@ func computeJA4(info ClientHelloInfo, ciphers, extIDs, sigAlgs []uint16) string 
 	if info.SNI != "" {
 		sniFlag = "d"
 	}
+	// Per the JA4 spec, the ALPN component is the FIRST and LAST ASCII-alphanumeric characters of the
+	// first ALPN value ("http/1.1" → "h1"); when either edge byte is non-alphanumeric, the first and
+	// last characters of the hex representation are used instead; no ALPN → "00".
 	alpn := "00"
-	if len(info.ALPN) >= 2 {
-		alpn = info.ALPN[:2]
-	} else if len(info.ALPN) == 1 {
-		alpn = info.ALPN + info.ALPN
+	if info.ALPN != "" {
+		first, last := info.ALPN[0], info.ALPN[len(info.ALPN)-1]
+		if isAlnum(first) && isAlnum(last) {
+			alpn = string(first) + string(last)
+		} else {
+			h := hex.EncodeToString([]byte(info.ALPN))
+			alpn = string(h[0]) + string(h[len(h)-1])
+		}
 	}
 	// JA4 counts are capped at 99.
 	a := fmt.Sprintf("t%s%s%02d%02d%s", ver, sniFlag, min(len(ciphers), 99), minExt(extIDs), alpn)
