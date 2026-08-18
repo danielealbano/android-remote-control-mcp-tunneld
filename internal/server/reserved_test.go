@@ -49,12 +49,12 @@ func mintSelfCert(t *testing.T, host string, notAfter time.Time) (certPEM, keyPE
 
 // countingIssuer is a selfIssuer that records calls and returns a canned cert or error.
 type countingIssuer struct {
-	mu       sync.Mutex
-	calls    int
-	certPEM  []byte
-	keyPEM   []byte
-	info     store.CertInfo
-	err      error
+	mu      sync.Mutex
+	calls   int
+	certPEM []byte
+	keyPEM  []byte
+	info    store.CertInfo
+	err     error
 }
 
 func (c *countingIssuer) obtain(context.Context, string) ([]byte, []byte, store.CertInfo, error) {

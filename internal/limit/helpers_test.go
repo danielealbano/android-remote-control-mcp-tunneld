@@ -32,4 +32,3 @@ func freezeClock(t *testing.T) {
 	nowFunc = func() time.Time { return base }
 	t.Cleanup(func() { nowFunc = time.Now })
 }
-

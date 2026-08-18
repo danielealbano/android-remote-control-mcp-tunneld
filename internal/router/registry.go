@@ -94,4 +94,3 @@ func (r *Registry) Heartbeat(ctx context.Context, name, connID string) (Heartbea
 func (r *Registry) Unbind(ctx context.Context, name, connID string) error {
 	return unbindScript.Run(ctx, r.rdb, []string{key(name)}, connID).Err()
 }
-

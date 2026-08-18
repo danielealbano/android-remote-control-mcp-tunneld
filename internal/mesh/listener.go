@@ -65,7 +65,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Read = request body (client→phone), Write = response body (phone→client).
 	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{})}
 	if err := h.bridge.BridgeMesh(r.Context(), tunnel, streamID, cs); err != nil {
-		cs.Close()
+		_ = cs.Close()
 		return
 	}
 	<-cs.done

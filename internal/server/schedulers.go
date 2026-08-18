@@ -67,7 +67,9 @@ func (h *meshCertHolder) mint(caObj *ca.CA) {
 }
 
 // getCert is the mesh listener's tls.Config.GetCertificate.
-func (h *meshCertHolder) getCert(*tls.ClientHelloInfo) (*tls.Certificate, error) { return h.cur.Load(), nil }
+func (h *meshCertHolder) getCert(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return h.cur.Load(), nil
+}
 
 // clientTLS returns the mesh client's tls.Config factory (hot cert via GetClientCertificate; peer mesh
 // certs are verified by chain-to-CA + mesh-role, NOT by hostname — see meshPeerVerifier).
@@ -87,28 +89,26 @@ func (h *meshCertHolder) clientTLS(caObj *ca.CA) func() *tls.Config {
 			// at the advertise address held in the trusted node registry, so standard hostname verification
 			// does not apply. Instead verify the peer cert chains to the internal CA AND carries the
 			// mesh-role marker: only a node holding a CA-signed mesh-role cert may serve the mesh.
-			InsecureSkipVerify:    true,
-			VerifyPeerCertificate: meshPeerVerifier(pool),
+			// VerifyConnection (NOT VerifyPeerCertificate) also runs on RESUMED sessions, so a resumed
+			// handshake cannot bypass the custom check.
+			InsecureSkipVerify: true,
+			VerifyConnection:   meshVerifyConnection(pool),
 		}
 	}
 }
 
-// meshPeerVerifier verifies a mesh peer's presented certificate chains to the internal CA and carries the
-// mesh-role marker. Hostname verification is intentionally skipped (the cert identity is the node id).
-func meshPeerVerifier(roots *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
+// meshVerifyConnection verifies a mesh peer's certificate chains to the internal CA and carries the
+// mesh-role marker. Hostname verification is intentionally skipped (the cert identity is the node id, and
+// the dial address comes from the trusted node registry). It runs on full AND resumed handshakes.
+func meshVerifyConnection(roots *x509.CertPool) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
 			return errors.New("mesh: peer presented no certificate")
 		}
-		leaf, err := x509.ParseCertificate(rawCerts[0])
-		if err != nil {
-			return fmt.Errorf("mesh: parse peer cert: %w", err)
-		}
+		leaf := cs.PeerCertificates[0]
 		inter := x509.NewCertPool()
-		for _, der := range rawCerts[1:] {
-			if c, e := x509.ParseCertificate(der); e == nil {
-				inter.AddCert(c)
-			}
+		for _, c := range cs.PeerCertificates[1:] {
+			inter.AddCert(c)
 		}
 		if _, err := leaf.Verify(x509.VerifyOptions{
 			Roots: roots, Intermediates: inter,

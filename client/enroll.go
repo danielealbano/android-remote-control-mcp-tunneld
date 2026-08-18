@@ -1,8 +1,8 @@
 // Package client is the Go HTTP/2 tunnel client: the reference (non-attesting) phone implementation used
 // by the integration/e2e tiers. It speaks wire v2 over HTTP/2 — the identity-mTLS control connection,
-// dial-back data streams (full-duplex opaque splice), PING/PONG liveness, CERT_PUSH, and the
-// RENEW_NUDGE → RENEW_REQUEST → RENEW_CHALLENGE → RENEW_SUBMIT → CERT_PUSH renewal exchange — plus an
-// attestation-optional enrollment path so tests enroll without a real device.
+// dial-back data streams (full-duplex opaque splice), PING/PONG liveness, and the RENEW_NUDGE → mTLS
+// POST /issue renewal — plus a two-phase attestation-optional enrollment path (Phase 1 /enroll → Phase 2
+// /issue) so tests enroll without a real device.
 package client
 
 import (
@@ -92,7 +92,9 @@ type EnrollError struct {
 	RetryAfter time.Duration
 }
 
-func (e *EnrollError) Error() string { return fmt.Sprintf("enroll: %s (status %d)", e.Reason, e.Status) }
+func (e *EnrollError) Error() string {
+	return fmt.Sprintf("enroll: %s (status %d)", e.Reason, e.Status)
+}
 
 // Enroll performs the two-phase attestation-optional enrollment: Phase 1 (server-TLS POST /enroll on
 // enrollHost) attests the identity key and returns the assigned name + bootstrap identity cert + a

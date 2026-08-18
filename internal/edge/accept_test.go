@@ -18,7 +18,8 @@ func TestEdge_AdmitCeiling(t *testing.T) {
 	cfg := baseConfig()
 	cfg.MaxClients = 2
 	te := newTestEdge(t, cfg, nil, nil)
-	if !te.e.admit() || !te.e.admit() {
+	first, second := te.e.admit(), te.e.admit()
+	if !first || !second {
 		t.Fatal("first two admits must succeed")
 	}
 	if te.e.admit() {

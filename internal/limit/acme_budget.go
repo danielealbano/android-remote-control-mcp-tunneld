@@ -1,3 +1,5 @@
+// Package limit implements tunneld's abuse-control primitives: rate windows, the enroll quota, the
+// global stream counter, per-process bandwidth buckets, and the per-CA ACME cooldown/backoff/budget.
 package limit
 
 import (

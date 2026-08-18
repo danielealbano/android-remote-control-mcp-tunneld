@@ -1,3 +1,6 @@
+// Package wire is the v2 (E2E) wire contract: the length-framed control-stream codec (dial-back, ping,
+// renewal nudge, error), the mesh StreamOpen header, and ChunkSize (the opaque data-splice pacing size).
+// See docs/PROTOCOL.md — the canonical contract both the Go and Kotlin clients conform to.
 package wire
 
 import (

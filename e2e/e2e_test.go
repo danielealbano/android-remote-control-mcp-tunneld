@@ -66,7 +66,7 @@ func startE2EInfra(t *testing.T) *e2eInfra {
 
 // replicaOpts tweaks a replica's config for a specific scenario.
 type replicaOpts struct {
-	acmeDirLE string // override the LE directory (for spillover); empty = Pebble
+	acmeDirLE  string // override the LE directory (for spillover); empty = Pebble
 	trafficDay string // override --limit-traffic-day; empty = 1gb
 	concurrent int    // override --limit-concurrent; 0 = 8
 }

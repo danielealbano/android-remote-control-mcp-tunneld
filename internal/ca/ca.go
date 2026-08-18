@@ -59,7 +59,6 @@ func (c *CA) Pool() *x509.CertPool {
 	return p
 }
 
-
 func parseCertPEM(data []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(data)
 	if block == nil || block.Type != "CERTIFICATE" {

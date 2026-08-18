@@ -49,4 +49,3 @@ func readControlFrame(r io.Reader) ([]byte, error) {
 	}
 	return frame, nil
 }
-

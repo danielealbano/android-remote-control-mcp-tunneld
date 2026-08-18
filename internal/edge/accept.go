@@ -68,7 +68,7 @@ func (l *chanListener) push(c net.Conn) {
 // and returns it plus a peekConn that replays it.
 func peekClientHello(conn net.Conn, deadline time.Duration) (ClientHelloInfo, *peekConn, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(deadline))
-	defer conn.SetReadDeadline(time.Time{})
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 
 	var hdr [5]byte
 	if _, err := io.ReadFull(conn, hdr[:]); err != nil {

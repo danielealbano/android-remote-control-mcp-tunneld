@@ -133,11 +133,11 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		BanPoll:       time.Second,
 		ShutdownGrace: 2 * time.Second,
 
-		S3Endpoint:     unreachable,
-		S3Region:       "us-east-1",
-		S3Bucket:       "tunneld-test",
-		S3AccessKey:    "test",
-		S3SecretKey:    "test-changeme",
+		S3Endpoint:       unreachable,
+		S3Region:         "us-east-1",
+		S3Bucket:         "tunneld-test",
+		S3AccessKey:      "test",
+		S3SecretKey:      "test-changeme",
 		S3ForcePathStyle: true,
 	}
 }

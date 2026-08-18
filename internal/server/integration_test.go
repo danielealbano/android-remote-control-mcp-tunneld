@@ -310,12 +310,12 @@ func waitBool(d time.Duration, cond func() bool) bool {
 // tls.Server. Addresses + deadlines are inert (the underlying HTTP/2 stream governs lifecycle).
 type rwcConn struct{ rwc io.ReadWriteCloser }
 
-func (c *rwcConn) Read(b []byte) (int, error)   { return c.rwc.Read(b) }
-func (c *rwcConn) Write(b []byte) (int, error)  { return c.rwc.Write(b) }
-func (c *rwcConn) Close() error                 { return c.rwc.Close() }
-func (c *rwcConn) LocalAddr() net.Addr          { return tunnelAddr{} }
-func (c *rwcConn) RemoteAddr() net.Addr         { return tunnelAddr{} }
-func (c *rwcConn) SetDeadline(time.Time) error  { return nil }
+func (c *rwcConn) Read(b []byte) (int, error)       { return c.rwc.Read(b) }
+func (c *rwcConn) Write(b []byte) (int, error)      { return c.rwc.Write(b) }
+func (c *rwcConn) Close() error                     { return c.rwc.Close() }
+func (c *rwcConn) LocalAddr() net.Addr              { return tunnelAddr{} }
+func (c *rwcConn) RemoteAddr() net.Addr             { return tunnelAddr{} }
+func (c *rwcConn) SetDeadline(time.Time) error      { return nil }
 func (c *rwcConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *rwcConn) SetWriteDeadline(time.Time) error { return nil }
 

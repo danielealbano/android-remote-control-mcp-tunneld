@@ -67,8 +67,8 @@ func (c *scriptConn) isClosed() bool {
 	return c.closed
 }
 
-func (c *scriptConn) LocalAddr() net.Addr  { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443} }
-func (c *scriptConn) RemoteAddr() net.Addr { return tcpAddr(c.peer) }
+func (c *scriptConn) LocalAddr() net.Addr              { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443} }
+func (c *scriptConn) RemoteAddr() net.Addr             { return tcpAddr(c.peer) }
 func (c *scriptConn) SetDeadline(time.Time) error      { return nil }
 func (c *scriptConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *scriptConn) SetWriteDeadline(time.Time) error { return nil }
@@ -162,7 +162,11 @@ func (r *recRecorder) PublicConnOpen()            { r.mu.Lock(); r.opens++; r.mu
 func (r *recRecorder) PublicConnClose(string)     { r.mu.Lock(); r.closes++; r.mu.Unlock() }
 func (r *recRecorder) StreamOpen()                { r.mu.Lock(); r.sOpen++; r.mu.Unlock() }
 func (r *recRecorder) StreamClose()               { r.mu.Lock(); r.sClose++; r.mu.Unlock() }
-func (r *recRecorder) QuotaExhausted(_, w string) { r.mu.Lock(); r.quota = append(r.quota, w); r.mu.Unlock() }
+func (r *recRecorder) QuotaExhausted(_, w string) {
+	r.mu.Lock()
+	r.quota = append(r.quota, w)
+	r.mu.Unlock()
+}
 
 func (r *recRecorder) rejectReasons() []string {
 	r.mu.Lock()
@@ -183,13 +187,7 @@ func (s *fakeSink) PutConnLogPublic(_ context.Context, ev PublicEvent) {
 	s.mu.Unlock()
 }
 
-func (s *fakeSink) all() []PublicEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]PublicEvent(nil), s.events...)
-}
-
-// testEdge builds an Edge wired to fakes + a miniredis-backed limiter with an injectable clock.
+// testEdge builds an Edge wired to fakes + a miniredis-backed limiter.
 type testEdge struct {
 	e     *Edge
 	rec   *recRecorder
@@ -197,7 +195,6 @@ type testEdge struct {
 	rtr   *fakeRouter
 	local *fakeLocal
 	mesh  *fakeMesh
-	clock func() time.Time
 }
 
 func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun func(string, string) bool) *testEdge {

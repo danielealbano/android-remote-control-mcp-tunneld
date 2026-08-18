@@ -64,7 +64,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, 
 	}
 	zerossl := acme.LegoConfig{
 		CAID: acme.CAZeroSSL, DirectoryURL: cfg.ACMEDirZeroSSL, Email: cfg.ACMEEmail,
-		AccountKey: loadAccountKey(accountsDir, acme.CAZeroSSL, logger),
+		AccountKey:  loadAccountKey(accountsDir, acme.CAZeroSSL, logger),
 		RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		EABKID: cfg.ACMEEABZeroSSLKID, EABHMAC: cfg.ACMEEABZeroSSLHMAC, RawDNS: dnsProvider,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,

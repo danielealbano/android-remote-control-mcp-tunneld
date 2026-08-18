@@ -119,7 +119,7 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 		return nil, fmt.Errorf("mesh: dial %s: %w", peer, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		_ = pw.Close()
 		return nil, ErrNoOwner
 	}

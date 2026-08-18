@@ -237,19 +237,19 @@ func (c *chainIssuer) orderFrom(id string) []caIssuer {
 }
 
 // backoff = min(initial * 2^(n-1), max) for a streak length n (n>=1).
-func backoff(initial, max time.Duration, n int) time.Duration {
+func backoff(initial, maxDur time.Duration, n int) time.Duration {
 	if n < 1 {
 		n = 1
 	}
 	d := initial
 	for i := 1; i < n; i++ {
 		d *= 2
-		if d >= max {
-			return max
+		if d >= maxDur {
+			return maxDur
 		}
 	}
-	if d > max {
-		return max
+	if d > maxDur {
+		return maxDur
 	}
 	return d
 }

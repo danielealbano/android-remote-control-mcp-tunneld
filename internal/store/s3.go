@@ -64,7 +64,7 @@ func (s *S3Store) GetName(ctx context.Context, name string) (NameRecord, error) 
 		}
 		return NameRecord{}, fmt.Errorf("store: get name %q: %w", name, err)
 	}
-	defer out.Body.Close()
+	defer func() { _ = out.Body.Close() }()
 	var rec NameRecord
 	if err := json.NewDecoder(out.Body).Decode(&rec); err != nil {
 		return NameRecord{}, fmt.Errorf("store: decode name %q: %w", name, err)

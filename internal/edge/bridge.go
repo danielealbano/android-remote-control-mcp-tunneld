@@ -240,9 +240,9 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		}
 	}()
 
-	<-done       // one direction finished (EOF, quota, or a closed side)
-	closeBoth()  // cascade the other direction
-	<-done       // wait for it to exit before returning
+	<-done      // one direction finished (EOF, quota, or a closed side)
+	closeBoth() // cascade the other direction
+	<-done      // wait for it to exit before returning
 	close(stopWatch)
 	<-watchExited // all writers (copies + watcher) have stopped; reason is now safe to read
 	return reason

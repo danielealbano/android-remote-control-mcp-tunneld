@@ -39,9 +39,9 @@ type fakeBridge struct {
 func (f *fakeBridge) BridgeMesh(_ context.Context, tunnel, streamID string, client io.ReadWriteCloser) error {
 	f.called = true
 	if f.closeNow {
-		client.Close() // signal done so the handler returns
+		_ = client.Close() // signal done so the handler returns
 	} else {
-		go func() { time.Sleep(10 * time.Millisecond); client.Close() }()
+		go func() { time.Sleep(10 * time.Millisecond); _ = client.Close() }()
 	}
 	return nil
 }
@@ -123,10 +123,12 @@ func TestClientPoolRoundRobin(t *testing.T) {
 	}
 }
 
-type poolRec struct{ calls []struct {
-	peer string
-	size int
-} }
+type poolRec struct {
+	calls []struct {
+		peer string
+		size int
+	}
+}
 
 func (r *poolRec) MeshPool(peer string, size int) {
 	r.calls = append(r.calls, struct {

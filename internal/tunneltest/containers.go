@@ -1,10 +1,10 @@
 //go:build integration || e2e
 
-// This file is the SHARED testcontainers harness for the integration (//go:build integration) and e2e
-// (//go:build e2e) tiers: ephemeral Valkey, MinIO (a plain-S3 stand-in), and a hermetic ACME test CA
-// (Pebble + pebble-challtestsrv), each registered for teardown via t.Cleanup. It NEVER touches real
-// Let's Encrypt / GTS / ZeroSSL (user decision: the automated tiers are hermetic). Image tags are pinned
-// constants.
+// SHARED testcontainers harness for the integration (//go:build integration) and e2e (//go:build e2e)
+// tiers: ephemeral Valkey, MinIO (a plain-S3 stand-in), and a hermetic ACME test CA (Pebble +
+// pebble-challtestsrv), each registered for teardown via t.Cleanup. It NEVER touches real Let's Encrypt /
+// GTS / ZeroSSL (user decision: the automated tiers are hermetic). Image tags are pinned constants.
+
 package tunneltest
 
 import (

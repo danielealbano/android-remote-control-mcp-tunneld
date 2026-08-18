@@ -30,7 +30,7 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial-back OpenStream failed: %v", err)
 	}
-	defer ds.Close()
+	defer func() { _ = ds.Close() }()
 
 	// Full-duplex echo: write client→phone bytes; the echo backend must send them back phone→client.
 	msg := []byte("full-duplex-hello")
