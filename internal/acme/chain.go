@@ -86,6 +86,8 @@ func (c *chainIssuer) Renew(ctx context.Context, csr *x509.CertificateRequest, n
 func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, name string, cas []caIssuer) ([]byte, store.CertInfo, error) {
 	shortest := time.Duration(0)
 	for _, ca := range cas {
+		// Cooldown bookkeeping is best-effort: a Valkey error reads as "not cooling" (fail-open — try
+		// the CA) rather than blocking issuance on the control plane.
 		if cool, _ := c.cfg.Limiter.CACooldown(ctx, ca.id()); cool > 0 {
 			if shortest == 0 || cool < shortest {
 				shortest = cool
@@ -94,7 +96,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 		}
 		pemChain, info, err := ca.obtain(ctx, csr, name)
 		if err == nil {
-			_ = c.cfg.Limiter.ResetCAFailures(ctx, ca.id())
+			_ = c.cfg.Limiter.ResetCAFailures(ctx, ca.id()) // best-effort streak reset; a stale count self-expires at TTL
 			c.cfg.Recorder.ACMEIssue(ca.id(), "ok")
 			return pemChain, info, nil
 		}
@@ -123,11 +125,13 @@ func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (
 	case ClassPermanent:
 		return true
 	case ClassRateLimited:
+		// Cooldown writes are best-effort: a Valkey error just means the CA is not skipped next time
+		// (fail-open) — the spillover + retry still protect the account.
 		d := max(retry, c.cfg.CooldownDefault)
 		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
 		c.cfg.Recorder.ACMECooldown(ca)
 	default: // transient / unknown → exponential backoff
-		n, _ := c.cfg.Limiter.BumpCAFailures(ctx, ca, c.cfg.BackoffMax)
+		n, _ := c.cfg.Limiter.BumpCAFailures(ctx, ca, c.cfg.BackoffMax) // best-effort streak counter (see above)
 		d := backoff(c.cfg.BackoffInitial, c.cfg.BackoffMax, n)
 		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
 		c.cfg.Recorder.ACMECooldown(ca)

@@ -45,7 +45,7 @@ type Registry struct {
 	ttl time.Duration
 }
 
-// NewRegistry constructs a Registry; ttl is --route-ttl (the WS heartbeat refreshes at ttl/3).
+// NewRegistry constructs a Registry; ttl is --route-ttl (the phone control heartbeat refreshes at ttl/3).
 func NewRegistry(rdb redis.UniversalClient, ttl time.Duration) *Registry {
 	return &Registry{rdb: rdb, ttl: ttl}
 }

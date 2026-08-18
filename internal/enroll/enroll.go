@@ -193,7 +193,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "unauthorized"}
 	}
 	if !csrMatchesTunnel(req.TLSCSR, name, s.cfg.TunnelDomain) {
-		s.rec.Reject("csr-mismatch", name, ip)
+		// A CSR requesting extra/foreign/wildcard identifiers is the most attack-indicative rejection —
+		// persist evidence like every other csr-mismatch, not just the metric.
+		s.recordRejection(ctx, ip, "csr-mismatch", req)
 		return Result{}, &Error{Reason: "csr_domain_mismatch"}
 	}
 
@@ -251,7 +253,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
 		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
 	}
-	s.recordCert(ctx, name, req, info, att.Device)
+	s.recordCert(ctx, name, cur, req, info, att.Device)
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
 }
@@ -385,10 +387,12 @@ func (s *Service) recordIdentity(ctx context.Context, name, claimNonce string, r
 // recordCert LWW-updates the registry record with the issued cert + rotated identity-key fingerprint +
 // the freshly-attested device scalars, preserving the claim nonce. A failure here is non-fatal (the
 // certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
-func (s *Service) recordCert(ctx context.Context, name string, req Request, info store.CertInfo, dev store.DeviceInfo) {
+func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo) {
+	// Re-read for the freshest record; on a transient read failure fall back to `cur` (the record Issue
+	// already read this call) so the claim_nonce + enrolled_at are PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
-		rec = store.NameRecord{Schema: 1, EnrolledAt: s.now().UTC()}
+		rec = cur
 	}
 	rec.Schema = 1
 	rec.LastRenewedAt = s.now().UTC()
