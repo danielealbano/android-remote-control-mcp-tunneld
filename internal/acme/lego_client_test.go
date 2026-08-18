@@ -58,3 +58,33 @@ func TestShouldRenewLEMarginFloor(t *testing.T) {
 		t.Fatal("past NotAfter−margin the cert must be due")
 	}
 }
+
+// TestClassifyRateLimitedErrorHonorsRetryAfter: lego's *acme.RateLimitedError carries the CA's
+// literal Retry-After header — classification must parse and honor it (and fall back to 0 → the
+// cooldown default when the header is absent or unparsable).
+func TestClassifyRateLimitedErrorHonorsRetryAfter(t *testing.T) {
+	tests := []struct {
+		name string
+		hdr  string
+		want time.Duration
+	}{
+		{name: "seconds form", hdr: "120", want: 2 * time.Minute},
+		{name: "absent header", hdr: "", want: 0},
+		{name: "garbage header", hdr: "not-a-time", want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &legoacme.RateLimitedError{
+				ProblemDetails: &legoacme.ProblemDetails{Type: "urn:ietf:params:acme:error:rateLimited", HTTPStatus: 429},
+				RetryAfter:     tc.hdr,
+			}
+			ie := classifyLego(err)
+			if ie.Class != ClassRateLimited {
+				t.Fatalf("class = %q, want rate-limited", ie.Class)
+			}
+			if ie.Retry != tc.want {
+				t.Fatalf("Retry = %s, want %s", ie.Retry, tc.want)
+			}
+		})
+	}
+}

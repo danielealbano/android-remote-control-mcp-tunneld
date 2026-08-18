@@ -93,7 +93,7 @@ type ServeCmd struct {
 	ACMEDNSResolvers            []string `name:"acme-dns-resolver" help:"Recursive nameserver(s) host[:port] used for the DNS-01 propagation pre-check; empty uses the system resolvers. Repeatable. Set for split-horizon/internal DNS or a hermetic ACME test server."`
 	ACMEDNSSkipPropagationCheck bool     `name:"acme-dns-skip-propagation-check" default:"false" help:"Skip the authoritative-nameserver DNS-01 propagation requirement (split-horizon/internal DNS, or a test ACME server that validates via its own resolver)."`
 
-	ACMECooldownDefault time.Duration `name:"acme-cooldown-default" default:"1h" help:"Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After (Retry-After wins when larger)."`
+	ACMECooldownDefault time.Duration `name:"acme-cooldown-default" default:"1h" help:"Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After header (an explicit Retry-After is honored as-is)."`
 	ACMEBackoffInitial  time.Duration `name:"acme-backoff-initial" default:"1m" help:"First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure)."`
 	ACMEBackoffMax      time.Duration `name:"acme-backoff-max" default:"6h" help:"Ceiling for the exponential per-CA failure backoff."`
 	ACMERenewMargin     time.Duration `name:"acme-renew-margin" default:"48h" help:"Renew floor before public-cert expiry (LE renews at NotAfter minus this)."`

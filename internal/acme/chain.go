@@ -133,9 +133,14 @@ func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (
 	case ClassPermanent:
 		return 0, true
 	case ClassRateLimited:
+		// The CA's explicit Retry-After is honored AS-IS (it is the authoritative statement of when a
+		// retry will be accepted); --acme-cooldown-default applies only when the CA sent no hint.
 		// Cooldown writes are best-effort: a Valkey error just means the CA is not skipped next time
 		// (fail-open) — the spillover + retry still protect the account.
-		d := max(retry, c.cfg.CooldownDefault)
+		d := retry
+		if d <= 0 {
+			d = c.cfg.CooldownDefault
+		}
 		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
 		c.cfg.Recorder.ACMECooldown(ca)
 		return d, false

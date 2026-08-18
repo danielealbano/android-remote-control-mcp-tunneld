@@ -161,7 +161,8 @@ decision REVERSES a Plan 1 invariant, it is marked **[REVERSES P1]**.
   crown-jewel secret).
 - One operator ACME account per CA. Rate-limit protection is **REACTIVE per-CA cooldown + backoff**
   (agreed, replacing an earlier proactive order-counter design): on a CA "rate limited" answer, store a
-  per-CA cooldown in Valkey (honoring the ACME `Retry-After`, floor `--acme-cooldown-default`) and skip
+  per-CA cooldown in Valkey (the CA's explicit `Retry-After` honored AS-IS; `--acme-cooldown-default`
+  only when no header was sent — user decision, tenth wave) and skip
   that CA (spillover proceeds to the next) until it expires; on repeated consecutive failures of any
   other kind, apply exponential per-CA backoff (`--acme-backoff-initial` doubling to
   `--acme-backoff-max`, reset on success) — this protects the LE account from the no-override
@@ -1185,8 +1186,9 @@ the spillover and the opportunistic at-renewal migration onto LE. NO order-count
   schedule `NotBefore + (160h − --acme-renew-margin)`, so a 90-day ZeroSSL cert still rotates every
   ~4.7 days.
 - [x] Rate-limit protection is REACTIVE: a CA in cooldown (`limit.CACooldown` > 0) is SKIPPED by the
-  spillover; an `ErrRateLimited` answer sets `limit.SetCACooldown(max(RetryAfter,
-  --acme-cooldown-default))`; any other failure bumps `limit.BumpCAFailures` and sets a cooldown of
+  spillover; an `ErrRateLimited` answer sets the per-CA cooldown to the CA's honored `Retry-After`
+  (or `--acme-cooldown-default` when no header was sent); any other failure bumps
+  `limit.BumpCAFailures` and sets a cooldown of
   `min(--acme-backoff-initial × 2^(n−1), --acme-backoff-max)`; success calls `limit.ResetCAFailures`.
   There is NO order-counting budget: LE is gated ONLY by its own retry-after cooldown, exactly like GTS
   and ZeroSSL.
@@ -1233,7 +1235,7 @@ Deviations` and use the closest supported path.
 - [x] **File**: `internal/acme/chain.go` — `chainIssuer` (implements `enroll.PublicIssuer`) holding
   `[LE, GTS, ZeroSSL]`. Common attempt mechanics (both entry points): SKIP any CA whose
   `limit.CACooldown` > 0 (an active retry-after); attempt the CA; on `ErrRateLimited` set
-  `limit.SetCACooldown(ca, max(RetryAfter, --acme-cooldown-default))`, record `ACMECooldown(ca)`, and
+  `limit.SetCACooldown(ca, <the honored RetryAfter, or --acme-cooldown-default when absent>)`, record `ACMECooldown(ca)`, and
   fall through; on `ErrTransient`/other failure `limit.BumpCAFailures(ctx, ca, --acme-backoff-max)` →
   `limit.SetCACooldown(ca, min(--acme-backoff-initial × 2^(n−1), --acme-backoff-max))` and fall
   through; on success `limit.ResetCAFailures(ca)`; on `ErrPermanent` (bad CSR) stop and return; if ALL
@@ -1262,7 +1264,7 @@ ACME issuance is covered by the integration tier (US14, Pebble).
 | `spillover LE→GTS→ZeroSSL` | LE rate-limited, GTS transient, ZeroSSL succeeds → `info.CA == zerossl` |
 | `spillover stops on permanent` | LE permanent (bad CSR) → no GTS/ZeroSSL attempt |
 | `cooldown skips CA` | A CA with `CACooldown > 0` is skipped WITHOUT a CA call; next CA attempted |
-| `rate-limited sets cooldown` | `ErrRateLimited` with Retry-After → `SetCACooldown(max(RetryAfter, default))`; `ACMECooldown(ca)` recorded |
+| `rate-limited sets cooldown` | `ErrRateLimited` with Retry-After → `SetCACooldown` honors it AS-IS (default only without a header); `ACMECooldown(ca)` recorded |
 | `failure backoff doubles` | Consecutive non-rate-limit failures → cooldowns `initial, 2×, 4×…` capped at `--acme-backoff-max`; success resets |
 | `all CAs cooling → retryable` | Every CA in cooldown → `ErrRateLimited` with the shortest remaining cooldown as Retry-After |
 | `all cooling message is quota-exhausted` | The all-cooling error text is "quota exhausted, retry later" |
@@ -2870,3 +2872,14 @@ gates, and validate all touched Mermaid diagrams.
     schema.
   - **Comment hygiene:** the last review-artifact reference in a comment ("R3-001") is removed, and
     the two dead `var _ =` unused-import anchors in test files are deleted with their imports.
+- **Tenth review wave (USER-DIRECTED Retry-After semantics; 2026-08-18):** the user rejected the
+  agreed `max(RetryAfter, --acme-cooldown-default)` rate-limit cooldown ("1h is WAY too much … tell
+  the user to retry in X time"). Verified against the pinned lego v4.35.2 source: an official 429
+  `rateLimited` answer arrives as `*acme.RateLimitedError` carrying the literal `Retry-After` header
+  (the in-code claim that lego does not surface it was WRONG), parsed via `api.ParseRetryAfter`. New
+  semantics: the CA's explicit Retry-After is honored AS-IS as the per-CA cooldown (and therefore as
+  the phone's `retry_after_seconds`); `--acme-cooldown-default` (still 1h, operator-tunable) applies
+  ONLY when a 429 carries no/an unparsable header. Combined with the ninth wave's in-run
+  shortest-cooldown fold, an all-CAs-unavailable answer now always reports the true earliest retry
+  time. Plan §design + US6 AC/Task 6.3/test-table wording re-aligned; tests added for the honored
+  header (seconds form, absent, garbage) and the short-Retry-After end-to-end path.

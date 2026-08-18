@@ -14,6 +14,7 @@ import (
 	"time"
 
 	legoacme "github.com/go-acme/lego/v4/acme"
+	"github.com/go-acme/lego/v4/acme/api"
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge"
 	"github.com/go-acme/lego/v4/challenge/dns01"
@@ -182,13 +183,21 @@ func certInfoFromPEM(caID string, pemChain []byte) (store.CertInfo, error) {
 	}, nil
 }
 
-// classifyLego maps a lego/ACME error to an IssuerError class.
+// classifyLego maps a lego/ACME error to an IssuerError class. An official rate-limit answer arrives
+// as *acme.RateLimitedError carrying the CA's literal Retry-After header — that value is HONORED
+// (parsed per RFC 7231), so the chain and the phone are told exactly when the CA will accept a retry;
+// the --acme-cooldown-default applies only when no header was sent.
 func classifyLego(err error) *IssuerError {
+	if rle, ok := errors.AsType[*legoacme.RateLimitedError](err); ok {
+		retry, perr := api.ParseRetryAfter(rle.RetryAfter)
+		if perr != nil {
+			retry = 0 // absent/unparsable header → the chain falls back to --acme-cooldown-default
+		}
+		return rateLimited(retry, err)
+	}
 	if pd, ok := errors.AsType[*legoacme.ProblemDetails](err); ok {
 		switch {
 		case pd.HTTPStatus == 429 || strings.Contains(pd.Type, "rateLimited"):
-			// lego's ProblemDetails does not surface Retry-After; return 0 so the chain applies
-			// --acme-cooldown-default as the cooldown floor.
 			return rateLimited(0, err)
 		case pd.HTTPStatus >= 500:
 			return transient(err)

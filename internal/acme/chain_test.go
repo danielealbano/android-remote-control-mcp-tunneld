@@ -157,8 +157,8 @@ func TestRateLimitedSpillsAndSetsRetryAfter(t *testing.T) {
 	if err != nil || info.CA != CAGTS {
 		t.Fatalf("rate-limited LE should spill to GTS, got %+v %v", info, err)
 	}
-	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d < 30*time.Minute {
-		t.Errorf("LE retry-after should honor the 30m Retry-After, got %s", d)
+	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d < 29*time.Minute || d > 30*time.Minute {
+		t.Errorf("LE cooldown must honor the 30m Retry-After AS-IS (not the 1h default), got %s", d)
 	}
 	if gts.calls != 1 {
 		t.Errorf("GTS should have been attempted once, calls=%d", gts.calls)
@@ -254,5 +254,25 @@ func TestMixedPreCoolingAndInRunFailurePicksShortest(t *testing.T) {
 	var ie *IssuerError
 	if !asIssuerError(err, &ie) || ie.Retry != time.Minute {
 		t.Fatalf("Retry-After must be the SHORTEST cooldown (in-run 1m beats pre-cooling 30m), got %v", err)
+	}
+}
+
+// TestShortRetryAfterHonoredAsIs: a CA saying "retry in 30s" must cool for ~30s — never be inflated
+// to the 1h --acme-cooldown-default (the default applies only when the CA sent no hint).
+func TestShortRetryAfterHonoredAsIs(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt, err: rateLimited(30*time.Second, nil)}
+	gts := &fakeCA{caID: CAGTS, err: rateLimited(45*time.Second, nil)}
+	ch, lim := newChain(t, ChainConfig{}, le, gts)
+	_, _, err := ch.Obtain(context.Background(), nil, "t")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
+		t.Fatalf("all rate-limited should be retryable, got %v", err)
+	}
+	// The phone is told the SHORTEST honored Retry-After (~30s), not the 1h default.
+	if ie.Retry != 30*time.Second {
+		t.Fatalf("Retry-After must be the shortest honored CA hint (30s), got %s", ie.Retry)
+	}
+	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d > 30*time.Second {
+		t.Fatalf("LE cooldown must be the honored 30s, got %s", d)
 	}
 }
