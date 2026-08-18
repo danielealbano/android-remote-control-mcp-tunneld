@@ -99,7 +99,6 @@ type ServeCmd struct {
 	ACMECooldownDefault time.Duration `name:"acme-cooldown-default" default:"1h" help:"Per-CA cooldown when a CA answers rate-limited WITHOUT a Retry-After (Retry-After wins when larger)."`
 	ACMEBackoffInitial  time.Duration `name:"acme-backoff-initial" default:"1m" help:"First per-CA backoff after a non-rate-limit failure (doubles per consecutive failure)."`
 	ACMEBackoffMax      time.Duration `name:"acme-backoff-max" default:"6h" help:"Ceiling for the exponential per-CA failure backoff."`
-	ACMELEWeeklyBudget  int           `name:"acme-le-weekly-budget" default:"50" help:"Max NEW-name LE orders per rolling 7d (per-registered-domain limit); renewals exempt."`
 	ACMERenewMargin     time.Duration `name:"acme-renew-margin" default:"48h" help:"Renew floor before public-cert expiry (ARI may pull earlier)."`
 	IssuePerWeek        int           `name:"issue-per-week" default:"3" help:"Max SUCCESSFUL public-cert issuances per tunnel per rolling 7d."`
 
@@ -211,7 +210,6 @@ func (c ServeCmd) Validate() error {
 		{"--limit-conn-rate", c.LimitConnRate},
 		{"--limit-stream-pending", c.LimitStreamPending},
 		{"--issue-per-week", c.IssuePerWeek},
-		{"--acme-le-weekly-budget", c.ACMELEWeeklyBudget},
 		{"--limit-enroll-hour", c.LimitEnrollHour},
 		{"--limit-enroll-minute", c.LimitEnrollMinute},
 	} {

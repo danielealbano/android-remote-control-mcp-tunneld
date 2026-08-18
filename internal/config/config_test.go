@@ -62,7 +62,6 @@ func validCfg(t *testing.T) ServeCmd {
 		ACMECooldownDefault:    time.Hour,
 		ACMEBackoffInitial:     time.Minute,
 		ACMEBackoffMax:         6 * time.Hour,
-		ACMELEWeeklyBudget:     50,
 		ACMERenewMargin:        48 * time.Hour,
 		IssuePerWeek:           3,
 		LimitTrafficDay:        "1gb",
@@ -248,7 +247,6 @@ func TestValidateRejectsZeroIntegerLimits(t *testing.T) {
 		func(c *ServeCmd) { c.LimitConnRate = 0 },
 		func(c *ServeCmd) { c.IssuePerWeek = 0 },
 		func(c *ServeCmd) { c.LimitStreamPending = 0 },
-		func(c *ServeCmd) { c.ACMELEWeeklyBudget = 0 },
 	}
 	for i, m := range mut {
 		c := validCfg(t)
