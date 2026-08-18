@@ -100,8 +100,12 @@ func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string,
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(ds, client); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, ds); done <- struct{}{} }()
+	// Wait for BOTH copy directions to exit before returning: `client` is the mesh HTTP/2 response writer,
+	// which MUST NOT be written after the handler returns. The first direction to finish triggers ds.Close
+	// (cascading the phone side); the frontend teardown EOFs the request body, so the other copy exits too.
 	<-done
 	_ = ds.Close()
+	<-done
 	_ = client.Close()
 	return nil
 }

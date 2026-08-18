@@ -140,8 +140,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		end.Event = "end"
 		end.CloseReason = reason
 		end.EndedAt = e.now()
-		end.BytesIn = as.bytesIn
-		end.BytesOut = as.bytesOut
+		end.BytesIn = atomic.LoadInt64(&as.bytesIn)
+		end.BytesOut = atomic.LoadInt64(&as.bytesOut)
 		e.logs.PutConnLogPublic(context.Background(), end)
 	}
 	_ = client.Close()
@@ -184,54 +184,68 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID strin
 }
 
 // splice copies bytes both directions with byte accounting (day/week traffic) + bandwidth pacing +
-// idle-timeout policy, returning the close reason.
+// idle-timeout policy, returning the close reason. It waits for BOTH copy goroutines to exit before
+// returning (so no goroutine touches the stream or the byte counters after handleTunnel reads them); a
+// watcher closes both sides on ctx-cancel (eviction) or idle timeout, which unblocks the copies.
 func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.ReadWriteCloser, as *activeStream) string {
-	var once sync.Once
+	var reasonOnce sync.Once
 	reason := store.CloseClientClose
-	setReason := func(r string) { once.Do(func() { reason = r }) }
+	setReason := func(r string) { reasonOnce.Do(func() { reason = r }) }
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() { _ = far.Close(); _ = client.Close() })
+	}
 
 	done := make(chan struct{}, 2)
 	// client → phone (in, from the peer's perspective).
 	go func() {
-		n := e.pacedCopy(ctx, name, "in", far, client, as, &as.bytesIn)
-		if n == quotaHit {
+		if e.pacedCopy(ctx, name, "in", far, client, as, &as.bytesIn) == quotaHit {
 			setReason(store.CloseQuotaExhausted)
 		}
 		done <- struct{}{}
 	}()
 	// phone → client (out).
 	go func() {
-		n := e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut)
-		if n == quotaHit {
+		if e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut) == quotaHit {
 			setReason(store.CloseQuotaExhausted)
 		}
 		done <- struct{}{}
 	}()
 
-	idle := time.NewTicker(e.idlePoll())
-	defer idle.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			setReason(store.CloseEvicted)
-			_ = far.Close()
-			_ = client.Close()
-			return reason
-		case <-done:
-			_ = far.Close()
-			_ = client.Close()
-			return reason
-		case <-idle.C:
-			last := as.lastAct.Load()
-			if e.cfg.IdleTimeout > 0 && e.now().UnixNano()-last > int64(e.cfg.IdleTimeout) {
-				setReason(store.CloseIdleTimeout)
-				_ = far.Close()
-				_ = client.Close()
-				return reason
+	// Policy watcher: closes both sides on eviction (ctx cancel) or idle timeout, then exits; otherwise it
+	// exits once signalled after both copies finish.
+	stopWatch := make(chan struct{})
+	watchExited := make(chan struct{})
+	go func() {
+		defer close(watchExited)
+		idle := time.NewTicker(e.idlePoll())
+		defer idle.Stop()
+		for {
+			select {
+			case <-stopWatch:
+				return
+			case <-ctx.Done():
+				setReason(store.CloseEvicted)
+				closeBoth()
+				return
+			case <-idle.C:
+				last := as.lastAct.Load()
+				if e.cfg.IdleTimeout > 0 && e.now().UnixNano()-last > int64(e.cfg.IdleTimeout) {
+					setReason(store.CloseIdleTimeout)
+					closeBoth()
+					return
+				}
+				as.recent.Store(0) // reset the rolling window
 			}
-			as.recent.Store(0) // reset the rolling window
 		}
-	}
+	}()
+
+	<-done       // one direction finished (EOF, quota, or a closed side)
+	closeBoth()  // cascade the other direction
+	<-done       // wait for it to exit before returning
+	close(stopWatch)
+	<-watchExited // all writers (copies + watcher) have stopped; reason is now safe to read
+	return reason
 }
 
 const quotaHit = -1

@@ -2544,3 +2544,28 @@ gates, and validate all touched Mermaid diagrams.
   `.<tunnel-domain>`; reject an SNI that is not a single label under the tunnel domain); `server.Run`
   wires `cfg.TunnelDomain`. The edge unit `baseConfig()` gained `TunnelDomain` (its SNIs were already
   FQDNs).
+
+- **US9/US14 (mesh peer cert verification fix):** the US9 mesh client TLS config verified the peer mesh
+  cert by HOSTNAME against the dial address, but the mesh cert's SAN is the node id (a node dials the
+  advertise address held in the trusted node registry), so cross-node mesh mTLS failed with `bad
+  certificate` (the mesh unit tests used bare `tls.Config{}`, never a real nodeID-SAN cert). Fixed:
+  `meshCertHolder.clientTLS` now uses `InsecureSkipVerify:true` + a `VerifyPeerCertificate`
+  (`meshPeerVerifier`) that verifies the peer cert chains to the internal CA AND carries the mesh-role
+  marker — hostname verification is intentionally skipped (the identity is the nodeID; the dial address is
+  trusted internal state). The e2e cross-node roundtrip surfaced it.
+- **US9/US11/US14 (mesh + edge splice teardown `-race` fixes):** two latent data races the e2e roundtrip
+  surfaced under `-race`. (a) `bridgeAdapter.BridgeMesh` (server) returned after ONE copy direction
+  finished, leaving the other `io.Copy` still writing the mesh HTTP/2 responseWriter after the handler
+  returned; fixed to close the phone stream and wait for BOTH copies before returning. (b) `edge.splice`
+  returned after ONE direction while the other `pacedCopy` goroutine still wrote the byte counters that
+  `handleTunnel` then read; rewritten with a policy watcher (ctx-cancel/idle-timeout) that closes both
+  sides + a wait-for-both-copies before return, and the counter reads in `handleTunnel` made atomic.
+
+- **US14 Task 14.2 (e2e replicas run in-process):** the e2e tier runs the two replicas as in-process
+  `server.Run` instances sharing ONE testcontainers Valkey + MinIO + Pebble/challtestsrv (rather than
+  building + running the `tunneld` Docker image via testcontainers). This gives identical cross-node mesh
+  coverage (two real assembled servers on distinct loopback ports + mesh-advertise addresses, meshing over
+  mTLS through the shared registry) without a Dockerfile build in the test path. The raw-TLS frontend
+  still connects directly to a replica's public port (no proxy anywhere), per the plan. Scenarios covered:
+  cross-node mesh, same-node fast path, ACME CA spillover (LE unreachable → GTS), per-tunnel quota
+  exhaustion, and idle-stream eviction.
