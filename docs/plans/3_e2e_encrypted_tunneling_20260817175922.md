@@ -2130,13 +2130,13 @@ NEVER a CI-with-device gate. Farm-vs-dedicated-device deferred.
 
 ## User Story 15: Deployment stack + documentation
 
-- [ ] **User Story 15 complete**
+- [x] **User Story 15 complete**
 
 Rework the deployment for the no-proxy E2E architecture and rewrite the canonical docs + `project.md`
 invariant amendments.
 
 ### Acceptance Criteria
-- [ ] `deploy/` compose has NO Traefik/Cloudflare and exactly ONE `tunneld` service (user decision)
+- [x] `deploy/` compose has NO Traefik/Cloudflare and exactly ONE `tunneld` service (user decision)
   binding :443 directly, plus Valkey and MinIO (a LOCAL plain-S3 stand-in — production targets any
   plain S3 provider; pin a recent release with lifecycle support; no conditional-write feature is
   needed), the
@@ -2144,21 +2144,21 @@ invariant amendments.
   scrape targets adapted, UIs on 127.0.0.1-only host ports — with Traefik gone nothing else may publish
   them). Multi-replica/mesh topologies are exercised by the e2e tier and documented for multi-host
   deployments.
-- [ ] The Traefik tooling dies with Traefik: the `traefik-config` Makefile target and the
+- [x] The Traefik tooling dies with Traefik: the `traefik-config` Makefile target and the
   `.github/workflows/ci.yml` "traefik config render" step are removed (the CI jobs otherwise stand —
   ubuntu runners already provide the Docker the container-backed test tiers need).
-- [ ] `deploy/.env.example` documents the new required config (S3, mesh, attestation, ACME, DNS provider)
+- [x] `deploy/.env.example` documents the new required config (S3, mesh, attestation, ACME, DNS provider)
   with PLACEHOLDER values only (`example.test`, `changeme`, `XX`/`YY`).
-- [ ] `docs/PROJECT.md` and `docs/ARCHITECTURE.md` rewritten to the E2E architecture; `docs/PROTOCOL.md`
+- [x] `docs/PROJECT.md` and `docs/ARCHITECTURE.md` rewritten to the E2E architecture; `docs/PROTOCOL.md`
   (US7) is the wire contract; `README.md` updated (DB-IP attribution preserved).
-- [ ] `.claude/rules/project.md` amended: durable S3 state invariant, mTLS auth, no-proxy edge, Valkey
+- [x] `.claude/rules/project.md` amended: durable S3 state invariant, mTLS auth, no-proxy edge, Valkey
   control plane, attestation gate, new commit scopes, updated Standard Commands — kept CONCISE
   (references the canonical docs, does not duplicate them).
-- [ ] All Mermaid in touched docs validates (US16).
+- [x] All Mermaid in touched docs validates (US16).
 
 ### Task 15.1: Compose + env
-- [ ] **Task 15.1 complete**
-- [ ] **File**: `deploy/docker-compose.yml` — remove Traefik and the P1 `tunneld-2`; ONE `tunneld`
+- [x] **Task 15.1 complete**
+- [x] **File**: `deploy/docker-compose.yml` — remove Traefik and the P1 `tunneld-2`; ONE `tunneld`
   service publishing :443 (the cross-node/mesh path is exercised by the e2e tier; real multi-replica
   deployments run one replica per host); add MinIO (pinned) + Valkey; wire the internal network,
   S3 env, attestation files, ACME/DNS env; RETAIN the `fetcher` service unchanged (Spamhaus DROP ban
@@ -2172,47 +2172,47 @@ invariant amendments.
   expiration. The deployment doc documents the PRE-GO-LIVE S3 PROVIDER PROBE (user decision): before
   pointing production at any plain-S3 provider, run a read-after-write validation (PUT → immediate GET
   → overwrite-PUT → GET returns the newest body) — the write-verify name claim relies on it.
-- [ ] **File**: `deploy/.env.example` AND `deploy/tunneld.env.example` (the `env_file:` the tunneld
+- [x] **File**: `deploy/.env.example` AND `deploy/tunneld.env.example` (the `env_file:` the tunneld
   services load) — rewrite BOTH to the new `TUNNELD_*` surface with placeholders only; every P1-only
   variable (incl. `TUNNELD_CLIENT_IP_HEADER`) removed; document that real values live
   in the operator's private env. CAA guidance (the three `issue` records incl. LE
   `accounturi`/`validationmethods`) documented as an operator DNS step (NOT enforced in code).
-- [ ] **File**: `deploy/ntfy/server.yml` + the ntfy-alertmanager bridge config — decouple from Traefik
+- [x] **File**: `deploy/ntfy/server.yml` + the ntfy-alertmanager bridge config — decouple from Traefik
   (base-url + listener adapted to the localhost-published port model above).
-- [ ] **File**: `deploy/prometheus/*`, `deploy/grafana/*` — adapt to the new metric families.
-- [ ] **File**: `Makefile` + `.github/workflows/ci.yml` — remove the `traefik-config` target (and its
+- [x] **File**: `deploy/prometheus/*`, `deploy/grafana/*` — adapt to the new metric families.
+- [x] **File**: `Makefile` + `.github/workflows/ci.yml` — remove the `traefik-config` target (and its
   membership in the static-checks aggregate) and the CI "traefik config render" step; delete the
   now-unreferenced `deploy/traefik/` config tree with the compose rework above.
 
 ### Task 15.2: Canonical docs
-- [ ] **Task 15.2 complete**
-- [ ] **File**: `docs/PROJECT.md` — rewrite: what the E2E tunnel is, topology (no proxy), the attestation
+- [x] **Task 15.2 complete**
+- [x] **File**: `docs/PROJECT.md` — rewrite: what the E2E tunnel is, topology (no proxy), the attestation
   gate, caps, CAs, durable vs transient state, non-goals.
-- [ ] **File**: `docs/ARCHITECTURE.md` — rewrite: package map (new + removed), the SNI edge, the phone
+- [x] **File**: `docs/ARCHITECTURE.md` — rewrite: package map (new + removed), the SNI edge, the phone
   control plane, the mesh, bridge fast-path, enrollment + renewal-with-rotation, ACME spillover +
   migration, the durable store, Valkey control plane, shutdown order. Include validated Mermaid.
-- [ ] **File**: `README.md` — update overview + quickstart; preserve the DB-IP Country Lite CC BY 4.0
+- [x] **File**: `README.md` — update overview + quickstart; preserve the DB-IP Country Lite CC BY 4.0
   attribution.
 
 ### Task 15.3: project.md amendments
-- [ ] **Task 15.3 complete**
-- [ ] **File**: `.claude/rules/project.md` — amend invariants (durable S3 name registry + conn logs; mTLS
+- [x] **Task 15.3 complete**
+- [x] **File**: `.claude/rules/project.md` — amend invariants (durable S3 name registry + conn logs; mTLS
   identity + mesh-role separation; no-proxy raw :443 edge; attestation-gated enrollment; E2E-only; wire
   v2), the tech-stack table (lego, AWS S3 SDK, MinIO, Pebble; remove Cloudflare/Traefik reference and
   `coder/websocket` as the transport), Standard Commands (MinIO/Pebble notes), and Commit Scopes (from
   US13). Keep it CONCISE — reference the canonical docs.
 
 ### Definition of Done
-- [ ] Compose without proxy: ONE `tunneld` on :443, Valkey + MinIO (plain-S3 stand-in) + fetcher
+- [x] Compose without proxy: ONE `tunneld` on :443, Valkey + MinIO (plain-S3 stand-in) + fetcher
   retained + observability on 127.0.0.1-only ports; BOTH env examples rewritten with placeholders; the
   pre-go-live S3 provider probe documented.
-- [ ] `traefik-config` Makefile target, the CI traefik step, and `deploy/traefik/` removed; ntfy +
+- [x] `traefik-config` Makefile target, the CI traefik step, and `deploy/traefik/` removed; ntfy +
   bridge configs decoupled from Traefik.
-- [ ] PROJECT/ARCHITECTURE rewritten; README updated (attribution preserved); PROTOCOL from US7. The
+- [x] PROJECT/ARCHITECTURE rewritten; README updated (attribution preserved); PROTOCOL from US7. The
   documented retention policy (registry indefinite / conn logs 90d / rejected-enrollment evidence 30d /
   content never) lands in PROJECT.md.
-- [ ] `project.md` invariants/tech-stack/scopes/commands amended, concise.
-- [ ] Mermaid in touched docs validated in US16.
+- [x] `project.md` invariants/tech-stack/scopes/commands amended, concise.
+- [x] Mermaid in touched docs validated in US16.
 
 ---
 

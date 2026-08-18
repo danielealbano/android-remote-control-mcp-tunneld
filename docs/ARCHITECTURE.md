@@ -1,258 +1,159 @@
 # tunneld — Architecture
 
-System map of the tunneld process and its packages. Read [`PROJECT.md`](PROJECT.md) first for the
-topology and product decisions; [`PROTOCOL.md`](PROTOCOL.md) is the canonical wire contract.
+This document maps the E2E-encrypted tunnel internals. The operational overview is
+[`PROJECT.md`](PROJECT.md); the wire contract is [`PROTOCOL.md`](PROTOCOL.md); the decision record is
+[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md).
 
 ## 1. Process anatomy
 
-One process (`tunneld serve`) runs two HTTP listeners plus the node-serving loop:
-
-- **Public listener** (`--listen`, behind the proxy): Host-dispatch mux → enroll handler
-  (`<enroll-host>`, `POST /enroll`), WebSocket manager (`/connect` on any per-tunnel host), or the
-  public ingress pipeline (everything else).
-- **Internal listener** (`--internal-listen`, never proxied): `/metrics`, `/healthz`,
-  `/admin/tunnels`.
-- **Node loop** (`transport.ServeNode`): subscribes to `req:{nodeID}` and bridges each delivered
-  request to the locally-held phone WebSocket.
+`tunneld serve` assembles everything in `server.Run` (constructor DI — no package globals) and runs it
+under one `errgroup`. The public edge is a raw TCP `:443` listener; the phone control plane, the replica
+mesh, and the internal metrics listener are separate servers.
 
 ```mermaid
-flowchart TB
-  subgraph PROC["tunneld process (one replica, nodeID = crypto/rand)"]
-    MUX["server.NewMux (Host dispatch)"]
-    ENR["ingress.EnrollHandler (POST /enroll)"]
-    ING["ingress.Handler (public pipeline)"]
-    WSM["wsconn.Manager (/connect + Conns)"]
-    SN["transport.ServeNode (req:{nodeID})"]
-    INT["metrics.Handler (/metrics /healthz /admin/tunnels)"]
-    BAN["ban.Engine + Watch (atomic snapshot)"]
-    REG["router.Registry (route:{name})"]
-    BKT["limit.BucketRegistry (ONE instance)"]
-    REC["metrics.PromRecorder (observ.Recorder)"]
-  end
-  RDS[("Redis")]
+flowchart TD
+  run["server.Run (assembly + errgroup)"]
+  edge["edge: raw :443 SNI edge (ClientHello peek + JA4)"]
+  enroll["enroll: attested enrollment (Phase 1)"]
+  phone["phoneconn: mTLS control plane (/control, /data, /issue)"]
+  mesh["mesh: replica mTLS HTTP/2 mesh"]
+  acme["acme: LE to GTS to ZeroSSL chain"]
+  attest["attest: Android key-attestation verifier"]
+  ca["ca: internal CA (identity + mesh-role certs)"]
+  router["router: Valkey route + node registry"]
+  limit["limit: rate / traffic / concurrency / ACME budget"]
+  store["store: durable S3 registry + logs + evidence"]
+  metrics["metrics: internal listener + PromRecorder"]
 
-  MUX --> ENR
-  MUX --> ING
-  MUX --> WSM
-  ING -- "Lookup / RoundTrip" --> RDS
-  SN -- "RouteLocal" --> WSM
-  SN <--> RDS
-  REG <--> RDS
-  WSM --> REG
-  ING --> BAN
-  ENR --> BAN
-  WSM --> BAN
-  ING --> BKT
-  WSM --> BKT
-  ING --> REC
-  ENR --> REC
-  WSM --> REC
-  REC -- "async tcnt flusher" --> RDS
-  INT -- "PING / TopN" --> RDS
+  run --> edge
+  run --> enroll
+  run --> phone
+  run --> mesh
+  run --> metrics
+  edge --> router
+  edge --> phone
+  edge --> mesh
+  enroll --> attest
+  enroll --> ca
+  enroll --> acme
+  enroll --> store
+  phone --> router
+  phone --> store
 ```
-
-Wiring happens exclusively in `server.Run` (constructor DI, `errgroup`): Redis client, CA, ban
-engine (initial load is SYNCHRONOUS, before any listener accepts — "ban-first" holds from the very
-first request), routing registry, ONE `limit.BucketRegistry` (shared by the ingress paced reader
-and the WS leg), the `observ.Recorder` implementation, and both HTTP servers.
 
 ### Package map
 
-| Package | Responsibility |
+| Package | Role |
 |---|---|
-| `cmd/tunneld` | kong CLI (`serve` / `version`), signal handling |
-| `internal/config` | flag surface + `Validate()`; `ParseByteSize` (binary) / `ParseBitrate` (decimal) |
-| `internal/logging` | slog fan-out; composite `--log` sinks (std severity-split, lumberjack files) |
-| `internal/ban` | ban-file parser, `bart` LPM engine (atomic snapshot swap), DB-IP CSV expansion, mtime watcher |
-| `internal/limit` | Redis fixed windows (`rl:*`), enroll quota, concurrency guard (`conc:*`), token buckets + registry |
-| `internal/ca` | CA signer (`SignCSR`, P-256 only), name generation (reserved-label skip), cert/possession verification |
-| `internal/clientip` | `TrustedIP` — the ONLY source of the abuse-control IP (right-most token) |
-| `internal/router` | `route:{name}` bind/heartbeat/unbind/lookup; fingerprint guard; connID ownership |
-| `internal/transport` | `RoundTrip` (subscribe-before-publish) + `ServeNode` per-message loop |
-| `internal/wire` | frame codec (`ChunkSize` 32768), envelopes, header adapters, golden fixtures |
-| `internal/wsconn` | `/connect` handshake, `Conn` (Do/read-pump), heartbeat/keepalive, `EvictBanned` |
-| `internal/ingress` | public pipeline, allowlist, header sanitizer, paced body reader, enroll handler |
-| `internal/server` | assembly (`Run`), Host-dispatch mux, graceful lifecycle |
-| `internal/observ` | the `Recorder` interface (+ `Nop`) — the metrics boundary handlers depend on |
-| `internal/metrics` | Prometheus registry, internal HTTP server, `PromRecorder` (+ async `tcnt` flusher) |
-| `internal/admin` | `tcnt:{name}` counters (single-Lua HINCRBY+PEXPIRE) + `/admin/tunnels` TopN |
-| `internal/caplog` | deduped cap-hit logger (first hit immediate, ≤1 summary/min, lazy flush) |
-| `internal/tunneltest` | shared test fakes: capturing `Recorder`, raw-WS `FakePhone` |
-| `client` | Go phone-side client: `Enroll`, `Connect` (challenge-response), backend bridge, backoff reconnect |
+| `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
+| `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, bridge (fast path + mesh), connection policy (idle/min-rate/eviction) |
+| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/data` dial-back, `/issue` cert generation |
+| `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
+| `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
+| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego DNS-01, spillover, cooldown/backoff, weekly LE budget, self-heal) |
+| `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
+| `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
+| `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
+| `internal/limit` | rate windows, enroll quota, global stream counter, per-process bandwidth buckets, ACME budget |
+| `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
+| `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
+| `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
+| `internal/wire` | v2 control-frame codec + mesh stream header |
+| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/admin/tunnels` + deduped cap logger + the Recorder interface |
+| `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
+| `internal/tunneltest` | shared test fakes + the testcontainers harness |
 
-## 2. Public request lifecycle (cross-replica)
-
-The ingress pipeline enforces, in order: trusted client IP (fail-closed `400`) → ban check
-(`403`) → mTLS-header rejection (`400`) → route lookup (`404`) → tunnel-ban gate (`403`) →
-allowlist (`404`/`405`) → header/body size caps (`431`/`413`) → per-IP rps/rpm (`429`) →
-per-tunnel concurrency (`429`) → end-to-end deadline over the **paced** body read (`408` on
-expiry) and the Redis round trip (`504` timeout, `502` publish failure / tunnel gone). There is
-deliberately NO Authorization check at any step.
+## 2. Public connection lifecycle
 
 ```mermaid
 sequenceDiagram
-  participant C as MCP client
-  participant FE as tunneld frontend (replica M)
-  participant R as Redis
-  participant NO as tunneld node (replica N)
-  participant PH as Phone WS
-
-  C->>FE: POST /mcp (Host: name.tunnel-domain)
-  FE->>FE: trusted IP → ban → mTLS-header reject
-  FE->>R: Lookup route:{name} → node N + fingerprint
-  FE->>FE: tunnel-ban → allowlist → caps → rps/rpm → concurrency
-  FE->>FE: paced body read (up-bucket, ≤ChunkSize slices)
-  FE->>R: SUBSCRIBE resp:{reqid} (before publish)
-  FE->>R: PUBLISH req:{N} (ReqEnvelope, PacedByNode=M)
-  R->>NO: req:{N} message
-  NO->>NO: RouteLocal → Conn.Do
-  NO->>PH: REQUEST_HEAD + BODY_CHUNKs (paced unless PacedByNode==N) + REQUEST_END
-  PH->>NO: RESPONSE_HEAD + BODY_CHUNKs (down-bucket paced) + RESPONSE_END
-  NO->>R: PUBLISH resp:{reqid} (RespEnvelope)
-  R->>FE: resp:{reqid} message
-  FE->>C: status + sanitized headers + body
+    participant C as MCP client
+    participant A as tunneld A (entry)
+    participant B as tunneld B (owner)
+    participant P as Phone
+    C->>A: TCP connect :443, TLS ClientHello (SNI name.tunnel-domain)
+    A->>A: ban check, peek SNI/JA4, resolve route (Valkey)
+    alt owner is A (fast path)
+        A->>P: OPEN (dial-back)
+        P-->>A: /data stream
+    else owner is B (mesh)
+        A->>B: connID-checked mesh stream
+        B->>P: OPEN (dial-back)
+        P-->>B: /data stream
+    end
+    C->>P: TLS handshake + app bytes (opaque, spliced through)
+    P-->>C: TLS response (opaque, spliced back)
 ```
 
-Key properties:
+The entry node accounts bytes (day/week traffic), paces per-process bandwidth, and enforces the
+connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
+Pebble/WebPKI cert — tunneld never sees plaintext.
 
-- **Subscribe-before-publish**: the frontend confirms the `resp:{reqid}` subscription is active
-  before publishing, so a fast response can never be lost; the subscription is closed on every
-  exit path.
-- **One end-to-end deadline** (`--limit-request-timeout`) covers the paced body read AND the round
-  trip — a client dribbling its body cannot hold a concurrency slot indefinitely.
-- **Error discrimination**: `ErrTimeout` → `504`; publish failure → `502`; envelope
-  `ErrCode="tunnel_gone"` → `502 tunnel_offline`; node-recorded synthetics
-  (`response_too_large`, `phone_error`) pass through as-is without re-attribution.
-- `ServeNode` runs each message's handler in its own goroutine under a per-message
-  `WithTimeout` ctx; the response is published under the base ctx so a timed-out handler's
-  synthetic reply is still delivered.
+## 3. Enrollment, issuance, renewal
 
-## 3. `/connect` lifecycle
-
-```mermaid
-sequenceDiagram
-  participant PH as Phone
-  participant WS as wsconn.Manager
-  participant R as Redis
-
-  PH->>WS: GET wss://name.tunnel-domain/connect
-  WS->>WS: TrustedIP → ban.Match → pre-auth semaphore (503) → connect rate (429) → host-suffix (404)
-  WS->>PH: WS accept + CHALLENGE {nonce}
-  PH->>WS: AUTH {cert b64DER, signature}
-  WS->>WS: verify chain+validity → possession → CN == Host name
-  WS->>WS: ban.MatchTunnel(name, fingerprint)
-  WS->>R: Bind route:{name} = {node, fingerprint, connID} (Lua fingerprint guard)
-  WS->>WS: conns.Store(name) → WSConnect → serve
-  loop every route-ttl/3
-    WS->>R: Heartbeat(name, connID) → refreshed | not-owner | missing
-  end
-```
-
-- All pre-upgrade checks run BEFORE the WebSocket is allocated, so unauthenticated floods never
-  hold sockets; the pre-auth semaphore (`--limit-connect-pending`) bounds concurrent handshakes.
-- **Fingerprint guard**: `route:{name}` records the cert fingerprint; a bind for a name held by a
-  DIFFERENT fingerprint is refused (distinct close + loud log). Same-fingerprint rebinds (phone
-  reconnecting via any replica) are permitted.
-- **connID ownership**: `Heartbeat`/`Unbind` mutate `route:{name}` only while its stored per-connection
-  `connID` still matches — a stale connection's delayed teardown can never clobber the new
-  connection's route, even on the same node.
-- **Heartbeat three-state**: `refreshed` (still owner) · `not-owner` (superseded — close the local
-  conn, do NOT unbind) · `missing` (TTL lapsed, e.g. Redis blip — SELF-HEAL by re-binding, since a
-  live WS must never stay permanently unrouteable).
-- **Liveness**: native WS pings every `--ping-interval` (Cloudflare-safe); a dead peer tears the
-  conn down. There is no idle disconnect.
-- **Live revocation**: the ban watcher's reload hook (`EvictBanned`) drops any live conn whose
-  `(name, fingerprint)` became banned — required precisely because connections never idle out.
-- **Multiplexing**: up to `--limit-concurrent` `Do` goroutines share one WS. `pending` is a
-  `sync.Map` keyed by `reqid`; every data-frame write holds the single `writeMu` (released between
-  frames so pings and other requests interleave); the blocking bandwidth `WaitN` is NEVER held
-  under `writeMu`. The single read-pump owns reassembly, clamps untrusted phone-sent status codes,
-  and enforces `--limit-response`.
+Enrollment is two-phase (see [`PROTOCOL.md`](PROTOCOL.md) §2): Phase 1 (`/enroll`, server-TLS) verifies
+attestation + key binding, write-verify-claims a name in S3, and signs a bootstrap identity cert; Phase
+2 (`/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
+`<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/issue` endpoint, triggered by a
+`RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
+The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
+certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on schedule.
 
 ## 4. Bandwidth model
 
-Per-tunnel, per-direction token buckets (`rate = burst = 1 s` of `--limit-bandwidth`), **per
-process**, from ONE `BucketRegistry` shared by the ingress and the WS manager (idle pairs are
-evicted; callers acquire in ≤ `ChunkSize` slices):
+Per-tunnel, per-direction token buckets are **per-PROCESS** (cross-replica exactness was rejected — it
+would put a synchronous Valkey call on every 32 KiB slice). The edge paced body-reader and the bridge
+share ONE `BucketRegistry`; byte ACCOUNTING (day/week) is recorded for every chunk via a TTL'd Lua
+INCR. The blocking `WaitN` is never held under a write mutex. `wire.ChunkSize` = 32768 is the paced-copy
+slice size.
 
-- **Uploads**: the ingress reads the request body through a paced reader (TCP backpressure slows
-  the client). It stamps `PacedByNode = <its nodeID>`; when the WS-owning node is the SAME
-  process, `Conn.Do` skips the duplicate token drain (bytes were already drawn from this very
-  bucket) but still records byte metrics for every chunk. A foreign `PacedByNode` IS paced at the
-  WS leg — the owning node is the authoritative choke point.
-- **Downloads**: the read-pump drains the down-bucket per `RESPONSE_BODY_CHUNK` — including chunks
-  that arrive after a response is resolved over `--limit-response`, which are still paced +
-  byte-accounted while drained (never at wire speed). Client-side egress (writing the assembled
-  response to the public client) is deliberately unpaced — it was already produced at the paced
-  phone-leg rate.
-- Cross-replica exactness was explicitly rejected: worst case aggregate ingress is replicas ×
-  rate, while true tunnel throughput stays 1 × rate at the WS leg.
+## 5. Valkey state (all transient — TTL atomic with the write, single Lua)
 
-## 5. Redis state (all transient — TTL atomic with the write, single Lua)
+Routing (`route:{name}` → owner/fp/connID/epoch, owner-conditional teardown on `connID`), node registry
+(`node:{id}` → advertise), rate-limit windows, the global concurrency counter, per-tunnel counters
+(`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff/budget. No permanent
+Valkey state; a stale connection never clobbers a re-bound route.
 
-| Key / channel | Content | TTL |
-|---|---|---|
-| `route:{name}` | `{node, fingerprint, connID}` | `--route-ttl` (30s), heartbeat-refreshed at TTL/3 |
-| `rl:{scope}:{ip}:{windowStart}` | fixed-window counter (`rps`, `rpm`, `connect`, enroll scopes) | 2 × window |
-| `conc:{name}` | in-flight request count (Lua: INCR → over-max ⇒ DECR+deny, else PEXPIRE) | 2 × `--limit-request-timeout` |
-| `tcnt:{name}` | hash `bytes_in` / `bytes_out` / `requests` (async flusher, Lua HINCRBY+PEXPIRE) | 1 h |
-| `req:{node}` / `resp:{reqid}` | pub/sub channels (envelopes: 4-byte BE header-len + JSON + raw body) | n/a |
+## 6. Durable S3 state
 
-No permanent Redis state exists, ever; Redis runs with persistence disabled in the compose stack.
+`internal/store` uses plain `GetObject`/`PutObject`/`DeleteObject` only (no conditional writes): the name
+registry (`names/<name>`), connection logs (`tunnel-logs/<name>/…`), and rejected-enroll evidence
+(`rejected-enroll/…`). Name uniqueness is the **write-verify claim**: GET (absent) → PUT a claim nonce
+under a hard timeout (SDK retries disabled) → settle wait (strictly > the PUT timeout) → GET-verify the
+nonce. Object-lifecycle expiration (logs 90d, rejected-enroll 30d) is applied programmatically at
+startup by `EnsureLifecycles`.
 
-## 6. Ban engine
+## 7. Ban engine
 
-`ban.Engine` holds an `atomic.Pointer` to an immutable snapshot: one `bart` LPM table (ip/cidr +
-country-expanded prefixes, payload = source file/line/reason) plus name/fingerprint sets. Reload
-(mtime poll, `--ban-poll`) parses all files, expands `country` entries from the DB-IP CSV
-(range → prefixes via `netipx`), builds a FRESH snapshot, and swaps it in — the hot path is
-lock-free, a load error keeps the previous snapshot, and absent files are skip-and-warn (first
-deploy: the fetcher's output does not exist yet). A successful reload fires `EvictBanned`.
+`internal/ban` parses the union of `--ban-file`s into an atomic-swap longest-prefix-match table over
+`netip`; `country XX` entries expand from the DB-IP CSV at reload. `ban.Watch` hot-reloads on mtime and
+fires an `EvictBanned` hook so a newly-banned tunnel's live phone connection is dropped. The ban check
+is the FIRST handler-level check on every ingress edge.
 
-## 7. Observability wiring
+## 8. Observability wiring
 
-Handlers depend on the `observ.Recorder` interface; `metrics.PromRecorder` implements it:
-
-- `Reject(reason, tunnel, ip)` → `tunneld_rejections_total{reason}` + the deduped cap-hit log.
-  Reason strings are the LITERAL registered label set — every label has a known writer.
-- `Request`/`Bytes` → aggregate Prometheus families AND an in-process accumulator that a
-  background flusher drains to `tcnt:{name}` (~5 s) — Redis is never on the data plane.
-- WS lifecycle → connects/disconnects{reason} + the derived `tunneld_tunnels_connected` gauge.
+`observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
+The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`, and
+`/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher).
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
-Every label below has a known writer edge; no other reason string is ever passed to `Reject`. The
-`banned_*` reasons come from `ban.Source.Reason.String()`.
+`ban`, `no-route`, `conn-rate`, `max-clients`, `handshake-timeout`, `stream-cap`, plus the enrollment
+rejection labels (attestation + `csr-mismatch`) recorded as durable evidence. Every reason label has
+exactly the writers the code emits — never abbreviate or invent reason strings at call sites.
 
-| Edge | Reasons |
-|---|---|
-| Public ingress (`internal/ingress/handler.go`) | `missing_client_ip`, `banned_ip`, `banned_cidr`, `banned_country`, `banned_tunnel_name`, `banned_tunnel_fingerprint`, `public_mtls_header`, `unknown_host`, `method_denied`, `path_denied`, `headers_too_large`, `body_too_large`, `rate_rps`, `rate_rpm`, `concurrency`, `body_read_timeout`, `timeout`, `tunnel_offline` |
-| Enroll (`internal/ingress/enroll.go`) | `missing_client_ip`, `banned_*`, `enroll_rate`, `enroll_body_too_large`, `enroll_malformed_csr`, `enroll_unsupported_key` |
-| `/connect` (`internal/wsconn/manager.go`) | `missing_client_ip`, `banned_*`, `connect_pending`, `rate_connect`, `connect_auth_failed`, `fingerprint_conflict` |
-| Read-pump (`internal/wsconn/conn.go`) | `response_too_large` |
-
-Metric families carry NO per-tunnel labels; `/admin/tunnels` is the per-tunnel view.
-
-## 8. Shutdown
+## 9. Shutdown
 
 ```mermaid
 flowchart LR
-  A["ctx cancel (SIGINT/SIGTERM)"] --> B["publicSrv.Shutdown + internalSrv.Shutdown<br/>(≤ --shutdown-grace; node path still ALIVE on drainCtx<br/>so in-flight tunnel requests complete)"]
-  B --> C["drainCancel: stop ServeNode + tcnt flusher"]
-  C --> D["manager.Shutdown: teardown every Conn<br/>(close WS, conn-conditional Unbind, fail pending 502)<br/>+ wait in-flight HandleConnect goroutines"]
-  D --> E["caplog.Flush + Redis close"]
+  cancel["ctx cancel"] --> close["close raw :443 listener (stop new public conns)"]
+  close --> drain["Shutdown enroll / control / mesh / internal servers"]
+  drain --> group["errgroup unwinds: schedulers + flusher + watchers on the drain ctx"]
+  group --> ttl["Valkey route/node entries expire by TTL (implicit deregistration)"]
 ```
 
-The node-serving path runs on a separate `drainCtx` (derived from `Background`, not the parent
-ctx) precisely so the listener drain can complete in-flight round trips before the WebSockets are
-torn down. Clean shutdown leaves no `route:{name}` behind. Hijacked WS handlers are not tracked by
-`http.Server.Shutdown`, so the manager tracks them itself (`connWG` + a closed-flag check that
-covers the bind-during-shutdown race).
+## 10. Configuration
 
-## 9. Configuration
-
-The full flag table (every flag has a `TUNNELD_*` env twin) lives in `internal/config/config.go`;
-`Validate()` fail-fasts on every cross-field invariant — mandatory `--client-ip-header`, the
-bandwidth floor (`≥ 32768 B/s = wire.ChunkSize`, decimal-bit parsing), Cloudflare-compatible
-durations (`--ping-interval ≤ 90s`, `--limit-request-timeout < 100s`), integer limits ≥ 1, and
-parseability of every size/bitrate/log spec.
+Config is a kong flag surface with `TUNNELD_*` env twins (note `--s3-*` → `TUNNELD_S_3_*`), validated
+fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are DECIMAL bits
+(`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`.
