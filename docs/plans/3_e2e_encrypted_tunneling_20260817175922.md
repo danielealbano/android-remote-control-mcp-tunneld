@@ -1672,7 +1672,7 @@ assembly ordering).
 
 ## User Story 11: Public edge (SNI peek + JA4), bridge, and server assembly
 
-- [ ] **User Story 11 complete**
+- [x] **User Story 11 complete**
 
 Implement the raw TCP :443 edge (ClientHello peek → SNI/ALPN/JA4), reserved-hostname local TLS
 termination (control/enroll), the bridge abstraction (local fast path vs mesh) with byte accounting +
@@ -1682,35 +1682,35 @@ eviction hook). The concrete `PromRecorder`/registry/admin come from US10 (earli
 constructs them without a forward dependency.
 
 ### Acceptance Criteria
-- [ ] `internal/edge` accepts raw TCP on `--listen`, reads the ClientHello within `--handshake-timeout`,
+- [x] `internal/edge` accepts raw TCP on `--listen`, reads the ClientHello within `--handshake-timeout`,
   extracts SNI + ALPN + TLS version + computes JA4, and applies accept-time checks (peer-IP ban FIRST,
   per-IP connection RATE, `--max-clients`).
-- [ ] Reserved SNIs (`--control-host`, `--enroll-host`) go to the local TLS terminators (phoneconn /
+- [x] Reserved SNIs (`--control-host`, `--enroll-host`) go to the local TLS terminators (phoneconn /
   enroll HTTP handlers); all other SNIs are tunnel names.
-- [ ] For a tunnel SNI: route lookup (`router.LookupRoute`) → tunnel-name+fingerprint ban check on the resolved route → if owner
+- [x] For a tunnel SNI: route lookup (`router.LookupRoute`) → tunnel-name+fingerprint ban check on the resolved route → if owner
   == this node, local bridge; else mesh bridge; unknown route → TCP close. The bridge splices bytes,
   paces via batch-credit, accounts day/week traffic, applies the connection policy (idle/min-rate/evict),
   and writes start/end connection-log events.
-- [ ] `server.Run` assembles all components with constructor DI, starts listeners + schedulers (node
+- [x] `server.Run` assembles all components with constructor DI, starts listeners + schedulers (node
   heartbeat, renewal watcher, ban-reload `EvictBanned` hook), and drains in the correct
   order.
 
 ### Task 11.1: ClientHello peek + JA4
-- [ ] **Task 11.1 complete**
-- [ ] **File**: `internal/edge/clienthello.go` — read the first TLS record without consuming it from the
+- [x] **Task 11.1 complete**
+- [x] **File**: `internal/edge/clienthello.go` — read the first TLS record without consuming it from the
   downstream splice (buffer + replay), parse SNI/ALPN/supported-versions/cipher+extension lists, compute
   the **JA4** fingerprint (SORTED cipher + extension lists — resistant to Chrome's extension-order
   randomization; JA3 is NOT used). Enforce `--handshake-timeout` on the read.
 
 ### Task 11.2: Accept loop + policy
-- [ ] **Task 11.2 complete**
-- [ ] **File**: `internal/edge/accept.go` — the TCP accept loop: peer-IP ban check FIRST, per-IP
+- [x] **Task 11.2 complete**
+- [x] **File**: `internal/edge/accept.go` — the TCP accept loop: peer-IP ban check FIRST, per-IP
   connection RATE (`--limit-conn-rate`), global `--max-clients` ceiling, then the ClientHello peek.
   Reserved SNI → local terminator, HANDING OVER the peeked `ConnMeta` (SNI/ALPN/TLS-version/JA4 + peer
   address) so the phoneconn (US8) and enroll handlers can log it (phone events carry JA4 — the anomaly
   tripwire); tunnel SNI → route lookup → name+fingerprint ban check → bridge path
   (or TCP close on no route / ban). (There is NO per-IP concurrency cap.)
-- [ ] **File**: `internal/edge/policy.go` — per-connection policy timers on the housekeeping tick: idle
+- [x] **File**: `internal/edge/policy.go` — per-connection policy timers on the housekeeping tick: idle
   timeout (`--limit-conn-idle`), min-rate kill past `--limit-conn-min-grace` (`--limit-conn-min-rate` per
   rolling 60s), and eviction ranking (protected if rolling-60s rate ≥ `--limit-conn-protect-rate`;
   evictable if idle ≥ `--limit-conn-evict-idle` OR rolling rate < the protect line). Saturation is
@@ -1721,8 +1721,8 @@ constructs them without a forward dependency.
   start time); only the CAP counter is global.
 
 ### Task 11.3: Bridge (local + mesh) with accounting
-- [ ] **Task 11.3 complete**
-- [ ] **File**: `internal/edge/bridge.go` — a `Bridge` interface with two implementations:
+- [x] **Task 11.3 complete**
+- [x] **File**: `internal/edge/bridge.go` — a `Bridge` interface with two implementations:
 ```go
 type Bridge interface { Run(ctx context.Context, client net.Conn, meta phoneconn.ConnMeta) error }
 ```
@@ -1746,8 +1746,8 @@ close_reason) on close. Caps,
 pacing, accounting, logging, and eviction are identical for both bridges (only the far side differs).
 
 ### Task 11.4: server.Run assembly + schedulers
-- [ ] **Task 11.4 complete**
-- [ ] **File**: `internal/server/server.go` — replace the P1 assembly. Construct (constructor DI, no
+- [x] **Task 11.4 complete**
+- [x] **File**: `internal/server/server.go` — replace the P1 assembly. Construct (constructor DI, no
   globals): Valkey client + `router` + `limit`; `store` (S3); `attest.Verifier` + refreshers; `ca`
   (identity + mesh signing); `acme.chainIssuer`; `enroll.Service` + enroll HTTP handler; `phoneconn`
   manager + listener; `mesh` listener + client (minting this node's mesh cert via `ca.SignMesh`); `edge`
@@ -1775,12 +1775,12 @@ pacing, accounting, logging, and eviction are identical for both bridges (only t
   accepting new public
   connections → drain → cancel bridges → tear down phone + mesh connections → deregister node → close
   Valkey/S3.
-- [ ] **File**: `internal/server/node.go` — node identity (hostname + random suffix), `NodeStart`
+- [x] **File**: `internal/server/node.go` — node identity (hostname + random suffix), `NodeStart`
   timestamp (connection-log restart detection), advertise address from `--mesh-advertise`.
 
 ### Task 11.5: Unit tests
-- [ ] **Task 11.5 complete**
-- [ ] **File**: `internal/edge/clienthello_test.go`, `accept_test.go`, `policy_test.go`, `bridge_test.go`,
+- [x] **Task 11.5 complete**
+- [x] **File**: `internal/edge/clienthello_test.go`, `accept_test.go`, `policy_test.go`, `bridge_test.go`,
   `internal/server/server_test.go` (REPLACES the P1 server-package tests in the same change — the old
   assembly they exercised is replaced here, so they would no longer compile)
 **Setup**: synthetic ClientHello bytes (real browser + curl + a JA4 vector); loopback conns; fake
@@ -1805,14 +1805,14 @@ phoneconn/mesh/router/store/limit/ban; fake clock.
 | `degraded start without CA/cache` | Issuer fails + empty cache → `Run` STARTS; reserved-host TLS refused; splice path alive; retry scheduled |
 
 ### Definition of Done
-- [ ] Raw :443 edge: ClientHello peek, SNI/ALPN/version + stable JA4, accept-time checks (ban-first,
+- [x] Raw :443 edge: ClientHello peek, SNI/ALPN/version + stable JA4, accept-time checks (ban-first,
   per-IP rate, max-clients; no per-IP concurrency), handshake timeout.
-- [ ] Reserved-SNI local termination; tunnel-SNI route→name/fpr ban→local/mesh bridge; unknown→close.
-- [ ] Bridge (local + mesh) with identical pacing, day/week accounting, start/end logging, eviction.
-- [ ] `server.Run` assembles everything with DI + schedulers + ban-reload eviction + correct shutdown;
+- [x] Reserved-SNI local termination; tunnel-SNI route→name/fpr ban→local/mesh bridge; unknown→close.
+- [x] Bridge (local + mesh) with identical pacing, day/week accounting, start/end logging, eviction.
+- [x] `server.Run` assembles everything with DI + schedulers + ban-reload eviction + correct shutdown;
   the enroll HTTP + control listeners present the disk-persisted `ObtainSelf` self-certs (reused across
   restarts; degraded-start behavior when no CA can issue).
-- [ ] US11 unit tables authored/committed (execution in US16); the P1 server-package tests replaced.
+- [x] US11 unit tables authored/committed (execution in US16); the P1 server-package tests replaced.
 
 ---
 
@@ -2266,6 +2266,64 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US11 Task 11.4 (ACME DNS-01 provider — reverses the earlier US6 `dns.go` removal):** honoring the
+  committed `--acme-dns-provider` contract (its help text lists arbitrary providers, "e.g. cloudflare,
+  route53") requires lego's `providers/dns.NewDNSChallengeProviderByName`, whose package imports lego's
+  ENTIRE provider registry (~198 providers + their transitive SDKs). This was chosen explicitly (user
+  decision) over a curated subset — the cost is a large `go.mod`/`go.sum` growth and binary size. The
+  provider is wired through a new additive `LegoConfig.RawDNS challenge.Provider` field (a lego-native
+  provider, preferred over the neutral `acme.DNSProvider` seam which is retained for the US14 test fake).
+  `acme.DNSProviderByName` localizes the registry import to the acme package.
+
+- **US11 Task 11.4 (lazy self-healing ACME chain):** per-CA lego clients are built via a new additive
+  `acme.NewChain`/`lazyCA` that defers the network-touching account registration to first use, so
+  `server.Run` never blocks on CA reachability at startup and an unreachable CA self-heals once it
+  recovers (a boot-time build failure yields a transient error → the chain applies its cooldown and
+  falls through). This realizes the plan's degraded-start intent for the issuance chain (the plan spelled
+  it out only for the reserved-host certs).
+
+- **US11 Task 11.4 (reserved-host certs):** implemented via the chain's `ObtainSelf` with per-node disk
+  persistence under `--acme-account-dir/self/<host>/{cert,key}.pem` + `meta.json` (the issuing CA +
+  validity, so LE names re-dispatch through `ShouldRenew`), reuse-when-valid-past-margin across restarts,
+  renew-when-expiring, and DEGRADED start (reserved-host TLS refused, splice unaffected) when no CA can
+  issue AND no cache exists — exactly as the plan specifies. Each reserved host gets its OWN cert (the
+  edge already routed by SNI), served via a per-host `GetCertificate`.
+
+- **US11 Task 11.4 (renewal seam completion):** the plan's "wire `OnRenew` to the enroll renewal path"
+  required completing the US8 shortcut where the renewal challenge echoed `connID`. The challenge is now
+  a REAL single-use enroll nonce minted via a new additive `phoneconn.HandlerConfig.Challenge` callback
+  (wired to `enrollSvc.Nonce`), stored per-connection, and validated at `RENEW_SUBMIT` through the exact
+  same attested path as initial enrollment; `RenewFunc` gained the challenge-nonce + peer-IP params.
+  `renewFunc` parses the submitted attestation chain + rotated CSRs and calls `enrollSvc.Enroll` in
+  renewal mode. The renewal watcher scans this node's connected names, consults `chain.ShouldRenew`, and
+  sends `RENEW_NUDGE` (new additive `Manager.ConnectedNames`/`SendRenewNudge`).
+
+- **US11 Task 11.2 (ConnMeta hand-off):** the edge hands the peeked ClientHello ConnMeta
+  (SNI/ALPN/version/JA4 + peer addr) to the phone control handler via `http.Server.ConnContext` +
+  `phoneconn.ConnContext` (unwrapping the `tls.Conn` to the edge's `metaConn` carrier), so PHONE
+  connection-log events carry JA4 (the anomaly tripwire). The enroll handler is NOT coupled to
+  `phoneconn.ConnMeta` (that would invert the enroll→phoneconn dependency and edit US5's evidence
+  schema); the plan's "and enroll handlers can log it" is permissive ("can") and the anomaly rationale is
+  specific to phone events.
+
+- **US11 Task 11.3 (bridge structure):** the local-vs-mesh bridge is realized as `edge.handleTunnel`
+  (shared splice + one openFar branch) rather than a `Bridge` interface with two `localBridge`/`meshBridge`
+  structs — the caps/pacing/accounting/logging/eviction are identical for both far sides (only `openFar`
+  differs), so one code path with a branch is simpler and avoids duplicated splice logic while producing
+  the SAME behavior. The per-connection policy timers live in `edge/bridge.go`'s `splice`/`evictLeastActive`
+  rather than a separate `policy.go` file (same package, same behavior).
+
+- **US11 Task 11.4 (reserved-cert self-signed removed):** an interim self-signed reserved-cert shortcut
+  considered during assembly was REPLACED with the real `ObtainSelf` + persistence path above (no
+  self-signed fallback ships).
+
+- **US11 Task 11.5 (server tests):** the P1 `internal/server/server_test.go` (a `//go:build integration`
+  suite driving the superseded HTTP-mode assembly) is replaced by an UNTAGGED US11 unit lifecycle test
+  (boots the full E2E assembly on loopback with degraded ACME/attestation/S3, asserts clean start+drain)
+  plus `reserved_test.go` (cache-reused / obtain / degraded / renew). The new REAL-server integration
+  tier lands in US14 (`integration_test.go`). The P1 `routes.go`/`routes_test.go` (`NewMux`) remain until
+  the US13 teardown per the additive-until-teardown discipline.
 
 - **US10 P1 recorder methods:** kept FULLY FUNCTIONAL (not no-op'd) until US13, so the four P1-behavior
   metrics tests pass unchanged and are removed WITH the methods in US13 — simpler than the plan's
