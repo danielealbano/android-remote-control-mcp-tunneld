@@ -1,4 +1,5 @@
-listen-http: ":80"   # explicit — Traefik's ntfy service and the bridge base-url both target :80
+listen-http: ":80"   # in-container port; compose publishes it on 127.0.0.1:8080 and the bridge base-url
+                     # (http://ntfy) reaches it on the compose network
 auth-default-access: "deny-all"
 auth-file: /var/lib/ntfy/auth.db
 cache-file: /var/lib/ntfy/cache.db
