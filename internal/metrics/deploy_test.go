@@ -41,8 +41,8 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 }
 
 // TestGrafanaDashboardReferencesRealFamilies fails if the shipped dashboard queries any tunneld_*
-// family that is not actually registered (the class of stale-artifact drift where US13 removed the
-// Plan-1 families but the dashboard kept querying them → permanently empty panels).
+// family that is not actually registered — the class of stale-artifact drift where a removed metric
+// family leaves the dashboard querying a name that no longer exists (permanently empty panels).
 func TestGrafanaDashboardReferencesRealFamilies(t *testing.T) {
 	data, err := os.ReadFile("../../deploy/grafana/provisioning/dashboards/tunneld.json")
 	if err != nil {
@@ -59,8 +59,8 @@ func TestGrafanaDashboardReferencesRealFamilies(t *testing.T) {
 }
 
 // TestPrometheusAlertsReferenceRealReasons fails if any alert rule matches a tunneld_rejections_total
-// reason label that is not in observ.RejectReasons (the class of dead-alert drift where the abuse
-// rules matched Plan-1 labels that PromRecorder.Reject now refuses → alerts that can never fire).
+// reason label that is not in observ.RejectReasons — the class of dead-alert drift where an alert rule
+// matches a rejection label PromRecorder.Reject refuses, so the alert can never fire.
 func TestPrometheusAlertsReferenceRealReasons(t *testing.T) {
 	data, err := os.ReadFile("../../deploy/prometheus/alerts.yml")
 	if err != nil {

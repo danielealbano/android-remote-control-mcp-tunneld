@@ -31,7 +31,7 @@ type Identity struct {
 	IdentityCertPEM []byte
 	IdentityKey     *ecdsa.PrivateKey
 	PublicCertPEM   []byte
-	PublicKey       *ecdsa.PrivateKey
+	PublicCertKey   *ecdsa.PrivateKey // the TLS private key behind PublicCertPEM (never leaves the phone)
 	CA              string
 }
 
@@ -199,7 +199,7 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 	}
 	return &Identity{
 		Name: name, IdentityCertPEM: []byte(ir.IdentityCert), IdentityKey: idKey,
-		PublicCertPEM: []byte(ir.PublicCert), PublicKey: tlsKey, CA: caID,
+		PublicCertPEM: []byte(ir.PublicCert), PublicCertKey: tlsKey, CA: caID,
 	}, nil
 }
 

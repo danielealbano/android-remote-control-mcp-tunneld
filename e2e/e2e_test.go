@@ -332,7 +332,7 @@ func writeCA(t *testing.T) (certPath, keyPath string) {
 
 func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
 	t.Helper()
-	keyDER, err := x509.MarshalECPrivateKey(id.PublicKey)
+	keyDER, err := x509.MarshalECPrivateKey(id.PublicCertKey)
 	if err != nil {
 		t.Fatal(err)
 	}

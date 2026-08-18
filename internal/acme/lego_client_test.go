@@ -38,9 +38,9 @@ func TestClassifyLegoErrors(t *testing.T) {
 	}
 }
 
-// TestShouldRenewLEMarginFloor covers the LE renewal timing as BUILT (see the Deviations entry "LE ARI
-// margin floor"): an LE cert renews at NotAfter − --acme-renew-margin — for a shortlived (~160h) cert
-// that is NotBefore+112h, the same uniform ~4.7-day cadence as the fixed non-LE path.
+// TestShouldRenewLEMarginFloor covers the LE renewal timing as built (docs/ARCHITECTURE.md §3): an LE
+// cert renews at NotAfter − --acme-renew-margin — for a shortlived (~160h) cert that is NotBefore+112h,
+// the same uniform ~4.7-day cadence as the fixed non-LE path.
 func TestShouldRenewLEMarginFloor(t *testing.T) {
 	lc := &legoClient{cfg: LegoConfig{CAID: CALetsEncrypt, UseARI: true,
 		RenewMargin: 48 * time.Hour, Shortlived: 160 * time.Hour}}
