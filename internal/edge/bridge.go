@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // rollingWindow is the window over which the connection-policy byte rate is measured (the --limit-conn-*
@@ -111,11 +112,15 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	streamID, _ := store.NewConnID(startedAt, e.now())
 
-	// Global per-tunnel stream cap with one evict-and-retry.
-	acq, _ := e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
-	if !acq {
-		if e.evictLeastActive(name) {
-			acq, _ = e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
+	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
+	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
+	acq, aerr := e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
+	if aerr != nil {
+		acq = true
+	} else if !acq && e.evictLeastActive(name) {
+		acq, aerr = e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
+		if aerr != nil {
+			acq = true
 		}
 	}
 	if !acq {
@@ -323,7 +328,7 @@ const bwBatch = 1 << 20
 // pacedCopy copies src→dst in ≤ChunkSize slices, consuming batch-drawn bandwidth credit and accounting
 // day/week traffic; on quota exhaustion it stops and returns quotaHit.
 func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, src io.Reader, as *activeStream, counter *int64) int64 {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, wire.ChunkSize)
 	var credit int64 // local batch credit (bytes already granted by the shared bucket)
 	for {
 		nr, er := src.Read(buf)

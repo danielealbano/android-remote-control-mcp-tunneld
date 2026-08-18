@@ -15,8 +15,10 @@ import (
 // chain applies its cooldown and falls through to the next CA), and the client self-heals when the CA
 // becomes reachable again.
 type lazyCA struct {
-	caID  string
-	build func() (caIssuer, error)
+	caID        string
+	shortlived  time.Duration // configured cert lifetime for the degraded renewal floor
+	renewMargin time.Duration // configured --acme-renew-margin for the degraded renewal floor
+	build       func() (caIssuer, error)
 
 	mu    sync.Mutex
 	inner caIssuer
@@ -25,8 +27,8 @@ type lazyCA struct {
 var _ caIssuer = (*lazyCA)(nil)
 
 // newLazyCA wraps a builder for one CA's client behind lazy, self-healing construction.
-func newLazyCA(caID string, build func() (caIssuer, error)) *lazyCA {
-	return &lazyCA{caID: caID, build: build}
+func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func() (caIssuer, error)) *lazyCA {
+	return &lazyCA{caID: caID, shortlived: shortlived, renewMargin: renewMargin, build: build}
 }
 
 // NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing per-CA clients constructed from
@@ -36,7 +38,8 @@ func newLazyCA(caID string, build func() (caIssuer, error)) *lazyCA {
 func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
 	cas := make([]caIssuer, 0, len(legoCfgs))
 	for _, lc := range legoCfgs {
-		cas = append(cas, newLazyCA(lc.CAID, func() (caIssuer, error) { return NewLegoClient(lc) }))
+		cas = append(cas, newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
+			func() (caIssuer, error) { return NewLegoClient(lc) }))
 	}
 	return NewChainIssuer(cfg, cas...)
 }
@@ -68,8 +71,16 @@ func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name 
 func (l *lazyCA) shouldRenew(ctx context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
 	c, err := l.resolve()
 	if err != nil {
-		// The CA client is unavailable: fall back to the fixed margin floor so renewal still fires.
-		at := cur.NotBefore.Add(160*time.Hour - 48*time.Hour)
+		// The CA client is unavailable: fall back to the CONFIGURED fixed floor so renewal still fires
+		// on the operator's schedule (defaults guard a zero config in tests).
+		shortlived, margin := l.shortlived, l.renewMargin
+		if shortlived <= 0 {
+			shortlived = 160 * time.Hour
+		}
+		if margin <= 0 {
+			margin = 48 * time.Hour
+		}
+		at := cur.NotBefore.Add(shortlived - margin)
 		return !now.Before(at), at, nil
 	}
 	return c.shouldRenew(ctx, cur, now)

@@ -207,3 +207,27 @@ func waitCond(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not reached in time")
 }
+
+// TestBanGatesRecordRejection: both phone-control ban gates are `ban` rejection writers (the US10
+// writer map): the peer-IP gate with no tunnel, the tunnel gate with the name.
+func TestBanGatesRecordRejection(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	var mu sync.Mutex
+	var got [][2]string
+	rej := func(reason, tunnel, _ string) {
+		mu.Lock()
+		got = append(got, [2]string{reason, tunnel})
+		mu.Unlock()
+	}
+	banned := netip.MustParseAddr("198.51.100.97")
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		BanIP:  func(a netip.Addr) bool { return a == banned },
+		Reject: rej})
+
+	req := httptest.NewRequest("GET", "/control", nil)
+	req.RemoteAddr = "198.51.100.97:40000"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if len(got) != 1 || got[0] != [2]string{"ban", ""} {
+		t.Fatalf("the IP ban gate must record Reject(ban, \"\"), got %v", got)
+	}
+}

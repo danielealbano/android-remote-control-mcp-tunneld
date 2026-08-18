@@ -121,6 +121,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	})
 	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
 		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,
+		Reject:       rec.Reject,
 		PingInterval: cfg.ControlPingInterval, StreamPending: cfg.LimitStreamPending,
 		OnIssue: issueFunc(enrollSvc),
 	})
@@ -137,8 +138,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 	ed := edge.New(edge.Config{
 		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
-		NodeID: nodeID, NodeHost: nodeHost,
-		NodeStart: nodeStart, MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
+		MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
 		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout, DialBackTimeout: cfg.LimitDialBackTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),

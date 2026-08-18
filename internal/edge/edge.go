@@ -51,9 +51,6 @@ type Config struct {
 	EnrollHost   string
 	ControlHost  string
 	TunnelDomain string // the tunnel base domain; a public SNI is <name>.<TunnelDomain>
-	NodeID       string
-	NodeHost     string
-	NodeStart    string
 	MaxClients   int
 	ConnRate     int
 	Concurrent   int

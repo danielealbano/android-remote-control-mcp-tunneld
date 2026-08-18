@@ -33,6 +33,7 @@ type Handler struct {
 	validName     NameValidator
 	banIP         BanIP
 	banTunnel     BanTunnel
+	reject        RejectFunc
 	pingInterval  time.Duration
 	streamPending int
 	onIssue       IssueFunc
@@ -80,11 +81,15 @@ type HandlerConfig struct {
 	ValidName     NameValidator
 	BanIP         BanIP
 	BanTunnel     BanTunnel
+	Reject        RejectFunc // rejection metric writer (the phone control plane is a `ban` writer)
 	PingInterval  time.Duration
 	StreamPending int
 	OnIssue       IssueFunc
 	IssueBody     int64 // max POST /issue body (bytes); defaults to 256 KiB
 }
+
+// RejectFunc records one rejection (reason ∈ observ.RejectReasons — satisfied by PromRecorder.Reject).
+type RejectFunc func(reason, tunnelName, clientIP string)
 
 // NewHandler builds the phone control handler.
 func NewHandler(cfg HandlerConfig) *Handler {
@@ -94,9 +99,13 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.IssueBody < 1 {
 		cfg.IssueBody = 256 * 1024
 	}
+	reject := cfg.Reject
+	if reject == nil {
+		reject = func(string, string, string) {}
+	}
 	return &Handler{
 		mgr: cfg.Manager, validName: cfg.ValidName, banIP: cfg.BanIP, banTunnel: cfg.BanTunnel,
-		pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending,
+		reject: reject, pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending,
 		onIssue: cfg.OnIssue, issueBody: cfg.IssueBody,
 		sem: make(chan struct{}, cfg.StreamPending),
 	}
@@ -121,8 +130,10 @@ func (h *Handler) identity(r *http.Request) (name, fingerprint string, ok bool) 
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Peer-IP ban check FIRST — a newly-banned IP must not keep using an established mTLS identity.
+	ip := peerIP(r)
 	if h.banIP != nil {
-		if addr, err := netip.ParseAddr(peerIP(r)); err == nil && h.banIP(addr) {
+		if addr, err := netip.ParseAddr(ip); err == nil && h.banIP(addr) {
+			h.reject("ban", "", ip)
 			http.Error(w, "banned", http.StatusForbidden)
 			return
 		}
@@ -133,6 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.banTunnel != nil && h.banTunnel(name, fp) {
+		h.reject("ban", name, ip)
 		http.Error(w, "banned", http.StatusForbidden)
 		return
 	}

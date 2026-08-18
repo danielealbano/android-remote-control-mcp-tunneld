@@ -28,11 +28,14 @@ func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("attestation signer allowlist: %w", err)
 	}
-	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, http.DefaultClient)
+	// A hard per-request timeout: a black-holed root/status URL must never wedge a refresher tick —
+	// a stuck fetch would let the status snapshot exceed --attest-status-max-stale with no self-heal.
+	fetchClient := &http.Client{Timeout: 30 * time.Second}
+	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, fetchClient)
 	if err != nil {
 		logger.Warn("attestation root fetch failed (fail-closed until refresh)", "err", err)
 	}
-	status, err := attest.NewStatusList(ctx, cfg.AttestStatusURL, http.DefaultClient)
+	status, err := attest.NewStatusList(ctx, cfg.AttestStatusURL, fetchClient)
 	if err != nil {
 		logger.Warn("attestation status fetch failed (fail-closed until refresh)", "err", err)
 	}
@@ -218,10 +221,17 @@ func (w *renewalWatcher) tick(ctx context.Context) {
 	for _, name := range w.mgr.ConnectedNames() {
 		rec, err := w.names.GetName(ctx, name)
 		if err != nil {
+			// Never silent: a persistent store failure would otherwise stop all renewal nudges (and
+			// eventually expire certs) with zero operator signal.
+			w.logger.Warn("renewal watcher: name record read failed", "tunnel", name, "err", err)
 			continue
 		}
 		due, at, err := w.chain.ShouldRenew(ctx, rec.Cert)
-		if err != nil || !due {
+		if err != nil {
+			w.logger.Warn("renewal watcher: ShouldRenew failed", "tunnel", name, "err", err)
+			continue
+		}
+		if !due {
 			continue
 		}
 		nonceHex, err := w.nonce(ctx)
