@@ -1,20 +1,19 @@
-// Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the raw
-// coder/websocket FakePhone, reused across the transport, ingress, and wsconn test suites.
+// Package tunneltest provides shared test fakes: the capturing observ.Recorder (here) and the durable
+// store fake, reused across the E2E package test suites.
 package tunneltest
 
 import (
 	"sync"
-	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
 
 // RecCall is one captured Recorder invocation.
 type RecCall struct {
-	Kind, Reason, Tunnel, IP, Class, Direction string
-	Code                                       int
-	N                                          int64
-	Dur                                        time.Duration
+	Kind, Reason, Tunnel, IP, Direction string
+	N                                   int64
+	CA, Result, Window, Peer            string
+	Size                                int
 }
 
 // Recorder is a thread-safe capturing observ.Recorder for assertions.
@@ -31,20 +30,39 @@ func (r *Recorder) Reject(reason, tunnel, ip string) {
 	r.add(RecCall{Kind: "reject", Reason: reason, Tunnel: tunnel, IP: ip})
 }
 
-func (r *Recorder) Request(tunnel, class string, code int, d time.Duration) {
-	r.add(RecCall{Kind: "request", Tunnel: tunnel, Class: class, Code: code, Dur: d})
-}
-
 func (r *Recorder) Bytes(tunnel, dir string, n int64) {
 	r.add(RecCall{Kind: "bytes", Tunnel: tunnel, Direction: dir, N: n})
 }
 
-func (r *Recorder) WSConnect()                 { r.add(RecCall{Kind: "wsconnect"}) }
-func (r *Recorder) WSDisconnect(reason string) { r.add(RecCall{Kind: "wsdisconnect", Reason: reason}) }
-func (r *Recorder) Enrollment()                { r.add(RecCall{Kind: "enrollment"}) }
-func (r *Recorder) InflightAdd(delta int)      { r.add(RecCall{Kind: "inflight", Code: delta}) }
-func (r *Recorder) Timeout()                   { r.add(RecCall{Kind: "timeout"}) }
-func (r *Recorder) PublishError()              { r.add(RecCall{Kind: "publisherror"}) }
+// --- E2E event set ---
+
+func (r *Recorder) PublicConnOpen() { r.add(RecCall{Kind: "publicconnopen"}) }
+func (r *Recorder) PublicConnClose(reason string) {
+	r.add(RecCall{Kind: "publicconnclose", Reason: reason})
+}
+func (r *Recorder) PhoneConnOpen() { r.add(RecCall{Kind: "phoneconnopen"}) }
+func (r *Recorder) PhoneConnClose(reason string) {
+	r.add(RecCall{Kind: "phoneconnclose", Reason: reason})
+}
+func (r *Recorder) StreamOpen()  { r.add(RecCall{Kind: "streamopen"}) }
+func (r *Recorder) StreamClose() { r.add(RecCall{Kind: "streamclose"}) }
+func (r *Recorder) EnrollmentResult(result string) {
+	r.add(RecCall{Kind: "enrollmentresult", Result: result})
+}
+func (r *Recorder) AttestVerify(result string) { r.add(RecCall{Kind: "attestverify", Result: result}) }
+func (r *Recorder) ACMEIssue(ca, result string) {
+	r.add(RecCall{Kind: "acmeissue", CA: ca, Result: result})
+}
+func (r *Recorder) ACMERenew(ca, result string) {
+	r.add(RecCall{Kind: "acmerenew", CA: ca, Result: result})
+}
+func (r *Recorder) QuotaExhausted(tunnel, window string) {
+	r.add(RecCall{Kind: "quotaexhausted", Tunnel: tunnel, Window: window})
+}
+func (r *Recorder) ACMECooldown(ca string) { r.add(RecCall{Kind: "acmecooldown", CA: ca}) }
+func (r *Recorder) MeshPool(peer string, size int) {
+	r.add(RecCall{Kind: "meshpool", Peer: peer, Size: size})
+}
 
 // BytesFor sums the bytes recorded for a tunnel in a direction ("in"/"out") across all Bytes calls.
 func (r *Recorder) BytesFor(tunnel, dir string) int64 {

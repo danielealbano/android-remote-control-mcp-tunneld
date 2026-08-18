@@ -48,11 +48,11 @@ func TestCLIServeDispatch(t *testing.T) {
 	dir := t.TempDir()
 	cert := filepath.Join(dir, "ca.pem")
 	key := filepath.Join(dir, "ca-key.pem")
-	if err := os.WriteFile(cert, []byte("c"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(key, []byte("k"), 0o600); err != nil {
-		t.Fatal(err)
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var (
@@ -71,11 +71,21 @@ func TestCLIServeDispatch(t *testing.T) {
 
 	origArgs := os.Args
 	defer func() { os.Args = origArgs }()
+	// The E2E Validate requires the S3/mesh/attestation/ACME families; supply the full set so the
+	// dispatch seam is reached (the legacy --client-ip-header flag no longer exists).
 	os.Args = []string{
 		"tunneld", "serve",
 		"--ca-cert", cert,
 		"--ca-key", key,
-		"--client-ip-header", "X-Real-Ip",
+		"--attest-signer-digest-file", digest,
+		"--mesh-advertise", "node-a:9443",
+		"--s3-endpoint", "http://localhost:9000",
+		"--s3-bucket", "tunneld",
+		"--s3-access-key", "access",
+		"--s3-secret-key", "secret",
+		"--acme-email", "ops@example.test",
+		"--acme-account-dir", dir,
+		"--acme-dns-provider", "cloudflare",
 	}
 
 	main()
@@ -85,8 +95,8 @@ func TestCLIServeDispatch(t *testing.T) {
 	if !called {
 		t.Fatal("serve did not dispatch to runServe seam")
 	}
-	if gotCfg.ClientIPHeader != "X-Real-Ip" {
-		t.Errorf("dispatched cfg.ClientIPHeader = %q, want X-Real-Ip", gotCfg.ClientIPHeader)
+	if gotCfg.S3Bucket != "tunneld" {
+		t.Errorf("dispatched cfg.S3Bucket = %q, want tunneld", gotCfg.S3Bucket)
 	}
 	if gotCfg.CACert != cert {
 		t.Errorf("dispatched cfg.CACert = %q, want %q", gotCfg.CACert, cert)

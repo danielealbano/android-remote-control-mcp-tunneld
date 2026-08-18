@@ -78,10 +78,10 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 	if _, _, err := Allow(ctx, rdb, "rps", testIP, 10, time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := AllowEnroll(ctx, rdb, testIP, 20, 2); err != nil {
+	if _, _, err := Allow(ctx, rdb, "enroll-min", testIP, 2, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Acquire(ctx, rdb, "tunnel-x", 4, time.Minute); err != nil {
+	if _, err := NewLimiter(rdb, 0, 0, 0).AcquireStream(ctx, "tunnel-x", 4); err != nil {
 		t.Fatal(err)
 	}
 	keys := mr.Keys()
@@ -92,5 +92,32 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 		if ttl := mr.TTL(k); ttl <= 0 {
 			t.Errorf("key %q has no TTL (%s) — un-TTL'd Redis state", k, ttl)
 		}
+	}
+}
+
+// TestOverReadOnlyPreGate: Over reports an at-limit window WITHOUT consuming a slot.
+func TestOverReadOnlyPreGate(t *testing.T) {
+	rdb, _ := newTestRedis(t)
+	ctx := ctxT(t)
+	freezeClock(t)
+	ip := netip.MustParseAddr("203.0.113.30")
+
+	over, _, err := Over(ctx, rdb, "enroll-min", ip, 2, time.Minute)
+	if err != nil || over {
+		t.Fatalf("fresh window must not be over (over=%v err=%v)", over, err)
+	}
+	for range 2 {
+		if ok, _, err := Allow(ctx, rdb, "enroll-min", ip, 2, time.Minute); err != nil || !ok {
+			t.Fatalf("allow within limit failed: %v %v", ok, err)
+		}
+	}
+	over, ra, err := Over(ctx, rdb, "enroll-min", ip, 2, time.Minute)
+	if err != nil || !over || ra <= 0 {
+		t.Fatalf("at-limit window must report over with a retry-after (over=%v ra=%v err=%v)", over, ra, err)
+	}
+	// Read-only: Over itself must not have consumed anything — the counter is still exactly 2.
+	over2, _, _ := Over(ctx, rdb, "enroll-min", ip, 3, time.Minute)
+	if over2 {
+		t.Fatal("Over must not increment the window counter")
 	}
 }

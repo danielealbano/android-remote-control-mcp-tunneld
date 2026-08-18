@@ -1,4 +1,4 @@
-// Package admin holds per-tunnel live counters (bytes in/out, requests) in Redis with a TTL, feeding
+// Package admin holds per-tunnel live counters (bytes in/out) in Redis with a TTL, feeding
 // the internal /admin/tunnels endpoint. TunnelStat lives here (not in metrics) to break the
 // metrics↔admin import cycle: metrics imports admin, admin imports nothing from metrics.
 package admin
@@ -17,10 +17,9 @@ type TunnelStat struct {
 	Name     string `json:"name"`
 	BytesIn  int64  `json:"bytes_in"`
 	BytesOut int64  `json:"bytes_out"`
-	Requests int64  `json:"requests"`
 }
 
-// Store reads/writes the per-tunnel tcnt:{name} hash (fields bytes_in, bytes_out, requests).
+// Store reads/writes the per-tunnel tcnt:{name} hash (fields bytes_in, bytes_out).
 type Store struct {
 	rdb redis.UniversalClient
 	ttl time.Duration
@@ -39,7 +38,7 @@ redis.call('PEXPIRE', KEYS[1], ARGV[3])
 return 1
 `)
 
-// Incr adds n to a tunnel counter field (bytes_in|bytes_out|requests) — the WRITE path, called only
+// Incr adds n to a tunnel counter field (bytes_in|bytes_out) — the WRITE path, called only
 // by the PromRecorder background flusher (never synchronously on the data plane).
 func (s *Store) Incr(ctx context.Context, name, field string, n int64) error {
 	return incrScript.Run(ctx, s.rdb, []string{"tcnt:" + name}, field, n, s.ttl.Milliseconds()).Err()
@@ -71,7 +70,6 @@ func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {
 				Name:     k[len("tcnt:"):],
 				BytesIn:  atoi64(h["bytes_in"]),
 				BytesOut: atoi64(h["bytes_out"]),
-				Requests: atoi64(h["requests"]),
 			})
 		}
 		cursor = next

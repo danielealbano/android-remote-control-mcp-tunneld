@@ -14,7 +14,8 @@ import (
 // (never empties the table), does NOT advance the recorded fingerprint (so it retries on the next
 // tick), and does NOT fire onReload.
 //
-// onReload is how live name/fingerprint revocation reaches the WS manager (see docs/ARCHITECTURE.md §6).
+// onReload is how live name/fingerprint revocation reaches the phone control manager
+// (phoneconn.Manager.EvictBanned; see docs/ARCHITECTURE.md §7).
 func Watch(ctx context.Context, e *Engine, files []string, csvPath string, poll time.Duration, onReload func(*Engine), log *slog.Logger) {
 	w := &watcher{e: e, files: files, csv: csvPath, onReload: onReload, log: log}
 	w.initial()

@@ -2,72 +2,85 @@ x-logging: &caplog
   driver: json-file
   options: { max-size: "50m", max-file: "1" }
 
+# No-proxy E2E topology: tunneld IS the internet edge on raw :443 (it terminates NOTHING — it relays
+# opaque TLS bytes to the phone, which holds the WebPKI cert). There is NO Traefik/Cloudflare and NO
+# per-tunnel TLS here. Multi-replica / mesh deployments run ONE tunneld per host (the cross-node mesh is
+# exercised by the e2e tier); this single-host stack runs one replica. Durable state lives in MinIO (a
+# LOCAL plain-S3 stand-in — production points --s3-endpoint at any plain-S3 provider); transient control
+# state lives in Valkey. The observability UIs publish to 127.0.0.1 ONLY (reach them via SSH forward) —
+# with Traefik gone, nothing else may expose them.
 services:
-  traefik:
-    image: traefik:v3.3
-    restart: unless-stopped
-    command:
-      - --providers.file.filename=/etc/traefik/dynamic.yml
-      - --entrypoints.web.address=:80
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --entrypoints.websecure.address=:443
-      - --certificatesresolvers.cloudflare.acme.dnschallenge=true
-      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
-      - --certificatesresolvers.cloudflare.acme.email=${ACME_EMAIL}
-      - --certificatesresolvers.cloudflare.acme.storage=/letsencrypt/acme.json
-    environment:
-      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
-      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN}
-      ENROLL_HOST: ${ENROLL_HOST}
-      OPS_DOMAIN: ${OPS_DOMAIN}
-      OPS_BASIC_AUTH: ${OPS_BASIC_AUTH}
-      CLOUDFLARE_IP_RANGES: ${CLOUDFLARE_IP_RANGES}
-    ports: ["80:80", "443:443"]
-    volumes:
-      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
-      - letsencrypt:/letsencrypt
-    logging: *caplog
-
-  # TWO EXPLICIT replicas via a shared anchor — NOT `deploy: replicas`: Traefik's file-provider
-  # service needs one URL per backend (a single `tunneld:8080` URL would pin pooled connections to
-  # one replica), and explicit names make LB + scraping deterministic. To scale: copy the block, add
-  # the URL in dynamic.yml and the target in prometheus.yml.
-  tunneld-1: &tunneld
+  tunneld:
     build: { context: .., args: { VERSION: "${TUNNELD_VERSION:-dev}" } }
     image: tunneld:local
     restart: unless-stopped
-    depends_on: [redis]
-    # Run as the OPERATOR's uid (see DEPLOY_UID in .env.example): the distroless default uid 65532
-    # cannot read the operator-owned 0600 CA key or write the bind-mounted ./logs dir.
+    depends_on:
+      valkey: { condition: service_started }
+      createbuckets: { condition: service_completed_successfully }
+    # Run as the OPERATOR's uid (see .env.example): the distroless default uid 65532 cannot read the
+    # operator-owned 0600 CA key / attestation files or write the bind-mounted ./logs + ./acme dirs.
     user: "${DEPLOY_UID:?set to your uid — run: id -u}"
-    # ONLY the TUNNELD_* env twins — NEVER `env_file: .env`: the shared .env carries unrelated
-    # secrets (CF_DNS_API_TOKEN, ops/grafana credentials) that must not enter the process
-    # terminating untrusted public traffic (least privilege).
+    # ONLY the TUNNELD_* env twins (+ the lego DNS-provider secret) — NEVER `env_file: .env`: the shared
+    # .env carries unrelated ops/grafana credentials that must not enter the process terminating untrusted
+    # public traffic (least privilege).
     env_file:
-      - { path: tunneld.env, required: false }   # required:false so `docker compose config -q`
-        # passes on a bare checkout (only the .example exists); at RUNTIME a missing file is caught
-        # fast by tunneld's own Validate() (mandatory --client-ip-header etc.)
+      - { path: tunneld.env, required: false }   # required:false so `docker compose config -q` passes on
+        # a bare checkout (only the .example exists); at RUNTIME a missing file is caught fast by tunneld's
+        # own Validate() (mandatory --s3-*/--acme-*/--mesh-advertise/etc.)
     environment:
-      # Topology (not secrets); domain values interpolated from the SINGLE source in .env —
-      # `environment:` overrides `env_file:`, so these are never duplicated in tunneld.env.
-      TUNNELD_REDIS_URL: redis://redis:6379
+      # Topology (not secrets); the domain values come from the SINGLE source in .env — `environment:`
+      # overrides `env_file:`, so these are never duplicated in tunneld.env.
+      TUNNELD_REDIS_URL: redis://valkey:6379
       TUNNELD_TUNNEL_DOMAIN: ${TUNNEL_DOMAIN}
       TUNNELD_ENROLL_HOST: ${ENROLL_HOST}
+      TUNNELD_CONTROL_HOST: ${CONTROL_HOST}
+      TUNNELD_MESH_ADVERTISE: tunneld:9443   # this host's mesh dial address (self on a single-replica host)
+      # Durable store (kong env twin: --s3-* → TUNNELD_S_3_*, letter→digit underscore). SINGLE source in
+      # .env, shared with the MinIO stand-in; production points the endpoint at any plain-S3 provider.
+      TUNNELD_S_3_ENDPOINT: http://minio:9000
+      TUNNELD_S_3_BUCKET: ${S3_BUCKET}
+      TUNNELD_S_3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      TUNNELD_S_3_SECRET_KEY: ${S3_SECRET_KEY}
     volumes:
       - ./ca:/ca:ro
+      - ./attest:/attest:ro         # the hot-reloadable app signer-digest allowlist (see tunneld.env)
       - banfiles:/banfiles:ro
-      - ./logs:/logs               # bind mount (operator-owned, writable by DEPLOY_UID) — a named
-                                   # volume would be created root:root and the file sink would fail
+      - acme:/acme                  # persisted per-CA ACME account keys + reserved-host self-certs
+      - ./logs:/logs                # bind mount (operator-owned, writable by DEPLOY_UID)
+    ports: ["443:443"]              # the ONLY published port: the raw SNI edge. Mesh (:9443) + internal
+                                    # metrics (:9090) stay on the compose network — never publish them.
     logging: *caplog
-    # NO ports: — reachable ONLY on the compose network (Traefik + Prometheus). Never publish.
 
-  tunneld-2: *tunneld
-
-  redis:
-    image: redis:7-alpine
+  valkey:
+    image: valkey/valkey:9.1-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]   # transient state only
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]   # transient control state only
+    logging: *caplog
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    restart: unless-stopped
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - minio-data:/data
+    logging: *caplog
+
+  # One-shot: create the durable-state bucket (object-lifecycle expiration is applied PROGRAMMATICALLY by
+  # tunneld's store.EnsureLifecycles at startup — no manual lifecycle config here). Production uses the
+  # provider's own bucket; document the PRE-GO-LIVE read-after-write probe in docs/PROJECT.md.
+  createbuckets:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio: { condition: service_started }
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}"; do sleep 1; done
+        mc mb --ignore-existing "local/${S3_BUCKET}"
     logging: *caplog
 
   prometheus:
@@ -77,6 +90,7 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prom-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]   # localhost-only (SSH-forward); with Traefik gone nothing else exposes it
     logging: *caplog
 
   alertmanager:
@@ -84,6 +98,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["127.0.0.1:9093:9093"]
     logging: *caplog
 
   grafana:
@@ -91,10 +106,11 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
-      GF_SERVER_ROOT_URL: https://grafana.${OPS_DOMAIN}
+      GF_SERVER_ROOT_URL: http://localhost:3000
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
+    ports: ["127.0.0.1:3000:3000"]
     logging: *caplog
 
   ntfy:
@@ -102,17 +118,18 @@ services:
     restart: unless-stopped
     command: ["serve"]
     environment:
-      NTFY_BASE_URL: https://ntfy.${OPS_DOMAIN}
+      NTFY_BASE_URL: http://localhost:8080
     volumes:
       - ./ntfy/server.yml:/etc/ntfy/server.yml:ro
       - ntfy-data:/var/lib/ntfy
+    ports: ["127.0.0.1:8080:80"]
     logging: *caplog
 
   ntfy-alertmanager:
     image: xenrox/ntfy-alertmanager:1.0.0
     restart: unless-stopped
     volumes:
-      - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config.scfg:ro   # the image's default config search path — a bare `/config` target would NOT be discovered
+      - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config.scfg:ro
     logging: *caplog
 
   fetcher:
@@ -121,13 +138,14 @@ services:
     command: ["/bin/sh", "/opt/fetcher/command.sh"]
     volumes:
       - ./fetcher/command.sh:/opt/fetcher/command.sh:ro
-      - ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md §4)
+      - ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md)
       - banfiles:/banfiles
     logging: *caplog
 
 volumes:
-  letsencrypt: {}
   banfiles: {}
+  acme: {}
+  minio-data: {}
   prom-data: {}
   grafana-data: {}
   ntfy-data: {}

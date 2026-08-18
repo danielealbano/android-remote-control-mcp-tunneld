@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// reserved host labels the name generator must never produce: the reserved /connect path source and
+// reserved host labels the name generator must never produce: the default control-host label and
 // the ops labels. NOTE: these BARE labels only collide with a generated name when --name-prefix is
 // empty; with a non-empty prefix the prefixed name can never equal a bare label, so the enroll host's
 // first label is passed in as an extra reserved label (a prefix-independent guard) by the caller.

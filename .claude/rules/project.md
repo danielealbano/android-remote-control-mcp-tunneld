@@ -1,34 +1,36 @@
 # tunneld — Self-Hosted Tunnel Server — Project Rules
 
-`tunneld` is a self-hosted, abuse-resistant **HTTP tunnel server** (Go) that gives the Android MCP
-app (`android-remote-control-mcp`) a stable public hostname for free. The phone opens an **outbound
-WebSocket** (`wss://<name>.<tunnel-domain>/connect`); the public web side is plain HTTP(S) behind a
-TLS-terminating reverse proxy (Cloudflare orange-cloud reference, Traefik origin); **N identical
-stateless replicas** bridge public requests to the WebSocket-holding node over **Redis pub/sub**.
-Identity is a CA-signed certificate the phone earns by CSR enrollment; every `/connect` is
-authenticated at the **APPLICATION layer** (challenge-response proof-of-possession — **NOT TLS
-mutual auth**), so the tunnel works through Cloudflare's proxy. Abuse is contained by layered caps,
-a hot-reloadable ban/geo engine, and a strict method+path ingress allowlist.
+`tunneld` is a self-hosted, abuse-resistant **end-to-end-encrypted tunnel server** (Go) that gives the
+Android MCP app (`android-remote-control-mcp`) a stable public hostname. External clients establish TLS
+**directly with the phone**, which holds a publicly-trusted (WebPKI) certificate for
+`<name>.<tunnel-domain>`. tunneld is the internet edge on **raw TCP `:443`** (there is NO reverse proxy):
+it peeks each ClientHello (SNI/ALPN/version/JA4), routes on SNI, and splices the **opaque encrypted byte
+stream** to the phone over an internal mTLS **mesh** — it can NEVER read tunnel traffic. Run **one
+replica per host**; **Valkey** holds transient control state (TTL'd), a plain **S3** bucket holds the
+durable state (name registry, connection logs, rejected-enroll evidence). Identity is earned by
+**two-phase attested enrollment** (Android hardware key attestation → identity mTLS cert → server-run
+ACME public cert). Abuse is contained by layered caps and a hot-reloadable ban/geo engine.
 
-> **STATUS: implemented.** Plan 1 (`docs/plans/1_self_hosted_tunnel_server_20260814130404.md`) is
-> delivered end to end (US1–US16). Releases are cut from `v*` tags via goreleaser; multi-arch
-> images are published to `ghcr.io/danielealbano/tunneld`.
+> **STATUS: Plan 3 (E2E) implemented.** Plan 3 (`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`)
+> replaces the Plan-1 HTTP/WebSocket-proxy architecture end to end. Releases are cut from `v*` tags via
+> goreleaser; multi-arch images are published to `ghcr.io/danielealbano/tunneld`.
 
 ## MANDATORY: Read These First
 
 You MUST ALWAYS read these documents before ANY work, in this order:
 
-1. **`docs/PROJECT.md`** — operational reference: what tunneld is, topology, deployment modes,
-   caps, ban/geo engine, observability, non-goals. **Entry-level read.**
-2. **`docs/ARCHITECTURE.md`** — system map: package layout, the three ingress edges, request
-   lifecycle across replicas, `/connect` lifecycle, bandwidth model, Redis state, shutdown.
-   **Entry-level read.**
-3. **`docs/PROTOCOL.md`** — the wire protocol: enrollment, the `/connect` challenge-response, the
-   WS binary frames, the Redis envelopes, liveness, and the security invariants. **CANONICAL wire
-   contract** — the Go client in `client/` and the future Kotlin client MUST both conform; golden
-   byte fixtures live in `internal/wire/testdata/`. **ESSENTIAL.**
-4. **`docs/plans/1_self_hosted_tunnel_server_20260814130404.md`** — the decision record (every
-   design decision was agreed with the user there). CANONICAL when a design detail is disputed.
+1. **`docs/PROJECT.md`** — operational reference: what tunneld is, topology, identity/auth,
+   caps, ban/geo engine, state + retention, observability, non-goals. **Entry-level read.**
+2. **`docs/ARCHITECTURE.md`** — system map: package layout, the raw `:443` SNI edge, the public
+   connection lifecycle (fast path + mesh), enrollment/issuance/renewal, bandwidth model, Valkey +
+   S3 state, shutdown. **Entry-level read.**
+3. **`docs/PROTOCOL.md`** — the wire protocol: two-phase enrollment, the mTLS `/issue` endpoint, the
+   v2 control frames, the opaque data splice, the mesh stream header, and the security invariants.
+   **CANONICAL wire contract** — the Go client in `client/` and the future Kotlin client MUST both
+   conform. **ESSENTIAL.**
+4. **`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`** — the decision record (every design
+   decision was agreed with the user there, incl. the `## Deviations` log). CANONICAL when a design
+   detail is disputed.
 
 You MUST ALSO follow `go.md`, `github.md`, `agent.md`, and `development_pipeline.md`. It is
 ABSOLUTELY MANDATORY to pass ALL quality gates before any work is considered done.
@@ -45,15 +47,18 @@ does NOT duplicate them.
 | Concern | Choice | Notes |
 |---|---|---|
 | Language | **Go (see `go.mod` for the pinned version)**, `CGO_ENABLED=0` for released artifacts | Static binary; distroless `nonroot` runtime image. |
-| CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`); `Validate()` enforces every cross-field invariant at startup. |
-| WebSocket | `github.com/coder/websocket` | Context-first; binary frames per `docs/PROTOCOL.md`; native control pings for keepalive. |
-| Cross-replica transport | Redis pub/sub via `github.com/redis/go-redis/v9` | Channels `req:{node}` / `resp:{reqid}`; routing `route:{name}`. **Transient state ONLY** — see invariants. |
+| CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`, `--s3-*` → `TUNNELD_S_3_*`); `Validate()` enforces every cross-field invariant at startup. |
+| Phone control + replica mesh | `golang.org/x/net/http2` (mTLS) | Phone control plane (`/control`, `/data`, `/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
+| Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `route:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
+| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
+| ACME issuance | `github.com/go-acme/lego/v4` | LE→GTS→ZeroSSL chain, DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal. |
+| Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
 | Metrics | `github.com/prometheus/client_golang` | Custom registry on the INTERNAL listener only; NO per-tunnel labels. |
 | Logging | `log/slog` fan-out + `gopkg.in/natefinch/lumberjack.v2` | Repeatable composite `--log` sinks; `std` splits by severity (info+ → stdout, warn+ → stderr). |
-| Unit-test Redis | `github.com/alicebob/miniredis/v2` | In-process; unit AND integration tiers. |
-| E2E infra | `github.com/testcontainers/testcontainers-go` | Redis + Traefik + two tunneld replicas; `//go:build e2e`. |
-| Edge / deployment | Traefik v3 + Cloudflare (orange-cloud reference) + Docker Compose | `deploy/`: traefik, tunneld-1/2, redis, prometheus, grafana, alertmanager, ntfy (+bridge), fetcher. Grey-cloud (Traefik as internet edge) is the privacy-max alternative. |
+| Unit-test Valkey | `github.com/alicebob/miniredis/v2` | In-process; UNIT tier only. |
+| Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO + Pebble/challtestsrv (`//go:build integration` / `e2e`); needs Docker. |
+| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443, valkey, minio (+bucket-create), fetcher, prometheus/grafana/alertmanager/ntfy on `127.0.0.1`-only ports. |
 | Release | goreleaser (`v*` tags) | linux amd64+arm64 archives + multi-arch image `ghcr.io/danielealbano/tunneld`. |
 | Source control | **GitHub**, `danielealbano/android-remote-control-mcp-tunneld` | See `github.md`. |
 
@@ -61,83 +66,74 @@ does NOT duplicate them.
 
 ## Hard Project Invariants — ABSOLUTE RULES
 
-These come from `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, and the Plan 1 decision record. They
+These come from `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, and the Plan 3 decision record. They
 MUST NOT be relaxed without explicit user direction.
 
+### End-to-end encryption — SACRED
+- **tunneld relays OPAQUE TLS bytes and MUST NEVER read, terminate, or inspect tunnel traffic.** The
+  phone terminates TLS with its own WebPKI cert. There is NO HTTP request forwarding, NO method/path
+  allowlist on relayed traffic, and NO `X-Forwarded-*` handling. The public edge is a raw `:443` SNI
+  splice; `wire.ChunkSize` = 32768 is the paced-copy slice size, NOT a framed protocol.
+
 ### Identity & authentication — SACRED
-- **There is NO TLS mutual auth ANYWHERE** — no `clientAuth`/`passTLSClientCert` in Traefik, no
-  client-cert header parsing in tunneld. `/connect` authentication is the APPLICATION-layer
-  challenge-response over the WebSocket (ECDSA-P256 possession proof over
-  `"tunneld-connect-v1" ‖ nonce`), and CN == Host `<name>` is enforced. This is what makes the
-  tunnel Cloudflare-proxyable. You MUST NEVER reintroduce TLS client certificates.
-- Enrollment accepts **ECDSA P-256 keys ONLY** (`400 unsupported_key_type` otherwise); the server
-  ignores ALL CSR subject/extension fields except the public key and assigns the name itself.
-- Any request carrying a client-cert / mTLS-indicating header on the PUBLIC side is rejected `400`.
-- **The edge performs NO authentication on forwarded requests** (standing user decision): the app
-  is the sole authenticator; a token-less `POST /mcp` MUST be forwarded so the app's own `401`
-  carries the RFC 9728 `WWW-Authenticate` discovery header. The ingress MUST NEVER inspect the
-  `Authorization` header or answer `401` itself.
-- **Revocation is the ban engine ONLY** (no CRL): `tunnel-name` / `tunnel-fingerprint` bans are
-  enforced at `/connect` (after auth, before bind), at public ingress (on the resolved route), and
-  live via the ban-reload `EvictBanned` hook. All three points MUST stay wired.
+- **Two-phase attested enrollment.** Phase 1 (`/enroll`, server-TLS): attestation (seven-point
+  predicate) + key binding → the server assigns a random name and signs a bootstrap identity (mTLS)
+  cert. Phase 2 (mTLS `/issue` on `--control-host`): the phone submits a TLS CSR for
+  `<name>.<tunnel-domain>`; the server re-verifies attestation and issues the public WebPKI cert via
+  ACME (regenerating identity + public certs together). Renewal is the SAME `/issue` endpoint.
+- **The server assigns the name (random, base32) and writes it into the identity-cert CN** (the CSR
+  subject is ignored); the public cert is issued for the server-dictated `<name>.<tunnel-domain>` — at
+  issuance the name is read from the **mTLS client-cert CN** and the TLS CSR MUST request exactly that.
+  Enrollment accepts **ECDSA P-256 keys ONLY**.
+- **mTLS with role separation.** The phone authenticates with its identity cert over the control
+  connection; the replica mesh uses distinct **mesh-role** certs (SAN = node id, verified by chain +
+  role, NOT hostname). There is **NO TLS mutual auth on the PUBLIC side** (the edge relays opaque TLS).
+  The phone control listener REJECTS a mesh-role cert; the mesh listener REJECTS an identity-role cert.
+- **Revocation is the ban engine ONLY** (no CRL): `tunnel-name` / `tunnel-fingerprint` bans are enforced
+  at the phone control connection, at the public SNI edge (on the resolved route), and live via the
+  ban-reload `EvictBanned` hook. All three points MUST stay wired.
 
-### Source-IP trust — SACRED
-- The IP for ban checks, rate limits, and quotas comes ONLY from the MANDATORY, defaultless
-  `--client-ip-header`, via the single `internal/clientip.TrustedIP` helper: the **RIGHT-MOST**
-  comma-separated token, NEVER the left-most (client-controlled) `X-Forwarded-For` entry. An
-  absent/unparseable header is rejected `400 missing_client_ip` — **fail-closed, never defaulted**.
-- The trust boundary is the deployment layer, not an in-process CIDR allowlist: orange-cloud =
-  origin reachable ONLY from Cloudflare (Traefik `IPAllowList` of Cloudflare ranges and/or
-  Authenticated Origin Pulls) so `Cf-Connecting-Ip` is trustworthy; grey-cloud = Traefik is the
-  internet edge with `X-Real-Ip`. **Never publish tunneld's port** — the replicas are reachable
-  only on the compose network.
+### Source-IP + ingress — SACRED
+- The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
+  edge is the internet edge — there is no proxy and no `--client-ip-header`).
+- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, `/enroll`,
+  `/control`), keyed on that IP. **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
+  only the raw edge `:443` is public.
+- The public edge dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
+  `--control-host` → local termination; anything else → close (`no-route`). Caps are UNIFORM — NO
+  per-path exceptions. Operators raise the `--limit-*` values, never the code.
 
-### Ingress discipline
-- **The ban check is the FIRST handler-level check on ALL THREE ingress edges** (public, `/enroll`,
-  `/connect` — before the WS upgrade), keyed on the trusted client IP. Only the fail-closed
-  client-IP extraction (and Go's `MaxHeaderBytes` backstop during header parsing) may precede it.
-- The public surface is an exact method+path **allowlist** (`internal/ingress/allowlist.go`) —
-  everything else is `404`; `GET /mcp` is `405` at the edge (`Allow: POST, DELETE`; SSE
-  unsupported); `/s/{token}` is matched by `^/s/[0-9a-f]{64}$`. The allowlist's source of truth is
-  the app's route code — reconcile there, never invent entries.
-- `/connect` on a per-tunnel host is a RESERVED path owned by the WebSocket manager; it MUST NEVER
-  reach the allowlist. A non-upgrade `/connect` request is `426`.
-- Client-supplied `X-Forwarded-*`/`Forwarded` are stripped and re-added from proxy-set values;
-  hop-by-hop headers are stripped in BOTH directions.
-- Caps are UNIFORM: NO per-path exceptions, NO ad-hoc higher caps (product decision — the tunnel is
-  a free service for MCP control traffic). Operators raise the `--limit-*` values, never the code.
-
-### Redis state — SACRED
-- **NO permanent Redis state, EVER.** Every key (routing, rate-limit windows, concurrency
-  counters, per-tunnel `tcnt:{name}` counters) carries a TTL set **atomically in the SAME Lua
-  script** as its INCR/HINCRBY/SET — never a separate `EXPIRE` call. The enrolled certificate
-  (held by the phone) is the ONLY persistent identity. There is no database.
-- Route teardown/refresh (`Unbind`/`Heartbeat`) is **owner-conditional on the per-connection
-  `connID`**, never node-only — a stale connection MUST NOT clobber a re-bound route.
+### Valkey (transient) + S3 (durable) state — SACRED
+- **NO permanent Valkey state, EVER.** Every key (routing, node registry, rate-limit windows,
+  concurrency counters, per-tunnel `tcnt:{name}`, enrollment nonces, ACME cooldown/backoff) carries a
+  TTL set **atomically in the SAME Lua script** as its INCR/HINCRBY/SET. Route teardown/refresh is
+  **owner-conditional on the per-connection `connID`** — a stale connection MUST NOT clobber a re-bound
+  route.
+- **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
+  and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
+  Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
+  retries disabled → settle wait > the PUT timeout → GET-verify). Lifecycle expiry (logs 90d,
+  rejected-enroll 30d) is applied programmatically at startup.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
-- `wire.ChunkSize` = **32768** bytes; both peers set the WS read limit to `ChunkSize + 64 KiB`.
-- Empty body = ZERO body-chunk frames (canonical, both directions); receivers tolerate zero-length
-  chunks; dispatch happens ONLY on `*_END`. Bodies are RAW bytes — never base64.
-- ANY wire change MUST update `docs/PROTOCOL.md`, the golden fixtures in
-  `internal/wire/testdata/`, and the Go client in `client/` together (the future Kotlin client
-  conforms to the spec, not to the Go source).
-
-### Cloudflare Free constraints — enforced by `Validate()`
-- `--ping-interval` ≤ 90 s (Cloudflare's 100 s WS idle timeout); `--limit-request-timeout` < 100 s
-  (Cloudflare's 524 origin timeout). Do NOT weaken these checks.
+- v2 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
+  values are frozen); the data stream is an OPAQUE unframed splice (`wire.ChunkSize` = 32768 is the
+  pacing slice). A mesh stream identifies itself via the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` request
+  headers (replica↔replica only — not part of the phone contract). ANY wire change MUST update
+  `docs/PROTOCOL.md` and the Go client in `client/` together (the future Kotlin client conforms to the
+  spec, not to the Go source).
 
 ### Bandwidth model
-- Per-tunnel, per-direction token buckets are **per-PROCESS** (user decision — cross-replica
-  exactness was REJECTED: it would put a synchronous Redis call per 32 KiB slice on the data
-  plane). The ingress paced body-reader and the WS leg share ONE `BucketRegistry` instance; the
-  `PacedByNode` guard prevents double-draining the same bytes (byte ACCOUNTING is still recorded
-  for every chunk). Client-side egress is deliberately unpaced.
-- The blocking `WaitN` MUST NEVER be held under the connection write mutex.
+- Per-tunnel, per-direction pacing draws from ONE global Valkey token bucket (`bw:{name}:{dir}`) in
+  **~1 MB batches** into a per-stream local credit — the data plane hits the control plane ~once/MB
+  (a synchronous per-32 KiB-slice Valkey call was REJECTED). An empty bucket blocks the copy in short
+  refill waits; a Valkey ERROR fails open. Byte ACCOUNTING (day/week) is still recorded per chunk; an
+  exhausted window refuses NEW streams at admission. The blocking refill wait MUST NEVER be held under
+  a connection write mutex.
 
 ### Observability
-- Prometheus metrics live on the INTERNAL listener ONLY (never proxied) and MUST NOT carry
-  per-tunnel labels (cardinality); the per-tunnel view is `/admin/tunnels` from the TTL'd Redis
+- Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
+  per-tunnel labels (cardinality); the per-tunnel view is `/admin/tunnels` from the TTL'd Valkey
   counters, written ASYNCHRONOUSLY by the recorder's background flusher — never synchronously on
   the data plane.
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
@@ -155,10 +151,11 @@ MUST NOT be relaxed without explicit user direction.
 
 ## Non-goals (MUST NOT build)
 
-- No database / persistent server-side identity store. No server-side request authentication
-  (the app authenticates). No per-path cap exceptions or bulk-transfer support. No CRL (bans are
-  the only revocation). No cross-replica exact bandwidth accounting. No server-side response
-  cache. No SSE on `/mcp` (`GET /mcp` = `405`). No idle disconnect (pings are liveness-only).
+- No database / persistent server-side identity store (the phone holds its cert). No reverse proxy
+  (tunneld IS the raw `:443` edge). No authentication of relayed traffic (it is opaque TLS; the app
+  authenticates). No HTTP request inspection / method-path allowlist on relayed traffic. No per-path cap
+  exceptions or bulk-transfer support. No CRL (bans are the only revocation). No cross-replica exact
+  bandwidth accounting. No server-side content storage or caching. No TLS mutual auth on the public side.
 - The Android (Kotlin) client integration is **out of scope** of this repo — it lives with the app.
 
 ---
@@ -173,23 +170,26 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `config` | `internal/config`: kong flag surface, `Validate()`, size/bitrate parsing |
 | `logging` | `internal/logging`: slog fan-out, composite `--log` sinks |
 | `ban` | `internal/ban`: parser, LPM engine, DB-IP expansion, watcher |
-| `limit` | `internal/limit`: rate windows, enroll quota, concurrency, token buckets |
-| `ca` | `internal/ca`: CA signer, name generation, cert/possession verification |
-| `clientip` | `internal/clientip`: trusted source-IP extraction |
-| `router` | `internal/router`: Redis routing registry (bind/heartbeat/unbind/lookup) |
-| `transport` | `internal/transport`: pub/sub round trip + node serve loop |
-| `wire` | `internal/wire`: frame codec, envelopes, golden fixtures |
-| `wsconn` | `internal/wsconn`: /connect handshake, connection manager, heartbeat |
-| `ingress` | `internal/ingress`: public pipeline, allowlist, header sanitizer, enroll |
-| `server` | `internal/server`: assembly (`Run`), Host-dispatch mux, lifecycle |
+| `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, batch-credit bandwidth, ACME cooldown |
+| `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
+| `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
+| `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
+| `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
+| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01, per-CA cooldown/backoff retry-after) |
+| `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
+| `wire` | `internal/wire`: v2 control-frame codec + mesh stream header |
+| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back, renewal, eviction) |
+| `edge` | `internal/edge`: raw :443 SNI edge (ClientHello peek + JA4), bridge, connection policy |
+| `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 mesh (per-pair pools, connID-checked delivery) |
+| `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
 | `admin` | `internal/admin`: per-tunnel counters + `/admin/tunnels` |
 | `caplog` | `internal/caplog`: deduped cap-hit logger |
 | `observ` | `internal/observ`: the Recorder interface |
-| `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, FakePhone) |
+| `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
 | `client` | `client/`: the Go tunnel client library |
 | `e2e` | `e2e/`: testcontainers harness + scenarios |
-| `deploy` | `deploy/`: compose, Traefik, observability provisioning, fetcher |
+| `deploy` | `deploy/`: compose, MinIO/Valkey, observability provisioning, fetcher |
 | `scripts` | `deploy/scripts/` + `scripts/`: fetch/gen-ca/dev-tooling scripts |
 | `ci` | `.github/workflows/` |
 | `make` | `Makefile` |
@@ -197,7 +197,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `deps` | dependency-only updates (`go.mod`, `go.sum`) |
 
 ```
-fix(wsconn): clamp untrusted phone-supplied response status
+fix(phoneconn): supersede a stale connection on rebind without clobbering the route
 ```
 
 ---
@@ -212,8 +212,8 @@ The `Makefile` is the authoritative command surface:
 - `make vet` — `go vet`
 - `make govulncheck` — vulnerability scan (pinned via the `go.mod` `tool` directive, never `@latest`)
 - `make test-unit` — unit tests (`-short -race -count=1`)
-- `make test-integration` — `-tags=integration` suite (`-race`; in-process real server + miniredis)
-- `make test-e2e` — `-tags=e2e` testcontainers suite (`-race`; needs Docker)
+- `make test-integration` — `-tags=integration` suite (`-race`; real `server.Run` + testcontainers Valkey/MinIO/Pebble; needs Docker)
+- `make test-e2e` — `-tags=e2e` suite (`-race`; two in-process replicas + testcontainers; adb-gated attestation test skips without a device; needs Docker)
 - `make test-all` — `test-unit` + `test-integration` + `test-e2e`
 - `make test-scripts` — POSIX harness for the `deploy/scripts/` fetch/gen-ca scripts
 - `make compose-config` — validates `deploy/docker-compose.yml` (placeholder env from
@@ -221,8 +221,9 @@ The `Makefile` is the authoritative command surface:
 - `make mermaid-check` — validate all Mermaid blocks in `README.md` + `docs/` via `mmdc`
 - `make tidy` — `go mod tidy`
 
-There is NO dotenv convention for tests in this repo: unit and integration tests are self-contained
-(miniredis, httptest, temp CA files); e2e needs only a working Docker daemon. CI
+There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
+httptest, temp CA files); the integration + e2e tiers provision everything via testcontainers and need a
+working Docker daemon. CI
 (`.github/workflows/ci.yml`) runs `static-checks` (lint ×3, govulncheck, tidy-drift, shellcheck,
 script tests, compose config, mermaid-check), `build`, `test-unit`, `test-integration`, `test-e2e`,
 and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
@@ -236,20 +237,19 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   DI (all wiring happens in `server.Run` — no package globals), `context.Context` first on any
   I/O, `errgroup` for the process's goroutine groups.
 - **Every goroutine has a shutdown path**: conn read-pump/heartbeat/keepalive tied to the conn
-  ctx; `ServeNode` and the flusher on the drain ctx; shutdown order is public-listener drain →
-  drain-cancel → WS teardown (see `docs/ARCHITECTURE.md`).
-- **Config via kong flags + `TUNNELD_*` env twins**, validated fail-fast in `Validate()`. NO
-  hardcoded secrets or environment-specific values; byte sizes are BINARY (`1mb` = 1048576),
-  bitrates are DECIMAL bits (`1mbit` = 125000 B/s) — two distinct parsers.
-- **`internal/clientip.TrustedIP` is the ONLY code path that derives the abuse-control IP.** Never
-  add another.
+  ctx; the mesh/edge/flusher goroutines on the drain ctx; shutdown order is raw-`:443` listener close →
+  server drains → schedulers/watchers unwind (see `docs/ARCHITECTURE.md`).
+- **Config via kong flags + `TUNNELD_*` env twins** (`--s3-*` → `TUNNELD_S_3_*`), validated fail-fast in
+  `Validate()`. NO hardcoded secrets or environment-specific values; byte sizes are BINARY
+  (`1mb` = 1048576), bitrates are DECIMAL bits (`1mbit` = 125000 B/s) — two distinct parsers.
+- **The abuse-control IP is the raw-TCP peer address** (tunneld is the internet edge — no proxy header).
 - **Rejection reasons are the literal `tunneld_rejections_total{reason}` labels** — every
   registered reason label has exactly the writers the architecture doc lists; never abbreviate or
   invent reason strings at call sites.
 - **Testing**: unit = miniredis/httptest/fake clock, no sockets where avoidable; integration
-  (`//go:build integration`) = the REAL assembled server (`server.Run`) on real ports + miniredis;
-  e2e (`//go:build e2e`) = testcontainers (Redis + Traefik + two replicas). Shared fakes live in
-  `internal/tunneltest` (capturing Recorder, FakePhone).
+  (`//go:build integration`) = the REAL assembled server (`server.Run`) + testcontainers
+  Valkey/MinIO/Pebble; e2e (`//go:build e2e`) = two in-process replicas + shared testcontainers. Shared
+  fakes + the containers harness live in `internal/tunneltest`.
 - **Logging with `log/slog`** through the fan-out handler; identifiers on every line; deduped
   cap-hit events via `internal/caplog`.
 

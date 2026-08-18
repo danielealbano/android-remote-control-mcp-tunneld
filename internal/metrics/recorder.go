@@ -3,7 +3,6 @@ package metrics
 import (
 	"context"
 	"log/slog"
-	"strconv"
 	"sync"
 	"time"
 
@@ -16,8 +15,8 @@ import (
 const flushShutdownTimeout = 5 * time.Second
 
 // PromRecorder implements observ.Recorder by combining the metric registry, the cap-hit deduping
-// logger, and the async per-tunnel counter flusher. It is the single object injected into the ingress,
-// enroll, and WS handlers (docs/ARCHITECTURE.md §7).
+// logger, and the async per-tunnel counter flusher. It is the single recorder injected into the
+// enroll, edge, and phone-control handlers (docs/ARCHITECTURE.md §8).
 type PromRecorder struct {
 	m      *Metrics
 	caplog *caplog.Logger
@@ -29,30 +28,43 @@ type PromRecorder struct {
 }
 
 type aggEntry struct {
-	requests int64
 	bytesIn  int64
 	bytesOut int64
 }
 
 var _ observ.Recorder = (*PromRecorder)(nil)
 
-// NewPromRecorder builds the recorder.
+// knownRejectReasons is the observ.RejectReasons set as a lookup (Reject refuses anything else, so an
+// unregistered reason string can never be invented at a call site).
+var knownRejectReasons = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(observ.RejectReasons))
+	for _, r := range observ.RejectReasons {
+		set[r] = struct{}{}
+	}
+	return set
+}()
+
+// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink so the recorder
+// never carries nil collaborators.
 func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slog.Logger) *PromRecorder {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if cl == nil {
+		cl = caplog.New(log)
+	}
 	return &PromRecorder{m: m, caplog: cl, admin: store, log: log, agg: map[string]*aggEntry{}}
 }
 
-// Reject bumps the reason counter AND emits a deduped cap-hit log.
+// Reject bumps the reason counter AND emits a deduped cap-hit log. A reason outside
+// observ.RejectReasons is refused (logged as an error) so call sites cannot invent labels.
 func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
+	if _, ok := knownRejectReasons[reason]; !ok {
+		p.log.Error("unregistered rejection reason refused", "reason", reason, "tunnel", tunnelName)
+		return
+	}
 	p.m.rejections.WithLabelValues(reason).Inc()
 	p.caplog.Hit(tunnelName, reason, clientIP)
-}
-
-// Request bumps the request counter + duration histogram and accumulates the per-tunnel requests
-// counter in-process (flushed async — never a synchronous Redis write on the data plane).
-func (p *PromRecorder) Request(tunnelName, class string, code int, dur time.Duration) {
-	p.m.httpRequests.WithLabelValues(class, strconv.Itoa(code)).Inc()
-	p.m.httpDuration.Observe(dur.Seconds())
-	p.accum(tunnelName, func(e *aggEntry) { e.requests++ })
 }
 
 // Bytes bumps the direction counter and accumulates the per-tunnel byte counters.
@@ -67,20 +79,34 @@ func (p *PromRecorder) Bytes(tunnelName, direction string, n int64) {
 	})
 }
 
-func (p *PromRecorder) WSConnect() {
-	p.m.wsConnects.Inc()
-	p.m.tunnelsConnected.Inc()
-}
+// --- E2E event set (real implementations). ---
 
-func (p *PromRecorder) WSDisconnect(reason string) {
-	p.m.wsDisconnects.WithLabelValues(reason).Inc()
-	p.m.tunnelsConnected.Dec()
+func (p *PromRecorder) PublicConnOpen()               { p.m.publicConnsUp.Inc() }
+func (p *PromRecorder) PublicConnClose(reason string) { p.m.publicConnsUp.Dec() }
+func (p *PromRecorder) PhoneConnOpen()                { p.m.phoneConnsUp.Inc() }
+func (p *PromRecorder) PhoneConnClose(reason string)  { p.m.phoneConnsUp.Dec() }
+func (p *PromRecorder) StreamOpen()                   { p.m.streamsActive.Inc() }
+func (p *PromRecorder) StreamClose()                  { p.m.streamsActive.Dec() }
+func (p *PromRecorder) EnrollmentResult(result string) {
+	p.m.enrollments.WithLabelValues(result).Inc()
 }
-
-func (p *PromRecorder) Enrollment()           { p.m.enrollments.Inc() }
-func (p *PromRecorder) InflightAdd(delta int) { p.m.httpInflight.Add(float64(delta)) }
-func (p *PromRecorder) Timeout()              { p.m.requestTimeouts.Inc() }
-func (p *PromRecorder) PublishError()         { p.m.pubsubPublishErrors.Inc() }
+func (p *PromRecorder) AttestVerify(result string) { p.m.attestVerify.WithLabelValues(result).Inc() }
+func (p *PromRecorder) ACMEIssue(ca, result string) {
+	p.m.acmeIssue.WithLabelValues(ca, result).Inc()
+}
+func (p *PromRecorder) ACMERenew(ca, result string) {
+	p.m.acmeRenew.WithLabelValues(ca, result).Inc()
+}
+func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {
+	p.m.quotaExhausted.WithLabelValues(window).Inc()
+	// The exhaustion LOG is deduped like any cap hit (first per (tunnel, window) immediately, then ≤1
+	// summary/min) — attacker-driven log flooding must stay impossible.
+	p.caplog.Hit(tunnelName, "quota-"+window, "")
+}
+func (p *PromRecorder) ACMECooldown(ca string) { p.m.acmeCooldown.WithLabelValues(ca).Inc() }
+func (p *PromRecorder) MeshPool(peer string, size int) {
+	p.m.meshPoolSize.WithLabelValues(peer).Set(float64(size))
+}
 
 func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 	if name == "" {
@@ -122,11 +148,6 @@ func (p *PromRecorder) flush(ctx context.Context) {
 	p.mu.Unlock()
 
 	for name, e := range drained {
-		if e.requests != 0 {
-			if err := p.admin.Incr(ctx, name, "requests", e.requests); err != nil {
-				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "requests", "err", err)
-			}
-		}
 		if e.bytesIn != 0 {
 			if err := p.admin.Incr(ctx, name, "bytes_in", e.bytesIn); err != nil {
 				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_in", "err", err)
