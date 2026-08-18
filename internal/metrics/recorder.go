@@ -82,23 +82,29 @@ func (p *PromRecorder) InflightAdd(delta int) { p.m.httpInflight.Add(float64(del
 func (p *PromRecorder) Timeout()              { p.m.requestTimeouts.Inc() }
 func (p *PromRecorder) PublishError()         { p.m.pubsubPublishErrors.Inc() }
 
-// --- Plan 3 (E2E) event set: stub bodies here; the real family/counter updates land in US10 when the
-// registry gains the E2E families. Declared now so the extended observ.Recorder assertion and the
-// server.Run wiring compile at every story boundary (additive-until-teardown). ---
+// --- Plan 3 (E2E) event set (real implementations). ---
 
-func (p *PromRecorder) PublicConnOpen()                          {}
-func (p *PromRecorder) PublicConnClose(reason string)            {}
-func (p *PromRecorder) PhoneConnOpen()                           {}
-func (p *PromRecorder) PhoneConnClose(reason string)             {}
-func (p *PromRecorder) StreamOpen()                              {}
-func (p *PromRecorder) StreamClose()                             {}
-func (p *PromRecorder) EnrollmentResult(result string)           {}
-func (p *PromRecorder) AttestVerify(result string)               {}
-func (p *PromRecorder) ACMEIssue(ca, result string)              {}
-func (p *PromRecorder) ACMERenew(ca, result string)              {}
-func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {}
-func (p *PromRecorder) ACMECooldown(ca string)                   {}
-func (p *PromRecorder) MeshPool(peer string, size int)           {}
+func (p *PromRecorder) PublicConnOpen()                { p.m.publicConnsUp.Inc() }
+func (p *PromRecorder) PublicConnClose(reason string)  { p.m.publicConnsUp.Dec() }
+func (p *PromRecorder) PhoneConnOpen()                 { p.m.phoneConnsUp.Inc() }
+func (p *PromRecorder) PhoneConnClose(reason string)   { p.m.phoneConnsUp.Dec() }
+func (p *PromRecorder) StreamOpen()                    { p.m.streamsActive.Inc() }
+func (p *PromRecorder) StreamClose()                   { p.m.streamsActive.Dec() }
+func (p *PromRecorder) EnrollmentResult(result string) { p.m.enrollments.Inc() }
+func (p *PromRecorder) AttestVerify(result string)     { p.m.attestVerify.WithLabelValues(result).Inc() }
+func (p *PromRecorder) ACMEIssue(ca, result string) {
+	p.m.acmeIssue.WithLabelValues(ca, result).Inc()
+}
+func (p *PromRecorder) ACMERenew(ca, result string) {
+	p.m.acmeRenew.WithLabelValues(ca, result).Inc()
+}
+func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {
+	p.m.quotaExhausted.WithLabelValues(window).Inc()
+}
+func (p *PromRecorder) ACMECooldown(ca string) { p.m.acmeCooldown.WithLabelValues(ca).Inc() }
+func (p *PromRecorder) MeshPool(peer string, size int) {
+	p.m.meshPoolSize.WithLabelValues(peer).Set(float64(size))
+}
 
 func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 	if name == "" {

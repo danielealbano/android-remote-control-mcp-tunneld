@@ -1595,7 +1595,7 @@ manager; fake router.
 
 ## User Story 10: Observability (PromRecorder implementation, registry, admin)
 
-- [ ] **User Story 10 complete**
+- [x] **User Story 10 complete**
 
 Supply the Prometheus implementation of the `observ.Recorder` interface (reworked in US1), the metric
 registry with the E2E families (no per-tunnel labels) + goroutine/memory gauges, and the adapted
@@ -1604,19 +1604,19 @@ construct the concrete `PromRecorder` without a forward dependency (matching Pla
 assembly ordering).
 
 ### Acceptance Criteria
-- [ ] `internal/metrics` registers the E2E metric families on the internal listener only, with NO
+- [x] `internal/metrics` registers the E2E metric families on the internal listener only, with NO
   per-tunnel labels: rejections (the exact US1 `observ.RejectReasons` set), public/phone connections up,
   streams active, bytes by direction, quota-exhaustion, attestation verify outcomes, ACME issue/renew by
   CA + result, per-CA cooldown activations, mesh pool sizes, goroutines, per-conn memory estimate.
-- [ ] `metrics.PromRecorder` implements the US1 `observ.Recorder` interface (updating families + the
+- [x] `metrics.PromRecorder` implements the US1 `observ.Recorder` interface (updating families + the
   async per-tunnel `tcnt:{name}` Valkey counters via a background flusher — never synchronous on the data
   plane).
-- [ ] `/admin/tunnels` reflects the TTL'd per-tunnel counters (traffic day/week, streams, last issuance).
-- [ ] Cap-hit logging stays deduped via `internal/caplog`.
+- [x] `/admin/tunnels` reflects the TTL'd per-tunnel counters (traffic day/week, streams, last issuance).
+- [x] Cap-hit logging stays deduped via `internal/caplog`.
 
 ### Task 10.1: Registry + reason set + gauges
-- [ ] **Task 10.1 complete**
-- [ ] **File**: `internal/metrics/metrics.go` — modify (the EXISTING registry file): register the
+- [x] **Task 10.1 complete**
+- [x] **File**: `internal/metrics/metrics.go` — modify (the EXISTING registry file): register the
   families for the US1 recorder events
   (custom registry, internal listener only, no per-tunnel labels) + the Go collector `go_goroutines` +
   a per-conn memory gauge. The `tunneld_rejections_total{reason}` label VALUES are the
@@ -1636,17 +1636,17 @@ assembly ordering).
   circuit-breaker family).
 
 ### Task 10.2: PromRecorder + admin
-- [ ] **Task 10.2 complete**
-- [ ] **File**: `internal/metrics/recorder.go` — modify (the EXISTING `PromRecorder`): replace the US1
+- [x] **Task 10.2 complete**
+- [x] **File**: `internal/metrics/recorder.go` — modify (the EXISTING `PromRecorder`): replace the US1
   E2E stubs with the real implementations — update the new Prometheus families and the async per-tunnel
   `tcnt:{name}` Valkey counters via a background flusher (never synchronous on the data plane); the
   retained P1 methods become NO-OPS here (their last callers are legacy packages removed in US13, which
   also strips the methods).
-- [ ] **File**: `internal/admin/tunnels.go` — modify: adapt `/admin/tunnels` to read the new counters.
+- [x] **File**: `internal/admin/tunnels.go` — modify: adapt `/admin/tunnels` to read the new counters.
 
 ### Task 10.3: Unit tests
-- [ ] **Task 10.3 complete**
-- [ ] **File**: `internal/metrics/metrics_test.go` — REWRITE the four P1-behavior test functions that
+- [x] **Task 10.3 complete**
+- [x] **File**: `internal/metrics/metrics_test.go` — REWRITE the four P1-behavior test functions that
   assert the now-no-op P1 methods update families/counters (`TestRunFlusherCadenceAndFinalFlush`,
   `TestMetricsEndpointExposesFamilies`, `TestNoPerTunnelMetricLabels`, `TestPromRecorderFlushesTcnt`)
   onto the new E2E recorder events (`Bytes`/`EnrollmentResult`/`ACMEIssue`/`PublicConnOpen`…) — they
@@ -1663,10 +1663,10 @@ assembly ordering).
 | `goroutine + mem gauges present` | `go_goroutines` and the per-conn memory gauge are exported |
 
 ### Definition of Done
-- [ ] E2E metric families (no per-tunnel labels) + goroutine/mem gauges on the internal listener.
-- [ ] `PromRecorder` implements the US1 `observ.Recorder`; async counters; `/admin/tunnels` adapted;
+- [x] E2E metric families (no per-tunnel labels) + goroutine/mem gauges on the internal listener.
+- [x] `PromRecorder` implements the US1 `observ.Recorder`; async counters; `/admin/tunnels` adapted;
   caplog dedup retained.
-- [ ] US10 unit tables authored/committed (execution in US16).
+- [x] US10 unit tables authored/committed (execution in US16).
 
 ---
 
@@ -2266,6 +2266,11 @@ gates, and validate all touched Mermaid diagrams.
 ## Deviations
 
 (Recorded during implementation per `agent.md` §2 — task/action reference + what changed + why.)
+
+- **US10 P1 recorder methods:** kept FULLY FUNCTIONAL (not no-op'd) until US13, so the four P1-behavior
+  metrics tests pass unchanged and are removed WITH the methods in US13 — simpler than the plan's
+  no-op-then-rewrite, same end state. E2E families added additively to the existing registry (+ the Go
+  collector for goroutines); `ACMECooldown` is the per-CA cooldown family (no circuit-breaker family).
 
 - **US9 mesh pool:** the per-directed-pair pool is N independent HTTP/2 clients (each its own
   x/net/http2 transport ⇒ its own connection) selected round-robin — this delivers the "4 real
