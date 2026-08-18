@@ -96,19 +96,19 @@ The phone opens ONE outbound HTTP/2 connection to `--control-host`. It carries:
   an incoming connection on the control stream; the phone opens the data stream — HTTP/2 streams are
   always client-initiated).
 
-Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`.
+Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values are FROZEN:
 
-| Frame | Direction | Payload |
-|---|---|---|
-| `OPEN` | server→phone | `{stream_id}` — dial back for one public connection |
-| `CLOSE` | either | `{stream_id, reason}` |
-| `PING` / `PONG` | either | (none) — application liveness |
-| `RENEW_NUDGE` | server→phone | `{nonce, ari_window}` — "renew now"; the phone answers by calling `POST /issue` |
-| `ERROR` | server→phone | `{reason, retryable, retry_after_seconds}` |
+| Frame | Type | Direction | Payload |
+|---|---|---|---|
+| `OPEN` | `0x01` | server→phone | `{stream_id}` — dial back for one public connection |
+| `PING` | `0x02` | server→phone | (none) — application liveness |
+| `PONG` | `0x03` | phone→server | (none) — liveness answer |
+| `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window}` — "renew now"; the phone answers by calling `POST /issue` |
 
 The control stream carries only small frames. All certificate material (attestation chains, CSRs, issued
-certs) travels over the mTLS `POST /issue` endpoint below — NEVER the stream. The only phone→server frame
-is `PONG` (liveness).
+certs) — and every issuance/renewal ERROR — travels over the mTLS `POST /issue` endpoint below, NEVER the
+stream. The only phone→server frame is `PONG` (liveness); a stream tears down via HTTP/2 `END_STREAM`,
+never a control frame.
 
 ### `POST /issue` (mTLS certificate-generation endpoint)
 
@@ -135,10 +135,11 @@ bandwidth-pacing slice size the bridge reads, NOT a wire frame.
 ## 5. Replica mesh
 
 When the accepting edge node is not the node holding the phone, it bridges to the owner over an internal
-HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). The mesh data stream is prefixed with ONE
-`StreamOpen` header: `[len:4 BE][ {tunnel, conn_id, stream_id} JSON ]`. The owner verifies `conn_id`
-against its live phone connection before bridging (one fresh route lookup + retry on mismatch, then
-close). Everything after the header is the opaque splice.
+HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh stream is a `POST /mesh` whose identity
+travels in the request headers `X-Tunnel`, `X-Conn-Id`, and `X-Stream-Id`; the request/response bodies
+are the opaque splice. The owner verifies `X-Conn-Id` against its live phone connection before bridging
+(the entry node takes one fresh route lookup + retry on a mismatch/stale route, then closes). The mesh
+is replica↔replica only — it is NOT part of the phone-client contract.
 
 ## 6. Security invariants
 

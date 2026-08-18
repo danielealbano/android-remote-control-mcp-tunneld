@@ -58,7 +58,7 @@ flowchart TD
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
-| `internal/wire` | v2 control-frame codec + mesh stream header |
+| `internal/wire` | v2 control-frame codec + the ChunkSize pacing constant |
 | `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/admin/tunnels` + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |

@@ -2693,3 +2693,47 @@ gates, and validate all touched Mermaid diagrams.
     IP ban, /data 404; US11 quota admission, fresh-route retry, fail-open traffic errors, batch/empty
     bucket pacing, ban-before-max-clients, JA4 ALPN table, idle-timeout splice, trickled-ClientHello
     timeout, heartbeat resilience, name validation, mesh pool reap, metrics label/validation/dedup rows.
+- **Second review wave (adversarial review round 2; wire contract + abuse-control + observability):**
+  - **US7/US9 (mesh stream identity travels in HTTP/2 headers; dead wire surface removed):** the
+    as-built mesh stream is a `POST /mesh` identified by the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id`
+    request headers — the planned in-stream `StreamOpen` `[len:4 BE][JSON]` header was never sent
+    (HTTP/2 headers are the natural realization, consistent with the recorded HTTP-shape deviation for
+    `/control` + `/data`; the mesh is replica↔replica only and NOT part of the phone-client contract).
+    `wire.StreamOpenHeader`/`EncodeStreamOpen`/`DecodeStreamOpen` (production-dead) were deleted.
+    Likewise the `CLOSE` and `ERROR` control frames had NO sender or handler anywhere (teardown is
+    HTTP/2 `END_STREAM`; issuance errors travel exclusively in the `POST /issue` response since the
+    two-phase redesign) — `CtrlClose`/`ClosePayload`/`CtrlError`/`ErrorPayload` were deleted and the
+    frame set is now exactly `OPEN(0x01)/PING(0x02)/PONG(0x03)/RENEW_NUDGE(0x04)` with the type values
+    FROZEN by `docs/PROTOCOL.md` §3 (pinned by a test) — a conforming Kotlin client implements no dead
+    frames. `PROTOCOL.md` §3/§5 and the `project.md` wire invariant were rewritten to the as-built
+    contract; US7's body text remains the historical record.
+  - **US5 (per-IP limit pre-gates the issue-nonce mint):** `POST /enroll` ran the per-IP enroll limit
+    only INSIDE `Enroll`, after the handler had already minted the Phase-2 issue nonce — an over-limit
+    flooder could mint one TTL'd Valkey key per request. A READ-ONLY window check (`limit.Over`, no
+    slot consumed) now gates the handler BEFORE the mint; `Enroll`'s consuming check stays
+    authoritative.
+  - **US4 (attestation fetches bounded):** the root/status fetch client now carries a 30s hard HTTP
+    timeout (`http.DefaultClient` had none — a black-holed URL could wedge a refresher tick forever
+    and let the status snapshot age past `--attest-status-max-stale` with no self-heal).
+  - **US11 (`AcquireStream` control-plane error fails open):** a Valkey error on the stream-cap
+    acquire was treated as a refusal — evicting a healthy live stream and rejecting the newcomer with
+    `stream-cap` during any control-plane blip. It now fails open like every other control-plane
+    check (`conn-rate`, quota, pacing).
+  - **US8/US10 (phone ban gates are `ban` writers):** both phone-control ban gates (peer-IP and
+    tunnel-name/fingerprint) now record `Reject("ban", …)` per the US10 writer map (they rejected
+    silently); the handler takes a `Reject` writer via `HandlerConfig`.
+  - **US5 (`Issue` store-error mapping):** a transient registry read failure during issuance now maps
+    to a RETRYABLE internal error; `name_unknown` is returned only on a definitive
+    `store.ErrNotFound`.
+  - **US11 (renewal watcher never silent):** `GetName`/`ShouldRenew` failures in the renewal watcher
+    are now logged (a persistent failure previously stopped all renewal nudges with zero signal).
+  - **US6 (degraded renewal floor uses the configured margins):** `lazyCA.shouldRenew`'s fallback now
+    derives from the configured shortlived lifetime + `--acme-renew-margin` instead of hardcoded
+    `160h − 48h`.
+  - **US11 (pacing slice bound to the constant):** the edge paced-copy buffer is `wire.ChunkSize`
+    (was a bare `32*1024` literal detached from the documented invariant).
+  - **US11 (dead `edge.Config` fields removed):** `NodeID`/`NodeHost`/`NodeStart` were set but never
+    read (node identity on public conn-log events comes from the server's `edgeLogSink`).
+  - **Commit convention:** four earlier branch commits deviate from `<type>(<scope>)` (a bare `docs:`,
+    a bare `deps:`, and two multi-scope commits) — acknowledged; published history is NOT rewritten
+    (amending requires explicit permission); all subsequent commits conform.

@@ -116,10 +116,12 @@ MUST NOT be relaxed without explicit user direction.
   rejected-enroll 30d) is applied programmatically at startup.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
-- v2 control frames: `[type:1][payloadLen:4 BE][payload JSON]`; the data stream is an OPAQUE unframed
-  splice (`wire.ChunkSize` = 32768 is the pacing slice). The mesh stream is prefixed with ONE StreamOpen
-  header. ANY wire change MUST update `docs/PROTOCOL.md` and the Go client in `client/` together (the
-  future Kotlin client conforms to the spec, not to the Go source).
+- v2 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
+  values are frozen); the data stream is an OPAQUE unframed splice (`wire.ChunkSize` = 32768 is the
+  pacing slice). A mesh stream identifies itself via the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` request
+  headers (replica↔replica only — not part of the phone contract). ANY wire change MUST update
+  `docs/PROTOCOL.md` and the Go client in `client/` together (the future Kotlin client conforms to the
+  spec, not to the Go source).
 
 ### Bandwidth model
 - Per-tunnel, per-direction pacing draws from ONE global Valkey token bucket (`bw:{name}:{dir}`) in
