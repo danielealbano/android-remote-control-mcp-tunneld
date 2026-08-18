@@ -293,18 +293,28 @@ func signError(err error) *Error {
 	return &Error{Reason: "identity_sign_failed"}
 }
 
-// csrMatchesTunnel reports whether csr requests exactly <name>.<tunnelDomain> (CN or a SAN).
+// csrMatchesTunnel reports whether csr requests EXACTLY <name>.<tunnelDomain> and NOTHING else. lego
+// derives the ACME order identifiers from the WHOLE CSR (CN + every SAN), and the DNS-01 provider is
+// scoped to the entire tunnel zone — so any additional identifier (another tenant's name, a reserved
+// host, a wildcard) would be satisfiable and MISISSUED. Equality, not containment: the CN must be
+// empty or the required FQDN, the SAN list must be exactly {want} (or empty when the CN carries it),
+// and no other identifier type (IP/email/URI SANs) may be present.
 func csrMatchesTunnel(csr *x509.CertificateRequest, name, tunnelDomain string) bool {
 	want := name + "." + tunnelDomain
-	if csr.Subject.CommonName == want {
-		return true
+	if csr.Subject.CommonName != "" && csr.Subject.CommonName != want {
+		return false
 	}
-	for _, d := range csr.DNSNames {
-		if d == want {
-			return true
-		}
+	if len(csr.IPAddresses) > 0 || len(csr.EmailAddresses) > 0 || len(csr.URIs) > 0 {
+		return false
 	}
-	return false
+	switch len(csr.DNSNames) {
+	case 0:
+		return csr.Subject.CommonName == want
+	case 1:
+		return csr.DNSNames[0] == want
+	default:
+		return false
+	}
 }
 
 // claimName runs the write-verify claim protocol over PLAIN S3 (no conditional writes): per candidate,

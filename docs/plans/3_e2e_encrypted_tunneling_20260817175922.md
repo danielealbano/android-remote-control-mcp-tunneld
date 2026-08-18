@@ -2779,3 +2779,12 @@ gates, and validate all touched Mermaid diagrams.
   `NameRecord.SetCert`/`NameRecord.CertInfo()` convert to/from the shared `CertInfo` at the call sites
   (renewal detection reads the authoritative top-level `CA`). The round-trip test now asserts the
   `cert` sub-object contains NO `ca` key, exactly as its plan row claims.
+- **Fifth review wave (adversarial review round 5; CSR identifier equality):** `csrMatchesTunnel`
+  enforced CONTAINMENT ("the CSR includes `<name>.<tunnel-domain>`"), not the documented EQUALITY —
+  lego derives the ACME order identifiers from the WHOLE CSR and the DNS-01 provider is scoped to the
+  entire tunnel zone, so an enrolled phone could smuggle EXTRA SANs (another tenant's name, a reserved
+  host, or `*.<tunnel-domain>`) into its `/issue` CSR and obtain publicly-trusted certs for them
+  (cross-tenant impersonation / operator misissuance). The check now requires the CSR to request
+  EXACTLY `<name>.<tunnel-domain>`: CN empty-or-equal, the SAN list exactly `{fqdn}` (or empty when
+  the CN carries it), and NO other identifier types (IP/email/URI SANs). A table test covers the
+  extra-tenant, wildcard, reserved-host, foreign-CN, and wildcard-only attack CSRs.

@@ -2,6 +2,8 @@ package enroll
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -345,5 +347,66 @@ func TestEnrollPerIPLimit(t *testing.T) {
 	_, ee := svc.Enroll(context.Background(), "6.6.6.6", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
 	if ee == nil || ee.Reason != "enroll_rate" || !ee.Retryable {
 		t.Fatalf("over-limit enroll must be refused with enroll_rate, got %v", ee)
+	}
+}
+
+// multiSANCSR builds a TLS CSR with an arbitrary CN + SAN list (the smuggling attack shapes).
+func multiSANCSR(t *testing.T, cn string, sans []string) *x509.CertificateRequest {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: cn}, DNSNames: sans,
+	}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, _ := x509.ParseCertificateRequest(der)
+	return csr
+}
+
+// TestIssueRejectsExtraIdentifiers covers the exact-identifier invariant: the TLS CSR must request
+// EXACTLY <name>.<tunnel-domain> — a CSR that ALSO carries another tenant's name, a wildcard, or a
+// reserved host must be refused (lego would otherwise order certs for every SAN in the CSR).
+func TestIssueRejectsExtraIdentifiers(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := doEnroll(t, svc, idCSR)
+	want := name + ".example.test"
+
+	tests := []struct {
+		tname string
+		cn    string
+		sans  []string
+	}{
+		{tname: "extra tenant SAN", cn: want, sans: []string{want, "othertenant.example.test"}},
+		{tname: "wildcard SAN", cn: want, sans: []string{want, "*.example.test"}},
+		{tname: "reserved enroll host SAN", cn: want, sans: []string{want, "enroll.example.test"}},
+		{tname: "reserved control host SAN", cn: want, sans: []string{want, "connect.example.test"}},
+		{tname: "foreign CN with own SAN", cn: "othertenant.example.test", sans: []string{want}},
+		{tname: "wildcard only", cn: "", sans: []string{"*.example.test"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.tname, func(t *testing.T) {
+			_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: multiSANCSR(t, tc.cn, tc.sans),
+			})
+			if ee == nil || ee.Reason != "csr_domain_mismatch" {
+				t.Fatalf("a CSR with extra/foreign identifiers must be refused (csr_domain_mismatch), got %v", ee)
+			}
+		})
+	}
+
+	// The exact single-identifier CSR still issues.
+	if _, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: multiSANCSR(t, want, []string{want}),
+	}); ee != nil {
+		t.Fatalf("the exact CSR must still issue: %v", ee)
 	}
 }
