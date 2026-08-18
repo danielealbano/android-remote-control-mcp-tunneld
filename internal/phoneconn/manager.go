@@ -46,10 +46,11 @@ type conn struct {
 	send   chan []byte // control frames to write to the phone (control-stream response body)
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	pending map[string]chan DataStream // streamID → dial-back waiter
-	closed  bool
-	reason  string
+	mu             sync.Mutex
+	pending        map[string]chan DataStream // streamID → dial-back waiter
+	closed         bool
+	reason         string
+	challengeNonce string // pending renewal challenge (hex), consumed on RENEW_SUBMIT
 }
 
 // Manager tracks live phone control connections, binds routes, writes conn-log events, and drives
@@ -234,6 +235,40 @@ func (m *Manager) EvictBanned(match func(name, fingerprint string) bool) {
 	}
 }
 
+// ConnectedNames returns a snapshot of the tunnel names with a live phone connection on this node (the
+// renewal watcher scans these to decide which certs to nudge).
+func (m *Manager) ConnectedNames() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.conns))
+	for name, c := range m.conns {
+		if !c.isClosed() {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// SendRenewNudge enqueues a RENEW_NUDGE control frame to the live connection for name, prompting the
+// phone to begin an early renewal. Returns false if no live connection exists or the send buffer is
+// full (the next watcher tick retries).
+func (m *Manager) SendRenewNudge(name, ariWindow string) bool {
+	c, ok := m.lookup(name)
+	if !ok || c.isClosed() {
+		return false
+	}
+	frame, err := wire.EncodeControl(wire.CtrlRenewNudge, wire.RenewNudgePayload{ARIWindow: ariWindow})
+	if err != nil {
+		return false
+	}
+	select {
+	case c.send <- frame:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Manager) writeEvent(ctx context.Context, c *conn, event, reason string) {
 	if m.logs == nil {
 		return
@@ -257,6 +292,22 @@ func (c *conn) isClosed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closed
+}
+
+// setChallengeNonce stores the pending renewal challenge (a fresh nonce supersedes any prior unused one).
+func (c *conn) setChallengeNonce(nonce string) {
+	c.mu.Lock()
+	c.challengeNonce = nonce
+	c.mu.Unlock()
+}
+
+// takeChallengeNonce returns and clears the pending renewal challenge (single use).
+func (c *conn) takeChallengeNonce() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.challengeNonce
+	c.challengeNonce = ""
+	return n
 }
 
 func (c *conn) dropPending(streamID string) {

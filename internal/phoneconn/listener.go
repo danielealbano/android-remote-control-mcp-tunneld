@@ -33,12 +33,19 @@ type Handler struct {
 	pingInterval  time.Duration
 	streamPending int
 	onRenew       RenewFunc
+	challenge     ChallengeFunc
 
 	sem chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
 }
 
-// RenewFunc handles a renewal submission, returning the pushed certs or an error.
-type RenewFunc func(ctx context.Context, name string, sub wire.RenewSubmitPayload) (wire.CertPushPayload, error)
+// RenewFunc handles a renewal submission, returning the pushed certs or an error. nonceHex is the
+// server-minted renewal challenge (a real single-use enroll nonce) the phone echoed in its fresh
+// attestation; ip is the phone's peer address (from the peeked ConnMeta) for rejection evidence.
+type RenewFunc func(ctx context.Context, name, nonceHex, ip string, sub wire.RenewSubmitPayload) (wire.CertPushPayload, error)
+
+// ChallengeFunc mints a fresh single-use renewal challenge nonce (hex), stored server-side (Valkey)
+// exactly like an initial-enrollment nonce so the renewal submission validates through the same path.
+type ChallengeFunc func(ctx context.Context) (nonceHex string, err error)
 
 // HandlerConfig wires the Handler.
 type HandlerConfig struct {
@@ -48,6 +55,7 @@ type HandlerConfig struct {
 	PingInterval  time.Duration
 	StreamPending int
 	OnRenew       RenewFunc
+	Challenge     ChallengeFunc
 }
 
 // NewHandler builds the phone control handler.
@@ -58,7 +66,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	return &Handler{
 		mgr: cfg.Manager, validName: cfg.ValidName, banTunnel: cfg.BanTunnel,
 		pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending, onRenew: cfg.OnRenew,
-		sem: make(chan struct{}, cfg.StreamPending),
+		challenge: cfg.Challenge,
+		sem:       make(chan struct{}, cfg.StreamPending),
 	}
 }
 
@@ -204,8 +213,16 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request, name string)
 }
 
 func metaFromRequest(r *http.Request) ConnMeta {
+	// The edge peeks the ClientHello and hands the ConnMeta (SNI/ALPN/version/JA4 + peer address) via
+	// http.Server.ConnContext (see ConnContext); use it when present.
+	if m, ok := r.Context().Value(connMetaKey{}).(ConnMeta); ok {
+		if m.ALPN == "" && r.TLS != nil {
+			m.ALPN = r.TLS.NegotiatedProtocol
+		}
+		return m
+	}
+	// Absent the hand-off (e.g. a direct connection in tests), derive what we can from the request.
 	m := ConnMeta{}
-	// The edge fills these when it hands off; absent that, derive what we can from the request.
 	if r.TLS != nil {
 		m.ALPN = r.TLS.NegotiatedProtocol
 	}
