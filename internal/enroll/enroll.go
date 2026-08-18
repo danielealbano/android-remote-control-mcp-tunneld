@@ -162,10 +162,14 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		return Result{}, &Error{Reason: "name_unavailable", Retryable: true}
 	}
 
-	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored).
+	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
+	// failure rolls the freshly claimed name back (plain delete — safe only after a VERIFIED claim);
+	// a rollback failure would orphan the claim in the indefinitely-retained registry, so it is logged.
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
-		s.rollback(ctx, true, name)
+		if derr := s.cfg.Names.DeleteName(ctx, name); derr != nil {
+			s.logger.Warn("claim rollback failed (name orphaned in the registry)", "tunnel", name, "err", derr)
+		}
 		return Result{}, signError(err)
 	}
 
@@ -359,12 +363,6 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		// Lost the race — new name.
 	}
 	return "", "", errClaimLost
-}
-
-func (s *Service) rollback(ctx context.Context, initial bool, name string) {
-	if initial {
-		_ = s.cfg.Names.DeleteName(ctx, name) // plain delete; safe only after a verified claim
-	}
 }
 
 // recordIdentity writes the Phase-1 registry record (name claimed, bootstrap identity signed, attested

@@ -36,7 +36,7 @@ const (
 //   - TUNNELD_ATTEST_PROBE: path to an executable invoked as `<probe> <nonceHex>` that prints the
 //     device's attestation chain as PEM (leaf certificate first) to stdout. The probe embodies the
 //     on-device keystore-attestation step; the Android client is out of THIS repo's scope
-//     (see .claude/rules/project.md), so the probe is provided by the operator.
+//     (see docs/PROJECT.md Non-goals), so the probe is provided by the operator.
 //   - TUNNELD_ATTEST_SIGNER_FILE: the signer-digest allowlist file matching the probe app's signing cert.
 func TestE2E_DeviceAttestation(t *testing.T) {
 	if !adbHasDevice(t) {

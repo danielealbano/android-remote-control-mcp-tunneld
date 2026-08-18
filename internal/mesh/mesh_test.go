@@ -176,3 +176,68 @@ func TestClientReapsIdlePools(t *testing.T) {
 	}
 	t.Fatal("an idle pool must be reaped")
 }
+
+// selfSignedServerTLS builds a self-signed keypair server tls.Config for the dead-peer test.
+func selfSignedServerTLS(t *testing.T) *tls.Config {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "dead-peer"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		DNSNames: []string{"dead-peer"}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"h2"},
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{der}, PrivateKey: key,
+		}},
+	}
+}
+
+// TestOpenStreamUnblocksOnDeadPeer covers the mesh PING health: a peer that completes the TLS
+// handshake but never speaks HTTP/2 must not pin OpenStream forever — the transport's read-idle PING
+// health kills the dead connection and the dial errors out within the configured bounds.
+func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", selfSignedServerTLS(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			// Complete the handshake, then read-and-discard forever, never writing a byte.
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, rerr := conn.Read(buf); rerr != nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}()
+		}
+	}()
+
+	c := NewClient(func() *tls.Config {
+		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+	}, 1, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second))
+
+	start := time.Now()
+	_, err = c.OpenStream(context.Background(), ln.Addr().String(), "t", "conn", "s1")
+	if err == nil {
+		t.Fatal("a dead peer must error the dial, not hang")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("PING health did not unblock the dial in time (took %s)", elapsed)
+	}
+}

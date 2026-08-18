@@ -1,6 +1,6 @@
 // Package mesh implements the replica↔replica HTTP/2 mesh with internal mTLS (mesh-role certs only):
-// lazily-dialed per-directed-pair connection pools (round-robin, grow-to-max), and connID-checked
-// stream delivery. When a public connection lands on a node that is NOT the phone's owner, the entry
+// lazily-dialed per-directed-pair connection pools (round-robin, fixed-size, reaped when idle), and
+// connID-checked stream delivery. When a public connection lands on a node that is NOT the phone's owner, the entry
 // node bridges to the owner over the mesh; the owner verifies the connID against its live phone
 // connection before dialing back to the phone.
 package mesh
@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -40,16 +41,34 @@ type Option func(*Client)
 // WithRecorder wires a Recorder so pool sizes are exported.
 func WithRecorder(r Recorder) Option { return func(c *Client) { c.rec = r } }
 
+// Mesh connection-health defaults: with no frames for readIdle the transport PINGs the peer and
+// closes the connection if no PONG arrives within pingTimeout — a black-holed owner node can never
+// pin an entry-side goroutine indefinitely (the pooled client redials on next use). dialTimeout
+// bounds the TCP+TLS dial of a NEW connection to an unresponsive address.
+const (
+	meshReadIdleTimeout = 15 * time.Second
+	meshPingTimeout     = 10 * time.Second
+	meshDialTimeout     = 10 * time.Second
+)
+
 // Client dials peer nodes over the mesh and opens connID-checked streams. It holds per-peer pools of
 // HTTP/2 clients (round-robin), each backed by its own transport/connection.
 type Client struct {
-	tlsConf  func() *tls.Config // hot-swappable mesh-role client cert
-	poolSize int
-	poolMax  int
-	rec      Recorder
+	tlsConf     func() *tls.Config // hot-swappable mesh-role client cert
+	poolSize    int
+	poolMax     int
+	rec         Recorder
+	readIdle    time.Duration // PING health cadence (see meshReadIdleTimeout)
+	pingTimeout time.Duration
+	dialTimeout time.Duration
 
 	mu    sync.Mutex
 	pools map[string]*peerPool // peer advertise addr → pool
+}
+
+// WithHealthTimeouts overrides the PING-health / dial bounds (tests).
+func WithHealthTimeouts(readIdle, ping, dial time.Duration) Option {
+	return func(c *Client) { c.readIdle, c.pingTimeout, c.dialTimeout = readIdle, ping, dial }
 }
 
 // NewClient builds the mesh client. tlsConf returns the current mesh-role client tls.Config (rotated).
@@ -60,7 +79,10 @@ func NewClient(tlsConf func() *tls.Config, poolSize, poolMax int, opts ...Option
 	if poolMax < poolSize {
 		poolMax = poolSize
 	}
-	c := &Client{tlsConf: tlsConf, poolSize: poolSize, poolMax: poolMax, pools: map[string]*peerPool{}}
+	c := &Client{
+		tlsConf: tlsConf, poolSize: poolSize, poolMax: poolMax, pools: map[string]*peerPool{},
+		readIdle: meshReadIdleTimeout, pingTimeout: meshPingTimeout, dialTimeout: meshDialTimeout,
+	}
 	for _, o := range opts {
 		o(c)
 	}
@@ -126,10 +148,16 @@ func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
 }
 
 // newH2Client builds one HTTP/2 client backed by its own transport (so N clients ≈ N connections,
-// round-robin spreading load).
+// round-robin spreading load), with PING health + a bounded dial so a dead peer never pins a caller.
 func (c *Client) newH2Client() *http.Client {
 	tr := &http2.Transport{
 		TLSClientConfig: c.tlsConf(),
+		ReadIdleTimeout: c.readIdle,
+		PingTimeout:     c.pingTimeout,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: c.dialTimeout}, Config: cfg}
+			return d.DialContext(ctx, network, addr)
+		},
 	}
 	return &http.Client{Transport: tr}
 }

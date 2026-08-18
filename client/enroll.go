@@ -278,3 +278,12 @@ func serverTLSTransport(dialAddr, host string, caPool *x509.CertPool) *http.Tran
 		},
 	}
 }
+
+// FetchIssueNonce mints a fresh single-use challenge nonce from GET /enroll/nonce (per-IP
+// rate-limited). The enroll and issue nonces share one namespace, so this is the documented retry
+// path after a RETRYABLE POST /issue failure (which consumed the previous nonce): fetch a fresh
+// nonce, wait retry_after_seconds, then call Client.Renew with it. See docs/PROTOCOL.md §3.
+func FetchIssueNonce(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertPool) (string, error) {
+	hc := &http.Client{Transport: serverTLSTransport(dialAddr, enrollHost, caPool)}
+	return fetchNonce(ctx, hc, enrollHost)
+}
