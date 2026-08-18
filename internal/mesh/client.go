@@ -80,7 +80,7 @@ func (c *Client) newH2Client() *http.Client {
 
 // OpenStream dials peer and opens a connID-checked mesh stream for (tunnel, connID, streamID). The
 // far side verifies connID against its live phone connection before bridging.
-func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (Stream, error) {
+func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (io.ReadWriteCloser, error) {
 	p := c.pool(peer)
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
 
