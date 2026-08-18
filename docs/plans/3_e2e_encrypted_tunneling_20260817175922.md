@@ -2831,3 +2831,27 @@ gates, and validate all touched Mermaid diagrams.
     in-flight" was never built — as shipped (and as the canonical docs state) an in-flight stream
     closes at the exhausting chunk, which is STRICTER than the agreed wording; new streams are refused
     at admission. The plan's design text is aligned to the as-built behavior.
+- **Eighth review wave (adversarial review round 8; mesh dial bounds + retry contract):**
+  - **US9 (mesh PING health implemented; dial bounded):** the plan's "HTTP/2 PING health, redial on
+    failure" is now real: the mesh transports set `ReadIdleTimeout`/`PingTimeout` (15s/10s — the
+    exported fields verified at the pinned x/net version) so a black-holed owner node's connection is
+    killed by the transport and the pooled client redials on next use, and `DialTLSContext` bounds NEW
+    dials with a 10s net.Dialer timeout — an entry-side goroutine (holding a max-clients + stream
+    slot) can no longer be pinned indefinitely by a dead peer. Covered by a dead-peer test
+    (handshake-then-silent server → OpenStream errors within the health bounds).
+  - **Docs (`/issue` retry contract):** every `/issue` attempt consumes its single-use nonce,
+    including a retryable failure — PROTOCOL.md §3 now documents the retry path (the enroll and issue
+    nonces share one namespace: fetch a fresh `GET /enroll/nonce` challenge, wait
+    `retry_after_seconds`, repeat `POST /issue`; a bound cert-less tunnel is additionally re-nudged by
+    the renewal watcher — both behaviors verified in code) and the Go client exports `FetchIssueNonce`
+    so the documented retry is exercisable (paired with `Client.Renew`).
+  - **US5 (rollback logged, dead parameter removed):** the claim rollback on a sign failure is inlined
+    at its only call site and its failure is LOGGED (a silent rollback failure would orphan a name in
+    the indefinitely-retained registry); the vestigial always-true `initial` parameter is gone.
+  - **File-shape deviations recorded:** Task 4.2's `roots.go`/`status.go` are consolidated into
+    `attest/refreshers.go` (same API/behavior); Task 11.4's node identity is a pure random id
+    (8 random hex bytes) rather than "hostname + random suffix" — the hostname travels separately as
+    `node_hostname` on every conn-log event, and the mesh-cert SAN / `node:{id}` key carry the random
+    id (restart detection via `NodeStart` is unaffected).
+  - **Comment citation fixed:** the adb-gated e2e test comment cites `docs/PROJECT.md` (Non-goals)
+    instead of a rules file.

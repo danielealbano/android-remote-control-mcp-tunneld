@@ -132,6 +132,12 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
 - Errors: `{"reason", "retryable", "retry_after_seconds"?}` with an HTTP status (401 unauthorized,
   503 retryable — `retry_after_seconds` carries the pacing hint when known, e.g. an ACME rate-limit
   cooldown — 400 otherwise).
+- **Retrying a retryable failure**: every `/issue` attempt CONSUMES its single-use nonce, including a
+  failed one. The enroll and issue nonces share ONE namespace, so the retry path is: fetch a fresh
+  challenge from `GET /enroll/nonce` (server-TLS, per-IP rate-limited), wait `retry_after_seconds`,
+  and repeat `POST /issue` with a fresh attestation over the new nonce (fresh keys/CSRs, as always).
+  A phone that is already BOUND on the control stream is also re-nudged: the renewal watcher sees a
+  cert-less or renewal-due tunnel and sends a fresh `RENEW_NUDGE{nonce}` on its next scan.
 
 **Renewal rotates the identity key**: on a `RENEW_NUDGE{nonce}` the phone calls `POST /issue` with a
 FRESH identity key + fresh TLS key + fresh attestation over the nonce; the server re-runs the full
