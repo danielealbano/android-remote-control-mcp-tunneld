@@ -31,7 +31,6 @@ func validCfg(t *testing.T) ServeCmd {
 		MeshListen:             ":9443",
 		MeshAdvertise:          "node-a:9443",
 		MeshPoolSize:           4,
-		MeshPoolMax:            8,
 		MeshCertTTL:            24 * time.Hour,
 		MaxClients:             10000,
 		RedisURL:               "redis://localhost:6379/0",
@@ -175,7 +174,7 @@ func TestValidateMeshPoolSizeRange(t *testing.T) {
 		t.Error("--mesh-pool-size 0 expected error")
 	}
 	c = validCfg(t)
-	c.MeshPoolSize = c.MeshPoolMax + 1
+	c.MeshPoolSize = 0
 	if err := c.Validate(); err == nil {
 		t.Error("--mesh-pool-size > max expected error")
 	}

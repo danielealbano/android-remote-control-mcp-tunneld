@@ -130,7 +130,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Mesh cert (hot-swappable) + client + listener.
 	meshCert := newMeshCertHolder(caObj, nodeID, cfg.MeshCertTTL, logger)
-	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, cfg.MeshPoolMax, mesh.WithRecorder(rec))
+	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
 	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout})
 
 	// Public edge.
@@ -244,8 +244,14 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	_ = controlSrv.Shutdown(sctx)
 	_ = meshSrv.Shutdown(sctx)
 	_ = internalSrv.Shutdown(sctx)
-	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		return err
+	werr := g.Wait()
+	// Explicit node deregistration once every goroutine (incl. the heartbeat) has stopped, so peers
+	// stop mesh-dialing this drained node immediately; the TTL remains the crash backstop.
+	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
+		logger.Warn("node deregister failed (expires by TTL)", "err", err)
+	}
+	if werr != nil && !errors.Is(werr, context.Canceled) {
+		return werr
 	}
 	return nil
 }

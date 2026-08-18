@@ -374,7 +374,6 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 | `--mesh-listen` | string | `:9443` | Replica↔replica HTTP/2 mesh listener (internal network only) |
 | `--mesh-advertise` | string | *(required for serve)* | This node's mesh dial address announced in the node registry |
 | `--mesh-pool-size` | int | `4` | HTTP/2 connections per directed node pair |
-| `--mesh-pool-max` | int | `8` | Hard cap on pool growth when max-concurrent-streams is hit |
 | `--mesh-cert-ttl` | duration | `24h` | Lifetime of a node's self-issued mesh-role cert |
 | `--max-clients` | int | `10000` | Per-node ceiling on ALL concurrent inbound connections (memory bound), enforced at the edge accept loop |
 | `--s3-endpoint` | string | *(required for serve)* | S3/MinIO endpoint URL |
@@ -418,7 +417,8 @@ validated by the US4 spike approach). The lego DNS provider sub-package is selec
 | `--handshake-timeout` | duration | `10s` | Max time to read a complete ClientHello before closing (pre-TLS slowloris guard) |
 | `--control-ping-interval` | duration | `30s` | Control-stream application PING cadence |
 
-- [x] **Action**: `Validate()` adds: `--mesh-pool-size` in `[1, --mesh-pool-max]`; `--max-clients ≥ 1`;
+- [x] **Action**: `Validate()` adds: `--mesh-pool-size ≥ 1` (see the Deviations entry removing
+  `--mesh-pool-max`); `--max-clients ≥ 1`;
   `--limit-concurrent ≥ 1`; `--limit-conn-rate ≥ 1`; `--limit-stream-pending ≥ 1`; `--issue-per-week ≥ 1`;
   `--acme-cooldown-default`/`--acme-backoff-initial`/`--acme-backoff-max`
   all > 0 and `--acme-backoff-initial ≤ --acme-backoff-max`; `ParseByteSize` of `--limit-traffic-day`/
@@ -530,7 +530,7 @@ Reused by US5/US6/US8/US10/US11 tests (the existing `Count`/`BytesFor` helpers w
 
 | Test | Verifies |
 |---|---|
-| `Validate rejects mesh-pool-size out of range` | `0` and `> --mesh-pool-max` → error |
+| `Validate rejects mesh-pool-size out of range` | `0` → error |
 | `Validate requires S3 fields` | Empty endpoint/bucket/access/secret → error |
 | `Validate requires attest signer digest file` | Empty or unreadable → error |
 | `Validate traffic week >= day` | `--limit-traffic-week 512mb` with `--limit-traffic-day 1gb` → error |
@@ -2883,3 +2883,19 @@ gates, and validate all touched Mermaid diagrams.
   shortest-cooldown fold, an all-CAs-unavailable answer now always reports the true earliest retry
   time. Plan §design + US6 AC/Task 6.3/test-table wording re-aligned; tests added for the honored
   header (seconds form, absent, garbage) and the short-Retry-After end-to-end path.
+- **Eleventh review wave (adversarial review round 10, Fable reviewer; wire-status mapping + drain +
+  dead flag):**
+  - **Wire contract (full error-status mapping):** retryable handler-level failures (nonce-store /
+    issue-nonce-mint outages) now answer `503` — a spec-conforming client keying on "503 = retryable"
+    previously saw a `500` with `retryable:true` and would misclassify it. PROTOCOL §2/§3 now document
+    the COMPLETE status mapping as built (`403` banned/forbidden, `429` nonce-route rate limit, `405`
+    method, `401` unauthorized, `503` retryable with the body's `retryable` field authoritative,
+    `400` otherwise).
+  - **US11 (explicit node deregistration at drain):** the plan's shutdown order ("deregister node")
+    is now implemented: after every goroutine (incl. the heartbeat) has stopped, `DeregisterNode`
+    deletes `node:{id}` so peers stop mesh-dialing a drained node immediately; the TTL remains the
+    crash backstop; a delete failure is logged. Covered by a registry test (removal + idempotency).
+  - **US9 (`--mesh-pool-max` removed):** the flag, its `Validate()` range check, and the dead
+    `poolMax` field promised a pool-growth mechanism the recorded US9 deviation had already
+    established as not built (fixed N-client pools). The operator surface no longer describes unbuilt
+    behavior; `--mesh-pool-size` validates as ≥ 1. `mesh.NewClient` drops the parameter.

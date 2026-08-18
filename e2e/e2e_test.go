@@ -94,7 +94,7 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 
 	cfg := config.ServeCmd{
 		RedisURL: inf.redisURL, Listen: edgeAddr, MeshListen: meshAddr, InternalListen: internalAddr,
-		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshPoolMax: 8, MeshCertTTL: 24 * time.Hour,
+		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
 		TunnelDomain: e2eTunnelDomain, EnrollHost: e2eEnrollHost, ControlHost: e2eControlHost, NameLength: 10,
 		CACert: inf.caCert, CAKey: inf.caKey, CertValidity: 4380 * time.Hour,
 		S3Endpoint: inf.s3URL, S3Region: "us-east-1", S3Bucket: e2eBucket,

@@ -75,7 +75,6 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		InternalListen: "127.0.0.1:0",
 		MeshAdvertise:  "127.0.0.1:19443",
 		MeshPoolSize:   4,
-		MeshPoolMax:    8,
 		MeshCertTTL:    24 * time.Hour,
 
 		EnrollHost:   "enroll.example.test",

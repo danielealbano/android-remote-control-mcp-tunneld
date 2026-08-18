@@ -156,8 +156,8 @@ func TestHandlerNonceMintedBeforeClaim(t *testing.T) {
 	req.RemoteAddr = "203.0.113.17:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != 500 {
-		t.Fatalf("a failing issue-nonce mint must answer 500, got %d", rr.Code)
+	if rr.Code != 503 {
+		t.Fatalf("a failing issue-nonce mint must answer 503 (retryable), got %d", rr.Code)
 	}
 	if st.NameCount() != 0 {
 		t.Fatal("no name may be claimed when the response cannot carry an issue nonce")

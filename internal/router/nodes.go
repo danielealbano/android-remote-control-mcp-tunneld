@@ -23,6 +23,12 @@ func (r *Registry) RefreshNode(ctx context.Context, nodeID, advertise string, tt
 	return r.rdb.Set(ctx, nodeKey(nodeID), advertise, ttl).Err()
 }
 
+// DeregisterNode removes node:{id} at drain time so peers stop mesh-dialing a drained node
+// immediately (the TTL remains the crash backstop).
+func (r *Registry) DeregisterNode(ctx context.Context, nodeID string) error {
+	return r.rdb.Del(ctx, nodeKey(nodeID)).Err()
+}
+
 // LookupNode resolves a node id to its mesh advertise address.
 func (r *Registry) LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error) {
 	v, err := r.rdb.Get(ctx, nodeKey(nodeID)).Result()

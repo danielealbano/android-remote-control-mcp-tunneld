@@ -97,3 +97,21 @@ func TestSelfHealRoutePreservesEpoch(t *testing.T) {
 	}
 	_ = mr
 }
+
+func TestDeregisterNodeRemovesKey(t *testing.T) {
+	reg, _ := newReg(t)
+	ctx := context.Background()
+	if err := reg.RegisterNode(ctx, "node-d", "10.0.0.4:9443", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DeregisterNode(ctx, "node-d"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := reg.LookupNode(ctx, "node-d"); ok {
+		t.Fatal("a deregistered node must not resolve")
+	}
+	// Idempotent: deregistering an absent node is not an error.
+	if err := reg.DeregisterNode(ctx, "node-d"); err != nil {
+		t.Fatal(err)
+	}
+}

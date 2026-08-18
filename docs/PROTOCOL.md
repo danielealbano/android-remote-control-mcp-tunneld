@@ -93,8 +93,9 @@ registry writes disable SDK auto-retries (a retried claim PUT would be a self-in
 - `POST /enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>"}`
   → `{"name": "<assigned>", "identity_cert": "<PEM>", "issue_nonce": "<hex>"}`. `issue_nonce` is the
   single-use nonce the phone echoes in its follow-up `POST /issue`. Errors are
-  `{"reason", "retryable", "retry_after_seconds"?}` with an HTTP status (401 unauthorized, 503 retryable,
-  400 otherwise).
+  `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping (both enroll routes): `403`
+  banned, `429` nonce-route rate limit, `401` unauthorized, `503` retryable (the body's `retryable`
+  field is authoritative), `400` otherwise.
 
 ## 3. Phone control connection (HTTP/2 + mTLS)
 
@@ -129,9 +130,10 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
 - Request: `{nonce, attestation_chain, identity_csr, tls_csr}` — `nonce` is the Phase-1 `issue_nonce`
   (initial) or the `RENEW_NUDGE` nonce (renewal); `tls_csr` MUST request `<name>.<tunnel-domain>`.
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs.
-- Errors: `{"reason", "retryable", "retry_after_seconds"?}` with an HTTP status (401 unauthorized,
-  503 retryable — `retry_after_seconds` carries the pacing hint when known, e.g. an ACME rate-limit
-  cooldown — 400 otherwise).
+- Errors: `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping: `403`
+  banned/forbidden identity, `405` non-POST method, `401` unauthorized, `503` retryable (the body's
+  `retryable` field is authoritative; `retry_after_seconds` carries the pacing hint when known, e.g.
+  an ACME rate-limit cooldown), `400` otherwise.
 - **Retrying a retryable failure**: every `/issue` attempt CONSUMES its single-use nonce, including a
   failed one. The enroll and issue nonces share ONE namespace, so the retry path is: fetch a fresh
   challenge from `GET /enroll/nonce` (server-TLS, per-IP rate-limited), wait `retry_after_seconds`,

@@ -86,7 +86,7 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 	}
 	nonce, err := h.svc.Nonce(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Reason: "internal", Retryable: true})
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 	writeJSON(w, http.StatusOK, nonceResponse{Nonce: hex.EncodeToString(nonce)})
@@ -134,7 +134,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	issueNonce, nerr := h.svc.Nonce(r.Context())
 	if nerr != nil {
 		h.rec.EnrollmentResult("internal")
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Reason: "internal", Retryable: true})
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 

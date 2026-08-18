@@ -97,7 +97,7 @@ func startIntegrationServer(t *testing.T) *itEnv {
 		MeshListen:     freeAddr(t),
 		InternalListen: freeAddr(t),
 		MeshAdvertise:  "127.0.0.1:19443",
-		MeshPoolSize:   4, MeshPoolMax: 8, MeshCertTTL: 24 * time.Hour,
+		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
 
 		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
 		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,

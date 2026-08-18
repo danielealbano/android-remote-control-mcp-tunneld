@@ -112,7 +112,7 @@ func TestMeshBridgesValidStream(t *testing.T) {
 }
 
 func TestClientPoolRoundRobin(t *testing.T) {
-	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, 8)
+	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4)
 	p := c.pool("10.0.0.1:9443")
 	if len(p.clients) != 4 {
 		t.Errorf("pool size = %d, want 4", len(p.clients))
@@ -139,7 +139,7 @@ func (r *poolRec) MeshPool(peer string, size int) {
 
 func TestClientReportsPoolSizeOnce(t *testing.T) {
 	rec := &poolRec{}
-	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, 8, WithRecorder(rec))
+	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, WithRecorder(rec))
 	c.pool("10.0.0.2:9443")
 	c.pool("10.0.0.2:9443") // memoized — must NOT re-report
 	if len(rec.calls) != 1 {
@@ -154,7 +154,7 @@ func TestClientReportsPoolSizeOnce(t *testing.T) {
 // closed, gauge zeroed) and lazily re-created on the next use.
 func TestClientReapsIdlePools(t *testing.T) {
 	rec := &poolRec{}
-	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, 4, WithRecorder(rec))
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, WithRecorder(rec))
 	_ = c.pool("10.0.0.5:9443")
 	if len(c.pools) != 1 {
 		t.Fatal("pool must exist after first use")
@@ -230,7 +230,7 @@ func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
 
 	c := NewClient(func() *tls.Config {
 		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-	}, 1, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second))
+	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second))
 
 	start := time.Now()
 	_, err = c.OpenStream(context.Background(), ln.Addr().String(), "t", "conn", "s1")

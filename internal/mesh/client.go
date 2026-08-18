@@ -56,7 +56,6 @@ const (
 type Client struct {
 	tlsConf     func() *tls.Config // hot-swappable mesh-role client cert
 	poolSize    int
-	poolMax     int
 	rec         Recorder
 	readIdle    time.Duration // PING health cadence (see meshReadIdleTimeout)
 	pingTimeout time.Duration
@@ -72,15 +71,12 @@ func WithHealthTimeouts(readIdle, ping, dial time.Duration) Option {
 }
 
 // NewClient builds the mesh client. tlsConf returns the current mesh-role client tls.Config (rotated).
-func NewClient(tlsConf func() *tls.Config, poolSize, poolMax int, opts ...Option) *Client {
+func NewClient(tlsConf func() *tls.Config, poolSize int, opts ...Option) *Client {
 	if poolSize < 1 {
 		poolSize = 4
 	}
-	if poolMax < poolSize {
-		poolMax = poolSize
-	}
 	c := &Client{
-		tlsConf: tlsConf, poolSize: poolSize, poolMax: poolMax, pools: map[string]*peerPool{},
+		tlsConf: tlsConf, poolSize: poolSize, pools: map[string]*peerPool{},
 		readIdle: meshReadIdleTimeout, pingTimeout: meshPingTimeout, dialTimeout: meshDialTimeout,
 	}
 	for _, o := range opts {

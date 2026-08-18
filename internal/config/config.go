@@ -42,7 +42,6 @@ type ServeCmd struct {
 	MeshListen    string        `name:"mesh-listen" default:":9443" help:"Replica↔replica HTTP/2 mesh listener (internal network only)."`
 	MeshAdvertise string        `name:"mesh-advertise" help:"This node's mesh dial address announced in the node registry. Required for serve."`
 	MeshPoolSize  int           `name:"mesh-pool-size" default:"4" help:"HTTP/2 connections per directed node pair."`
-	MeshPoolMax   int           `name:"mesh-pool-max" default:"8" help:"Hard cap on pool growth when max-concurrent-streams is hit."`
 	MeshCertTTL   time.Duration `name:"mesh-cert-ttl" default:"24h" help:"Lifetime of a node's self-issued mesh-role cert."`
 	MaxClients    int           `name:"max-clients" default:"10000" help:"Per-node ceiling on ALL concurrent inbound connections (memory bound), enforced at the edge accept loop."`
 
@@ -185,8 +184,8 @@ func (c ServeCmd) Validate() error {
 			return fmt.Errorf("%s must be an http(s) URL, got %q", u.name, u.v)
 		}
 	}
-	if c.MeshPoolSize < 1 || c.MeshPoolSize > c.MeshPoolMax {
-		return fmt.Errorf("--mesh-pool-size must be in [1, --mesh-pool-max=%d], got %d", c.MeshPoolMax, c.MeshPoolSize)
+	if c.MeshPoolSize < 1 {
+		return fmt.Errorf("--mesh-pool-size must be ≥ 1, got %d", c.MeshPoolSize)
 	}
 	for _, r := range c.ACMEDNSResolvers {
 		if strings.TrimSpace(r) == "" {
