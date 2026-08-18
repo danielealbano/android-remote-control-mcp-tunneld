@@ -53,12 +53,13 @@ func TestHandlerDecodeErrors(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	tests := []struct {
-		name string
-		body string
+		name       string
+		body       string
+		wantReason string
 	}{
-		{name: "bad json", body: "{not-json"},
-		{name: "bad nonce hex", body: `{"nonce":"zz","attestation_chain":"","identity_csr":""}`},
-		{name: "bad identity csr", body: `{"nonce":"aabb","attestation_chain":"","identity_csr":"not-pem"}`},
+		{name: "bad json", body: "{not-json", wantReason: "bad_json"},
+		{name: "bad nonce hex", body: `{"nonce":"zz","attestation_chain":"","identity_csr":""}`, wantReason: "bad_nonce"},
+		{name: "bad identity csr", body: `{"nonce":"aabb","attestation_chain":"","identity_csr":"not-pem"}`, wantReason: "bad_identity_csr"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,6 +69,11 @@ func TestHandlerDecodeErrors(t *testing.T) {
 			h.ServeHTTP(rr, req)
 			if rr.Code != 400 {
 				t.Fatalf("want 400, got %d", rr.Code)
+			}
+			// Decode failures follow the SAME documented JSON error schema as service errors.
+			var er errorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &er); err != nil || er.Reason != tc.wantReason {
+				t.Fatalf("want structured %q error, got %s", tc.wantReason, rr.Body.String())
 			}
 		})
 	}

@@ -101,8 +101,15 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			return pemChain, info, nil
 		}
 		c.cfg.Recorder.ACMEIssue(ca.id(), "fail")
-		if c.handleFailure(ctx, ca.id(), err) {
+		cool, permanent := c.handleFailure(ctx, ca.id(), err)
+		if permanent {
 			return nil, store.CertInfo{}, err // permanent (e.g. bad CSR) — stop
+		}
+		// Fold the cooldown this failure JUST set into the shortest-remaining computation, so the
+		// Retry-After reflects when the chain would actually accept a retry (a run where every CA
+		// fails transitively must not report the 1h default when a 1m backoff applies).
+		if cool > 0 && (shortest == 0 || cool < shortest) {
+			shortest = cool
 		}
 	}
 	// Every CA was cooling or failed transiently: retryable with the shortest remaining cooldown.
@@ -112,8 +119,9 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	return nil, store.CertInfo{}, rateLimited(shortest, fmt.Errorf("all issuance CAs are rate-limited; quota exhausted, retry later"))
 }
 
-// handleFailure applies the reactive cooldown/backoff for ca and reports whether the error is permanent.
-func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (permanent bool) {
+// handleFailure applies the reactive cooldown/backoff for ca, returning the cooldown it set (0 for a
+// permanent error) and whether the error is permanent.
+func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (cooldown time.Duration, permanent bool) {
 	var ie *IssuerError
 	class := ClassTransient
 	var retry time.Duration
@@ -123,20 +131,21 @@ func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (
 	}
 	switch class {
 	case ClassPermanent:
-		return true
+		return 0, true
 	case ClassRateLimited:
 		// Cooldown writes are best-effort: a Valkey error just means the CA is not skipped next time
 		// (fail-open) — the spillover + retry still protect the account.
 		d := max(retry, c.cfg.CooldownDefault)
 		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
 		c.cfg.Recorder.ACMECooldown(ca)
+		return d, false
 	default: // transient / unknown → exponential backoff
 		n, _ := c.cfg.Limiter.BumpCAFailures(ctx, ca, c.cfg.BackoffMax) // best-effort streak counter (see above)
 		d := backoff(c.cfg.BackoffInitial, c.cfg.BackoffMax, n)
 		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
 		c.cfg.Recorder.ACMECooldown(ca)
+		return d, false
 	}
-	return false
 }
 
 // ShouldRenew dispatches to the CA that issued cur (LE: NotAfter−margin floor; GTS/ZeroSSL: fixed cadence).

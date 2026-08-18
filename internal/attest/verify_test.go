@@ -1,7 +1,6 @@
 package attest
 
 import (
-	"crypto/x509"
 	"errors"
 	"testing"
 	"time"
@@ -171,5 +170,3 @@ func TestVerifyEmptyChain(t *testing.T) {
 		t.Errorf("got %v, want ErrEmptyChain", err)
 	}
 }
-
-var _ = x509.Certificate{}

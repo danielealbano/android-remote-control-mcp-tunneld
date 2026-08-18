@@ -150,18 +150,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.banIP != nil {
 		if addr, err := netip.ParseAddr(ip); err == nil && h.banIP(addr) {
 			h.reject("ban", "", ip)
-			http.Error(w, "banned", http.StatusForbidden)
+			writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
 			return
 		}
 	}
 	id, ok := h.identity(r)
 	if !ok {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"reason": "forbidden", "retryable": false})
 		return
 	}
 	if h.banTunnel != nil && h.banTunnel(id.name, id.fingerprint) {
 		h.reject("ban", id.name, ip)
-		http.Error(w, "banned", http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
 		return
 	}
 	switch r.URL.Path {
@@ -181,21 +181,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the regenerated identity + public certs. POST only.
 func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name, fp string) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
 		return
 	}
 	if h.onIssue == nil {
-		http.Error(w, "issuance unavailable", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.issueBody))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_request", "retryable": false})
 		return
 	}
 	var req IssueRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_json", "retryable": false})
 		return
 	}
 	resp, ierr := h.onIssue(r.Context(), name, fp, peerIP(r), req)

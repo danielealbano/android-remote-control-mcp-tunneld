@@ -2855,3 +2855,18 @@ gates, and validate all touched Mermaid diagrams.
     id (restart detection via `NodeStart` is unaffected).
   - **Comment citation fixed:** the adb-gated e2e test comment cites `docs/PROJECT.md` (Non-goals)
     instead of a rules file.
+- **Ninth review wave (adversarial review round 9, Fable reviewer; retry pacing accuracy + wire-error
+  schema):**
+  - **US6 (all-fail Retry-After reflects in-run cooldowns):** when every CA failed transiently DURING
+    a single run, the returned Retry-After was the 1h `--acme-cooldown-default` even though the
+    failures had just set ~1m backoffs (and a long pre-existing cooldown could mask a shorter in-run
+    one). `handleFailure` now returns the cooldown it set and `run` folds it into the
+    shortest-remaining computation; the default remains only the last-resort fallback. Two new tests
+    cover the all-fail-in-run and mixed pre-cooling/in-run cases.
+  - **Wire contract (structured errors everywhere):** every `/enroll` and `/issue` error path —
+    including decode/validation failures, bans, method/availability errors — now emits the documented
+    `{"reason", "retryable", "retry_after_seconds"?}` JSON body (previously plain-text `http.Error`
+    responses that a spec-conforming client could not parse). The decode-error test asserts the
+    schema.
+  - **Comment hygiene:** the last review-artifact reference in a comment ("R3-001") is removed, and
+    the two dead `var _ =` unused-import anchors in test files are deleted with their imports.

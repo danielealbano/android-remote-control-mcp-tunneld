@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -218,7 +217,7 @@ func (fakeDataStream) Read([]byte) (int, error)    { return 0, nil }
 func (fakeDataStream) Write(p []byte) (int, error) { return len(p), nil }
 func (fakeDataStream) Close() error                { return nil }
 
-// TestCancelPendingClosesRacedDelivery covers the dial-back cancel/deliver race (R3-001): when
+// TestCancelPendingClosesRacedDelivery covers the dial-back cancel/deliver race: when
 // deliverStream delivers a stream to the buffered waiter at the same moment the dial-back deadline fires,
 // cancelPending MUST close the orphaned stream (so its /data handler cannot leak) and drop the pending
 // registration.
@@ -248,5 +247,3 @@ func (s *closeableStream) Read([]byte) (int, error)    { return 0, nil }
 func (s *closeableStream) Write(p []byte) (int, error) { return len(p), nil }
 func (s *closeableStream) Close() error                { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
 func (s *closeableStream) isClosed() bool              { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }
-
-var _ = store.Event{}

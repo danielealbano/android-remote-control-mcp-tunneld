@@ -64,7 +64,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ban check FIRST.
 	if addr, err := netip.ParseAddr(ip); err == nil && h.ban != nil && h.ban(addr) {
 		h.rec.Reject("ban", "", ip)
-		http.Error(w, "banned", http.StatusForbidden)
+		writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
 		return
 	}
 	switch {
@@ -86,7 +86,7 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 	}
 	nonce, err := h.svc.Nonce(r.Context())
 	if err != nil {
-		http.Error(w, "internal", http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 	writeJSON(w, http.StatusOK, nonceResponse{Nonce: hex.EncodeToString(nonce)})
@@ -95,27 +95,27 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_request"})
 		return
 	}
 	var req enrollRequestBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_json"})
 		return
 	}
 	nonce, err := decodeHex(req.Nonce)
 	if err != nil {
-		http.Error(w, "bad nonce", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_nonce"})
 		return
 	}
 	chain, err := parsePEMChain([]byte(req.AttestChainPEM))
 	if err != nil {
-		http.Error(w, "bad attestation chain", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_attestation_chain"})
 		return
 	}
 	idCSR, err := parseCSR([]byte(req.IdentityCSR))
 	if err != nil {
-		http.Error(w, "bad identity csr", http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_identity_csr"})
 		return
 	}
 
@@ -134,7 +134,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	issueNonce, nerr := h.svc.Nonce(r.Context())
 	if nerr != nil {
 		h.rec.EnrollmentResult("internal")
-		http.Error(w, "internal", http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 

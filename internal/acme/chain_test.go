@@ -225,3 +225,34 @@ func TestObtainSelfSelfCert(t *testing.T) {
 		t.Fatal("ObtainSelf must not consume the per-tunnel issuance counter")
 	}
 }
+
+// TestAllFailInRunRetryAfterUsesBackoff covers the shortest-remaining-cooldown rule when every CA
+// fails DURING the run (none pre-cooling): the Retry-After must reflect the backoff the failures just
+// set (~= --acme-backoff-initial), never the 1h --acme-cooldown-default.
+func TestAllFailInRunRetryAfterUsesBackoff(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt, err: transient(nil)}
+	gts := &fakeCA{caID: CAGTS, err: transient(nil)}
+	ch, _ := newChain(t, ChainConfig{}, le, gts) // backoff-initial 1m, cooldown-default 1h
+	_, _, err := ch.Obtain(context.Background(), nil, "t")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
+		t.Fatalf("all-fail should be retryable rate-limited, got %v", err)
+	}
+	if ie.Retry != time.Minute {
+		t.Fatalf("Retry-After must be the in-run backoff (1m), got %s", ie.Retry)
+	}
+}
+
+// TestMixedPreCoolingAndInRunFailurePicksShortest: a long pre-existing cooldown must not mask a
+// shorter cooldown set by an in-run failure.
+func TestMixedPreCoolingAndInRunFailurePicksShortest(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt}
+	gts := &fakeCA{caID: CAGTS, err: transient(nil)}
+	ch, lim := newChain(t, ChainConfig{}, le, gts)
+	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, 30*time.Minute) // pre-cooling
+	_, _, err := ch.Obtain(context.Background(), nil, "t")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Retry != time.Minute {
+		t.Fatalf("Retry-After must be the SHORTEST cooldown (in-run 1m beats pre-cooling 30m), got %v", err)
+	}
+}
