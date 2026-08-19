@@ -1604,57 +1604,57 @@ Acceptance criteria:
 
 ---
 
-## [ ] US14 — Ground-up verification (FINAL)
+## [x] US14 — Ground-up verification (FINAL)
 
 Every prior story is re-verified from the ground up before the change is considered done.
 
 Acceptance criteria:
-- [ ] Every action of US1–US13 is implemented exactly as specified or has a recorded `## Deviations` entry.
-- [ ] All quality gates pass with ZERO errors/warnings on the final code.
-- [ ] All touched Mermaid charts validate.
-- [ ] No file outside this plan's scope is modified.
+- [x] Every action of US1–US13 is implemented exactly as specified or has a recorded `## Deviations` entry.
+- [x] All quality gates pass with ZERO errors/warnings on the final code.
+- [x] All touched Mermaid charts validate.
+- [x] No file outside this plan's scope is modified.
 
-### [ ] Task 14.1 — plan-vs-tree verification
+### [x] Task 14.1 — plan-vs-tree verification
 
-- [ ] Action: re-read this ENTIRE plan from disk; verify EVERY action of every user story is
+- [x] Action: re-read this ENTIRE plan from disk; verify EVERY action of every user story is
   implemented in the working tree exactly as specified (or has a recorded entry in `## Deviations`);
   verify every checkbox above is checked.
-- [ ] Definition of Done: zero unimplemented actions; zero unchecked boxes; every deviation recorded.
+- [x] Definition of Done: zero unimplemented actions; zero unchecked boxes; every deviation recorded.
 
-### [ ] Task 14.2 — ground-up code re-read
+### [x] Task 14.2 — ground-up code re-read
 
-- [ ] Action: re-read the changed code from the ground up: every file touched by US1–US13, checking
+- [x] Action: re-read the changed code from the ground up: every file touched by US1–US13, checking
   for TODOs, placeholders, dead code, unused imports/params left by the refactors (e.g. `startedAt`
   remnants, `IssuanceAllowed` remnants, `binary` import in event.go, `strconv`/`time` in
   route_e2e.go).
-- [ ] Definition of Done: zero TODOs/placeholders/dead code/unused imports in the touched files.
+- [x] Definition of Done: zero TODOs/placeholders/dead code/unused imports in the touched files.
 
-### [ ] Task 14.3 — quality gates
+### [x] Task 14.3 — quality gates
 
-- [ ] Action: run each gate `tee`'d to `/tmp/p4-<gate>.log`:
-  - [ ] `make lint 2>&1 | tee /tmp/p4-lint.log | tail -5` — ZERO issues (all three tag runs + shellcheck + compose-config)
-  - [ ] `make vet 2>&1 | tee /tmp/p4-vet.log | tail -5`
-  - [ ] `make govulncheck 2>&1 | tee /tmp/p4-govulncheck.log | tail -5`
-  - [ ] `make build 2>&1 | tee /tmp/p4-build.log | tail -5`
-  - [ ] `make test-unit 2>&1 | tee /tmp/p4-test-unit.log | tail -10`
-  - [ ] `make test-integration 2>&1 | tee /tmp/p4-test-integration.log | tail -10`
-  - [ ] `make test-e2e 2>&1 | tee /tmp/p4-test-e2e.log | tail -10`
-  - [ ] `make test-scripts 2>&1 | tee /tmp/p4-test-scripts.log | tail -10`
-- [ ] Definition of Done: every gate exits 0 with zero errors/warnings; failures fixed and the FULL
+- [x] Action: run each gate `tee`'d to `/tmp/p4-<gate>.log`:
+  - [x] `make lint 2>&1 | tee /tmp/p4-lint.log | tail -5` — ZERO issues (all three tag runs + shellcheck + compose-config)
+  - [x] `make vet 2>&1 | tee /tmp/p4-vet.log | tail -5`
+  - [x] `make govulncheck 2>&1 | tee /tmp/p4-govulncheck.log | tail -5`
+  - [x] `make build 2>&1 | tee /tmp/p4-build.log | tail -5`
+  - [x] `make test-unit 2>&1 | tee /tmp/p4-test-unit.log | tail -10`
+  - [x] `make test-integration 2>&1 | tee /tmp/p4-test-integration.log | tail -10`
+  - [x] `make test-e2e 2>&1 | tee /tmp/p4-test-e2e.log | tail -10`
+  - [x] `make test-scripts 2>&1 | tee /tmp/p4-test-scripts.log | tail -10`
+- [x] Definition of Done: every gate exits 0 with zero errors/warnings; failures fixed and the FULL
   affected gates re-run until clean.
 
-### [ ] Task 14.4 — Mermaid validation
+### [x] Task 14.4 — Mermaid validation
 
-- [ ] Action: the shutdown chart in `docs/ARCHITECTURE.md` is modified by US13 — validate ALL Mermaid
+- [x] Action: the shutdown chart in `docs/ARCHITECTURE.md` is modified by US13 — validate ALL Mermaid
   blocks in every touched Markdown file per `development_pipeline.md` §9 (`make mermaid-check` covers
   README + docs).
-- [ ] Definition of Done: `make mermaid-check` exits 0.
+- [x] Definition of Done: `make mermaid-check` exits 0.
 
-### [ ] Task 14.5 — scope boundary
+### [x] Task 14.5 — scope boundary
 
-- [ ] Action: verify `git status` shows NO modified file outside this plan's actions; `docs/plans/`
+- [x] Action: verify `git status` shows NO modified file outside this plan's actions; `docs/plans/`
   untouched except this file's checkmarks/Deviations.
-- [ ] Definition of Done: the diff against `main` contains only in-scope files.
+- [x] Definition of Done: the diff against `main` contains only in-scope files.
 
 ## Deviations
 
