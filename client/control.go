@@ -110,6 +110,18 @@ func (c *Client) Run(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("client: control connect rejected: " + resp.Status)
 	}
+	// Deterministic cancellation: closing the body/pipe unblocks the frame read and any in-flight
+	// control write immediately, without relying on the transport's own ctx propagation timing.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = resp.Body.Close()
+			_ = pw.CloseWithError(ctx.Err())
+		case <-watchDone:
+		}
+	}()
 	c.setSend(pw)
 
 	for {

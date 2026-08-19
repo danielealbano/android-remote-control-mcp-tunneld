@@ -175,7 +175,8 @@ func TestClient_CloseReleasesControlTransport(t *testing.T) {
 	c := ts.newClient(t, func(io.ReadWriteCloser) {})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = c.Run(ctx) }()
+	runDone := make(chan struct{})
+	go func() { defer close(runDone); _ = c.Run(ctx) }()
 
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
 		t.Fatal("control connect must bind the route")
@@ -184,9 +185,11 @@ func TestClient_CloseReleasesControlTransport(t *testing.T) {
 		t.Fatal("expected a live control connection while Run is active")
 	}
 
-	cancel() // end Run so the control connection becomes idle in the transport pool
-	c.Close()
-	if !waitFor(t, 3*time.Second, func() bool { return ts.conns.live.Load() == 0 }) {
+	cancel()
+	<-runDone // Close's contract: call once Run has returned
+	// The transport marks the conn idle asynchronously after the canceled streams unwind; poll
+	// Close until the pool has quiesced and released it.
+	if !waitFor(t, 3*time.Second, func() bool { c.Close(); return ts.conns.live.Load() == 0 }) {
 		t.Fatalf("Close must release the control transport; %d connection(s) remain", ts.conns.live.Load())
 	}
 }

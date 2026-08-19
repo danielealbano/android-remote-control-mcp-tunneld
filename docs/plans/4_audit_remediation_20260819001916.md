@@ -1746,3 +1746,11 @@ Acceptance criteria:
   time-prefix / char-count found no format claim to update; §1's revocation line ("live eviction on ban
   reload") already matches the implemented behavior and the wire frames are untouched by Plan 4. The
   action is checked as verified-no-change.
+- **Task 11.1 (`client/control.go`) — `Run` gains a deterministic cancellation watcher.** The Stage-4
+  unit gate exposed that `Run` relied solely on the transport's ctx propagation to unblock the control
+  frame read after cancel, which is not deterministic under load (`TestClient_CloseReleasesControlTransport`
+  hung in the full suite, passed in isolation). A ctx-scoped watcher now closes the response body and
+  the request pipe on cancel, guaranteeing `Run` returns promptly; the watcher itself exits via a
+  deferred channel close, so no goroutine leaks. Test fixes: the reserved-cert legacy tests now assert
+  the `bundle.json` persist artifact, and the Close test honors `Close`'s contract (waits for `Run` to
+  return, then polls `Close` while the transport quiesces).

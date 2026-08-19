@@ -535,7 +535,7 @@ func TestEdge_HandleTunnel_MeshDuplicateRetries(t *testing.T) {
 	}
 }
 
-// --- US4: edge accept-loop, SNI case-insensitivity, slot accounting, ban eviction ---
+// --- edge accept-loop, SNI case-insensitivity, slot accounting, ban eviction ---
 
 // countingLimiter wraps a real limiter to (a) force AcquireStream to fail-open and (b) count
 // ReleaseStream calls, so a fail-open admission's release-once behaviour is observable.

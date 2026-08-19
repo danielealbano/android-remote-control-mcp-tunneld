@@ -116,8 +116,8 @@ func TestReservedCerts_ObtainsWhenNoCache(t *testing.T) {
 	if _, err := rc.getCertificateFor(host)(nil); err != nil {
 		t.Fatalf("obtained cert must be served, got %v", err)
 	}
-	// It must have been persisted for reuse across restarts.
-	if _, err := os.Stat(filepath.Join(dir, "self", host, "cert.pem")); err != nil {
+	// It must have been persisted for reuse across restarts (atomic single-file bundle).
+	if _, err := os.Stat(filepath.Join(dir, "self", host, "bundle.json")); err != nil {
 		t.Fatalf("obtained cert must be persisted: %v", err)
 	}
 }
@@ -148,15 +148,17 @@ func TestReservedCerts_RenewsExpiringCache(t *testing.T) {
 	if iss.callCount() != 1 {
 		t.Fatalf("an expiring cached pair must be renewed once at startup, got %d", iss.callCount())
 	}
-	// The persisted meta must reflect the renewed (far-future) NotAfter.
-	metaRaw, err := os.ReadFile(filepath.Join(dir, "self", host, "meta.json"))
+	// The persisted bundle must reflect the renewed (far-future) NotAfter.
+	raw, err := os.ReadFile(filepath.Join(dir, "self", host, "bundle.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got store.CertInfo
-	_ = json.Unmarshal(metaRaw, &got)
-	if !got.NotAfter.After(oldInfo.NotAfter) {
-		t.Fatalf("renewed cert must be re-persisted with a later NotAfter (old=%v new=%v)", oldInfo.NotAfter, got.NotAfter)
+	var got certBundle
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Info.NotAfter.After(oldInfo.NotAfter) {
+		t.Fatalf("renewed cert must be re-persisted with a later NotAfter (old=%v new=%v)", oldInfo.NotAfter, got.Info.NotAfter)
 	}
 }
 
