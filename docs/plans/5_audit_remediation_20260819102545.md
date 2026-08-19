@@ -32,7 +32,7 @@ commit messages, or any non-plan artifact; code comments cite `docs/` only.
 
 ---
 
-## [ ] US1 — Attestation: require TEE-asserted verified-boot evidence (CRITICAL C1)
+## [x] US1 — Attestation: require TEE-asserted verified-boot evidence (CRITICAL C1)
 
 **Why:** `ParseKeyDescription` walks `softwareEnforced` and `teeEnforced` into one struct with no
 presence tracking, so `rootOfTrust` from the software-enforced list is honored, and when it is absent
@@ -40,16 +40,16 @@ from BOTH lists `VerifiedBootState` defaults to `0` == `BootVerified` and `Devic
 predicate point (5) can pass with zero TEE evidence. The project supports TEE/StrongBox devices ONLY.
 
 **Acceptance criteria:**
-- [ ] `rootOfTrust` (tag 704) is parsed ONLY from `teeEnforced`; a copy in `softwareEnforced` is ignored.
-- [ ] Absence of `rootOfTrust` in `teeEnforced` makes `Verify` FAIL (`ErrBootState`), never default to pass.
-- [ ] `securityLevel`, `verifiedBootState`, `deviceLocked` continue to be enforced exactly as the
+- [x] `rootOfTrust` (tag 704) is parsed ONLY from `teeEnforced`; a copy in `softwareEnforced` is ignored.
+- [x] Absence of `rootOfTrust` in `teeEnforced` makes `Verify` FAIL (`ErrBootState`), never default to pass.
+- [x] `securityLevel`, `verifiedBootState`, `deviceLocked` continue to be enforced exactly as the
       seven-point predicate documents (no other predicate point weakened).
-- [ ] Negative tests cover "no rootOfTrust anywhere" and "rootOfTrust only in softwareEnforced".
+- [x] Negative tests cover "no rootOfTrust anywhere" and "rootOfTrust only in softwareEnforced".
 
-### [ ] Task 1.1 — Track `rootOfTrust` presence and source-list in the parser
+### [x] Task 1.1 — Track `rootOfTrust` presence and source-list in the parser
 
-- [ ] **modify** `internal/attest/keydescription.go`
-  - [ ] Add a presence flag to the decoded struct:
+- [x] **modify** `internal/attest/keydescription.go`
+  - [x] Add a presence flag to the decoded struct:
     ```go
     // KeyDescription is the decoded, semantically-meaningful subset the verifier needs.
     type KeyDescription struct {
@@ -60,7 +60,7 @@ predicate point (5) can pass with zero TEE evidence. The project supports TEE/St
         // ... existing fields ...
     }
     ```
-  - [ ] Make `walkAuthList` accept whether it is walking the TEE-enforced list and record `rootOfTrust`
+  - [x] Make `walkAuthList` accept whether it is walking the TEE-enforced list and record `rootOfTrust`
         ONLY from it:
     ```go
     // ParseKeyDescription ... rootOfTrust is read ONLY from teeEnforced (a copy in softwareEnforced is
@@ -92,17 +92,17 @@ predicate point (5) can pass with zero TEE evidence. The project supports TEE/St
         // ...
     }
     ```
-  - [ ] Update the package/parse doc comments to state the TEE-only placement and the fail-on-absent
+  - [x] Update the package/parse doc comments to state the TEE-only placement and the fail-on-absent
         contract accurately (agent.md: comments must not misstate the code).
 
 **Definition of Done:**
-- [ ] `continue` in the non-TEE `rootOfTrust` branch; `attestationApplicationId` and the patch/version
+- [x] `continue` in the non-TEE `rootOfTrust` branch; `attestationApplicationId` and the patch/version
       tags are still read from whichever list carries them (unchanged).
-- [ ] Comments describe the actual behavior.
+- [x] Comments describe the actual behavior.
 
-### [ ] Task 1.2 — Fail `Verify` when TEE `rootOfTrust` is absent
+### [x] Task 1.2 — Fail `Verify` when TEE `rootOfTrust` is absent
 
-- [ ] **modify** `internal/attest/verify.go` — predicate point (5), before the `VerifiedBootState` check:
+- [x] **modify** `internal/attest/verify.go` — predicate point (5), before the `VerifiedBootState` check:
   ```go
   // (5) verifiedBootState == Verified — but ONLY when rootOfTrust was TEE-asserted. A chain whose
   // teeEnforced list carries no rootOfTrust proves nothing about boot state and is rejected (the
@@ -116,12 +116,12 @@ predicate point (5) can pass with zero TEE evidence. The project supports TEE/St
   ```
 
 **Definition of Done:**
-- [ ] Points (1)-(4), (6), (7) unchanged; only the boot-state gate gains the presence precondition.
+- [x] Points (1)-(4), (6), (7) unchanged; only the boot-state gate gains the presence precondition.
 
-### [ ] Task 1.3 — Tests
+### [x] Task 1.3 — Tests
 
-- [ ] **modify** `internal/attest/keydescription_test.go` and/or `internal/attest/verify_test.go`
-- [ ] **modify** `internal/attest/fixtures_test.go` if a fixture builder is needed to place `rootOfTrust`
+- [x] **modify** `internal/attest/keydescription_test.go` and/or `internal/attest/verify_test.go`
+- [x] **modify** `internal/attest/fixtures_test.go` if a fixture builder is needed to place `rootOfTrust`
       in a chosen list / omit it.
 
 | Test | Verifies | Setup notes |
@@ -132,25 +132,25 @@ predicate point (5) can pass with zero TEE evidence. The project supports TEE/St
 | `TestVerify_TEERootOfTrust_StillPasses` | a valid TEE-asserted `rootOfTrust{Verified,locked}` still passes point (5)/(6) | regression guard on the happy path |
 
 **Definition of Done:**
-- [ ] All four tests are present and green; the fixture builder can place/omit `rootOfTrust` per list.
+- [x] All four tests are present and green; the fixture builder can place/omit `rootOfTrust` per list.
 
 ---
 
-## [ ] US2 — Secret & durable-state protection (CRITICAL C2 + W-A7, W-D2, W-D3, W-D7)
+## [x] US2 — Secret & durable-state protection (CRITICAL C2 + W-A7, W-D2, W-D3, W-D7)
 
 **Why:** operator key material and abuse data can be committed by a bulk `git add` or destroyed by a
 silent ACME account-key overwrite.
 
 **Acceptance criteria:**
-- [ ] `git status` on a configured deployment checkout shows NO secret/operator file as untracked-stageable.
-- [ ] An existing-but-unparseable (or existing-but-unreadable) ACME account key aborts startup; it is
+- [x] `git status` on a configured deployment checkout shows NO secret/operator file as untracked-stageable.
+- [x] An existing-but-unparseable (or existing-but-unreadable) ACME account key aborts startup; it is
       NEVER overwritten.
-- [ ] The Docker build context excludes all secret/generated material.
-- [ ] The ntfy bridge token lives in a gitignored file with a committed example.
+- [x] The Docker build context excludes all secret/generated material.
+- [x] The ntfy bridge token lives in a gitignored file with a committed example.
 
-### [ ] Task 2.1 — Ignore operator secrets & data (C2, W-D2, W-D7)
+### [x] Task 2.1 — Ignore operator secrets & data (C2, W-D2, W-D7)
 
-- [ ] **modify** `.gitignore` — extend the "Operator secrets & generated material" block:
+- [x] **modify** `.gitignore` — extend the "Operator secrets & generated material" block:
   ```gitignore
   /deploy/ca/
   /deploy/.env
@@ -163,28 +163,28 @@ silent ACME account-key overwrite.
   ```
 
 **Definition of Done:**
-- [ ] `git check-ignore` matches each of `/deploy/acme/`, `/deploy/banfiles/`, `/deploy/attest/`,
+- [x] `git check-ignore` matches each of `/deploy/acme/`, `/deploy/banfiles/`, `/deploy/attest/`,
       `/deploy/ntfy-alertmanager/config.scfg`.
 
-### [ ] Task 2.2 — ntfy bridge token: example + gitignored real file (W-D7)
+### [x] Task 2.2 — ntfy bridge token: example + gitignored real file (W-D7)
 
-- [ ] **create** `deploy/ntfy-alertmanager/config.scfg.example` — copy of the current committed
+- [x] **create** `deploy/ntfy-alertmanager/config.scfg.example` — copy of the current committed
       `config.scfg` content, token line kept as the placeholder `access-token changeme-write-token`.
-- [ ] **modify** (git) — `git rm --cached deploy/ntfy-alertmanager/config.scfg` so the real file becomes
+- [x] **modify** (git) — `git rm --cached deploy/ntfy-alertmanager/config.scfg` so the real file becomes
       untracked (now gitignored via Task 2.1); the working copy stays for local use. The compose mount
       (`./ntfy-alertmanager/config.scfg:...`) is ALREADY correct and MUST NOT change.
-- [ ] **modify** `README.md` step 7 — instruct copying `config.scfg.example` → `config.scfg` before
+- [x] **modify** `README.md` step 7 — instruct copying `config.scfg.example` → `config.scfg` before
       setting the token (the copy step, alongside the existing "set the token" instruction).
   - Context: the bridge reads scfg only (no env-var config — verified upstream); this mirrors the
     existing `.env`/`.env.example`, `tunneld.env`/`tunneld.env.example` convention.
 
 **Definition of Done:**
-- [ ] `config.scfg.example` is tracked with the placeholder token; `config.scfg` is untracked; the compose
+- [x] `config.scfg.example` is tracked with the placeholder token; `config.scfg` is untracked; the compose
       mount path is unchanged.
 
-### [ ] Task 2.3 — Add `.dockerignore` (W-D3)
+### [x] Task 2.3 — Add `.dockerignore` (W-D3)
 
-- [ ] **create** `.dockerignore` at repo root:
+- [x] **create** `.dockerignore` at repo root:
   ```dockerignore
   .git
   bin/
@@ -202,12 +202,12 @@ silent ACME account-key overwrite.
   and the BuildKit cache.
 
 **Definition of Done:**
-- [ ] `.dockerignore` exists at the repo root and excludes every secret/generated path above; the compose
+- [x] `.dockerignore` exists at the repo root and excludes every secret/generated path above; the compose
       build (US14 gate) still succeeds.
 
-### [ ] Task 2.4 — ACME account key: fail hard, never overwrite (W-A7)
+### [x] Task 2.4 — ACME account key: fail hard, never overwrite (W-A7)
 
-- [ ] **modify** `internal/server/acmewire.go` — `loadAccountKey` returns an error. An existing file that
+- [x] **modify** `internal/server/acmewire.go` — `loadAccountKey` returns an error. An existing file that
       cannot be READ (non-not-exist error) or PARSED (SEC1 or PKCS#8) aborts startup — it is NEVER
       overwritten. A genuinely ABSENT file still generates + best-effort-persists a new key (a
       generation/mkdir/write failure stays non-fatal with a Warn + nil/ephemeral key, exactly as today —
@@ -273,22 +273,22 @@ silent ACME account-key overwrite.
       return ec, nil
   }
   ```
-- [ ] **modify** `internal/server/acmewire.go` — `buildACMEChain` calls `loadAccountKey` (3×, for the
+- [x] **modify** `internal/server/acmewire.go` — `buildACMEChain` calls `loadAccountKey` (3×, for the
       three `AccountKey:` fields); change `buildACMEChain` to return `(acmeChain, error)` and propagate any
       `loadAccountKey` error (a corrupt/unreadable existing key aborts construction).
-- [ ] **modify** `internal/server/server.go` — the `chain := buildACMEChain(cfg, lim, rec, logger)` call
+- [x] **modify** `internal/server/server.go` — the `chain := buildACMEChain(cfg, lim, rec, logger)` call
       site (~line 114): handle the new error return and `return` it fatally from `Run` (BEFORE any listener
       binds, consistent with the other fatal construction steps).
-- [ ] **modify** `internal/server/acmewire.go` imports as needed (`errors`, `io/fs`, `fmt`).
+- [x] **modify** `internal/server/acmewire.go` imports as needed (`errors`, `io/fs`, `fmt`).
 
 **Definition of Done:**
-- [ ] Existing-unreadable/unparseable key → construction error → `Run` returns before any listener binds;
+- [x] Existing-unreadable/unparseable key → construction error → `Run` returns before any listener binds;
       the file bytes are unchanged. Absent key → generated; absent-path generation/persist failure stays a
       Warn (non-fatal). `buildACMEChain` returns `(acmeChain, error)` and its call site propagates it.
 
-### [ ] Task 2.5 — Tests
+### [x] Task 2.5 — Tests
 
-- [ ] **create/modify** the `acmewire` test file in `internal/server/`.
+- [x] **create/modify** the `acmewire` test file in `internal/server/`.
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -299,30 +299,30 @@ silent ACME account-key overwrite.
 | `TestBuildACMEChain_CorruptAccountKeyAborts` | a corrupt existing `<caid>.key` makes `buildACMEChain`/`server.Run` return an error at startup (propagation seam, not just `loadAccountKey`) | seed a junk key file in the account dir |
 
 **Definition of Done:**
-- [ ] All five tests present and green; the corrupt-key propagation test asserts the error reaches
+- [x] All five tests present and green; the corrupt-key propagation test asserts the error reaches
       `buildACMEChain`/`Run`.
 
 ---
 
-## [ ] US3 — Ban-engine enforcement integrity (W-A1, W-S1, W-I5, W-D4, W-E1)
+## [x] US3 — Ban-engine enforcement integrity (W-A1, W-S1, W-I5, W-D4, W-E1)
 
 **Why:** several paths can silently unban (double-load vanish gap, torn live snapshot, vanished signer
 allowlist, empty droplist) or let a banned tunnel keep a live splice through the dial-back window. Bans
 are the ONLY revocation.
 
 **Acceptance criteria:**
-- [ ] Ban inputs are loaded exactly ONCE at startup; a file that vanishes after that first load is
+- [x] Ban inputs are loaded exactly ONCE at startup; a file that vanishes after that first load is
       refused on the next poll (never silently unbans).
-- [ ] A torn (mid-write) ban file is NEVER swapped into the live engine; the previous snapshot serves
+- [x] A torn (mid-write) ban file is NEVER swapped into the live engine; the previous snapshot serves
       until a stable read commits.
-- [ ] A vanished signer-digest allowlist is refused (kept) and logged, mirroring the ban engine.
-- [ ] `fetch-droplist.sh` refuses to install an empty result.
-- [ ] A ban reload evicts a splice that is still in its dial-back window; a dial-back never completes on
+- [x] A vanished signer-digest allowlist is refused (kept) and logged, mirroring the ban engine.
+- [x] `fetch-droplist.sh` refuses to install an empty result.
+- [x] A ban reload evicts a splice that is still in its dial-back window; a dial-back never completes on
       an already-closed phone connection.
 
-### [ ] Task 3.1 — Build-then-verify-then-swap in the ban engine (W-S1)
+### [x] Task 3.1 — Build-then-verify-then-swap in the ban engine (W-S1)
 
-- [ ] **modify** `internal/ban/engine.go` — split `Load` so the atomic swap is separable from the build
+- [x] **modify** `internal/ban/engine.go` — split `Load` so the atomic swap is separable from the build
       (unexported, same package as the watcher):
   ```go
   // build parses+expands into a fresh snapshot WITHOUT swapping it in, so a caller can verify input
@@ -349,12 +349,12 @@ are the ONLY revocation.
   ```
 
 **Definition of Done:**
-- [ ] `build` returns a snapshot without swapping; `Load` = `build`+`commit`; the absent/vanished/corrupt/
+- [x] `build` returns a snapshot without swapping; `Load` = `build`+`commit`; the absent/vanished/corrupt/
       zero-row semantics are byte-for-byte the current ones (only the swap point moved).
 
-### [ ] Task 3.2 — Single-load watcher; commit only on a stable read (W-A1, W-S1)
+### [x] Task 3.2 — Single-load watcher; commit only on a stable read (W-A1, W-S1)
 
-- [ ] **modify** `internal/ban/watch.go` — restructure `Watch` into constructor + synchronous initial
+- [x] **modify** `internal/ban/watch.go` — restructure `Watch` into constructor + synchronous initial
       load + poll loop, and gate the poll's swap on read stability:
   ```go
   // NewWatcher builds the poll state. Initial() runs the ONE startup load synchronously (before the
@@ -389,7 +389,7 @@ are the ONLY revocation.
       }
   }
   ```
-  - [ ] `tick` gains build-verify-commit (replaces the in-loop `w.e.Load`):
+  - [x] `tick` gains build-verify-commit (replaces the in-loop `w.e.Load`):
     ```go
     func (w *watcher) tick(onReload func(*Engine)) {
         cur := w.fingerprint()
@@ -425,11 +425,11 @@ are the ONLY revocation.
         w.log.Warn("ban files kept changing during reload; retrying next tick")
     }
     ```
-  - [ ] Add `poll time.Duration` to the `watcher` struct.
-  - [ ] Keep the top-level `Watch(...)` function ONLY if an existing test still calls it (as a thin
+  - [x] Add `poll time.Duration` to the `watcher` struct.
+  - [x] Keep the top-level `Watch(...)` function ONLY if an existing test still calls it (as a thin
         `NewWatcher(...).Initial()/.Run(...)` wrapper); otherwise update the callers and remove it — do
         NOT leave a dead wrapper.
-- [ ] **modify** `internal/server/server.go`:
+- [x] **modify** `internal/server/server.go`:
   - Remove the direct pre-load block (current lines 70-73). Construct the watcher and run its Initial()
     load synchronously right there (before all other construction / listener binds):
     ```go
@@ -451,13 +451,13 @@ are the ONLY revocation.
     ```
 
 **Definition of Done:**
-- [ ] Exactly ONE startup load (no `banEng.Load` + separate watcher initial load); the poll's swap happens
+- [x] Exactly ONE startup load (no `banEng.Load` + separate watcher initial load); the poll's swap happens
       only after a stable re-read; the eviction hooks (`EvictBanned` + `EvictBannedStreams`) stay wired on
       `onReload`.
 
-### [ ] Task 3.3 — Signer allowlist: refuse & log a vanished file (W-I5)
+### [x] Task 3.3 — Signer allowlist: refuse & log a vanished file (W-I5)
 
-- [ ] **modify** `internal/attest/signers.go` — in `Watch`, when `os.Stat` fails for the configured
+- [x] **modify** `internal/attest/signers.go` — in `Watch`, when `os.Stat` fails for the configured
       allowlist file, log an Error (rate-limited to once per state transition, mirroring the ban engine's
       vanished-file handling) and keep the previous set instead of silently continuing. Fix the two
       comments to describe the ACTUAL retry semantics (a failed reload does not advance mtime, so it
@@ -466,12 +466,12 @@ are the ONLY revocation.
     do NOT clear the allowlist on a stat failure.
 
 **Definition of Done:**
-- [ ] A vanished allowlist file logs Error and keeps the previous digest set; the two comments match the
+- [x] A vanished allowlist file logs Error and keeps the previous digest set; the two comments match the
       code.
 
-### [ ] Task 3.4 — Droplist fetcher: refuse an empty result (W-D4)
+### [x] Task 3.4 — Droplist fetcher: refuse an empty result (W-D4)
 
-- [ ] **modify** `deploy/scripts/fetch-droplist.sh` — after the `jq` extraction, before the `mv`:
+- [x] **modify** `deploy/scripts/fetch-droplist.sh` — after the `jq` extraction, before the `mv`:
   ```sh
   jq -r 'select(.cidr) | "cidr \(.cidr)"' "$feed" > "$tmp"
 
@@ -482,17 +482,17 @@ are the ONLY revocation.
 
   mv "$tmp" "$OUT_DIR/droplist.bans"
   ```
-- [ ] **modify** `deploy/scripts/scripts_test.sh` — add a case asserting an empty jq result leaves the
+- [x] **modify** `deploy/scripts/scripts_test.sh` — add a case asserting an empty jq result leaves the
       previous `droplist.bans` untouched and exits non-zero (stub `curl`/`jq` to yield empty output).
   - NOTE: this is D-004's fix on `fetch-droplist.sh`; it is NOT the excluded fetcher service (D-005).
 
 **Definition of Done:**
-- [ ] An empty extraction leaves the previous `droplist.bans` intact and exits non-zero; `scripts_test.sh`
+- [x] An empty extraction leaves the previous `droplist.bans` intact and exits non-zero; `scripts_test.sh`
       covers it and passes `shellcheck`.
 
-### [ ] Task 3.5 — Close the ban-evict dial-back escape window (W-E1)
+### [x] Task 3.5 — Close the ban-evict dial-back escape window (W-E1)
 
-- [ ] **modify** `internal/edge/bridge.go` — in `handleTunnel`, AFTER `trackStream(as)` and BEFORE
+- [x] **modify** `internal/edge/bridge.go` — in `handleTunnel`, AFTER `trackStream(as)` and BEFORE
       starting the splice, re-check the tunnel ban on the (possibly re-bound) fingerprint and abort if
       now banned. The early return MUST close the client socket like every sibling rejection path:
   ```go
@@ -509,7 +509,7 @@ are the ONLY revocation.
   }
   ```
   (The deferred `untrackStream`, `closeFar`, and slot release also run on this early return.)
-- [ ] **modify** `internal/phoneconn/manager.go` — `deliverStream` MUST refuse delivery on an
+- [x] **modify** `internal/phoneconn/manager.go` — `deliverStream` MUST refuse delivery on an
       already-closed connection so a dial-back does not complete after `EvictBanned`/`CloseAll` closed it:
   ```go
   func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
@@ -534,19 +534,19 @@ are the ONLY revocation.
   (`conn.close` already sets `c.closed` under `c.mu`, so this read is race-free — reconcile and keep it so.)
 
 **Definition of Done:**
-- [ ] The post-`trackStream` ban re-check closes the client and returns; `deliverStream` returns false on a
+- [x] The post-`trackStream` ban re-check closes the client and returns; `deliverStream` returns false on a
       closed conn; no new data race is introduced (`-race` clean).
 
-### [ ] Task 3.6 — Tests
+### [x] Task 3.6 — Tests
 
-- [ ] **create** `internal/ban/watch_test.go` (no watcher test file exists today).
-- [ ] **modify** `internal/ban/engine_test.go` — the existing watcher tests live here and construct
+- [x] **create** `internal/ban/watch_test.go` (no watcher test file exists today).
+- [x] **modify** `internal/ban/engine_test.go` — the existing watcher tests live here and construct
       `&watcher{… onReload: …}` literals and call `w.initial()` / `w.tick()` (no arg); MIGRATE all of
       them to the new `NewWatcher`/`Initial`/`Run`/`tick(onReload)` API, preserving every BEHAVIORAL
       assertion (vanish refusal, older-mtime detection, failed-load retry, CSV-vanish refusal,
       absent-file benign skip, torn-read stability) while RE-BASELINING every reload-count expectation to
       the new contract. None currently call the top-level `Watch(...)`.
-  - [ ] The new contract is: `Initial()` fires ZERO reload callbacks (no live connections yet); each
+  - [x] The new contract is: `Initial()` fires ZERO reload callbacks (no live connections yet); each
         change-driven `tick` fires ONE. This shifts EVERY reload-count assertion DOWN by one across the
         SEVEN affected tests — the four that assert the initial load fires `onReload` once
         (`TestWatchFiresOnReloadOnMtimeChange`, `TestWatcher_DetectsDeletionAndEqualMtime`,
@@ -555,7 +555,7 @@ are the ONLY revocation.
         `TestWatcher_VanishedFileKeepsSnapshot`, `TestWatcher_VanishedCSVKeepsSnapshot`). Only
         `TestWatcher_TornReadRetries` (which seeds `w.last` directly) is unaffected. (This is a
         deliberate contract change, mirroring Task 11.4's `TestReadPumpPongStampsLiveness` flip.)
-- [ ] **modify** `internal/attest/signers_test.go`, `internal/edge/*_test.go`,
+- [x] **modify** `internal/attest/signers_test.go`, `internal/edge/*_test.go`,
       `internal/phoneconn/manager_test.go`.
 
 | Test | Verifies | Setup notes |
@@ -569,31 +569,31 @@ are the ONLY revocation.
 | `TestDeliverStream_RefusesClosedConn` | `deliverStream` returns false once `conn.close` ran | close then deliver |
 
 **Definition of Done:**
-- [ ] `internal/ban` compiles and passes with the migrated tests (including the updated initial-`onReload`
+- [x] `internal/ban` compiles and passes with the migrated tests (including the updated initial-`onReload`
       expectations); all rows above are green.
 
 ---
 
-## [ ] US4 — Startup fail-fast & listener correctness (W-A2, W-A8, A-002, A-003, A-004, A-005, A-009)
+## [x] US4 — Startup fail-fast & listener correctness (W-A2, W-A8, A-002, A-003, A-004, A-005, A-009)
 
 **Why:** the internal listener binds lazily and a bind failure is swallowed; several address/name
 misconfigurations surface late; a failed mesh-cert mint leaves an accepting-but-dead `:9443`; the
 errgroup's fail-fast is unused because serve errors are swallowed.
 
 **Acceptance criteria:**
-- [ ] `--listen`, `--mesh-listen`, `--internal-listen` are validated at startup and their binds are all
+- [x] `--listen`, `--mesh-listen`, `--internal-listen` are validated at startup and their binds are all
       fatal at construction (before serving).
-- [ ] `--name-prefix` is lowercased everywhere and charset-validated; an uppercase/invalid prefix cannot
+- [x] `--name-prefix` is lowercased everywhere and charset-validated; an uppercase/invalid prefix cannot
       silently `no-route` every tunnel.
-- [ ] `--enroll-host` == `--control-host` is rejected at startup.
-- [ ] A non-shutdown `Serve` error cancels the errgroup (process exits for the orchestrator to restart);
+- [x] `--enroll-host` == `--control-host` is rejected at startup.
+- [x] A non-shutdown `Serve` error cancels the errgroup (process exits for the orchestrator to restart);
       `ErrServerClosed`/`net.ErrClosed` remain non-fatal.
-- [ ] The internal server drains gracefully (no hard `Close` racing `Shutdown`).
-- [ ] A failed initial mesh-cert mint is fatal; a failed rotation retries on a short backoff.
+- [x] The internal server drains gracefully (no hard `Close` racing `Shutdown`).
+- [x] A failed initial mesh-cert mint is fatal; a failed rotation retries on a short backoff.
 
-### [ ] Task 4.1 — Validate listen addresses; lowercase+validate name prefix; reject host collision (W-A2, W-A8, A-009)
+### [x] Task 4.1 — Validate listen addresses; lowercase+validate name prefix; reject host collision (W-A2, W-A8, A-009)
 
-- [ ] **modify** `internal/config/config.go` `Validate()`:
+- [x] **modify** `internal/config/config.go` `Validate()`:
   - Add address parseability for the three listeners (accept `host:port` or `:port`):
     ```go
     for _, a := range []struct{ name, v string }{
@@ -622,18 +622,18 @@ errgroup's fail-fast is unused because serve errors are swallowed.
         return fmt.Errorf("--name-prefix must not start with '-', got %q", c.NamePrefix)
     }
     ```
-- [ ] **modify** `internal/server/server.go` — lowercase the prefix alongside the hosts (after line 50):
+- [x] **modify** `internal/server/server.go` — lowercase the prefix alongside the hosts (after line 50):
   ```go
   cfg.NamePrefix = strings.ToLower(cfg.NamePrefix)
   ```
 
 **Definition of Done:**
-- [ ] `Validate()` rejects a bad listen address, an enroll/control collision, and an out-of-charset prefix;
+- [x] `Validate()` rejects a bad listen address, an enroll/control collision, and an out-of-charset prefix;
       `server.Run` lowercases `cfg.NamePrefix` so name generation AND `validNameFunc` both see lowercase.
 
-### [ ] Task 4.2 — Bind the internal listener at construction; propagate serve errors; graceful drain (W-A2, A-002, A-003, A-004)
+### [x] Task 4.2 — Bind the internal listener at construction; propagate serve errors; graceful drain (W-A2, A-002, A-003, A-004)
 
-- [ ] **modify** `internal/server/server.go`:
+- [x] **modify** `internal/server/server.go`:
   - Bind the internal listener alongside `rawLn`/`meshLn` (after the mesh bind, ~line 207), fatal on
     error, closing the already-bound listeners on failure:
     ```go
@@ -649,7 +649,7 @@ errgroup's fail-fast is unused because serve errors are swallowed.
     ```go
     g.Go(func() error { return serveTLS(gctx, internalSrv, internalLn, logger, "internal") })
     ```
-- [ ] **modify** `internal/server/serve.go`:
+- [x] **modify** `internal/server/serve.go`:
   - `serveTLS` returns the non-shutdown error so the errgroup cancels (A-003), keeping the shutdown
     sentinels non-fatal:
     ```go
@@ -671,13 +671,13 @@ errgroup's fail-fast is unused because serve errors are swallowed.
     (agent.md: comments must not misstate the code).
 
 **Definition of Done:**
-- [ ] The internal listener binds at construction (fatal on failure); `serveInternal` is gone; `serveTLS`
+- [x] The internal listener binds at construction (fatal on failure); `serveInternal` is gone; `serveTLS`
       propagates non-shutdown errors and keeps `ErrServerClosed`/`net.ErrClosed` non-fatal; the shutdown
       order in `Run` still drains the internal server via `Shutdown`; `serveTLS`'s comment is accurate.
 
-### [ ] Task 4.3 — Mesh-cert mint: fatal initial, retried rotation (A-005)
+### [x] Task 4.3 — Mesh-cert mint: fatal initial, retried rotation (A-005)
 
-- [ ] **modify** `internal/server/schedulers.go` — make `mint` return an error, make the INITIAL mint
+- [x] **modify** `internal/server/schedulers.go` — make `mint` return an error, make the INITIAL mint
       fatal via `newMeshCertHolder`, and make a failed rotation retry on a short backoff. Add an
       injectable timer seam (`after`, default `time.After`) so the rotation-retry test needs no wall-clock
       wait:
@@ -740,19 +740,19 @@ errgroup's fail-fast is unused because serve errors are swallowed.
       }
   }
   ```
-- [ ] **modify** `internal/server/server.go` — `newMeshCertHolder` now returns an error (call site
+- [x] **modify** `internal/server/server.go` — `newMeshCertHolder` now returns an error (call site
       ~line 144): handle it and `return` it fatally from `Run` BEFORE `:9443` binds (consistent with the
       other fatal construction steps).
   - Context: mirror the fatal treatment `buildVerifier` gives a failed signer-allowlist load.
 
 **Definition of Done:**
-- [ ] A failed initial mint aborts `Run` before `:9443` binds; a failed rotation waits `meshRotateRetry`
+- [x] A failed initial mint aborts `Run` before `:9443` binds; a failed rotation waits `meshRotateRetry`
       (5m) then a successful one returns to the 2/3-TTL interval; the `after` seam lets the test drive
       rotations without wall-clock waits.
 
-### [ ] Task 4.4 — Tests
+### [x] Task 4.4 — Tests
 
-- [ ] **modify** `internal/config/config_test.go`, `internal/server/serve_test.go` /
+- [x] **modify** `internal/config/config_test.go`, `internal/server/serve_test.go` /
       `server_test.go` / `schedulers_test.go`.
 
 | Test | Verifies | Setup notes |
@@ -768,27 +768,27 @@ errgroup's fail-fast is unused because serve errors are swallowed.
 | `TestRun_NamePrefixLowercased` (integration) | an uppercase `--name-prefix` yields lowercase generated/validated tunnel names (the runtime `server.Run` normalization, not just `Validate()`) | integration tier drives `server.Run`; enroll a tunnel, assert the name uses the lowercase prefix |
 
 **Definition of Done:**
-- [ ] Every AC of US4 maps to a green test above (validation, fatal binds, serve-error propagation, graceful
+- [x] Every AC of US4 maps to a green test above (validation, fatal binds, serve-error propagation, graceful
       drain, mesh-mint fatal + rotation retry, runtime prefix lowercasing).
 
 ---
 
-## [ ] US5 — Eliminate silent failures & error swallowing (W-S2, W-A6, E-005, S-006, A-010, A-011)
+## [x] US5 — Eliminate silent failures & error swallowing (W-S2, W-A6, E-005, S-006, A-010, A-011)
 
 **Why:** several error paths `continue`/discard with no signal, so real outages (Valkey, renewal,
 heartbeat) are diagnosable only by their downstream symptom.
 
 **Acceptance criteria:**
-- [ ] The issuance-slot heartbeat error is LOGGED (30s TTL kept — user decision; no timeout change).
-- [ ] The reserved-host `shouldRenew` error and a persistent phone `Heartbeat` error are logged with
+- [x] The issuance-slot heartbeat error is LOGGED (30s TTL kept — user decision; no timeout change).
+- [x] The reserved-host `shouldRenew` error and a persistent phone `Heartbeat` error are logged with
       identifiers.
-- [ ] Every remaining intentional `_` discard in scope carries a go.md justification comment.
-- [ ] `reservedCerts.ensure` uses the injected clock in both branches.
-- [ ] `NewPromRecorder` no longer panics on a nil admin store, and its comment matches reality.
+- [x] Every remaining intentional `_` discard in scope carries a go.md justification comment.
+- [x] `reservedCerts.ensure` uses the injected clock in both branches.
+- [x] `NewPromRecorder` no longer panics on a nil admin store, and its comment matches reality.
 
-### [ ] Task 5.1 — Log discarded errors (W-S2, W-A6, E-005)
+### [x] Task 5.1 — Log discarded errors (W-S2, W-A6, E-005)
 
-- [ ] **modify** `internal/limit/issuance.go` — `IssuanceHeartbeatLoop`: log the heartbeat error at Warn
+- [x] **modify** `internal/limit/issuance.go` — `IssuanceHeartbeatLoop`: log the heartbeat error at Warn
       with `name` + `orderID`. KEEP the 30s TTL (**user decision:** a Valkey blip is a real problem; fail
       fast and let the client retry via the documented 503/`retry_after` path — NO TTL/timeout change):
   ```go
@@ -800,7 +800,7 @@ heartbeat) are diagnosable only by their downstream symptom.
   ```
   Reconcile: if `Limiter` has no logger field, add one (constructor/functional-option, per go.md DI); wire
   it in `server.Run`'s `limit.NewLimiter(...)`. No package global.
-- [ ] **modify** `internal/server/reserved.go` — `maybeRenew`: log the `shouldRenew` error, mirroring
+- [x] **modify** `internal/server/reserved.go` — `maybeRenew`: log the `shouldRenew` error, mirroring
       `renewalWatcher.tick`:
   ```go
   due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
@@ -812,30 +812,30 @@ heartbeat) are diagnosable only by their downstream symptom.
       return
   }
   ```
-- [ ] **modify** `internal/phoneconn/manager.go` — the heartbeat loop (~lines 212-215): Warn-log a
+- [x] **modify** `internal/phoneconn/manager.go` — the heartbeat loop (~lines 212-215): Warn-log a
       persistent `Heartbeat` error with tunnel + connID (dedup/rate-limit if per-tick volume is a concern)
       instead of a bare `continue`.
 
 **Definition of Done:**
-- [ ] The three error paths log at Warn with identifiers; the 30s issuance-slot TTL is unchanged;
+- [x] The three error paths log at Warn with identifiers; the 30s issuance-slot TTL is unchanged;
       `Limiter` receives its logger via DI (no package global).
 
-### [ ] Task 5.2 — Documented discards, injected clock & nil-guard (S-006, A-010, A-011)
+### [x] Task 5.2 — Documented discards, injected clock & nil-guard (S-006, A-010, A-011)
 
-- [ ] **modify** `internal/admin/tunnels.go` — `atoi64` (~lines 89-92): add the one-line justification
+- [x] **modify** `internal/admin/tunnels.go` — `atoi64` (~lines 89-92): add the one-line justification
       comment for the intentional `_` discard (absent hash field → 0), mirroring `store/rejected.go`.
-- [ ] **modify** `internal/server/reserved.go` — `ensure` (~lines 92/95): use `rc.now()` in BOTH the
+- [x] **modify** `internal/server/reserved.go` — `ensure` (~lines 92/95): use `rc.now()` in BOTH the
       renew-margin and still-valid branches (`notAfter.Sub(rc.now()) > rc.renewMargin`).
-- [ ] **modify** `internal/metrics/recorder.go` — `NewPromRecorder`: nil-guard the `*admin.Store` (treat
+- [x] **modify** `internal/metrics/recorder.go` — `NewPromRecorder`: nil-guard the `*admin.Store` (treat
       nil as a no-op admin sink in `flush`); fix the constructor comment (it currently claims "never
       carries nil collaborators" while accepting a nil store). No-op guard keeps the existing
       `deploy_test`/`e2e_test` nil callers valid without a panic if they ever flush.
 
 **Definition of Done:**
-- [ ] `atoi64` carries the justification comment; `ensure` uses `rc.now()` in both branches;
+- [x] `atoi64` carries the justification comment; `ensure` uses `rc.now()` in both branches;
       `NewPromRecorder` no-ops the admin sink on nil and its comment is accurate.
 
-### [ ] Task 5.3 — Tests
+### [x] Task 5.3 — Tests
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -846,27 +846,27 @@ heartbeat) are diagnosable only by their downstream symptom.
 | `TestPromRecorder_NilAdminStoreFlushNoPanic` | `flush` with a nil admin store does not panic | construct with nil, force a flush |
 
 **Definition of Done:**
-- [ ] All five tests present and green.
+- [x] All five tests present and green.
 
 ---
 
-## [ ] US6 — ACME cancellation & bounded external I/O (W-I3, W-I4)
+## [x] US6 — ACME cancellation & bounded external I/O (W-I3, W-I4)
 
 **Why:** the caller `context` is dropped across the lego seam (no cancellation into ACME orders; account
 registration runs under the `lazyCA` mutex, blocking concurrent obtains and the renewal scheduler), and
 the custom DNS provider is called with an unbounded `context.Background()`.
 
 **Acceptance criteria:**
-- [ ] A cancelled/shutdown caller stops waiting on an in-flight ACME obtain AND on in-flight first-use
+- [x] A cancelled/shutdown caller stops waiting on an in-flight ACME obtain AND on in-flight first-use
       registration.
-- [ ] The renewal scheduler (`shouldRenew`) is NEVER pinned by a hung registration (it uses the cached
+- [x] The renewal scheduler (`shouldRenew`) is NEVER pinned by a hung registration (it uses the cached
       client or the configured fixed floor, never triggering registration); a build error is still
       retried on the next call.
-- [ ] The custom DNS provider `Present`/`CleanUp` calls carry a bounded deadline.
+- [x] The custom DNS provider `Present`/`CleanUp` calls carry a bounded deadline.
 
-### [ ] Task 6.1 — Propagate ctx into obtain + registration; keep the renewal scheduler off the registration path (W-I3)
+### [x] Task 6.1 — Propagate ctx into obtain + registration; keep the renewal scheduler off the registration path (W-I3)
 
-- [ ] **modify** `internal/acme/lego_client.go` — `obtain`: run the (ctx-less) `ObtainForCSR` in a
+- [x] **modify** `internal/acme/lego_client.go` — `obtain`: run the (ctx-less) `ObtainForCSR` in a
       goroutine and select on `ctx.Done()` so a cancelled/shutdown caller stops waiting (the abandoned
       call completes under lego's internal per-request timeout):
   ```go
@@ -899,7 +899,7 @@ the custom DNS provider is called with an unbounded `context.Background()`.
       }
   }
   ```
-- [ ] **modify** `internal/acme/lazy.go` — make first-use registration ctx-aware and keep the renewal
+- [x] **modify** `internal/acme/lazy.go` — make first-use registration ctx-aware and keep the renewal
       scheduler entirely off the registration path:
   - `resolve(ctx)` uses `singleflight.Group.DoChan("build", …)` + `select` on `ctx.Done()` so a
     cancelled/shutdown caller returns promptly (the in-flight build completes+caches in the background;
@@ -983,12 +983,12 @@ the custom DNS provider is called with an unbounded `context.Background()`.
   registration.
 
 **Definition of Done:**
-- [ ] `obtain` and `resolve` are ctx-aware (a cancelled caller returns promptly); `shouldRenew` never
+- [x] `obtain` and `resolve` are ctx-aware (a cancelled caller returns promptly); `shouldRenew` never
       calls `build()`; a build error is retried on the next `resolve`; the old mutex is gone.
 
-### [ ] Task 6.2 — Bound the DNS provider call (W-I4)
+### [x] Task 6.2 — Bound the DNS provider call (W-I4)
 
-- [ ] **modify** `internal/acme/lego_client.go` — `legoDNSAdapter.Present`/`CleanUp`: derive a bounded
+- [x] **modify** `internal/acme/lego_client.go` — `legoDNSAdapter.Present`/`CleanUp`: derive a bounded
       deadline instead of a bare `context.Background()`:
   ```go
   // dnsProviderTimeout bounds one TXT publish/cleanup against our neutral DNSProvider seam. lego's
@@ -1006,9 +1006,9 @@ the custom DNS provider is called with an unbounded `context.Background()`.
   ```
 
 **Definition of Done:**
-- [ ] `Present`/`CleanUp` pass a bounded-deadline ctx to the DNSProvider seam.
+- [x] `Present`/`CleanUp` pass a bounded-deadline ctx to the DNSProvider seam.
 
-### [ ] Task 6.3 — Tests
+### [x] Task 6.3 — Tests
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1019,40 +1019,40 @@ the custom DNS provider is called with an unbounded `context.Background()`.
 | `TestLegoDNSAdapter_PresentUsesDeadline` | the adapter passes a ctx with a deadline to the DNSProvider | fake DNSProvider asserting `ctx.Deadline()` ok |
 
 **Definition of Done:**
-- [ ] All five tests present and green (`-race` clean), including the cancel-while-hanging and
+- [x] All five tests present and green (`-race` clean), including the cancel-while-hanging and
       no-build-from-shouldRenew guarantees.
 
 ---
 
-## [ ] US7 — Enrollment/issuance conformance & taxonomy (W-I2, W-I6, I-007, I-008, I-009, I-010)
+## [x] US7 — Enrollment/issuance conformance & taxonomy (W-I2, W-I6, I-007, I-008, I-009, I-010)
 
 **Why:** the P-256-only invariant is not enforced on the Phase-2 TLS CSR; several enroll-HTTP error
 mappings diverge from PROTOCOL.md and the ban gate fails open on an unparseable IP; Issue-path rejection
 labels drop the known tunnel name.
 
 **Acceptance criteria:**
-- [ ] `recordRejection` records the mTLS-CN name on the Issue path (Phase 1 stays `""`).
-- [ ] A non-P-256 Phase-2 TLS CSR is refused (user reason `unsupported_key_type`, metric label
+- [x] `recordRejection` records the mTLS-CN name on the Issue path (Phase 1 stays `""`).
+- [x] A non-P-256 Phase-2 TLS CSR is refused (user reason `unsupported_key_type`, metric label
       `csr-mismatch` — an existing registered label, so no ARCHITECTURE §8 change).
-- [ ] `GET /enroll/nonce` maps `bad_source_ip`→400 and `enroll_rate`→429 (frozen PROTOCOL §2 contract);
+- [x] `GET /enroll/nonce` maps `bad_source_ip`→400 and `enroll_rate`→429 (frozen PROTOCOL §2 contract);
       an unparseable peer IP is rejected before dispatch; a Valkey nonce-consume error is `internal`
       (retryable), not `invalid_nonce`.
-- [ ] A FAILED `/issue` consumes its nonce (replay → `invalid_nonce`).
+- [x] A FAILED `/issue` consumes its nonce (replay → `invalid_nonce`).
 
-### [ ] Task 7.1 — Thread the tunnel name into Issue-path rejections (I-010) — FIRST (7.2 depends on it)
+### [x] Task 7.1 — Thread the tunnel name into Issue-path rejections (I-010) — FIRST (7.2 depends on it)
 
-- [ ] **modify** `internal/enroll/enroll.go` — give `recordRejection` (and `attestAndBind`, which calls
+- [x] **modify** `internal/enroll/enroll.go` — give `recordRejection` (and `attestAndBind`, which calls
       it) a `name` parameter: pass the mTLS-CN name in `Issue` (its `attest-*`/`csr-mismatch` rejections),
       pass `""` in `Enroll` (Phase 1, no name yet). `recordRejection` then calls `s.rec.Reject(reason,
       name, ip)` so the metric + caplog dedup key on `(tunnel, reason)` per ARCHITECTURE §8. Phase-1
       behavior (empty name) is unchanged.
 
 **Definition of Done:**
-- [ ] `recordRejection` takes a `name`; Issue-path callers pass the CN name; Phase-1 callers pass `""`.
+- [x] `recordRejection` takes a `name`; Issue-path callers pass the CN name; Phase-1 callers pass `""`.
 
-### [ ] Task 7.2 — Enforce ECDSA P-256 on the Phase-2 TLS CSR (W-I2)
+### [x] Task 7.2 — Enforce ECDSA P-256 on the Phase-2 TLS CSR (W-I2)
 
-- [ ] **modify** `internal/enroll/enroll.go` — in `Issue`, after `TLSCSR.CheckSignature()` and
+- [x] **modify** `internal/enroll/enroll.go` — in `Issue`, after `TLSCSR.CheckSignature()` and
       `csrMatchesTunnel(...)` pass and before forwarding to the ACME chain, require the TLS CSR public key
       to be `*ecdsa.PublicKey` on P-256. On failure, record the rejection with the EXISTING registered
       `csr-mismatch` label via `recordRejection(ctx, ip, name, "csr-mismatch", req)` (persists evidence,
@@ -1062,26 +1062,26 @@ labels drop the known tunnel name.
     enrollment. No new metric label is introduced, so ARCHITECTURE §8 is unchanged.
 
 **Definition of Done:**
-- [ ] A non-P-256 TLS CSR is rejected with `unsupported_key_type` (400) and a `csr-mismatch` metric +
+- [x] A non-P-256 TLS CSR is rejected with `unsupported_key_type` (400) and a `csr-mismatch` metric +
       evidence; the identity-CSR path is unchanged; no new rejection label is introduced.
 
-### [ ] Task 7.3 — Enroll-HTTP status mapping, taxonomy & fail-closed ban gate (I-007, I-008, I-009)
+### [x] Task 7.3 — Enroll-HTTP status mapping, taxonomy & fail-closed ban gate (I-007, I-008, I-009)
 
-- [ ] **modify** `internal/enroll/http.go`:
+- [x] **modify** `internal/enroll/http.go`:
   - `handleNonce`: map `enrollLimit` errors explicitly — `enroll_rate` (Retryable) → **429** (frozen
     PROTOCOL §2 nonce-route contract), everything else (e.g. `bad_source_ip`) → `statusForError(e)` (→
     400). Do NOT route `enroll_rate` through the blanket `statusForError` (which would yield 503).
   - `ServeHTTP` ban gate: when `netip.ParseAddr(ip)` FAILS, reject (`400 bad_source_ip`) BEFORE dispatch
     instead of proceeding — the ban check must be the first effective gate (fail closed).
-- [ ] **modify** `internal/enroll/enroll.go` — `consumeNonce` handling in `Enroll`/`Issue`: distinguish a
+- [x] **modify** `internal/enroll/enroll.go` — `consumeNonce` handling in `Enroll`/`Issue`: distinguish a
       Valkey/script ERROR (→ `{Reason:"internal", Retryable:true}`) from a genuinely absent/replayed nonce
       (→ `{Reason:"invalid_nonce"}`), instead of mapping both to `invalid_nonce`.
 
 **Definition of Done:**
-- [ ] Nonce route: `enroll_rate`→429, `bad_source_ip`→400; unparseable peer IP → 400 before dispatch;
+- [x] Nonce route: `enroll_rate`→429, `bad_source_ip`→400; unparseable peer IP → 400 before dispatch;
       a Valkey nonce-consume error → `internal`+retryable, a real absent/replayed nonce → `invalid_nonce`.
 
-### [ ] Task 7.4 — Tests
+### [x] Task 7.4 — Tests
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1094,26 +1094,26 @@ labels drop the known tunnel name.
 | `TestConsumeNonce_ValkeyErrorIsInternal` | a script error yields `internal`+retryable, not `invalid_nonce` | rdb stub returning error |
 
 **Definition of Done:**
-- [ ] All seven tests present and green.
+- [x] All seven tests present and green.
 
 ---
 
-## [ ] US8 — Client library & protocol retry path (W-C1, W-C2, W-C3, I-005, I-006)
+## [x] US8 — Client library & protocol retry path (W-C1, W-C2, W-C3, I-005, I-006)
 
 **Why:** the client panics on a bad enroll host, discards the Phase-1 bootstrap identity on a retryable
 Phase-2 failure (orphaning a name in the registry), and its retry API is untested; several response
 reads discard errors.
 
 **Acceptance criteria:**
-- [ ] `fetchNonce` returns an error instead of nil-panicking on a bad host.
-- [ ] On a Phase-2 failure, `Enroll` returns the Phase-1 bootstrap identity so the caller can run the
+- [x] `fetchNonce` returns an error instead of nil-panicking on a bad host.
+- [x] On a Phase-2 failure, `Enroll` returns the Phase-1 bootstrap identity so the caller can run the
       documented retry path WITHOUT re-enrolling (which would orphan the first name).
-- [ ] Response read errors are surfaced (not misreported as decode/empty-reason errors).
-- [ ] The `FetchIssueNonce` → `Renew` retry path is tested end to end.
+- [x] Response read errors are surfaced (not misreported as decode/empty-reason errors).
+- [x] The `FetchIssueNonce` → `Renew` retry path is tested end to end.
 
-### [ ] Task 8.1 — Robust request construction & response reads (W-C1, I-005, I-006)
+### [x] Task 8.1 — Robust request construction & response reads (W-C1, I-005, I-006)
 
-- [ ] **modify** `client/enroll.go`:
+- [x] **modify** `client/enroll.go`:
   - `fetchNonce`: check the `http.NewRequestWithContext` error (return it) instead of `req, _ :=`.
   - The three `io.ReadAll(io.LimitReader(...))` sites (Phase-1 `Enroll`, `issueCerts`, `fetchNonce`):
     check the read error and wrap it (`fmt.Errorf("read response: %w", err)`).
@@ -1121,11 +1121,11 @@ reads discard errors.
     cannot fail — a one-line comment is acceptable).
 
 **Definition of Done:**
-- [ ] No `req, _ :=` or unjustified `_` discard remains in `client/enroll.go`; read errors are wrapped.
+- [x] No `req, _ :=` or unjustified `_` discard remains in `client/enroll.go`; read errors are wrapped.
 
-### [ ] Task 8.2 — Preserve the bootstrap identity for the documented retry path (W-C2)
+### [x] Task 8.2 — Preserve the bootstrap identity for the documented retry path (W-C2)
 
-- [ ] **modify** `client/enroll.go` — `Enroll`: on a Phase-2 (`issueCerts`) failure, return the Phase-1
+- [x] **modify** `client/enroll.go` — `Enroll`: on a Phase-2 (`issueCerts`) failure, return the Phase-1
       bootstrap `*Identity` (name + bootstrap identity cert + `bootKey`) ALONGSIDE the error, so the
       caller can execute PROTOCOL §3's retry path (fresh nonce → wait `retry_after_seconds` → `Renew` over
       the same mTLS identity) without re-enrolling (which would orphan the first name — PROTOCOL §2: the
@@ -1136,10 +1136,10 @@ reads discard errors.
     `Enroll` callers (client tests, e2e) — existing `if err != nil { return … }` callers are unaffected.
 
 **Definition of Done:**
-- [ ] A Phase-2 failure returns the bootstrap identity + the error; a successful enroll is unchanged; the
+- [x] A Phase-2 failure returns the bootstrap identity + the error; a successful enroll is unchanged; the
       contract is documented and all callers compile.
 
-### [ ] Task 8.3 — Tests (W-C3 + the above)
+### [x] Task 8.3 — Tests (W-C3 + the above)
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1149,27 +1149,27 @@ reads discard errors.
 | `TestReadResponse_TruncatedBodyErrors` | a truncated response body surfaces a read error, not a decode error | server closing mid-body |
 
 **Definition of Done:**
-- [ ] All four tests present and green.
+- [x] All four tests present and green.
 
 ---
 
-## [ ] US9 — e2e / test-harness robustness (W-C4, I-007c, I-008c, I-009c, I-010c, I-011)
+## [x] US9 — e2e / test-harness robustness (W-C4, I-007c, I-008c, I-009c, I-010c, I-011)
 
 **Why:** several e2e tests pass without exercising what they claim, leak a client connection, or fail
 nondeterministically.
 
 **Acceptance criteria:**
-- [ ] `TestE2E_Eviction` asserts the evicted victim's socket is closed (an unenforced concurrency cap
+- [x] `TestE2E_Eviction` asserts the evicted victim's socket is closed (an unenforced concurrency cap
       cannot pass silently).
-- [ ] `echoPhone` joins `Run`'s return before `Close` (honors the `Close` contract; no leaked transport).
-- [ ] `TestE2E_CrossNodeAndFastPath`'s comment matches the actual scenario.
-- [ ] Test-code `pem.Decode`/parse/marshal/generate discards are nil-checked or `t.Fatal`'d.
-- [ ] `freeAddr` no longer races (deterministic bind).
-- [ ] `chalPost` uses a bounded-timeout HTTP client.
+- [x] `echoPhone` joins `Run`'s return before `Close` (honors the `Close` contract; no leaked transport).
+- [x] `TestE2E_CrossNodeAndFastPath`'s comment matches the actual scenario.
+- [x] Test-code `pem.Decode`/parse/marshal/generate discards are nil-checked or `t.Fatal`'d.
+- [x] `freeAddr` no longer races (deterministic bind).
+- [x] `chalPost` uses a bounded-timeout HTTP client.
 
-### [ ] Task 9.1 — Strengthen and correct e2e tests
+### [x] Task 9.1 — Strengthen and correct e2e tests
 
-- [ ] **modify** `e2e/e2e_test.go`:
+- [x] **modify** `e2e/e2e_test.go`:
   - `TestE2E_Eviction` (W-C4): after `c3` succeeds, assert exactly one of `c1`/`c2` observes EOF/error
     within a deadline (the evicted victim's socket is closed).
   - `echoPhone` (I-007c): capture a `runDone` channel and make cleanup `cancel(); <-runDone; c.Close()`.
@@ -1177,45 +1177,45 @@ nondeterministically.
     the owner replica" (no rebinding occurs).
   - `freeAddr` TOCTOU (I-010c): hold the probe listeners and pass bound listeners/addresses into the
     server where feasible, OR retry `startReplica` on a bind failure with fresh ports (deterministic).
-- [ ] **modify** `internal/tunneltest/containers.go` — `chalPost` (I-011): use an `http.Client` with a
+- [x] **modify** `internal/tunneltest/containers.go` — `chalPost` (I-011): use an `http.Client` with a
       short timeout (or a ctx-bound request), matching the other helpers.
-- [ ] **modify** `client/harness_test.go`, `client/enroll_test.go`, `e2e/e2e_test.go` (I-009c): nil-check
+- [x] **modify** `client/harness_test.go`, `client/enroll_test.go`, `e2e/e2e_test.go` (I-009c): nil-check
       `pem.Decode` blocks before using `.Bytes` (reuse `parseCSR`'s pattern), and handle/`t.Fatal` the
       `_`-discarded `x509.ParseCertificate` / `MarshalECPrivateKey` / `ecdsa.GenerateKey` /
       `json.Marshal` / body-`Decode` results.
 
 **Definition of Done:**
-- [ ] `TestE2E_Eviction` asserts a closed victim; `echoPhone` joins `Run` before `Close`; the CrossNode
+- [x] `TestE2E_Eviction` asserts a closed victim; `echoPhone` joins `Run` before `Close`; the CrossNode
       comment is accurate; `freeAddr` is deterministic; `chalPost` is time-bounded; the flagged test
       discards are handled. The e2e tier passes (`-tags=e2e`).
 
 ---
 
-## [ ] US10 — Ban geo-source attribution (S-007)
+## [x] US10 — Ban geo-source attribution (S-007)
 
 **Why:** per-country `Source` data is collected then discarded, so a matched geo-ban cannot tell the
 operator which country/line fired.
 
 **Acceptance criteria:**
-- [ ] A matched geo-ban's `Source` names the country code and the requesting ban-file line.
-- [ ] The absent/corrupt/zero-row CSV semantics are preserved EXACTLY.
+- [x] A matched geo-ban's `Source` names the country code and the requesting ban-file line.
+- [x] The absent/corrupt/zero-row CSV semantics are preserved EXACTLY.
 
-### [ ] Task 10.1 — Carry the country/source through expansion
+### [x] Task 10.1 — Carry the country/source through expansion
 
-- [ ] **modify** `internal/ban/dbip.go` — `ExpandCountries` returns per-country prefixes:
+- [x] **modify** `internal/ban/dbip.go` — `ExpandCountries` returns per-country prefixes:
       `func ExpandCountries(csvPath string, wanted map[string]struct{}) (map[string][]netip.Prefix, error)`
       (key = country code). Preserve the absent/corrupt/zero-row semantics EXACTLY (still `(nil, err)` on
       present-but-zero-rows and on absent — the caller distinguishes).
-- [ ] **modify** `internal/ban/engine.go` — `build`/`Load`: insert each country's prefixes with the
+- [x] **modify** `internal/ban/engine.go` — `build`/`Load`: insert each country's prefixes with the
       parsed entry's `Source` (from `p.countries[cc]`, i.e. the file/line/`Detail=cc`), not the generic
       `country-expansion` source.
-- [ ] **modify** `internal/ban/dbip_test.go`, `internal/ban/engine_test.go` for the new return shape.
+- [x] **modify** `internal/ban/dbip_test.go`, `internal/ban/engine_test.go` for the new return shape.
 
 **Definition of Done:**
-- [ ] A geo-ban `Source` carries the country + file/line; the absent/zero-row `(nil,err)` semantics are
+- [x] A geo-ban `Source` carries the country + file/line; the absent/zero-row `(nil,err)` semantics are
       unchanged; dbip/engine tests updated to the new shape.
 
-### [ ] Task 10.2 — Test
+### [x] Task 10.2 — Test
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1223,61 +1223,61 @@ operator which country/line fired.
 | `TestExpandCountries_SemanticsPreserved` | absent CSV, zero-row CSV, and absent-wanted-code still return the documented `(nil,err)`/empty results | reuse the existing dbip cases against the new signature |
 
 **Definition of Done:**
-- [ ] Both tests present and green.
+- [x] Both tests present and green.
 
 ---
 
-## [ ] US11 — Protocol method enforcement & close-reason accuracy (E-004, E-006, E-003)
+## [x] US11 — Protocol method enforcement & close-reason accuracy (E-004, E-006, E-003)
 
 **Why:** `/control`, `/data`, `/mesh` accept any method though PROTOCOL specifies POST; an oversize
 control frame is misattributed as `phone-close`; a `NewConnID` discard carries a factually wrong comment.
 
 **Acceptance criteria:**
-- [ ] `GET /control`, `GET /data`, `GET /mesh` → 405 (PROTOCOL §3–§5 already specify POST).
-- [ ] An oversize control frame records the `protocol-error` close reason (reviving that dead branch);
+- [x] `GET /control`, `GET /data`, `GET /mesh` → 405 (PROTOCOL §3–§5 already specify POST).
+- [x] An oversize control frame records the `protocol-error` close reason (reviving that dead branch);
       genuine EOF stays `phone-close`.
-- [ ] The `NewConnID` failure fallback is a deterministic non-empty id (never a 400-refused dial-back),
+- [x] The `NewConnID` failure fallback is a deterministic non-empty id (never a 400-refused dial-back),
       and its comment is accurate.
 
-### [ ] Task 11.1 — Enforce POST (E-006)
+### [x] Task 11.1 — Enforce POST (E-006)
 
-- [ ] **modify** `internal/phoneconn/listener.go` — dispatch: require `http.MethodPost` on `/control` and
+- [x] **modify** `internal/phoneconn/listener.go` — dispatch: require `http.MethodPost` on `/control` and
       `/data` (405, mirroring the existing `/issue` handling).
-- [ ] **modify** `internal/mesh/listener.go` — require `http.MethodPost` on `/mesh` (405).
+- [x] **modify** `internal/mesh/listener.go` — require `http.MethodPost` on `/mesh` (405).
   - Context: aligns the code with docs/PROTOCOL.md §3–§5 (already POST); no doc change needed.
 
 **Definition of Done:**
-- [ ] Non-POST `/control`, `/data`, `/mesh` return 405; POST behavior is unchanged.
+- [x] Non-POST `/control`, `/data`, `/mesh` return 405; POST behavior is unchanged.
 
-### [ ] Task 11.2 — Distinct protocol-error close reason (E-004)
+### [x] Task 11.2 — Distinct protocol-error close reason (E-004)
 
-- [ ] **modify** `internal/phoneconn/stream.go` — `readControlFrame`: return the EXISTING
+- [x] **modify** `internal/phoneconn/stream.go` — `readControlFrame`: return the EXISTING
       `wire.ErrControlTooLarge` for the oversize length-prefix case (instead of `io.ErrUnexpectedEOF`).
       (The `wire.ErrControlTooLarge` sentinel already exists in `internal/wire` — returned today by
       `EncodeControl`; `wire.DecodeControl` returns `ErrControlMalformed` for oversize, and `readPump`
       already maps any `wire.DecodeControl` failure to `protocol-error` — so no `internal/wire` change is
       required.)
-- [ ] **modify** `internal/phoneconn/listener.go` — `readPump`: map `wire.ErrControlTooLarge` (and any
+- [x] **modify** `internal/phoneconn/listener.go` — `readPump`: map `wire.ErrControlTooLarge` (and any
       `wire.DecodeControl` failure) to the `protocol-error` close reason; a genuine EOF stays
       `phone-close`.
 
 **Definition of Done:**
-- [ ] An oversize control frame records `protocol-error`; a graceful EOF still records `phone-close`; no
+- [x] An oversize control frame records `protocol-error`; a graceful EOF still records `phone-close`; no
       `internal/wire` change was made.
 
-### [ ] Task 11.3 — Fix the NewConnID discard comment/fallback (E-003)
+### [x] Task 11.3 — Fix the NewConnID discard comment/fallback (E-003)
 
-- [ ] **modify** `internal/edge/bridge.go` — the `store.NewConnID()` discards (~lines 141-143, 181, 192):
+- [x] **modify** `internal/edge/bridge.go` — the `store.NewConnID()` discards (~lines 141-143, 181, 192):
       use a deterministic non-empty fallback on the (practically impossible) `crypto/rand` failure so a
       dial-back is never 400-refused, mirroring phoneconn's `mustConnID` (`"00000000"`), and correct the
       comment to describe the true behavior. Prefer hoisting `mustConnID` into `store` and reusing it at
       both sites (single source of truth).
 
 **Definition of Done:**
-- [ ] The edge uses a non-empty fallback id on rand failure; the comment is accurate; `mustConnID` has a
+- [x] The edge uses a non-empty fallback id on rand failure; the comment is accurate; `mustConnID` has a
       single source of truth if hoisted.
 
-### [ ] Task 11.4 — Tests
+### [x] Task 11.4 — Tests
 
 | Test | Verifies | Setup notes |
 |---|---|---|
@@ -1286,167 +1286,184 @@ control frame is misattributed as `phone-close`; a `NewConnID` discard carries a
 | `TestReadPump_OversizeFrameIsProtocolError` | an oversize length prefix records `protocol-error`, not `phone-close` | craft `0x01,0xff,0xff,0xff,0xff` |
 | `TestNewConnIDFallback_NonEmpty` | the fallback id is non-empty and accepted by the dial-back match | force the rand-failure path via the hoisted helper |
 
-- [ ] Update the existing `TestReadPumpPongStampsLiveness` expectation (currently asserts the oversize
+- [x] Update the existing `TestReadPumpPongStampsLiveness` expectation (currently asserts the oversize
       frame → `phone-close`) to expect `protocol-error` (same file as Task 11.2's caller).
 
 **Definition of Done:**
-- [ ] All four rows green, plus the `TestReadPumpPongStampsLiveness` expectation updated.
+- [x] All four rows green, plus the `TestReadPumpPongStampsLiveness` expectation updated.
 
 ---
 
-## [ ] US12 — Correct the false-pass & redundant tests (W-E2, W-A12, W-A13, W-S3, A-014, A-015, S-005, S-004, S-008)
+## [x] US12 — Correct the false-pass & redundant tests (W-E2, W-A12, W-A13, W-S3, A-014, A-015, S-005, S-004, S-008)
 
 **Why:** several tests can pass while the behavior they name is broken, or are duplicates/dead; two
 package globals block clean testing.
 
 **Acceptance criteria:**
-- [ ] No test in scope can pass while the behavior it names is broken (unbanned-IP assertion, lifecycle
+- [x] No test in scope can pass while the behavior it names is broken (unbanned-IP assertion, lifecycle
       readiness, legacy-flag rejection, all-8-key TTL sweep are made real).
-- [ ] Duplicate/dead tests are removed; the reserved-label branch gains real coverage.
-- [ ] `internal/limit/window.go` uses an injected clock (no package global); the async backoff base is
+- [x] Duplicate/dead tests are removed; the reserved-label branch gains real coverage.
+- [x] `internal/limit/window.go` uses an injected clock (no package global); the async backoff base is
       injectable so the retry test runs in milliseconds.
 
-### [ ] Task 12.1 — Make weak assertions real
+### [x] Task 12.1 — Make weak assertions real
 
-- [ ] **modify** `internal/phoneconn/listener_test.go` (W-E2) — `TestServeHTTPIPBanFirst`: assert via the
+- [x] **modify** `internal/phoneconn/listener_test.go` (W-E2) — `TestServeHTTPIPBanFirst`: assert via the
       `Reject` recorder that the unbanned request records ZERO `ban` rejections (or decode the JSON body
       and assert `reason != "banned"`); the current `Body.String() == "banned\n"` compare can never fire.
-- [ ] **modify** `internal/server/server_test.go` (W-A12) — `waitUntil`: `t.Fatal` on timeout.
-- [ ] **modify** `internal/config/config_test.go` (W-A13) — `TestRemovedLegacyFlagsRejected`: assert the
+- [x] **modify** `internal/server/server_test.go` (W-A12) — `waitUntil`: `t.Fatal` on timeout.
+- [x] **modify** `internal/config/config_test.go` (W-A13) — `TestRemovedLegacyFlagsRejected`: assert the
       error identifies an UNKNOWN FLAG (message contains `unknown flag`) or supply an otherwise-valid
       config (env twins) so the only possible failure is the unknown flag.
-- [ ] **modify** `internal/limit/window_test.go` (W-S3) — extend `TestEveryKeyHasTTLAfterFirstOp` (or add
+- [x] **modify** `internal/limit/window_test.go` (W-S3) — extend `TestEveryKeyHasTTLAfterFirstOp` (or add
       a sibling) to invoke `ClaimBandwidth`, `ClaimTraffic`, `IssuanceBegin`, `IssuanceRecord`,
       `BumpCAFailures` before the all-keys TTL sweep, so `bw:`, `traf:day/week`, `iss:`, `iss_inflight:`,
       `acme-fail:` are pinned as TTL'd.
 
 **Definition of Done:**
-- [ ] Each of the four tests now fails if its named behavior regresses (verified by construction, not a
+- [x] Each of the four tests now fails if its named behavior regresses (verified by construction, not a
       dead/always-true assertion).
 
-### [ ] Task 12.2 — Remove dead/duplicate tests; fix missed coverage
+### [x] Task 12.2 — Remove dead/duplicate tests; fix missed coverage
 
-- [ ] **modify** `internal/config/config_test.go` (A-014) — delete the copy-paste duplicate second case
+- [x] **modify** `internal/config/config_test.go` (A-014) — delete the copy-paste duplicate second case
       of `TestValidateMeshPoolSizeRange`.
-- [ ] **modify** `internal/server/schedulers_test.go` (A-015) — `TestValidNameFunc`: add a case whose
+- [x] **modify** `internal/server/schedulers_test.go` (A-015) — `TestValidNameFunc`: add a case whose
       length matches the generator shape so the reserved-label rejection is actually exercised.
-- [ ] **modify** `internal/router/nodes_test.go` (S-005) — delete the three route-registry duplicates
+- [x] **modify** `internal/router/nodes_test.go` (S-005) — delete the three route-registry duplicates
       (`TestBindLookupRouteRoundTrip`, `TestBindRouteFingerprintGuard`, `TestSelfHealRouteConnIDOwner` —
       kept in `registry_test.go`) and the dead `_ = mr` statement.
 
 **Definition of Done:**
-- [ ] The duplicate/dead items are gone; the reserved-label branch is exercised; the kept coverage
+- [x] The duplicate/dead items are gone; the reserved-label branch is exercised; the kept coverage
       (registry_test.go) still passes.
 
-### [ ] Task 12.3 — Testability seams (S-004, S-008)
+### [x] Task 12.3 — Testability seams (S-004, S-008)
 
-- [ ] **modify** `internal/limit/window.go` (S-004) — replace the package-global `nowFunc` with an
+- [x] **modify** `internal/limit/window.go` (S-004) — replace the package-global `nowFunc` with an
       injected clock: move `Allow`/`Over` onto `Limiter` (which already has an injected `now` + `SetClock`)
       or pass the clock in. No package-level mutable global.
-- [ ] **modify** the call sites this changes: `internal/enroll/enroll.go` (`limit.Allow` ×2 /
+- [x] **modify** the call sites this changes: `internal/enroll/enroll.go` (`limit.Allow` ×2 /
       `limit.Over` ×2), `internal/edge/edge.go` (`limit.Allow`), and their tests
       (`internal/enroll/*_test.go`, `internal/edge/*_test.go`, `internal/limit/window_test.go`, AND
       `internal/limit/helpers_test.go` — `freezeClock` writes the `nowFunc` global directly and MUST be
       migrated to the injected-clock seam, or it will not compile).
-- [ ] **modify** `internal/store/async.go` (S-008) — make the retry backoff base injectable (functional
+- [x] **modify** `internal/store/async.go` (S-008) — make the retry backoff base injectable (functional
       option, per go.md), defaulting to the current 1s; `internal/store/async_test.go` uses a tiny base so
       the retry-exhaustion test runs in milliseconds. Reconcile the `NewAsyncConnLog` call in `server.Run`
       (default option).
 
 **Definition of Done:**
-- [ ] No package-global `nowFunc` remains; all call sites compile against the injected clock; the async
+- [x] No package-global `nowFunc` remains; all call sites compile against the injected clock; the async
       retry test runs in milliseconds with the injected backoff; production defaults unchanged.
 
 ---
 
-## [ ] US13 — Deployment fixups (D-008, D-009, D-010)
+## [x] US13 — Deployment fixups (D-008, D-009, D-010)
 
 **Why:** the README ntfy step is not literally executable and leaves alerting silently broken; the pinned
 compose images get no update PRs; missing required-variable guards let an empty-credential stack start.
 
 **Acceptance criteria:**
-- [ ] The README ntfy step runs inside the ntfy container and restarts the bridge after setting the token.
-- [ ] Dependabot covers the compose images.
-- [ ] Every REQUIRED compose variable is `:?`-guarded (fail fast); optional ones are not.
+- [x] The README ntfy step runs inside the ntfy container and restarts the bridge after setting the token.
+- [x] Dependabot covers the compose images.
+- [x] Every REQUIRED compose variable is `:?`-guarded (fail fast); optional ones are not.
 
-### [ ] Task 13.1 — README ntfy step (D-008)
+### [x] Task 13.1 — README ntfy step (D-008)
 
-- [ ] **modify** `README.md` step 7 — prefix the `ntfy user add`/`ntfy token add` commands with
+- [x] **modify** `README.md` step 7 — prefix the `ntfy user add`/`ntfy token add` commands with
       `docker compose -f deploy/docker-compose.yml exec ntfy …`, and add
       `docker compose -f deploy/docker-compose.yml restart ntfy-alertmanager` after setting the token.
       Do NOT change ntfy exposure (D-006 deferred).
 
 **Definition of Done:**
-- [ ] The README step is literally executable (exec context + bridge restart); ntfy exposure is unchanged.
+- [x] The README step is literally executable (exec context + bridge restart); ntfy exposure is unchanged.
 
-### [ ] Task 13.2 — Dependabot for compose images (D-009)
+### [x] Task 13.2 — Dependabot for compose images (D-009)
 
-- [ ] **modify** `.github/dependabot.yml` — add a `package-ecosystem: "docker-compose"` entry with
+- [x] **modify** `.github/dependabot.yml` — add a `package-ecosystem: "docker-compose"` entry with
       `directory: "/deploy"` (verified upstream: Docker Compose is a distinct ecosystem from `docker`).
 
 **Definition of Done:**
-- [ ] `.github/dependabot.yml` has a valid `docker-compose` entry for `/deploy`.
+- [x] `.github/dependabot.yml` has a valid `docker-compose` entry for `/deploy`.
 
-### [ ] Task 13.3 — Fail-fast compose variables (D-010)
+### [x] Task 13.3 — Fail-fast compose variables (D-010)
 
-- [ ] **modify** `deploy/docker-compose.yml` — guard every REQUIRED interpolated variable with `:?`,
+- [x] **modify** `deploy/docker-compose.yml` — guard every REQUIRED interpolated variable with `:?`,
       matching the existing `${DEPLOY_UID:?…}`: `TUNNEL_DOMAIN`, `ENROLL_HOST`, `CONTROL_HOST`, `S3_BUCKET`,
       `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `GRAFANA_ADMIN_PASSWORD` (and any other currently-unguarded
       required var). Do NOT add `:?` to genuinely optional variables. The fetcher service and its
       variables (D-005) MUST NOT be touched.
 
 **Definition of Done:**
-- [ ] Every required variable is `:?`-guarded; the fetcher service is untouched; `make compose-config`
+- [x] Every required variable is `:?`-guarded; the fetcher service is untouched; `make compose-config`
       (run at US14) passes with `deploy/.env.example`.
 
 ---
 
-## [ ] US14 — Documentation sync + ground-up verification (final)
+## [x] US14 — Documentation sync + ground-up verification (final)
 
 **Why:** keep the canonical docs and `project.md` accurate for the behavior changes, and double-check
 EVERYTHING from the ground up.
 
 **Acceptance criteria:**
-- [ ] The canonical docs reflect the P-256-on-TLS-CSR invariant, the single-load/build-verify-commit ban
+- [x] The canonical docs reflect the P-256-on-TLS-CSR invariant, the single-load/build-verify-commit ban
       behavior, and the signer-allowlist vanished-file refusal.
-- [ ] D-005 and D-006 were NOT touched; no finding/plan ID leaked into any code/commit/artifact.
-- [ ] ALL quality gates pass on the final code.
+- [x] D-005 and D-006 were NOT touched; no finding/plan ID leaked into any code/commit/artifact.
+- [x] ALL quality gates pass on the final code.
 
-### [ ] Task 14.1 — Documentation
+### [x] Task 14.1 — Documentation
 
-- [ ] **modify** `docs/PROTOCOL.md` §2 — state explicitly that Phase 2 enforces ECDSA P-256 on the TLS
+- [x] **modify** `docs/PROTOCOL.md` §2 — state explicitly that Phase 2 enforces ECDSA P-256 on the TLS
       CSR (matching the identity-CSR rule) so the "ECDSA P-256 keys ONLY" invariant covers both keys.
-- [ ] **modify** `docs/ARCHITECTURE.md` §7 — note the single startup ban load + build-verify-commit
+- [x] **modify** `docs/ARCHITECTURE.md` §7 — note the single startup ban load + build-verify-commit
       reload (no double load; a torn read never goes live) and the signer-allowlist vanished-file refusal.
-- [ ] **modify** `.claude/rules/project.md` ONLY if a Standard Command / behavior summary changed (e.g.
+- [x] **modify** `.claude/rules/project.md` ONLY if a Standard Command / behavior summary changed (e.g.
       the P-256 invariant wording). Keep it CONCISE (reference the canonical docs; no duplication).
-- [ ] Do NOT create new doc files. Do NOT touch the DB-IP CC BY 4.0 attribution. No AI attribution
+- [x] Do NOT create new doc files. Do NOT touch the DB-IP CC BY 4.0 attribution. No AI attribution
       anywhere. No real country codes/domains (placeholders `XX`/`YY`, `example.test`, `free.example.com`
       only). These doc edits touch NO Mermaid chart (prose only).
 
 **Definition of Done:**
-- [ ] PROTOCOL §2 and ARCHITECTURE §7 reflect the new behavior; no Mermaid chart changed; attribution and
+- [x] PROTOCOL §2 and ARCHITECTURE §7 reflect the new behavior; no Mermaid chart changed; attribution and
       placeholder rules honored.
 
-### [ ] Task 14.2 — Ground-up double-check of EVERYTHING (last task)
+### [x] Task 14.2 — Ground-up double-check of EVERYTHING (last task)
 
-- [ ] Re-read this plan top to bottom; confirm every acceptance criterion and every `[ ]` is satisfied and
+- [x] Re-read this plan top to bottom; confirm every acceptance criterion and every `[ ]` is satisfied and
       checked, and that D-005 and D-006 were NOT touched.
-- [ ] Confirm no code comment, commit message, or artifact references a finding/plan ID (agent.md).
-- [ ] Confirm no secret/real value entered the repo; `git status` shows the intended tracked/untracked set
+- [x] Confirm no code comment, commit message, or artifact references a finding/plan ID (agent.md).
+- [x] Confirm no secret/real value entered the repo; `git status` shows the intended tracked/untracked set
       (secrets untracked & gitignored; `config.scfg` git-`rm --cached`).
-- [ ] Run ALL quality gates (ONCE, here): `make build`, `make lint`, `make vet`, `make govulncheck`,
+- [x] Run ALL quality gates (ONCE, here): `make build`, `make lint`, `make vet`, `make govulncheck`,
       `make test-unit`, `make test-integration`, `make test-e2e`, `make test-scripts`,
       `make compose-config`, `make tidy` (assert no drift). Pipe each through `tee` to
       `/tmp/tunneld-plan5-<gate>.log`. Fix every failure (root cause) and re-run.
-- [ ] Confirm the `## Deviations` section records every reconciliation made against the current code.
+- [x] Confirm the `## Deviations` section records every reconciliation made against the current code.
 
 **Definition of Done:**
-- [ ] Every checkbox in the plan is `[x]`; all quality gates pass on the FINAL code; `## Deviations` is
+- [x] Every checkbox in the plan is `[x]`; all quality gates pass on the FINAL code; `## Deviations` is
       complete; D-005/D-006 untouched.
 
 ---
 
 ## Deviations
 
-(To be filled during implementation: task/action reference + what changed + why.)
+- **Task 4.3 (mesh cert) — added a signer seam for testability.** `meshCertHolder` gained a `sign
+  meshSigner` field (defaulting to `caObj.SignMesh`), and `mint()`/`rotateLoop()` dropped their `caObj`
+  parameter. A real CA cannot be made to fail `SignMesh` deterministically, so the seam is required to
+  test the fatal-initial-mint and rotation-retry paths. `server.Run`'s `rotateLoop(gctx)` call and
+  `TestMeshCertHolderHotSwap` were updated accordingly.
+- **Task 6.1 (ACME obtain) — added an obtain seam for testability.** `legoClient` gained an `obtainCSR`
+  field (defaulting to `client.Certificate.ObtainForCSR`) so the ctx-cancel path can be driven with a
+  blocking stub (`TestLegoClient_ObtainRespectsCtxCancel`); the real lego client is otherwise unstubbable.
+- **Task 12.3 (S-004) — removed the now-dead edge `rdb` field/param.** Moving `Allow`/`Over` onto
+  `Limiter` left `Edge.rdb` (and the `rdb` parameter of `edge.New`) unused; both were removed (updating
+  `server.Run` and the edge test harness) to keep the build lint-clean. `StreamLimiter` gained `Allow`.
+- **Task 12.3 (S-004) — integration test needed a Limiter.** `TestIntegration_Registry` built a bare
+  `enroll.Service` with no `Limiter` (it previously relied on the package-level `limit.Allow(s.rdb, …)`).
+  Both sub-tests now pass a `limit.NewLimiter(rdb, …)`.
+- **Task 4.4 test (W-A8) — corrected the name-prefix expectation.** Per decision 5 the prefix is
+  lowercased at runtime, so an UPPERCASE prefix is normalized-and-accepted (not rejected). The planned
+  "uppercase fails" test row was corrected to "uppercase normalized ok"; the charset guard rejects only
+  non-`[a-z0-9-]` characters and a leading `-`.
