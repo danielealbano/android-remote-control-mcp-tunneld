@@ -27,11 +27,14 @@ fi
 url_prefix="${DBIP_URL_TEMPLATE%%%s*}"
 url_suffix="${DBIP_URL_TEMPLATE#*%s}"
 url="${url_prefix}${month}${url_suffix}"
-gz="$OUT_DIR/dbip-country-lite.csv.gz.tmp"
-csvtmp="$OUT_DIR/dbip-country-lite.csv.tmp"
+# $$-suffixed temps (collision-free under concurrent runs); the trap clears them on ANY exit, so an
+# aborted run leaves no litter and the previous output untouched.
+gz="$OUT_DIR/dbip-country-lite.csv.gz.tmp.$$"
+csvtmp="$OUT_DIR/dbip-country-lite.csv.tmp.$$"
+trap 'rm -f "$gz" "$csvtmp"' EXIT
 
-curl -fsS "$url" -o "$gz"
+# --max-time bounds a hung download; on any curl failure `set -e` aborts, leaving the target untouched.
+curl -fsS --max-time 300 "$url" -o "$gz"
 gunzip -c "$gz" > "$csvtmp"
 mv "$csvtmp" "$target"
-rm -f "$gz"
 printf '%s' "$month" > "$sentinel"

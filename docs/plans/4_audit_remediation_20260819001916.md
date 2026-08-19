@@ -1369,35 +1369,35 @@ if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 
 ---
 
-## [ ] US10 — Deployment, scripts, CI supply chain (C-3, W-21, W-24, W-22, I-16)
+## [x] US10 — Deployment, scripts, CI supply chain (C-3, W-21, W-24, W-22, I-16)
 
 Acceptance criteria:
-- [ ] `/acme` is an operator-owned bind mount — ACME accounts + reserved certs actually persist across restarts under `DEPLOY_UID`.
-- [ ] The manual ban file has a host-side, documented write path (bind mount), hot-reloaded.
-- [ ] Fetch scripts: bounded curl, collision-free temp names, temp cleanup on failure; atomic `mv` preserved.
-- [ ] Dependabot actually runs (gomod + github-actions + docker).
-- [ ] Release image description no longer says "HTTP tunnel server".
+- [x] `/acme` is an operator-owned bind mount — ACME accounts + reserved certs actually persist across restarts under `DEPLOY_UID`.
+- [x] The manual ban file has a host-side, documented write path (bind mount), hot-reloaded.
+- [x] Fetch scripts: bounded curl, collision-free temp names, temp cleanup on failure; atomic `mv` preserved.
+- [x] Dependabot actually runs (gomod + github-actions + docker).
+- [x] Release image description no longer says "HTTP tunnel server".
 
-### [ ] Task 10.1 — C-3 + W-21: compose mounts
+### [x] Task 10.1 — C-3 + W-21: compose mounts
 
-- [ ] Action: modify `deploy/docker-compose.yml`:
+- [x] Action: modify `deploy/docker-compose.yml`:
   - `acme:/acme` → `./acme:/acme` (bind mount, operator-owned like `./logs`); remove `acme: {}` from
     the `volumes:` section.
   - Add `./banfiles:/banfiles-manual:ro` to the tunneld service (the named `banfiles` volume stays for
     fetcher-produced files); comment: manual bans are edited on the HOST in `deploy/banfiles/bans.txt`
     and hot-reload within `--ban-poll`.
-- [ ] Action: modify `deploy/tunneld.env.example` —
+- [x] Action: modify `deploy/tunneld.env.example` —
   `TUNNELD_BAN_FILE=/banfiles-manual/bans.txt,/banfiles/droplist.bans`.
-- [ ] Action: modify `README.md` quickstart — the deploy setup step creates the operator dirs
+- [x] Action: modify `README.md` quickstart — the deploy setup step creates the operator dirs
   (`mkdir -p deploy/ca deploy/attest deploy/logs deploy/acme deploy/banfiles` — adjust to the existing
   quickstart wording) and the Ban/geo section documents: "revoke by editing `deploy/banfiles/bans.txt`
   on the host (hot-reloaded within `--ban-poll`)".
-- [ ] Definition of Done: `make compose-config` passes; a fresh `docker compose up` persists
+- [x] Definition of Done: `make compose-config` passes; a fresh `docker compose up` persists
   `./acme/**` across restarts; editing the host `bans.txt` bans live.
 
-### [ ] Task 10.2 — W-24: fetch scripts
+### [x] Task 10.2 — W-24: fetch scripts
 
-- [ ] Action: modify `deploy/scripts/fetch-droplist.sh` — PID-suffixed temps, curl timeout, cleanup:
+- [x] Action: modify `deploy/scripts/fetch-droplist.sh` — PID-suffixed temps, curl timeout, cleanup:
 
 ```sh
 feed="$OUT_DIR/droplist.feed.tmp.$$"
@@ -1410,17 +1410,17 @@ mv "$tmp" "$OUT_DIR/droplist.bans"
 ```
 
   (drop the trailing `rm -f "$feed"` — the trap owns cleanup).
-- [ ] Action: modify `deploy/scripts/fetch-dbip.sh` — same pattern:
+- [x] Action: modify `deploy/scripts/fetch-dbip.sh` — same pattern:
   `gz="$OUT_DIR/dbip-country-lite.csv.gz.tmp.$$"`, `csvtmp="$OUT_DIR/dbip-country-lite.csv.tmp.$$"`,
   `trap 'rm -f "$gz" "$csvtmp"' EXIT`, `curl -fsS --max-time 300 "$url" -o "$gz"`; drop the explicit
   `rm -f "$gz"`.
-- [ ] Definition of Done: two overlapping runs cannot interleave into one temp file; a hung download
+- [x] Definition of Done: two overlapping runs cannot interleave into one temp file; a hung download
   aborts at 300 s leaving the previous output untouched; `make test-scripts` updated + passing;
   `shellcheck` clean.
 
-### [ ] Task 10.3 — W-22 + I-16
+### [x] Task 10.3 — W-22 + I-16
 
-- [ ] Action: modify `.github/dependabot.yml`:
+- [x] Action: modify `.github/dependabot.yml`:
 
 ```yaml
 version: 2
@@ -1439,31 +1439,31 @@ updates:
       interval: "weekly"
 ```
 
-- [ ] Action: modify `.goreleaser.yaml` — both image-description labels →
+- [x] Action: modify `.goreleaser.yaml` — both image-description labels →
   `org.opencontainers.image.description=Self-hosted end-to-end-encrypted tunnel server (tunneld)`.
-- [ ] Definition of Done: dependabot config lists the three ecosystems; both goreleaser labels
+- [x] Definition of Done: dependabot config lists the three ecosystems; both goreleaser labels
   updated; no other release field touched.
 
-### [ ] Task 10.4 — US10 script tests
+### [x] Task 10.4 — US10 script tests
 
 | Test | Verifies |
 |---|---|
 | script-test: droplist temp uniqueness | two concurrent invocations produce a valid final file (distinct `$$` temps) |
 | script-test: failure leaves no temp litter | forced curl failure → no `*.tmp.*` remains, previous output intact |
 
-- [ ] Definition of Done: `make test-scripts` covers and passes both cases; `shellcheck` clean.
+- [x] Definition of Done: `make test-scripts` covers and passes both cases; `shellcheck` clean.
 
 ---
 
-## [ ] US11 — Go client library hygiene (W-23, I-15)
+## [x] US11 — Go client library hygiene (W-23, I-15)
 
 Acceptance criteria:
-- [ ] No code path leaks a pooled TLS connection: `Enroll`/`FetchIssueNonce` close their transports; `Client` has `Close`.
-- [ ] The `CERT_PUSH` ghost is gone from the docs comments.
+- [x] No code path leaks a pooled TLS connection: `Enroll`/`FetchIssueNonce` close their transports; `Client` has `Close`.
+- [x] The `CERT_PUSH` ghost is gone from the docs comments.
 
-### [ ] Task 11.1 — transport lifecycle
+### [x] Task 11.1 — transport lifecycle
 
-- [ ] Action: modify `client/enroll.go` — hold the transports and close them:
+- [x] Action: modify `client/enroll.go` — hold the transports and close them:
 
 ```go
 // in Enroll:
@@ -1481,7 +1481,7 @@ defer tr.CloseIdleConnections()
 hc := &http.Client{Transport: tr}
 ```
 
-- [ ] Action: modify `client/control.go` — `Client` keeps `tr *http2.Transport` (set in `New`
+- [x] Action: modify `client/control.go` — `Client` keeps `tr *http2.Transport` (set in `New`
   alongside `c.hc`); add:
 
 ```go
@@ -1493,34 +1493,34 @@ func (c *Client) Close() {
 
   and fix the `Client` doc comment: identity is rotated via the mTLS `POST /issue` exchange
   (`Renew`), not a `CERT_PUSH` frame (audit I-15).
-- [ ] Action: modify `e2e`/client tests to `defer`/`t.Cleanup` the new `Close` where a `Client` is
+- [x] Action: modify `e2e`/client tests to `defer`/`t.Cleanup` the new `Close` where a `Client` is
   constructed.
-- [ ] Definition of Done: no `http.Client` in `client/` outlives its use with pooled conns
+- [x] Definition of Done: no `http.Client` in `client/` outlives its use with pooled conns
   unreleased.
 
-### [ ] Task 11.2 — US11 tests
+### [x] Task 11.2 — US11 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
 | `TestEnroll_ClosesTransports` (integration tier where a server exists, else unit via httptest) | after Enroll returns, no live TCP conns remain from its transports | count via `httptest` server ConnState or netstat-free check on close notifications |
 | `TestClient_CloseReleasesControlTransport` | Close → transport idle conns closed | |
 
-- [ ] Definition of Done: both US11 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: both US11 tests present and passing at the Stage-4 gates.
 
 ---
 
-## [ ] US12 — e2e test hygiene (I-18, I-19, I-20)
+## [x] US12 — e2e test hygiene (I-18, I-19, I-20)
 
 Acceptance criteria:
-- [ ] The eviction test leaks no conns inside its own assertion loop.
-- [ ] The quota test asserts a QUOTA signal, not just "some error".
-- [ ] The adb gate enforces exactly one device.
+- [x] The eviction test leaks no conns inside its own assertion loop.
+- [x] The quota test asserts a QUOTA signal, not just "some error".
+- [x] The adb gate enforces exactly one device.
 
-### [ ] Task 12.1 — fixes
+### [x] Task 12.1 — fixes
 
-- [ ] Action: modify `e2e/e2e_test.go` `startReplica` — record the internal address:
+- [x] Action: modify `e2e/e2e_test.go` `startReplica` — record the internal address:
   `e2eInfra` gains `internal map[string]string` (edge addr → internal addr), populated before return.
-- [ ] Action: modify `e2e/e2e_test.go` `TestE2E_Quota` — after the cut assertion, add a metrics
+- [x] Action: modify `e2e/e2e_test.go` `TestE2E_Quota` — after the cut assertion, add a metrics
   assertion:
 
 ```go
@@ -1533,7 +1533,7 @@ if !waitBool(10*time.Second, func() bool {
 
   with helper `metricCounterPositive(internalAddr, family string) bool` — GET `/metrics`, scan for a
   line starting with the family name whose value parses > 0.
-- [ ] Action: modify `e2e/e2e_test.go` `TestE2E_Eviction` — close the conn on a failed echo inside the
+- [x] Action: modify `e2e/e2e_test.go` `TestE2E_Eviction` — close the conn on a failed echo inside the
   retry closure:
 
 ```go
@@ -1551,7 +1551,7 @@ if !waitBool(15*time.Second, func() bool {
 }) {
 ```
 
-- [ ] Action: modify `e2e/device_attestation_test.go` `adbHasDevice` — count and require exactly one:
+- [x] Action: modify `e2e/device_attestation_test.go` `adbHasDevice` — count and require exactly one:
 
 ```go
 count := 0
@@ -1563,7 +1563,7 @@ for _, line := range strings.Split(string(out), "\n")[1:] {
 return count == 1
 ```
 
-- [ ] Definition of Done: `make test-e2e` passes with the strengthened assertions.
+- [x] Definition of Done: `make test-e2e` passes with the strengthened assertions.
 
 ---
 
@@ -1712,3 +1712,22 @@ Acceptance criteria:
   makes the in-flight obtain fail immediately (EOF) and every subsequent CA attempt fail fast
   (connection-refused), bounding the post-cancel return. The +500 ms connection-refused assertion — the
   actual W-1 proof — is unchanged.
+
+- **Task 10.4 (`deploy/scripts/scripts_test.sh`) — updated the existing "droplist converts feed to cidr
+  lines" cleanup assertion.** Task 10.2 renamed the work temps to `*.tmp.$$`, so that test's literal
+  `[ ! -f "$t/droplist.feed.tmp" ]` check now referenced a filename the script never creates (vacuously
+  true). Added a `no_tmp_litter <dir>` helper (a POSIX glob loop over `*.tmp.*`) and routed the success
+  test — plus the two new Task 10.4 tests — through it, so the success path still verifies no temp litter
+  remains. No production behaviour changed.
+
+- **Task 11.2 (`client/harness_test.go` + `client/enroll_test.go`) — added a connection-counting
+  listener seam to the client test harness.** `TestClient_CloseReleasesControlTransport` must observe that
+  `Client.Close` releases the control transport's pooled TCP connection, and `TestEnroll_ClosesTransports`
+  the same for `Enroll`'s two transports. Introduced test-only `countingListener`/`countingConn` wrappers
+  (in `enroll_test.go`) and wrapped the harness listener in `startTestServer` (exposed via a new
+  `testServer.conns` field). This follows the plan Note's "netstat-free check on close notifications"
+  option and mirrors the US2/US4 test-seam deviations. The `Enroll` server harness uses the repo's
+  existing `net.Listen` + `http2` + mTLS pattern (as `startTestServer` already does) rather than
+  `httptest.Server`, because `Enroll` needs both HTTP/1.1 (Phase 1) and mTLS HTTP/2 (Phase 2) with a
+  CA-signed server cert and `VerifyClientCertIfGiven` — which `httptest`'s fixed cert/ClientAuth cannot
+  provide. No production code changed.

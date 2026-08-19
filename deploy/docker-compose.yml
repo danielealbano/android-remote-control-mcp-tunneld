@@ -44,8 +44,9 @@ services:
     volumes:
       - ./ca:/ca:ro
       - ./attest:/attest:ro         # the hot-reloadable app signer-digest allowlist (see tunneld.env)
-      - banfiles:/banfiles:ro
-      - acme:/acme                  # persisted per-CA ACME account keys + reserved-host self-certs
+      - banfiles:/banfiles:ro       # fetcher-produced feeds (droplist.bans, DB-IP)
+      - ./banfiles:/banfiles-manual:ro   # manual bans: edit deploy/banfiles/bans.txt on the HOST — hot-reloaded within --ban-poll
+      - ./acme:/acme                # bind mount (operator-owned): per-CA ACME account keys + reserved-host self-certs
       - ./logs:/logs                # bind mount (operator-owned, writable by DEPLOY_UID)
     ports: ["443:443"]              # the ONLY published port: the raw SNI edge. Mesh (:9443) + internal
                                     # metrics (:9090) stay on the compose network — never publish them.
@@ -144,7 +145,6 @@ services:
 
 volumes:
   banfiles: {}
-  acme: {}
   minio-data: {}
   prom-data: {}
   grafana-data: {}

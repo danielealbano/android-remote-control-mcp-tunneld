@@ -13,6 +13,14 @@ export TMPDIR="$tmproot"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 
+# no_tmp_litter <dir>: true when no `*.tmp.*` work file remains in <dir>.
+no_tmp_litter() {
+  for f in "$1"/*.tmp.*; do
+    [ -e "$f" ] && return 1
+  done
+  return 0
+}
+
 # make_stub_curl <bindir>: a curl shim. Behavior via env:
 #   STUB_CURL_EXIT (default 0): exit code (nonzero simulates a download failure).
 #   STUB_CURL_SRC:              file whose bytes are copied to the `-o <target>` path.
@@ -46,10 +54,41 @@ JSON
 if STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" &&
   grep -q '^cidr 1.2.3.0/24$' "$t/droplist.bans" &&
   grep -q '^cidr 5.6.0.0/16$' "$t/droplist.bans" &&
-  [ ! -f "$t/droplist.feed.tmp" ]; then
+  no_tmp_litter "$t"; then
   pass "droplist converts feed to cidr lines"
 else
   fail "droplist converts feed to cidr lines"
+fi
+
+# --- droplist temp uniqueness under concurrent invocations ---
+t="$(mktemp -d)"
+b="$(mktemp -d)"
+make_stub_curl "$b"
+cat > "$t/feed.json" <<'JSON'
+{"cidr":"1.2.3.0/24","sblid":"SBL1"}
+JSON
+STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" &
+p1=$!
+STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" &
+p2=$!
+if wait "$p1" && wait "$p2" &&
+  grep -q '^cidr 1.2.3.0/24$' "$t/droplist.bans" &&
+  no_tmp_litter "$t"; then
+  pass "droplist temp uniqueness under concurrent invocations"
+else
+  fail "droplist temp uniqueness under concurrent invocations"
+fi
+
+# --- droplist failure leaves no temp litter ---
+t="$(mktemp -d)"
+b="$(mktemp -d)"
+make_stub_curl "$b"
+echo "cidr 9.9.9.0/24" > "$t/droplist.bans"
+STUB_CURL_EXIT=1 PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" 2>/dev/null || true
+if no_tmp_litter "$t" && grep -q '^cidr 9.9.9.0/24$' "$t/droplist.bans"; then
+  pass "droplist failure leaves no temp litter"
+else
+  fail "droplist failure leaves no temp litter"
 fi
 
 # --- droplist failure preserves old file ---
