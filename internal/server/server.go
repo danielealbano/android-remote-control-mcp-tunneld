@@ -66,11 +66,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 
-	// Ban engine + watcher.
+	// Ban engine + watcher: ONE startup load (Initial), synchronous, before any listener binds — so a
+	// file present at that load which later VANISHES is refused on the next poll instead of silently
+	// unbanning (docs/ARCHITECTURE.md §7).
 	banEng := ban.NewEngine()
-	if err := banEng.Load(cfg.BanFile, cfg.DBIPCountryLiteCSV, nil, logger); err != nil {
-		logger.Warn("initial ban load failed", "err", err)
-	}
+	banWatcher := ban.NewWatcher(banEng, cfg.BanFile, cfg.DBIPCountryLiteCSV, cfg.BanPoll, logger)
+	banWatcher.Initial()
 	banIP := func(ip netip.Addr) bool { _, b := banEng.Match(ip); return b }
 	banTunnel := func(name, fp string) bool { _, b := banEng.MatchTunnel(name, fp); return b }
 
@@ -254,10 +255,10 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Ban watcher with the live eviction hook.
 	g.Go(func() error {
-		ban.Watch(gctx, banEng, cfg.BanFile, cfg.DBIPCountryLiteCSV, cfg.BanPoll, func(e *ban.Engine) {
+		banWatcher.Run(gctx, func(e *ban.Engine) {
 			phoneMgr.EvictBanned(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
 			ed.EvictBannedStreams(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
-		}, logger)
+		})
 		return nil
 	})
 

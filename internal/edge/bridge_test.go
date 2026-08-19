@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +12,37 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 )
+
+// TestBridge_BanDuringDialbackEvictsStream verifies the post-trackStream ban re-check: a tunnel banned
+// AFTER admission but before the splice starts is refused (recorded ban + client socket closed), closing
+// the dial-back escape window a ban reload would otherwise leave open.
+func TestBridge_BanDuringDialbackEvictsStream(t *testing.T) {
+	name := "abcdef012345.example.test"
+	var calls int32
+	// banTun: false at the admission check, true at the post-trackStream re-check.
+	banTun := func(string, string) bool { return atomic.AddInt32(&calls, 1) >= 2 }
+	te := newTestEdge(t, baseConfig(), nil, banTun)
+	te.rtr.ok = true
+	te.rtr.nodeID = "node-a"
+	te.rtr.fp = "fp"
+	te.rtr.connID = "conn"
+	te.local.has = true
+	te.local.owns = true
+	te.local.ds = &pipeStream{r: io.NopCloser(nil), w: io.Discard, closed: make(chan struct{})}
+
+	client := newScriptConn("198.51.100.30", nil)
+	te.e.handleTunnel(context.Background(), client, ClientHelloInfo{SNI: name})
+
+	if !containsStr(te.rec.rejectReasons(), "ban") {
+		t.Fatalf("a ban during the dial-back window must record a ban reject, got %v", te.rec.rejectReasons())
+	}
+	if !client.isClosed() {
+		t.Fatal("the client socket must be closed on the post-trackStream ban re-check")
+	}
+	if atomic.LoadInt32(&calls) < 2 {
+		t.Fatal("the post-trackStream ban re-check must run")
+	}
+}
 
 func TestEdge_OpenFar_LocalWhenOwner(t *testing.T) {
 	te := newTestEdge(t, baseConfig(), nil, nil)

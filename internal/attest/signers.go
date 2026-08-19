@@ -85,15 +85,18 @@ func (a *SignerAllowlist) Allowed(digestHex string) bool {
 }
 
 // Watch reloads the allowlist when its mtime changes, at the given poll cadence, until ctx is done. A
-// reload failure keeps the last-known-good snapshot and is logged at Warn (a corrupt replacement file
-// must surface to the operator, not silently keep serving the stale set); the reload is retried when
-// the file changes again.
+// reload failure keeps the last-known-good snapshot and is logged at Warn; because a failed reload does
+// NOT advance the recorded mtime, it retries on EVERY subsequent tick until it succeeds. A vanished or
+// unreadable file is refused the same way — the previous set is KEPT (never cleared) and the stat error
+// is logged at Error once per state transition. The allowlist is a security-critical file, so a
+// disappearing file must never silently allow everyone (mirrors internal/ban's vanished-file refusal).
 func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 	if poll <= 0 {
 		poll = 10 * time.Second
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	statErrLogged := false // rate-limit: log a vanished/unreadable allowlist ONCE per state transition
 	for {
 		select {
 		case <-ctx.Done():
@@ -101,11 +104,16 @@ func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 		case <-ticker.C:
 			fi, err := os.Stat(a.path)
 			if err != nil {
-				continue // keep last-known-good; a changed-then-failed reload is logged below
+				if !statErrLogged {
+					a.logger.Error("signer allowlist stat failed; keeping the last-known-good set", "path", a.path, "err", err)
+					statErrLogged = true
+				}
+				continue // keep last-known-good; never clear the set on a stat failure
 			}
+			statErrLogged = false
 			if fi.ModTime().UnixNano() != a.mtime.Load() {
 				if rerr := a.reload(); rerr != nil {
-					a.logger.Warn("signer allowlist reload failed; keeping last-known-good set (will retry)", "path", a.path, "err", rerr)
+					a.logger.Warn("signer allowlist reload failed; keeping last-known-good set (retries every tick)", "path", a.path, "err", rerr)
 				}
 			}
 		}

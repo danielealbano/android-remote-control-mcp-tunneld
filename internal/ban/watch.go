@@ -7,27 +7,38 @@ import (
 	"time"
 )
 
-// Watch polls a per-path (exists, mtime, size) fingerprint across all ban files + the CSV every
-// `poll`; on ANY change — including a deletion or a replacement with an equal/older mtime — it reloads
-// the engine and, on a SUCCESSFUL load, invokes onReload(e) (nil-safe). The initial load happens once
-// before the poll loop (and fires onReload on success). A load error keeps the previous snapshot
-// (never empties the table), does NOT advance the recorded fingerprint (so it retries on the next
-// tick), and does NOT fire onReload.
+// NewWatcher builds the poll state. Initial() runs the ONE startup load synchronously (before the caller
+// binds listeners); Run() then polls a per-path (exists, mtime, size) fingerprint across all ban files +
+// the CSV every `poll` and, on ANY change, reloads with build-verify-commit.
 //
-// onReload is how live name/fingerprint revocation reaches the phone control manager
+// onReload (passed to Run) is how live name/fingerprint revocation reaches the phone control manager
 // (phoneconn.Manager.EvictBanned; see docs/ARCHITECTURE.md §7).
-func Watch(ctx context.Context, e *Engine, files []string, csvPath string, poll time.Duration, onReload func(*Engine), log *slog.Logger) {
-	w := &watcher{e: e, files: files, csv: csvPath, onReload: onReload, log: log}
-	w.initial()
+func NewWatcher(e *Engine, files []string, csvPath string, poll time.Duration, log *slog.Logger) *watcher {
+	return &watcher{e: e, files: files, csv: csvPath, poll: poll, log: log}
+}
 
-	ticker := time.NewTicker(poll)
+// Initial performs the single startup load and records the baseline fingerprint (and thus the `required`
+// set). It does NOT fire onReload (no live connections exist yet). A load error leaves the baseline
+// unrecorded so Run() retries on the first tick (best-effort, matching the previous behavior).
+func (w *watcher) Initial() {
+	cur := w.fingerprint()
+	if err := w.e.Load(w.files, w.csv, nil, w.log); err != nil {
+		w.log.Warn("initial ban load error; engine stays at empty snapshot until a successful load", "err", err)
+		return // do NOT record cur — retry on the next tick
+	}
+	w.last = cur
+}
+
+// Run polls until ctx is done; onReload fires on each SUCCESSFUL reload after a detected change.
+func (w *watcher) Run(ctx context.Context, onReload func(*Engine)) {
+	ticker := time.NewTicker(w.poll)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.tick()
+			w.tick(onReload)
 		}
 	}
 }
@@ -39,64 +50,55 @@ type fileState struct {
 	size    int64
 }
 
-// watcher holds the poll state; split out so tests can drive initial()/tick() deterministically
+// watcher holds the poll state; split out so tests can drive Initial()/tick() deterministically
 // without depending on ticker timing.
 type watcher struct {
-	e        *Engine
-	files    []string
-	csv      string
-	onReload func(*Engine)
-	log      *slog.Logger
-	last     map[string]fileState
+	e     *Engine
+	files []string
+	csv   string
+	poll  time.Duration
+	log   *slog.Logger
+	last  map[string]fileState
 	// stat is the per-path fingerprint source; nil means os.Stat. Tests override it to script a torn
 	// read (a file changing between the pre- and post-load fingerprints).
 	stat func(string) fileState
 }
 
-func (w *watcher) initial() {
-	cur := w.fingerprint()
-	if err := w.e.Load(w.files, w.csv, nil, w.log); err != nil {
-		w.log.Warn("initial ban load error; engine stays at empty/previous snapshot until next successful load", "err", err)
-		return // do NOT record cur — retry on the next tick
-	}
-	w.last = cur
-	if w.onReload != nil {
-		w.onReload(w.e)
-	}
-}
-
-func (w *watcher) tick() {
+func (w *watcher) tick(onReload func(*Engine)) {
 	cur := w.fingerprint()
 	if w.last != nil && sameStates(w.last, cur) {
 		return
 	}
 	// A path that existed at the last successful load and has now VANISHED is an operator error or a
 	// tooling race, NOT a request to unban: keep the previous snapshot and retry every tick (delete
-	// the entry from config + restart to drop a file on purpose). Load's `required` set
+	// the entry from config + restart to drop a file on purpose). build's `required` set
 	// enforces the same refusal even when the deletion lands between this check and the file reads.
 	req := w.required()
 	if p, vanished := w.vanished(cur); vanished {
 		w.log.Error("ban input file disappeared; refusing reload and keeping the previous bans", "file", p)
 		return
 	}
-	// Torn-read guard: a non-atomic external writer can be caught mid-truncate; reload until the
-	// fingerprint is stable across the load (bounded).
-	for attempt := 0; attempt < 3; attempt++ {
-		if err := w.e.Load(w.files, w.csv, req, w.log); err != nil {
+	// Torn-read guard: a non-atomic external writer can be caught mid-truncate. Build the snapshot
+	// WITHOUT swapping, and commit it ONLY once the fingerprint is stable across the build (bounded), so
+	// a torn read never becomes the live snapshot.
+	for range 3 {
+		snap, err := w.e.build(w.files, w.csv, req, w.log)
+		if err != nil {
 			w.log.Warn("ban reload error; keeping previous snapshot (will retry)", "err", err)
 			return
 		}
 		after := w.fingerprint()
 		if p, vanished := w.vanished(after); vanished {
-			// The deletion landed mid-tick: Load already refused via `required`, but a stability pass
+			// The deletion landed mid-tick: build already refused via `required`, but a stability pass
 			// here must never commit the vanished state as the new baseline.
 			w.log.Error("ban input file disappeared during reload; keeping the previous bans", "file", p)
 			return
 		}
 		if sameStates(cur, after) {
+			w.e.commit(snap) // swap in ONLY a snapshot built from a stable read
 			w.last = cur
-			if w.onReload != nil {
-				w.onReload(w.e)
+			if onReload != nil {
+				onReload(w.e)
 			}
 			return
 		}

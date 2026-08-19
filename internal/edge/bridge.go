@@ -208,6 +208,16 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	e.trackStream(as)
 	defer e.untrackStream(as)
 
+	// A ban reload during the dial-back wait sweeps only TRACKED streams; re-check now that we are
+	// tracked so a tunnel banned in that window does not keep one live splice (docs/PROJECT.md §2 — a
+	// reload stops live traffic, not only new admissions). The deferred untrackStream/closeFar/slot
+	// release run on this early return, and the client socket is closed like every sibling rejection.
+	if e.banTun != nil && e.banTun(name, fp) {
+		e.rec.Reject("ban", name, peerAddr(client))
+		_ = client.Close()
+		return
+	}
+
 	e.rec.PublicConnOpen()
 	e.rec.StreamOpen()
 	srcIP, srcPort := splitAddr(client.RemoteAddr())

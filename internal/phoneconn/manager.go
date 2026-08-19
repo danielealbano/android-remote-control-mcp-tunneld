@@ -276,6 +276,12 @@ func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		// The conn was evicted/closed (e.g. a ban reload) while this dial-back was in flight: refuse
+		// delivery so the /data handler answers 404 and closes the stream, rather than starting a splice
+		// on a torn-down connection.
+		return false
+	}
 	w, ok := c.pending[streamID]
 	if !ok {
 		return false // the waiter was cancelled (dial-back deadline) before we arrived

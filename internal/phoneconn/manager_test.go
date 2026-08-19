@@ -264,6 +264,18 @@ func TestOpenStreamDialbackCorrelates(t *testing.T) {
 	}
 }
 
+// TestDeliverStream_RefusesClosedConn verifies a dial-back arriving after the phone conn was closed
+// (e.g. a ban reload evicted it) is refused, so no splice starts on a torn-down connection.
+func TestDeliverStream_RefusesClosedConn(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("abc")
+	_, _ = m.register(context.Background(), c)
+	c.close("ban-evict")
+	if m.deliverStream("abc", "s1", &fakeDataStream{}) {
+		t.Fatal("deliverStream must refuse delivery once the conn is closed")
+	}
+}
+
 // TestOpenStreamTimesOut covers the bounded dial-back wait both the local (edge.openFar) and the mesh
 // (bridgeAdapter.OpenMesh) paths rely on: a connected phone that never opens /data must make OpenStream
 // return within the caller's deadline and drop the pending waiter (releasing the caller's stream slot).
