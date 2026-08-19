@@ -179,6 +179,7 @@ func (c ServeCmd) Validate() error {
 		{"--acme-dir-zerossl", c.ACMEDirZeroSSL},
 		{"--attest-root-url", c.AttestRootURL},
 		{"--attest-status-url", c.AttestStatusURL},
+		{"--s3-endpoint", c.S3Endpoint},
 	} {
 		if !strings.HasPrefix(u.v, "http://") && !strings.HasPrefix(u.v, "https://") {
 			return fmt.Errorf("%s must be an http(s) URL, got %q", u.name, u.v)
@@ -241,6 +242,12 @@ func (c ServeCmd) Validate() error {
 		if d.v <= 0 {
 			return fmt.Errorf("%s must be > 0, got %s", d.name, d.v)
 		}
+	}
+	if c.AttestStatusMaxStale <= c.AttestRefresh {
+		return fmt.Errorf("--attest-status-max-stale (%s) must exceed --attest-refresh (%s): a staleness bound at or below the refresh cadence refuses enrollment for the tail of every refresh window", c.AttestStatusMaxStale, c.AttestRefresh)
+	}
+	if c.ACMEGTSValidity <= shortlivedLifetime-c.ACMERenewMargin {
+		return fmt.Errorf("--acme-gts-validity (%s) must exceed %s (the fixed non-LE renewal point = 160h shortlived − --acme-renew-margin): shorter GTS certs would expire before the renewal nudge fires", c.ACMEGTSValidity, shortlivedLifetime-c.ACMERenewMargin)
 	}
 	if c.RegistryClaimSettle <= c.RegistryClaimTimeout {
 		return fmt.Errorf("--registry-claim-settle (%s) must exceed --registry-claim-timeout (%s): the write-verify claim relies on the settle wait outlasting the PUT deadline", c.RegistryClaimSettle, c.RegistryClaimTimeout)
