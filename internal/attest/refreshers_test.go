@@ -145,6 +145,39 @@ func TestRootSetInitialFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// TestRootSetRejectsMalformedBundle covers the fail-closed parse branches: only a bare JSON array of PEM
+// strings is accepted, so a non-array body, the old {"roots":…} object, a raw PEM bundle, and an empty
+// array are ALL errors that leave a non-nil empty pool (never nil, which would verify against system roots).
+func TestRootSetRejectsMalformedBundle(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "old roots-object no longer accepted", body: `{"roots":["x"]}`},
+		{name: "non-JSON body", body: `not json`},
+		{name: "raw PEM bundle no longer accepted", body: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"},
+		{name: "empty array", body: `[]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			rs, err := NewRootSet(context.Background(), srv.URL, srv.Client(), nil)
+			if err == nil {
+				t.Fatal("a malformed root bundle must be reported as an error")
+			}
+			if rs == nil {
+				t.Fatal("RootSet must be non-nil even when the initial parse fails")
+			}
+			if rs.Pool() == nil {
+				t.Fatal("a failed parse must leave a non-nil EMPTY pool (nil would verify against system roots)")
+			}
+		})
+	}
+}
+
 func TestStatusRefresherSwapAndLastKnownGood(t *testing.T) {
 	sw := &switchServer{}
 	sw.set([]byte(`{"entries":{}}`))
