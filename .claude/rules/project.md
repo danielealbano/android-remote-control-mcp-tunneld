@@ -90,8 +90,9 @@ MUST NOT be relaxed without explicit user direction.
   role, NOT hostname). There is **NO TLS mutual auth on the PUBLIC side** (the edge relays opaque TLS).
   The phone control listener REJECTS a mesh-role cert; the mesh listener REJECTS an identity-role cert.
 - **Revocation is the ban engine ONLY** (no CRL): `tunnel-name` / `tunnel-fingerprint` bans are enforced
-  at the phone control connection, at the public SNI edge (on the resolved route), and live via the
-  ban-reload `EvictBanned` hook. All three points MUST stay wired.
+  at the phone control connection, at the public SNI edge (on the resolved route), and live on ban reload
+  via BOTH the `EvictBanned` hook (phone control conn) AND the `EvictBannedStreams` hook (in-flight public
+  splices, `close_reason=ban-evict`). All these points MUST stay wired.
 
 ### Source-IP + ingress — SACRED
 - The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
@@ -129,7 +130,9 @@ MUST NOT be relaxed without explicit user direction.
   (a synchronous per-32 KiB-slice Valkey call was REJECTED). An empty bucket blocks the copy in short
   refill waits; a Valkey ERROR fails open. Byte ACCOUNTING (day/week) is still recorded per chunk; an
   exhausted window refuses NEW streams at admission. The blocking refill wait MUST NEVER be held under
-  a connection write mutex.
+  a connection write mutex. The global stream-counter key `conc:{name}` carries TTL = 3 ×
+  `--limit-conn-idle`, refreshed by a `PEXPIRE` piggybacked on the per-chunk accounting script (a
+  no-op on a missing key, so a torn-down counter is never resurrected).
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
@@ -137,7 +140,12 @@ MUST NOT be relaxed without explicit user direction.
   counters, written ASYNCHRONOUSLY by the recorder's background flusher — never synchronously on
   the data plane.
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
-  summary/min) — attacker-driven log flooding MUST stay impossible.
+  summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
+  value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map.
+- Connection-log S3 writes are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and MUST NEVER block an
+  admission/splice/teardown path; a bounded 5000-event queue + 8 workers + per-item exponential retry
+  drain it; a full queue drops-newest and increments `tunneld_connlog_dropped_total`; shutdown drains
+  the queue (bounded) so `server-shutdown` end events land.
 - NEVER log secrets, key material, or tunnel payloads.
 
 ### Repository hygiene

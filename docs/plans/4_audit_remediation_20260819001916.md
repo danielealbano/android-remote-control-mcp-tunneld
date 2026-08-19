@@ -1567,17 +1567,17 @@ return count == 1
 
 ---
 
-## [ ] US13 — Documentation sync
+## [x] US13 — Documentation sync
 
 The canonical docs must reflect every behavioral change above (agent.md: docs ALWAYS current).
 
 Acceptance criteria:
-- [ ] No statement in `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md`, or `.claude/rules/project.md` contradicts the implemented behavior.
-- [ ] The §9 shutdown Mermaid chart shows the new drain sequence and validates via `mmdc`.
+- [x] No statement in `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md`, or `.claude/rules/project.md` contradicts the implemented behavior.
+- [x] The §9 shutdown Mermaid chart shows the new drain sequence and validates via `mmdc`.
 
-### [ ] Task 13.1 — doc updates
+### [x] Task 13.1 — doc updates
 
-- [ ] Action: modify `docs/ARCHITECTURE.md`:
+- [x] Action: modify `docs/ARCHITECTURE.md`:
   - §8 (observability/caplog): `no-route` is metric + debug-only (attacker-controlled key — no dedup
     state); all other cap hits stay deduped. Conn-log writes are ASYNC: bounded queue (5000) + 8
     workers + exponential retry + `tunneld_connlog_dropped_total`; drop-newest on overflow.
@@ -1592,14 +1592,14 @@ Acceptance criteria:
     (`ban-evict`); conn/stream ids are 8-hex random with bind-time re-roll; ban-input files that
     vanish at runtime are refused (previous snapshot kept).
   - Close reasons: add `cert-expired`.
-- [ ] Action: modify `docs/PROJECT.md` — cap-hit dedup paragraph (no-route exception), revocation
+- [x] Action: modify `docs/PROJECT.md` — cap-hit dedup paragraph (no-route exception), revocation
   paragraph (active-splice kill), state paragraph if it mentions the conn-id epoch.
-- [ ] Action: modify `docs/PROTOCOL.md` — only if it mentions the conn-id time prefix / route
+- [x] Action: modify `docs/PROTOCOL.md` — only if it mentions the conn-id time prefix / route
   `startedAt` (grep `startedAt`, `epoch`, `conn id`); the wire frames are untouched by this plan.
-- [ ] Action: modify `.claude/rules/project.md` — Hard Project Invariants: revocation bullet (all
+- [x] Action: modify `.claude/rules/project.md` — Hard Project Invariants: revocation bullet (all
   three points + live-splice eviction), observability bullet (async conn-log + no-route exception);
   Bandwidth bullet unchanged; note `conc:{name}` TTL = 3× idle refreshed on the accounting script.
-- [ ] Definition of Done: no doc statement contradicts the implemented behavior; the modified
+- [x] Definition of Done: no doc statement contradicts the implemented behavior; the modified
   shutdown Mermaid chart validates (checked again in US14).
 
 ---
@@ -1731,3 +1731,18 @@ Acceptance criteria:
   `httptest.Server`, because `Enroll` needs both HTTP/1.1 (Phase 1) and mTLS HTTP/2 (Phase 2) with a
   CA-signed server cert and `VerifyClientCertIfGiven` — which `httptest`'s fixed cert/ClientAuth cannot
   provide. No production code changed.
+
+- **Task 13.1 (`docs/ARCHITECTURE.md`) — conn/stream-id fact placed in §5, not §7.** The plan's §7
+  bullet asks for the "conn/stream ids are 8-hex random with bind-time re-roll" fact, but ARCHITECTURE §7
+  is the *Ban engine* section — an id-format sentence there is incoherent. The fact was documented in §5
+  (Valkey state), the section that already describes the route record and `connID`, keeping the doc
+  coherent; §7 carries the two ban-eviction/vanish-guard facts as specified. Additionally, the
+  `conc:{name}` TTL = 3 × `--limit-conn-idle` (per-chunk `PEXPIRE` refresh) note was added to
+  ARCHITECTURE §5 as well as `.claude/rules/project.md` — the plan required it only for `project.md`, but
+  ARCHITECTURE §5 already enumerates the concurrency counter, so the added detail keeps that description
+  accurate and non-contradicting. No behavioral claim changed beyond the implemented behavior.
+
+- **Task 13.1 (`docs/PROTOCOL.md`) — no change required.** A grep for `startedAt` / `epoch` / conn-id
+  time-prefix / char-count found no format claim to update; §1's revocation line ("live eviction on ban
+  reload") already matches the implemented behavior and the wire frames are untouched by Plan 4. The
+  action is checked as verified-no-change.
