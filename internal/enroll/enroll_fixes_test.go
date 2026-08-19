@@ -86,6 +86,97 @@ func TestEnrollUnsupportedKeyType(t *testing.T) {
 	}
 }
 
+// TestIssueReject_CarriesTunnelName verifies an Issue-path csr-mismatch reject records the mTLS-CN name
+// (ARCHITECTURE §8 dedup key), unlike the Phase-1 path which has no name yet.
+func TestIssueReject_CarriesTunnelName(t *testing.T) {
+	st := tunneltest.NewStore()
+	rec := &tunneltest.Recorder{}
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"}, Recorder: rec,
+	})
+	name := doEnroll(t, svc, idCSR)
+	wrong := newTLSCSR(t, "someone-else.example.test") // wrong domain → csr-mismatch
+	if _, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: wrong}); ee == nil {
+		t.Fatal("a wrong-domain TLS CSR must be rejected")
+	}
+	found := false
+	for _, c := range rec.Calls {
+		if c.Kind == "reject" && c.Reason == "csr-mismatch" && c.Tunnel == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the Issue-path csr-mismatch reject must carry the tunnel name %q; calls=%+v", name, rec.Calls)
+	}
+}
+
+// TestIssue_RejectsNonP256TLSCSR verifies a non-P256 TLS CSR (correct domain, valid signature) is refused
+// unsupported_key_type with a csr-mismatch metric; the identity CSR path is unchanged.
+func TestIssue_RejectsNonP256TLSCSR(t *testing.T) {
+	st := tunneltest.NewStore()
+	rec := &tunneltest.Recorder{}
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"}, Recorder: rec,
+	})
+	name := doEnroll(t, svc, idCSR)
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	fqdn := name + ".example.test"
+	der, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn}}, rsaKey)
+	rsaCSR, _ := x509.ParseCertificateRequest(der)
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: rsaCSR})
+	if ee == nil || ee.Reason != "unsupported_key_type" {
+		t.Fatalf("a non-P256 TLS CSR must be refused unsupported_key_type, got %v", ee)
+	}
+	if rec.Count("reject", "csr-mismatch") == 0 {
+		t.Fatal("the non-P256 rejection must record a csr-mismatch metric")
+	}
+}
+
+// TestIssue_NonceConsumedOnFailure verifies a FAILED Issue still consumes its nonce (a replay is refused
+// invalid_nonce) — the documented retry path requires a fresh nonce.
+func TestIssue_NonceConsumedOnFailure(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := doEnroll(t, svc, idCSR)
+	nonce := mintNonce(t, svc)
+	wrong := newTLSCSR(t, "elsewhere.example.test") // rejected AFTER the nonce is consumed
+	if _, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: wrong}); ee == nil {
+		t.Fatal("the failing Issue must return an error")
+	}
+	tls2 := newTLSCSR(t, name+".example.test")
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: tls2})
+	if ee == nil || ee.Reason != "invalid_nonce" {
+		t.Fatalf("replaying a consumed nonce must be invalid_nonce, got %v", ee)
+	}
+}
+
+// TestConsumeNonce_ValkeyErrorIsInternal verifies a control-plane error during nonce consumption yields
+// internal (retryable), NOT invalid_nonce.
+func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, mr := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := doEnroll(t, svc, idCSR)
+	nonce := mintNonce(t, svc)
+	mr.Close() // Valkey down → consumeNonce errors
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test")})
+	if ee == nil || ee.Reason != "internal" {
+		t.Fatalf("a Valkey error during nonce consume must be internal, got %v", ee)
+	}
+}
+
 // TestSignFailureRollsBack: the plan's "sign failure rolls back" row — any SignIdentity failure after a
 // verified claim deletes the claimed name.
 func TestSignFailureRollsBack(t *testing.T) {

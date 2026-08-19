@@ -3,6 +3,8 @@ package enroll
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
@@ -146,13 +148,17 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		return Result{}, e
 	}
 
-	// Consume + validate the single-use nonce.
-	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil || !ok {
+	// Consume + validate the single-use nonce. A control-plane error is retryable/internal; a genuinely
+	// absent/replayed nonce is invalid_nonce.
+	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
+		return Result{}, &Error{Reason: "internal", Retryable: true}
+	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
 
-	// Attestation gate (skipped only in the fail-closed test-only optional mode) + key binding.
-	att, e := s.attestAndBind(ctx, ip, req)
+	// Attestation gate (skipped only in the fail-closed test-only optional mode) + key binding. No name
+	// exists yet at Phase 1, so rejections are recorded with an empty tunnel name.
+	att, e := s.attestAndBind(ctx, ip, "", req)
 	if e != nil {
 		return Result{}, e
 	}
@@ -183,24 +189,34 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 // rebinds + rotates the identity cert, and obtains (first public cert) or renews (subsequent) the public
 // WebPKI cert for <name>.<tunnel-domain>. It regenerates the identity + public certs TOGETHER.
 func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Result, *Error) {
-	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil || !ok {
+	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
+		// A control-plane (Valkey/script) error is retryable and distinct from a genuinely absent/replayed
+		// nonce — do NOT mislabel a Valkey outage as invalid_nonce.
+		return Result{}, &Error{Reason: "internal", Retryable: true}
+	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
-	att, e := s.attestAndBind(ctx, ip, req)
+	att, e := s.attestAndBind(ctx, ip, name, req)
 	if e != nil {
 		return Result{}, e
 	}
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
 	// and MUST request exactly <name>.<tunnel-domain>.
 	if err := req.TLSCSR.CheckSignature(); err != nil {
-		s.recordRejection(ctx, ip, "csr-mismatch", req)
+		s.recordRejection(ctx, ip, name, "csr-mismatch", req)
 		return Result{}, &Error{Reason: "unauthorized"}
 	}
 	if !csrMatchesTunnel(req.TLSCSR, name, s.cfg.TunnelDomain) {
 		// A CSR requesting extra/foreign/wildcard identifiers is the most attack-indicative rejection —
 		// persist evidence like every other csr-mismatch, not just the metric.
-		s.recordRejection(ctx, ip, "csr-mismatch", req)
+		s.recordRejection(ctx, ip, name, "csr-mismatch", req)
 		return Result{}, &Error{Reason: "csr_domain_mismatch"}
+	}
+	// Enrollment accepts ECDSA P-256 keys ONLY (docs/PROTOCOL.md §2) — enforce it on the TLS CSR too, not
+	// just the identity CSR (which ca.SignIdentity checks). A non-P-256 TLS key is the phone's error.
+	if !isECDSAP256(req.TLSCSR.PublicKey) {
+		s.recordRejection(ctx, ip, name, "csr-mismatch", req)
+		return Result{}, &Error{Reason: "unsupported_key_type"}
 	}
 
 	// The tunnel MUST already be enrolled (Phase 1 wrote the claim record). Only a definitive
@@ -280,24 +296,26 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 // and — when attestation ran — the identity key MUST equal the attested TEE key (closes the software-key
 // bypass). On any failure it records rejection evidence + the rejection metric and returns an
 // unauthorized error; on success it returns the attestation result (device scalars + attested key).
-func (s *Service) attestAndBind(ctx context.Context, ip string, req Request) (attest.Result, *Error) {
+// name is the mTLS-CN tunnel name on the Issue path (recorded in the rejection metric + evidence), or ""
+// on the Phase-1 Enroll path where no name exists yet.
+func (s *Service) attestAndBind(ctx context.Context, ip, name string, req Request) (attest.Result, *Error) {
 	var att attest.Result
 	if !s.cfg.AttestOptional {
 		res, err := s.cfg.Verifier.Verify(req.AttestChain, req.Nonce, s.now())
 		if err != nil {
 			s.rec.AttestVerify(attestReason(err))
-			s.recordRejection(ctx, ip, attestReason(err), req)
+			s.recordRejection(ctx, ip, name, attestReason(err), req)
 			return attest.Result{}, &Error{Reason: "unauthorized"}
 		}
 		s.rec.AttestVerify("ok")
 		att = res
 	}
 	if err := req.IdentityCSR.CheckSignature(); err != nil {
-		s.recordRejection(ctx, ip, "csr-mismatch", req)
+		s.recordRejection(ctx, ip, name, "csr-mismatch", req)
 		return attest.Result{}, &Error{Reason: "unauthorized"}
 	}
 	if att.LeafPublicKey != nil && !publicKeyEqual(req.IdentityCSR.PublicKey, att.LeafPublicKey) {
-		s.recordRejection(ctx, ip, "csr-mismatch", req)
+		s.recordRejection(ctx, ip, name, "csr-mismatch", req)
 		return attest.Result{}, &Error{Reason: "unauthorized"}
 	}
 	return att, nil
@@ -433,8 +451,8 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 
 // recordRejection bumps the rejection metric (reason is an observ.RejectReasons label) and persists the
 // rejected-enrollment evidence (best-effort — a store failure is logged and never masks the rejection).
-func (s *Service) recordRejection(ctx context.Context, ip, reason string, req Request) {
-	s.rec.Reject(reason, "", ip)
+func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, req Request) {
+	s.rec.Reject(reason, name, ip)
 	pkg, digest := claimedIdentity(req.AttestChain)
 	ev := store.RejectedEnrollment{
 		TS:              s.now().UTC(),
@@ -496,6 +514,13 @@ func newClaimNonce() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails (it panics internally on a broken source)
 	return hex.EncodeToString(b[:])
+}
+
+// isECDSAP256 reports whether a public key is ECDSA on the NIST P-256 curve (the ONLY key type
+// enrollment accepts — docs/PROTOCOL.md §2).
+func isECDSAP256(pub crypto.PublicKey) bool {
+	k, ok := pub.(*ecdsa.PublicKey)
+	return ok && k.Curve == elliptic.P256()
 }
 
 // publicKeyEqual compares two crypto.PublicKey values.

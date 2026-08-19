@@ -61,8 +61,14 @@ func NewHandler(svc *Service, ban BanFunc, rec observ.Recorder, maxBody int64) *
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := peerIP(r)
-	// Ban check FIRST.
-	if addr, err := netip.ParseAddr(ip); err == nil && h.ban != nil && h.ban(addr) {
+	// Ban check FIRST. An unparseable peer IP cannot be ban-checked, so refuse rather than proceed
+	// (fail closed — the ban gate is the first effective security check on this ingress edge).
+	addr, perr := netip.ParseAddr(ip)
+	if perr != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
+		return
+	}
+	if h.ban != nil && h.ban(addr) {
 		h.rec.Reject("ban", "", ip)
 		writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
 		return
@@ -79,9 +85,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string) {
 	// The nonce route carries the same per-IP enroll limit (an unauthenticated surface must not mint
-	// unbounded Valkey nonce keys).
+	// unbounded Valkey nonce keys). Per docs/PROTOCOL.md §2 the frozen nonce-route mapping is 429 for a
+	// rate-limit and 400 otherwise (e.g. bad_source_ip) — do NOT blanket-503 the rate-limit case.
 	if e := h.svc.enrollLimit(r.Context(), ip); e != nil {
-		writeErr(w, e, http.StatusTooManyRequests)
+		status := statusForError(e)
+		if e.Reason == "enroll_rate" {
+			status = http.StatusTooManyRequests
+		}
+		writeErr(w, e, status)
 		return
 	}
 	nonce, err := h.svc.Nonce(r.Context())
