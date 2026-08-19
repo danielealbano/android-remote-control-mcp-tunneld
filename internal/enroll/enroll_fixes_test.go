@@ -467,3 +467,83 @@ func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
 		t.Fatalf("the first issue must succeed: %v", got.err)
 	}
 }
+
+// countingNames is a NameStore that counts GETs/PUTs and scripts the claim-verify GET: the initial GET
+// on an unclaimed candidate is a definitive miss (so the claim PUT proceeds); once a record exists, a
+// verify GET returns verifyErr (persistent failure) or, one time, ErrNotFound (PUT definitively lost).
+type countingNames struct {
+	recs           map[string]store.NameRecord
+	gets           int
+	puts           int
+	verifyErr      error
+	verifyGoneOnce bool
+}
+
+func (c *countingNames) GetName(_ context.Context, name string) (store.NameRecord, error) {
+	c.gets++
+	rec, ok := c.recs[name]
+	if !ok {
+		return store.NameRecord{}, store.ErrNotFound
+	}
+	if c.verifyErr != nil {
+		return store.NameRecord{}, c.verifyErr
+	}
+	if c.verifyGoneOnce {
+		c.verifyGoneOnce = false
+		return store.NameRecord{}, store.ErrNotFound
+	}
+	return rec, nil
+}
+
+func (c *countingNames) PutName(_ context.Context, name string, rec store.NameRecord) error {
+	c.puts++
+	c.recs[name] = rec
+	return nil
+}
+
+func (c *countingNames) DeleteName(_ context.Context, name string) error {
+	delete(c.recs, name)
+	return nil
+}
+
+// TestClaimName_VerifyErrorFailsWithoutNewName: a persistent claim-verify GET error fails the claim
+// (retryable) and consumes EXACTLY one candidate — moving on could orphan a claim whose PUT landed.
+func TestClaimName_VerifyErrorFailsWithoutNewName(t *testing.T) {
+	names := &countingNames{recs: map[string]store.NameRecord{}, verifyErr: errors.New("s3 read timeout")}
+	svc, _ := newService(t, Config{Names: names})
+	var drawn []string
+	svc.SetNameGen(func() (string, error) {
+		n := "cand" + string(rune('a'+len(drawn)))
+		drawn = append(drawn, n)
+		return n, nil
+	})
+
+	name, _, err := svc.claimName(context.Background())
+	if err == nil {
+		t.Fatalf("a persistent verify error must fail the claim, got name %q", name)
+	}
+	if len(drawn) != 1 {
+		t.Fatalf("a persistent verify error must consume exactly one candidate, drew %v", drawn)
+	}
+}
+
+// TestClaimName_VerifyNotFoundDrawsNewName: a definitive NotFound at verify means the PUT did not land,
+// so the candidate is abandoned and the next one is drawn (regression for the pre-fix behavior).
+func TestClaimName_VerifyNotFoundDrawsNewName(t *testing.T) {
+	names := &countingNames{recs: map[string]store.NameRecord{}, verifyGoneOnce: true}
+	svc, _ := newService(t, Config{Names: names})
+	var drawn []string
+	svc.SetNameGen(func() (string, error) {
+		n := "cand" + string(rune('a'+len(drawn)))
+		drawn = append(drawn, n)
+		return n, nil
+	})
+
+	name, _, err := svc.claimName(context.Background())
+	if err != nil {
+		t.Fatalf("a NotFound at verify must redraw and then succeed, got %v", err)
+	}
+	if len(drawn) != 2 || name != drawn[1] {
+		t.Fatalf("a NotFound at verify must draw a new candidate, drew %v won %q", drawn, name)
+	}
+}

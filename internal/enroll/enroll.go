@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"time"
@@ -366,12 +367,21 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		// Settle wait (strictly > the PUT timeout) so any zombie PUT has landed or died.
 		s.sleep(s.cfg.ClaimSettle)
 
-		got, err := s.cfg.Names.GetName(ctx, cand)
-		if err != nil {
-			continue // our PUT was lost — new name
+		got, gerr := s.cfg.Names.GetName(ctx, cand)
+		for r := 0; r < 2 && gerr != nil && !errors.Is(gerr, store.ErrNotFound); r++ {
+			s.sleep(time.Second)
+			got, gerr = s.cfg.Names.GetName(ctx, cand)
+		}
+		if errors.Is(gerr, store.ErrNotFound) {
+			continue // our PUT definitively did not land — this candidate is clean to abandon
+		}
+		if gerr != nil {
+			// Persistent verify failure: fail the enrollment (retryable) rather than drawing a new name —
+			// if the PUT landed, moving on would orphan the claim forever.
+			return "", "", fmt.Errorf("enroll: claim verify: %w", gerr)
 		}
 		if got.ClaimNonce == nonce {
-			return cand, nonce, nil // we won
+			return cand, nonce, nil
 		}
 		// Lost the race — new name.
 	}

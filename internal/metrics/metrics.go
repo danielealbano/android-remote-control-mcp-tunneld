@@ -35,6 +35,7 @@ type Metrics struct {
 	acmeCooldown   *prometheus.CounterVec // {ca}
 	meshPoolSize   *prometheus.GaugeVec   // {peer}
 	perConnMem     prometheus.Gauge
+	connLogDropped prometheus.Counter
 }
 
 // NewMetrics registers every family into a fresh registry.
@@ -81,11 +82,15 @@ func NewMetrics() *Metrics {
 		perConnMem: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "tunneld_per_conn_mem_bytes", Help: "Estimated per-connection memory.",
 		}),
+		connLogDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "tunneld_connlog_dropped_total", Help: "Connection-log events dropped: queue full or retries exhausted.",
+		}),
 	}
 	reg.MustRegister(
 		m.enrollments, m.rejections, m.bytesTotal,
 		m.publicConnsUp, m.phoneConnsUp, m.streamsActive, m.quotaExhausted,
 		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
+		m.connLogDropped,
 		collectors.NewGoCollector(),
 	)
 	// Pre-register the EXACT rejection-reason label set so the family always exposes every registered
@@ -100,3 +105,7 @@ func NewMetrics() *Metrics {
 // Registry returns the custom registry (mounted at /metrics; the default registry exposes none of
 // these families).
 func (m *Metrics) Registry() *prometheus.Registry { return m.reg }
+
+// ConnLogDropped returns the dropped-connection-log-events counter (wired to the async conn-log
+// writer's drop callback in server.Run).
+func (m *Metrics) ConnLogDropped() prometheus.Counter { return m.connLogDropped }
