@@ -110,8 +110,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 
-	// ACME chain (lazy self-healing lego clients; DNS-01 provider selected by --acme-dns-provider).
-	chain := buildACMEChain(cfg, lim, rec, logger)
+	// ACME chain (lazy self-healing lego clients; DNS-01 provider selected by --acme-dns-provider). An
+	// existing-but-unreadable account key aborts startup (never overwrites it).
+	chain, err := buildACMEChain(cfg, lim, rec, logger)
+	if err != nil {
+		return err
+	}
 
 	// Enrollment service + handler.
 	enrollSvc := enroll.NewService(enroll.Config{

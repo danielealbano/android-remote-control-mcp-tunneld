@@ -1,0 +1,11 @@
+.git
+bin/
+dist/
+deploy/ca
+deploy/.env
+deploy/tunneld.env
+deploy/acme
+deploy/logs
+deploy/banfiles
+deploy/attest
+deploy/ntfy-alertmanager/config.scfg
