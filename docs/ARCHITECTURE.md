@@ -141,6 +141,13 @@ present at the last successful load but VANISHES at runtime is refused: the prev
 (Error-logged, retried), never silently unbanning (a first-deploy absence stays a benign skip). The ban
 check is the FIRST handler-level check on every ingress edge.
 
+Ban inputs are loaded **exactly once** at startup (synchronously, before any listener binds); the watcher
+then polls and reloads with **build-verify-commit** — it builds the snapshot, re-reads the input
+fingerprint, and swaps the new snapshot in ONLY when the read is stable, so a non-atomic writer caught
+mid-truncate never becomes the live snapshot. The attestation **signer-digest allowlist** follows the same
+vanished-file discipline: a deleted allowlist file keeps the previous digest set (Error-logged), never
+silently allowing every signer.
+
 ## 8. Observability wiring
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).

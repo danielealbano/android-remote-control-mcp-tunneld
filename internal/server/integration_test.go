@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -120,7 +121,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 // startIntegrationServer stands up Valkey + MinIO + Pebble/challtestsrv + the DNS shim, runs the real
 // server.Run on loopback in attestation-optional mode against Pebble, and waits until it is ready
 // (construction, incl. the reserved-host cert obtain, has finished and the node heartbeat has landed).
-func startIntegrationServer(t *testing.T) *itEnv {
+func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itEnv {
 	t.Helper()
 	redisURL := tunneltest.StartValkey(t)
 	s3URL, access, secret := tunneltest.StartMinIO(t)
@@ -136,6 +137,9 @@ func startIntegrationServer(t *testing.T) *itEnv {
 	edgeAddr := freeAddr(t)
 	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
 		pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, []string{pebble.DNSResolver})
+	for _, m := range mutate {
+		m(&cfg)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
@@ -187,6 +191,24 @@ func startIntegrationServer(t *testing.T) *itEnv {
 		t.Fatal(err)
 	}
 	return &itEnv{edgeAddr: edgeAddr, pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st, drain: drain}
+}
+
+// TestRun_NamePrefixLowercased verifies the runtime server.Run normalization: an UPPERCASE --name-prefix
+// yields lowercase enrolled tunnel names (so the CN matches the lowercased SNI at the edge), not just the
+// Validate() charset guard.
+func TestRun_NamePrefixLowercased(t *testing.T) {
+	env := startIntegrationServer(t, func(c *config.ServeCmd) { c.NamePrefix = "AB" })
+	ctx := context.Background()
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if !strings.HasPrefix(ident.Name, "ab") {
+		t.Fatalf("an uppercase --name-prefix must yield a lowercase name, got %q", ident.Name)
+	}
+	if strings.ContainsAny(ident.Name, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		t.Fatalf("the enrolled name must be all-lowercase, got %q", ident.Name)
+	}
 }
 
 // TestIntegration_EnrollConnectRoundtrip exercises the full E2E path against the real assembled server +

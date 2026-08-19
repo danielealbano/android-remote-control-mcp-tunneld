@@ -78,6 +78,10 @@ At Phase 2 and at every renewal the server reads the name from the **mTLS client
 is fixed at Phase 1 and stays stable across renewals (which rotate the identity key). Phase 1 records the
 claim; Phase 2 is retryable and its name is never rolled back.
 
+**Key type — ECDSA P-256 ONLY (both CSRs).** Enrollment accepts ECDSA P-256 keys only. The server
+enforces this on the identity CSR (Phase 1 and Phase 2) AND on the Phase-2 **TLS CSR**: a non-P-256 TLS
+key is refused (`unsupported_key_type`) before the public cert is ever obtained.
+
 **Seven-point attestation predicate** (ALL mandatory): chain roots at a Google attestation root ∧
 `attestationChallenge == nonce` ∧ signing digest ∈ the hot-reloadable allowlist ∧ `securityLevel ≥
 TrustedEnvironment` (Software rejected; StrongBox not required) ∧ `verifiedBootState == Verified` ∧
