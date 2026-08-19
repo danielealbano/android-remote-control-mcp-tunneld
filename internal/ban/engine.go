@@ -63,10 +63,22 @@ func (e *Engine) MatchTunnel(name, fingerprint string) (Source, bool) {
 // that existed at the last successful load) that has now VANISHED returns an error WITHOUT swapping —
 // a mid-load deletion is an operator error, never a request to unban.
 func (e *Engine) Load(files []string, csvPath string, required map[string]struct{}, log *slog.Logger) error {
+	s, err := e.build(files, csvPath, required, log)
+	if err != nil {
+		return err
+	}
+	e.commit(s)
+	return nil
+}
+
+// build parses all files + expands country entries into a FRESH snapshot WITHOUT swapping it in, so a
+// caller (the watcher) can verify input stability before committing. Absent/vanished/corrupt/zero-row
+// semantics are identical to Load — see the Load doc comment.
+func (e *Engine) build(files []string, csvPath string, required map[string]struct{}, log *slog.Logger) (*snapshot, error) {
 	table := &bart.Table[Source]{}
 	names := map[string]Source{}
 	fps := map[string]Source{}
-	wanted := map[string]struct{}{}
+	countries := map[string]Source{}
 
 	for _, f := range files {
 		p, err := parseFile(f, log)
@@ -74,45 +86,53 @@ func (e *Engine) Load(files []string, csvPath string, required map[string]struct
 			if errors.Is(err, fs.ErrNotExist) {
 				if _, req := required[f]; req {
 					log.Error("required ban file vanished, keeping previous ban state", "file", f)
-					return err // do NOT swap — a previously-loaded file MUST NOT silently unban
+					return nil, err // do NOT swap — a previously-loaded file MUST NOT silently unban
 				}
 				log.Warn("ban file absent, skipping (will load when it appears)", "file", f)
 				continue
 			}
 			log.Warn("ban file read error, keeping previous ban state", "file", f, "err", err)
-			return err // do NOT swap — preserve the previous snapshot
+			return nil, err // do NOT swap — preserve the previous snapshot
 		}
 		for _, ps := range p.prefixes {
 			table.Insert(ps.prefix, ps.source)
 		}
 		maps.Copy(names, p.names)
 		maps.Copy(fps, p.fingerprints)
-		for cc := range p.countries {
-			wanted[cc] = struct{}{}
-		}
+		// last writer wins; each source carries the requesting file/line/Detail=cc.
+		maps.Copy(countries, p.countries)
 	}
 
-	if len(wanted) > 0 {
-		prefixes, err := ExpandCountries(csvPath, wanted)
+	if len(countries) > 0 {
+		wanted := make(map[string]struct{}, len(countries))
+		for cc := range countries {
+			wanted[cc] = struct{}{}
+		}
+		byCC, err := ExpandCountries(csvPath, wanted)
 		switch {
 		case err == nil:
-			for _, pfx := range prefixes {
-				table.Insert(pfx, Source{Reason: ReasonCountry, File: csvPath, Detail: "country-expansion"})
+			for cc, pfxs := range byCC {
+				src := countries[cc] // the ban-file entry that requested this country (file/line/Detail=cc)
+				for _, pfx := range pfxs {
+					table.Insert(pfx, src)
+				}
 			}
 		case csvPath == "" || errors.Is(err, fs.ErrNotExist):
 			if _, req := required[csvPath]; req {
 				log.Error("required ban CSV vanished, keeping previous ban state", "csv", csvPath)
-				return err // do NOT swap — a previously-loaded CSV MUST NOT silently drop country bans
+				return nil, err // do NOT swap — a previously-loaded CSV MUST NOT silently drop country bans
 			}
 			// First-deploy / geo-off: the CSV does not exist yet — skip country entries, keep ip/cidr.
 			log.Warn("country ban expansion skipped (CSV absent); ip/cidr bans still enforced", "csv", csvPath, "err", err)
 		default:
 			// A configured CSV is present but failed to parse: do NOT silently drop active geo bans.
 			log.Warn("country ban expansion failed on a present CSV; keeping previous snapshot", "csv", csvPath, "err", err)
-			return err // preserve the previous snapshot (never swap in one missing the country layer)
+			return nil, err // preserve the previous snapshot (never swap in one missing the country layer)
 		}
 	}
 
-	e.current.Store(&snapshot{table: table, names: names, fps: fps})
-	return nil
+	return &snapshot{table: table, names: names, fps: fps}, nil
 }
+
+// commit atomically swaps a built snapshot in.
+func (e *Engine) commit(s *snapshot) { e.current.Store(s) }

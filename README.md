@@ -60,8 +60,16 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    provider, set the `S3_*` / `TUNNELD_S_3_*` values and **run a pre-go-live read-after-write probe**
    (PUT → GET → overwrite-PUT → GET returns the newest body) — the name-claim protocol relies on it.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.
-7. **ntfy** (first start): create a read user for the phone (`ntfy user add`) and a write token for the
-   bridge (`ntfy token add`), then set the token in `deploy/ntfy-alertmanager/config.scfg`.
+7. **ntfy** (first start): copy the bridge config
+   (`cp deploy/ntfy-alertmanager/config.scfg.example deploy/ntfy-alertmanager/config.scfg` — the real
+   `config.scfg` is gitignored), then create a read user for the phone and a write token for the bridge
+   INSIDE the ntfy container:
+   ```sh
+   docker compose -f deploy/docker-compose.yml exec ntfy ntfy user add phone
+   docker compose -f deploy/docker-compose.yml exec ntfy ntfy token add phone
+   ```
+   Set that token as `access-token` in `deploy/ntfy-alertmanager/config.scfg`, then restart the bridge so
+   it picks up the token: `docker compose -f deploy/docker-compose.yml restart ntfy-alertmanager`.
 
 **Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` is
 public. The observability UIs (Grafana/Prometheus/Alertmanager/ntfy) bind to `127.0.0.1` only; reach

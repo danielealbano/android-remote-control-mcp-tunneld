@@ -10,8 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
@@ -43,6 +41,7 @@ type StreamLimiter interface {
 	ClaimTraffic(ctx context.Context, name string, n int64) (dayOK, weekOK bool, err error)
 	ClaimBandwidth(ctx context.Context, name, dir string, want int64) (int64, error)
 	TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error)
+	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)
 }
 
 var _ StreamLimiter = (*limit.Limiter)(nil)
@@ -79,7 +78,6 @@ type Config struct {
 // Edge is the raw :443 public edge.
 type Edge struct {
 	cfg    Config
-	rdb    redis.UniversalClient
 	ban    func(netip.Addr) bool
 	banTun func(name, fingerprint string) bool
 	rec    Recorder
@@ -131,11 +129,11 @@ type PublicEvent struct {
 }
 
 // New builds the Edge. enrollLn/controlLn are the reserved-SNI listeners the http servers accept from.
-func New(cfg Config, rdb redis.UniversalClient, ban func(netip.Addr) bool, banTun func(string, string) bool,
+func New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool,
 	rec Recorder, r Router, local LocalDialer, mesh MeshDialer, lim StreamLimiter, logs PhoneEventSink,
 	addr net.Addr) *Edge {
 	return &Edge{
-		cfg: cfg, rdb: rdb, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,
+		cfg: cfg, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,
 		lim: lim, logs: logs,
 		enrollLn: newChanListener(addr), controlLn: newChanListener(addr), now: time.Now,
 	}
@@ -153,7 +151,7 @@ func (e *Edge) Serve(ctx context.Context, ln net.Listener) {
 
 // connRate enforces the per-IP TCP connection rate at accept.
 func (e *Edge) connRate(ctx context.Context, ip netip.Addr) bool {
-	ok, _, err := limit.Allow(ctx, e.rdb, "conn-rate", ip, e.cfg.ConnRate, time.Second)
+	ok, _, err := e.lim.Allow(ctx, "conn-rate", ip, e.cfg.ConnRate, time.Second)
 	if err != nil {
 		return true // fail-open on a control-plane error (never a hard outage)
 	}

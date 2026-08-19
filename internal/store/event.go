@@ -75,13 +75,28 @@ func LogKey(ev Event) string {
 		ev.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), conn8, ev.Event)
 }
 
+// connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure
+// path that exercises MustConnID's fallback. Production always uses crypto/rand.
+var connIDRand = rand.Read
+
 // NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
 // the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision;
 // pending-stream duplicate refusal) — a collision is detected and retried, never silent.
 func NewConnID() (string, error) {
 	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
+	if _, err := connIDRand(buf[:]); err != nil {
 		return "", fmt.Errorf("store: conn id rand: %w", err)
 	}
 	return hex.EncodeToString(buf[:]), nil
+}
+
+// MustConnID mints a conn/stream id, falling back to a deterministic non-empty id ("00000000") on the
+// practically impossible crypto/rand failure — an EMPTY id would be refused by the dial-back match
+// (serveData / the mesh header check both reject "") and turn every connection into a no-route.
+func MustConnID() string {
+	id, err := NewConnID()
+	if err != nil {
+		return "00000000"
+	}
+	return id
 }

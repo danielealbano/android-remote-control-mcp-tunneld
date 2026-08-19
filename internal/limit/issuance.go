@@ -87,11 +87,22 @@ func (l *Limiter) IssuanceHeartbeatLoop(ctx context.Context, name, orderID strin
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			now := l.now().UnixMilli()
-			_ = issuanceHeartbeatScript.Run(ctx, l.rdb, []string{inflightKey(name)},
-				orderID, now, issuanceSlotTTL.Milliseconds(),
-				(issuanceSlotTTL + issuanceKeyTTLMargin).Milliseconds()).Err()
+			l.issuanceHeartbeat(ctx, name, orderID)
 		}
+	}
+}
+
+// issuanceHeartbeat refreshes the slot once. The 30s slot TTL is intentionally short (a Valkey blip is a
+// real problem — fail fast and let the phone retry via the documented 503/retry_after path); a failed
+// heartbeat is LOGGED so a voided slot (which could let a second concurrent order start) is diagnosable,
+// not silent.
+func (l *Limiter) issuanceHeartbeat(ctx context.Context, name, orderID string) {
+	now := l.now().UnixMilli()
+	if err := issuanceHeartbeatScript.Run(ctx, l.rdb, []string{inflightKey(name)},
+		orderID, now, issuanceSlotTTL.Milliseconds(),
+		(issuanceSlotTTL + issuanceKeyTTLMargin).Milliseconds()).Err(); err != nil {
+		l.logger.Warn("issuance slot heartbeat failed (slot may expire; a concurrent order could then start)",
+			"tunnel", name, "order", orderID, "err", err)
 	}
 }
 

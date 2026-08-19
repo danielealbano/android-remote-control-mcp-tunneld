@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -165,6 +166,32 @@ func TestRun_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestRun_InternalBindFailureIsFatal verifies an unusable --internal-listen makes Run return an error
+// (not a silent Warn that leaves metrics/healthz dead forever).
+func TestRun_InternalBindFailureIsFatal(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := lifecycleConfig(t, mr.Addr())
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = occupied.Close() }()
+	cfg.InternalListen = occupied.Addr().String() // already in use → bind must fail
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, cfg, testLogger(), "bindfatal") }()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Run must return an error when the internal listener cannot bind")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not fail on the internal bind")
+	}
+}
+
 func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -174,4 +201,5 @@ func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	t.Fatal("waitUntil: condition not met within timeout")
 }

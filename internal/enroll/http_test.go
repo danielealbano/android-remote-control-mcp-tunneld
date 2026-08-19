@@ -140,6 +140,51 @@ func TestHandlerNonceRouteRateLimited(t *testing.T) {
 	}
 }
 
+// TestHandleNonce_BadSourceIPIs400 verifies the GET /enroll/nonce route answers 400 bad_source_ip for an
+// unparseable peer IP (not 429): the ban gate fails closed.
+func TestHandleNonce_BadSourceIPIs400(t *testing.T) {
+	st := tunneltest.NewStore()
+	_, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	h := newTestHandler(t, svc, nil)
+
+	req := httptest.NewRequest("GET", "/enroll/nonce", nil)
+	req.RemoteAddr = "not-an-ip" // no host:port → unparseable
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("an unparseable peer IP must answer 400, got %d", rr.Code)
+	}
+	var er errorResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &er)
+	if er.Reason != "bad_source_ip" {
+		t.Fatalf("reason = %q, want bad_source_ip", er.Reason)
+	}
+}
+
+// TestServeHTTP_UnparseableIPRejected verifies the POST /enroll route also refuses an unparseable peer IP
+// BEFORE dispatch (fail closed), without touching the service.
+func TestServeHTTP_UnparseableIPRejected(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	h := newTestHandler(t, svc, nil)
+
+	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(mintNonce(t, svc)), IdentityCSR: csrPEM(t, idCSR)})
+	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req.RemoteAddr = "garbage-addr"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 400 {
+		t.Fatalf("an unparseable peer IP must be refused 400, got %d", rr.Code)
+	}
+	if st.NameCount() != 0 {
+		t.Fatal("no name must be claimed when the peer IP is refused")
+	}
+}
+
 // TestHandlerNonceMintedBeforeClaim: a failing issue-nonce mint answers 500 BEFORE any name is
 // claimed (no orphaned registry record).
 func TestHandlerNonceMintedBeforeClaim(t *testing.T) {

@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,64 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
+
+// TestMeshCert_InitialMintFatal verifies a failing initial mint makes newMeshCertHolder return an error
+// (which server.Run then treats as fatal, so :9443 never binds without a servable cert).
+func TestMeshCert_InitialMintFatal(t *testing.T) {
+	certPath, keyPath := writeCA(t)
+	caObj, err := ca.Load(certPath, keyPath, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failSign := func(string, time.Duration) ([]byte, []byte, error) { return nil, nil, errors.New("boom") }
+	if _, err := newMeshCertHolder(caObj, "node", time.Hour, testLogger(), failSign); err == nil {
+		t.Fatal("a failing initial mint must make newMeshCertHolder return an error")
+	}
+}
+
+// TestMeshCert_RotationRetriesOnBackoff verifies a failed rotation requests meshRotateRetry, then a
+// success returns to the 2/3-TTL interval. The `after` seam captures the requested durations so no
+// wall-clock wait is needed.
+func TestMeshCert_RotationRetriesOnBackoff(t *testing.T) {
+	certPath, keyPath := writeCA(t)
+	caObj, err := ca.Load(certPath, keyPath, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durs := make(chan time.Duration, 8)
+	fire := make(chan time.Time)
+	var failNext atomic.Bool
+	h := &meshCertHolder{
+		nodeID: "node", ttl: 3 * time.Hour, logger: testLogger(),
+		after: func(d time.Duration) <-chan time.Time { durs <- d; return fire },
+		sign: func(id string, ttl time.Duration) ([]byte, []byte, error) {
+			if failNext.Load() {
+				return nil, nil, errors.New("boom")
+			}
+			return caObj.SignMesh(id, ttl)
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.rotateLoop(ctx); close(done) }()
+
+	interval := h.ttl * 2 / 3
+	if d := <-durs; d != interval {
+		t.Fatalf("first scheduled wait = %v, want interval %v", d, interval)
+	}
+	failNext.Store(true)
+	fire <- time.Now()
+	if d := <-durs; d != meshRotateRetry {
+		t.Fatalf("post-failure wait = %v, want backoff %v", d, meshRotateRetry)
+	}
+	failNext.Store(false)
+	fire <- time.Now()
+	if d := <-durs; d != interval {
+		t.Fatalf("post-success wait = %v, want interval %v", d, interval)
+	}
+	cancel()
+	<-done
+}
 
 // TestHeartbeatNodeSurvivesTransientError: one failing refresh must not kill the heartbeat — the node
 // re-registers on the next tick (RefreshNode is a plain SET).
@@ -93,6 +153,18 @@ func TestValidNameFunc(t *testing.T) {
 	if !validP("t-abcdef234567") || validP("abcdef234567") || validP("x-abcdef234567") {
 		t.Fatal("the prefix must be enforced literally")
 	}
+
+	// The reserved-label rejection is only REACHABLE when the label length matches the generator shape:
+	// with NameLength=6, "enroll" passes the length + charset gates and must then be rejected as the
+	// reserved enroll label (the table case above with NameLength=12 is rejected by length first).
+	cfg6 := config.ServeCmd{EnrollHost: "enroll.example.test", ControlHost: "connect.example.test", NameLength: 6}
+	valid6 := validNameFunc(cfg6)
+	if valid6("enroll") {
+		t.Fatal("the reserved enroll label must be rejected even when it matches the generator length")
+	}
+	if !valid6("abcde2") {
+		t.Fatal("a non-reserved 6-char base32 name must pass")
+	}
 }
 
 // TestMeshCertHolderHotSwap covers the mesh cert hot-swap path: mint installs a cert, a re-mint swaps
@@ -104,7 +176,10 @@ func TestMeshCertHolderHotSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newMeshCertHolder(caObj, "node-hot", time.Hour, testLogger())
+	h, err := newMeshCertHolder(caObj, "node-hot", time.Hour, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	first, err := h.getCert(nil)
 	if err != nil || first == nil {
@@ -114,7 +189,9 @@ func TestMeshCertHolderHotSwap(t *testing.T) {
 
 	// Re-mint: the served cert pointer must change (a fresh serial), and both getCert and the mesh
 	// client's GetClientCertificate must return the NEW cert without any restart.
-	h.mint(caObj)
+	if err := h.mint(); err != nil {
+		t.Fatal(err)
+	}
 	second, err := h.getCert(nil)
 	if err != nil || second == nil {
 		t.Fatalf("re-mint must serve a cert: %v", err)

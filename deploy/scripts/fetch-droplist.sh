@@ -19,4 +19,9 @@ curl -fsS --max-time 300 "$DROP_URL" -o "$feed"
 # jq reads the feed file directly (no pipeline); select only records carrying a cidr.
 jq -r 'select(.cidr) | "cidr \(.cidr)"' "$feed" > "$tmp"
 
+# Refuse to install an EMPTY result: an upstream schema change (or an HTTP-200 empty body) would
+# otherwise atomically replace the live droplist with zero entries — a silent mass-unban. Mirrors the
+# DB-IP zero-row refusal in internal/ban/dbip.go.
+[ -s "$tmp" ] || { echo "fetch-droplist: empty droplist output, keeping previous file" >&2; exit 1; }
+
 mv "$tmp" "$OUT_DIR/droplist.bans"

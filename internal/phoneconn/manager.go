@@ -211,6 +211,11 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 		case <-ticker.C:
 			res, err := m.router.Heartbeat(ctx, c.name, c.connID)
 			if err != nil {
+				// Retrying next tick is fine for a blip, but a PERSISTENT failure (Valkey ACL/auth or a
+				// partition to Valkey only) lets route:{name} TTL-expire — public clients then get
+				// no-route while the phone still believes it is connected. Surface it, don't swallow it.
+				m.logger.Warn("route heartbeat failed (route expires by TTL if this persists)",
+					"tunnel", c.name, "conn", c.connID, "err", err)
 				continue
 			}
 			switch res {
@@ -276,6 +281,12 @@ func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		// The conn was evicted/closed (e.g. a ban reload) while this dial-back was in flight: refuse
+		// delivery so the /data handler answers 404 and closes the stream, rather than starting a splice
+		// on a torn-down connection.
+		return false
+	}
 	w, ok := c.pending[streamID]
 	if !ok {
 		return false // the waiter was cancelled (dial-back deadline) before we arrived

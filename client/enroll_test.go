@@ -61,7 +61,7 @@ func (c *countingConn) Close() error {
 // startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /enroll/nonce, POST /enroll
 // server-TLS, POST /issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
 // (Phase-2 mTLS) via ALPN and returns the dial address plus the connection-counting listener.
-func startEnrollServer(t *testing.T, ca *testCA) (string, *countingListener) {
+func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (string, *countingListener) {
 	t.Helper()
 
 	signFromCSR := func(csrPEM, cn string, server bool, dns []string) (string, bool) {
@@ -90,6 +90,11 @@ func startEnrollServer(t *testing.T, ca *testCA) (string, *countingListener) {
 		writeJSON(w, enrollResponse{Name: testName, IdentityCert: idCert, IssueNonce: "bb"})
 	})
 	mux.HandleFunc("/issue", func(w http.ResponseWriter, r *http.Request) {
+		if len(issueFail) > 0 && issueFail[0]() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeJSON(w, errorResponse{Reason: "acme_rate_limited", Retryable: true, RetryAfter: 1})
+			return
+		}
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			http.Error(w, "mtls required", http.StatusUnauthorized)
 			return
@@ -113,7 +118,10 @@ func startEnrollServer(t *testing.T, ca *testCA) (string, *countingListener) {
 		writeJSON(w, issueResponseBody{IdentityCert: idCert, PublicCert: pubCert, CA: "test"})
 	})
 
-	srvKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srvCertPEM := ca.signLeaf(t, testEnrollHost, &srvKey.PublicKey, true, []string{testEnrollHost, testControlHost})
 	srvCert, err := tls.X509KeyPair(srvCertPEM, keyPEM(t, srvKey))
 	if err != nil {
@@ -165,6 +173,101 @@ func TestEnroll_ClosesTransports(t *testing.T) {
 	}
 	if !waitFor(t, 3*time.Second, func() bool { return cl.live.Load() == 0 }) {
 		t.Fatalf("Enroll left %d connection(s) open; transports were not closed", cl.live.Load())
+	}
+}
+
+// TestFetchNonce_BadHostReturnsError verifies a malformed enroll host returns an error instead of a
+// nil-pointer panic (the request-construction error is now checked).
+func TestFetchNonce_BadHostReturnsError(t *testing.T) {
+	if _, err := FetchIssueNonce(context.Background(), "127.0.0.1:1", "bad host", nil); err == nil {
+		t.Fatal("a malformed enroll host must return an error, not panic")
+	}
+}
+
+// TestEnroll_Phase2FailureReturnsBootstrapIdentity verifies a retryable /issue failure returns the
+// Phase-1 bootstrap identity (name + identity cert, no public cert) alongside the error, so the caller
+// can retry without re-enrolling (which would orphan the name).
+func TestEnroll_Phase2FailureReturnsBootstrapIdentity(t *testing.T) {
+	ca := newTestCA(t)
+	dialAddr, _ := startEnrollServer(t, ca, func() bool { return true }) // /issue always 503
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
+	if err == nil {
+		t.Fatal("a Phase-2 /issue failure must return an error")
+	}
+	if id == nil || id.Name != testName || len(id.IdentityCertPEM) == 0 {
+		t.Fatalf("the bootstrap identity must be returned on Phase-2 failure, got %+v", id)
+	}
+	if len(id.PublicCertPEM) != 0 {
+		t.Error("the bootstrap identity must NOT carry a public cert yet")
+	}
+	var ee *EnrollError
+	if !errors.As(err, &ee) || ee.Status != http.StatusServiceUnavailable {
+		t.Fatalf("expected a 503 EnrollError, got %v", err)
+	}
+}
+
+// TestFetchIssueNonce_RetryPathCompletes drives the documented retry path: a failed Phase-2 issue →
+// bootstrap identity → fresh nonce → Renew over the SAME mTLS identity completes the issuance.
+func TestFetchIssueNonce_RetryPathCompletes(t *testing.T) {
+	ca := newTestCA(t)
+	var issueCalls atomic.Int32
+	dialAddr, _ := startEnrollServer(t, ca, func() bool { return issueCalls.Add(1) == 1 }) // fail the first /issue only
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	boot, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
+	if err == nil {
+		t.Fatal("the first /issue must fail")
+	}
+	if boot == nil || boot.Name == "" || len(boot.PublicCertPEM) != 0 {
+		t.Fatalf("Enroll must return the bootstrap identity (no public cert), got %+v", boot)
+	}
+
+	nonce, err := FetchIssueNonce(ctx, dialAddr, testEnrollHost, ca.pool)
+	if err != nil {
+		t.Fatalf("FetchIssueNonce: %v", err)
+	}
+	c, err := New(dialAddr, testControlHost, testTunnelDomain, ca.pool, boot, func(io.ReadWriteCloser) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close) // Run was never started, so Close only releases the pooled transport
+	if err := c.Renew(ctx, nonce); err != nil {
+		t.Fatalf("Renew (retry) must complete after a fresh nonce: %v", err)
+	}
+}
+
+// truncatedRT returns a response whose body errors partway through Read.
+type truncatedRT struct{}
+
+func (truncatedRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(&truncReader{})}, nil
+}
+
+type truncReader struct{ done bool }
+
+func (r *truncReader) Read(p []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		if len(p) > 0 {
+			p[0] = 'x'
+		}
+		return 1, nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// TestReadResponse_TruncatedBodyErrors verifies a truncated response body surfaces a read error, not a
+// misleading decode/empty-reason error.
+func TestReadResponse_TruncatedBodyErrors(t *testing.T) {
+	hc := &http.Client{Transport: truncatedRT{}}
+	_, err := fetchNonce(context.Background(), hc, testEnrollHost)
+	// It must surface the READ error, not a decode error: assert the wrapped io.ErrUnexpectedEOF (a
+	// bare err != nil would also pass against the pre-fix code, which misreported it as a decode error).
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("a truncated body must surface the read error (io.ErrUnexpectedEOF), got %v", err)
 	}
 }
 

@@ -103,6 +103,24 @@ else
   fail "droplist failure preserves old file"
 fi
 
+# --- droplist empty result preserves old file and exits non-zero ---
+t="$(mktemp -d)"
+b="$(mktemp -d)"
+make_stub_curl "$b"
+echo "cidr 9.9.9.0/24" > "$t/droplist.bans"
+# A feed with NO cidr records → jq yields empty output → the empty-result guard must refuse to install.
+cat > "$t/feed.json" <<'JSON'
+{"type":"metadata","version":1}
+{"other":"field"}
+JSON
+if STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" 2>/dev/null; then
+  fail "droplist empty result should exit non-zero"
+elif grep -q '^cidr 9.9.9.0/24$' "$t/droplist.bans" && no_tmp_litter "$t"; then
+  pass "droplist empty result preserves old file"
+else
+  fail "droplist empty result did not preserve the old file"
+fi
+
 # --- dbip skips when month present ---
 t="$(mktemp -d)"
 b="$(mktemp -d)"

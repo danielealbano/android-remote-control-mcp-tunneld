@@ -117,3 +117,34 @@ func TestSignerAllowlistReloadFailureLogged(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestSigners_VanishedFileKeepsSet verifies a deleted allowlist file keeps the previous digests and logs
+// an Error (the security-critical file must never silently allow everyone).
+func TestSigners_VanishedFileKeepsSet(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "signers.txt")
+	if err := os.WriteFile(f, []byte("aabbcc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ch := &captureHandler{}
+	a, err := LoadSignerAllowlist(f, slog.New(ch))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { a.Watch(ctx, 10*time.Millisecond); close(done) }()
+
+	time.Sleep(20 * time.Millisecond)
+	if err := os.Remove(f); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool { return ch.count(slog.LevelError) > 0 })
+	if !a.Allowed("aabbcc") {
+		t.Fatal("a vanished allowlist file must keep the last-known-good set")
+	}
+	cancel()
+	<-done
+}

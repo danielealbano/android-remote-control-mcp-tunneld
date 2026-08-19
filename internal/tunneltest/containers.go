@@ -288,9 +288,14 @@ func (p *PebbleEnv) ClearTXT(host string) error {
 	return p.chalPost("/clear-txt", map[string]string{"host": host})
 }
 
+// chalMgmtTimeout bounds a challtestsrv management call so a hung management API cannot block the ACME
+// DNS shim (and thus replica startup) indefinitely, matching the other timed HTTP helpers in this file.
+const chalMgmtTimeout = 15 * time.Second
+
 func (p *PebbleEnv) chalPost(path string, body map[string]string) error {
-	raw, _ := json.Marshal(body)
-	resp, err := http.Post(p.ChallMgmtURL+path, "application/json", bytes.NewReader(raw))
+	raw, _ := json.Marshal(body) // string-map marshal cannot fail
+	hc := &http.Client{Timeout: chalMgmtTimeout}
+	resp, err := hc.Post(p.ChallMgmtURL+path, "application/json", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -308,16 +313,24 @@ func (p *PebbleEnv) chalPost(path string, body map[string]string) error {
 func StartACMEDNSShim(t *testing.T, p *PebbleEnv) (endpointURL string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	decode := func(r *http.Request) (fqdn, value string) {
+	// decode returns ok=false on a malformed body or an empty fqdn, so a bad request is rejected rather
+	// than silently publishing/clearing an empty-host TXT record.
+	decode := func(r *http.Request) (fqdn, value string, ok bool) {
 		var m struct {
 			FQDN  string `json:"fqdn"`
 			Value string `json:"value"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&m)
-		return m.FQDN, m.Value
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.FQDN == "" {
+			return "", "", false
+		}
+		return m.FQDN, m.Value, true
 	}
 	mux.HandleFunc("/present", func(w http.ResponseWriter, r *http.Request) {
-		fqdn, value := decode(r)
+		fqdn, value, ok := decode(r)
+		if !ok {
+			http.Error(w, "bad present body", http.StatusBadRequest)
+			return
+		}
 		if err := p.PublishTXT(fqdn, value); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -325,7 +338,11 @@ func StartACMEDNSShim(t *testing.T, p *PebbleEnv) (endpointURL string) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/cleanup", func(w http.ResponseWriter, r *http.Request) {
-		fqdn, _ := decode(r)
+		fqdn, _, ok := decode(r)
+		if !ok {
+			http.Error(w, "bad cleanup body", http.StatusBadRequest)
+			return
+		}
 		if err := p.ClearTXT(fqdn); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return

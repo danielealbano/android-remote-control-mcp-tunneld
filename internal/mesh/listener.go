@@ -54,6 +54,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method != http.MethodPost { // docs/PROTOCOL.md §5: a mesh stream is a POST /mesh
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	tunnel := r.Header.Get("X-Tunnel")
 	connID := r.Header.Get("X-Conn-Id")
 	streamID := r.Header.Get("X-Stream-Id")

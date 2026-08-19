@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,75 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
+
+// errListener is a net.Listener whose Accept always fails with a fixed error (drives serveTLS's
+// error-propagation branch without a real socket).
+type errListener struct{ err error }
+
+func (l errListener) Accept() (net.Conn, error) { return nil, l.err }
+func (l errListener) Close() error              { return nil }
+func (l errListener) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)} }
+
+// TestServeTLS_PropagatesNonShutdownError verifies serveTLS returns a non-shutdown Serve error (so the
+// errgroup cancels), while ErrServerClosed / net.ErrClosed stay non-fatal.
+func TestServeTLS_PropagatesNonShutdownError(t *testing.T) {
+	boom := errors.New("permanent accept failure")
+	if err := serveTLS(context.Background(), &http.Server{}, errListener{err: boom}, testLogger(), "x"); !errors.Is(err, boom) {
+		t.Fatalf("a non-shutdown Serve error must propagate, got %v", err)
+	}
+	if err := serveTLS(context.Background(), &http.Server{}, errListener{err: net.ErrClosed}, testLogger(), "x"); err != nil {
+		t.Fatalf("net.ErrClosed must be non-fatal, got %v", err)
+	}
+	if err := serveTLS(context.Background(), &http.Server{}, errListener{err: http.ErrServerClosed}, testLogger(), "x"); err != nil {
+		t.Fatalf("http.ErrServerClosed must be non-fatal, got %v", err)
+	}
+}
+
+// TestServeInternal_DrainsGracefully verifies an in-flight request survives ctx cancellation: serveTLS
+// closes the listener (stops accepting) but does NOT hard-Close the server, so the in-flight handler
+// completes (the ordered drain's Shutdown is what bounds it).
+func TestServeInternal_DrainsGracefully(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveTLS(ctx, srv, ln, testLogger(), "internal") }()
+
+	respCh := make(chan int, 1)
+	go func() {
+		resp, gerr := http.Get("http://" + ln.Addr().String() + "/")
+		if gerr != nil {
+			respCh <- -1
+			return
+		}
+		respCh <- resp.StatusCode
+		_ = resp.Body.Close()
+	}()
+
+	<-started
+	cancel() // serveTLS closes the listener; the in-flight request MUST NOT be aborted
+	close(release)
+	select {
+	case code := <-respCh:
+		if code != http.StatusOK {
+			t.Fatalf("in-flight request must complete gracefully, got %d", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("in-flight request did not complete")
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("serveTLS returned %v, want nil (net.ErrClosed is non-fatal)", err)
+	}
+}
 
 // blockingRWC blocks Read forever until Close, and discards Write. It models the mesh request-body
 // reader that never receives bytes from a quiet entry node.

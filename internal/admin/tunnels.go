@@ -87,6 +87,9 @@ func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {
 }
 
 func atoi64(s string) int64 {
+	// The error is intentionally ignored: an absent hash field returns "" here (→ 0, the correct default
+	// for a counter not yet written), and the values are our own INCR-written integers. A corrupt value
+	// likewise degrades to 0 rather than failing the whole /admin/tunnels read.
 	v, _ := strconv.ParseInt(s, 10, 64)
 	return v
 }

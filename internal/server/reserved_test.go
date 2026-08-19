@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,17 +10,66 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
+
+// TestReservedMaybeRenew_LogsShouldRenewError verifies a shouldRenew error is logged (not silently
+// swallowed) so a stalled reserved-host renewal is diagnosable before the cert expires.
+func TestReservedMaybeRenew_LogsShouldRenewError(t *testing.T) {
+	dir := t.TempDir()
+	host := "enroll.example.test"
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	failRenew := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+		return false, time.Time{}, errors.New("cooldown state unavailable")
+	}
+	rc := newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, failRenew, 48*time.Hour, logger)
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	if !strings.Contains(buf.String(), "renewal check failed") {
+		t.Fatalf("a shouldRenew error must be logged at Warn; log = %q", buf.String())
+	}
+}
+
+// TestReservedEnsure_UsesInjectedClock verifies the renew-margin branch compares against the injected
+// clock (rc.now), not the wall clock: a cache valid by the wall clock but inside the margin by the
+// injected clock must trigger a renewal.
+func TestReservedEnsure_UsesInjectedClock(t *testing.T) {
+	dir := t.TempDir()
+	host := "enroll.example.test"
+	realNow := time.Now()
+	cachedCert, cachedKey, cachedInfo := mintSelfCert(t, host, realNow.Add(100*time.Hour))
+	seedCache(t, dir, host, cachedCert, cachedKey, cachedInfo)
+	newCert, newKey, newInfo := mintSelfCert(t, host, realNow.Add(400*time.Hour))
+	iss := &countingIssuer{certPEM: newCert, keyPEM: newKey, info: newInfo}
+
+	fakeNow := realNow.Add(60 * time.Hour) // cache NotAfter=+100h is now inside the 48h margin
+	rc := &reservedCerts{
+		dir: filepath.Join(dir, "self"), obtain: iss.obtain, shouldRenew: neverRenew,
+		renewMargin: 48 * time.Hour, logger: testLogger(),
+		now:   func() time.Time { return fakeNow },
+		hosts: map[string]*reservedHost{},
+	}
+	rh := &reservedHost{host: host}
+	rc.hosts[host] = rh
+	rc.ensure(context.Background(), rh)
+
+	if iss.callCount() != 1 {
+		t.Fatalf("the margin branch must use the injected clock (renew → 1 obtain), got %d", iss.callCount())
+	}
+}
 
 func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 

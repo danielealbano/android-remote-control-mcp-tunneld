@@ -28,11 +28,13 @@ type chainParams struct {
 	notBefore     time.Time
 	notAfter      time.Time
 	// mutators for negative cases:
-	tamperExtension  bool
-	breakSignature   bool
-	duplicateLeaf    bool
-	leafOnly         bool
-	dropIntermediate bool
+	tamperExtension    bool
+	breakSignature     bool
+	duplicateLeaf      bool
+	leafOnly           bool
+	dropIntermediate   bool
+	noRootOfTrust      bool // omit rootOfTrust from BOTH authorization lists
+	rootInSoftwareOnly bool // place rootOfTrust in softwareEnforced instead of teeEnforced
 }
 
 func defaultParams() chainParams {
@@ -163,8 +165,6 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 	octetWrapped := mustMarshal(t, aaidDER) // OCTET STRING containing aaidDER
 	field709 := ctxTag(t, 709, octetWrapped)
 
-	software := sequence(t, field709)
-
 	rot := rootOfTrust{
 		VerifiedBootKey:   []byte{1, 2, 3, 4},
 		DeviceLocked:      p.deviceLocked,
@@ -176,7 +176,19 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 	field706 := ctxTag(t, 706, mustMarshal(t, 202607))
 	field718 := ctxTag(t, 718, mustMarshal(t, 202607))
 	field719 := ctxTag(t, 719, mustMarshal(t, 202607))
-	tee := sequence(t, field705, field706, field704, field718, field719)
+
+	softwareFields := [][]byte{field709}
+	teeFields := [][]byte{field705, field706, field718, field719}
+	switch {
+	case p.noRootOfTrust:
+		// rootOfTrust omitted from both lists
+	case p.rootInSoftwareOnly:
+		softwareFields = append(softwareFields, field704)
+	default:
+		teeFields = append(teeFields, field704)
+	}
+	software := sequence(t, softwareFields...)
+	tee := sequence(t, teeFields...)
 
 	kd := keyDescription{
 		AttestationVersion:       200,

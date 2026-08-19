@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // httpDataStream splices one dial-back data stream: Read pulls phone→client bytes from the /data
@@ -62,7 +64,9 @@ func readControlFrame(r io.Reader) ([]byte, error) {
 	}
 	n := binary.BigEndian.Uint32(hdr[1:5])
 	if n > 1<<20 {
-		return nil, io.ErrUnexpectedEOF
+		// An oversize length prefix is a wire-protocol violation, not a transport error: surface the
+		// distinct sentinel so readPump records close_reason=protocol-error (not phone-close).
+		return nil, wire.ErrControlTooLarge
 	}
 	frame := make([]byte, 5+int(n))
 	copy(frame, hdr[:])

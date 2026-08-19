@@ -173,19 +173,20 @@ func TestWatchFiresOnReloadOnMtimeChange(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
-	w.initial()
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("initial load must fire onReload once, got %d", reloads)
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w.Initial()
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("Initial must NOT fire onReload (no live connections yet), got %d", reloads)
 	}
 	writeBan(t, dir, "bans.txt", "ip 2.2.2.2\n")
 	future := time.Now().Add(2 * time.Second)
 	if err := os.Chtimes(f, future, future); err != nil {
 		t.Fatal(err)
 	}
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
-		t.Errorf("mtime change must fire onReload again, got %d", reloads)
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
+		t.Errorf("mtime change must fire onReload, got %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
 		t.Error("reloaded entry must match")
@@ -283,17 +284,18 @@ func TestWatcher_DetectsDeletionAndEqualMtime(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
-	w.initial()
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("initial reload count = %d", reloads)
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w.Initial()
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("Initial reload count = %d, want 0", reloads)
 	}
 	// Replace with an OLDER mtime (the old max-mtime watcher would miss this).
 	writeBan(t, dir, "bans.txt", "ip 2.2.2.2\n")
 	older := time.Now().Add(-time.Hour)
 	_ = os.Chtimes(f, older, older)
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("an older-mtime replacement must reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
@@ -304,8 +306,8 @@ func TestWatcher_DetectsDeletionAndEqualMtime(t *testing.T) {
 	if err := os.Remove(f); err != nil {
 		t.Fatal(err)
 	}
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("a vanished loaded file must NOT reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
@@ -318,8 +320,9 @@ func TestWatcher_RetriesAfterFailedLoad(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
-	w.initial()
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w.Initial()
 	// Make the next load fail (file → directory).
 	if err := os.Remove(f); err != nil {
 		t.Fatal(err)
@@ -327,8 +330,8 @@ func TestWatcher_RetriesAfterFailedLoad(t *testing.T) {
 	if err := os.Mkdir(f, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 1 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("a failed load must NOT fire onReload, count = %d", reloads)
 	}
 	// Fix it — the failed load did not consume the change, so the next tick retries.
@@ -336,8 +339,8 @@ func TestWatcher_RetriesAfterFailedLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeBan(t, dir, "bans.txt", "ip 3.3.3.3\n")
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("the watcher must retry after a failed load, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("3.3.3.3")); !ok {
@@ -350,10 +353,11 @@ func TestWatchLoadErrorKeepsPreviousSnapshot(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
-	w.initial()
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("initial onReload count = %d", reloads)
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w.Initial()
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("Initial onReload count = %d, want 0", reloads)
 	}
 	// Replace the file with a directory → a hard read error on the next Load.
 	if err := os.Remove(f); err != nil {
@@ -364,8 +368,8 @@ func TestWatchLoadErrorKeepsPreviousSnapshot(t *testing.T) {
 	}
 	future := time.Now().Add(2 * time.Second)
 	_ = os.Chtimes(f, future, future)
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 1 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("load error must NOT fire onReload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
@@ -398,8 +402,9 @@ func TestWatcher_VanishedFileKeepsSnapshot(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	log, buf := captureLog()
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: log}
-	w.initial()
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, log)
+	w.Initial()
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
 		t.Fatal("initial ban must be enforced")
 	}
@@ -407,8 +412,8 @@ func TestWatcher_VanishedFileKeepsSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 1 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("a vanished loaded file must NOT reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
@@ -423,8 +428,8 @@ func TestWatcher_VanishedFileKeepsSnapshot(t *testing.T) {
 	if err := os.Chtimes(f, future, future); err != nil {
 		t.Fatal(err)
 	}
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("restoring the file must reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
@@ -439,8 +444,9 @@ func TestWatcher_VanishedCSVKeepsSnapshot(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	log, buf := captureLog()
-	w := &watcher{e: e, files: []string{f}, csv: csv, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: log}
-	w.initial()
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, csv, 0, log)
+	w.Initial()
 	if _, ok := e.Match(mustAddr("1.0.0.5")); !ok {
 		t.Fatal("country XX must be enforced after initial load")
 	}
@@ -448,8 +454,8 @@ func TestWatcher_VanishedCSVKeepsSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf.Reset()
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 1 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("a vanished loaded CSV must NOT reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("1.0.0.5")); !ok {
@@ -465,19 +471,19 @@ func TestWatcher_FirstDeployAbsenceStillSkips(t *testing.T) {
 	f := filepath.Join(dir, "never.txt") // never created
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
-	w.initial()
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("a first-deploy absent file must still complete the initial load, count = %d", reloads)
-	}
-	w.tick() // still absent, no change → no reload
-	if atomic.LoadInt32(&reloads) != 1 {
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w.Initial()
+	// Initial fires no callback; that it COMPLETED (recorded the baseline) is proven by the next,
+	// unchanged tick doing nothing — a nil baseline would instead treat the absent file as a change.
+	w.tick(cb) // still absent, no change → no reload
+	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("an unchanged absent file must not reload, count = %d", reloads)
 	}
 	// When the file finally appears it loads.
 	writeBan(t, dir, "never.txt", "ip 8.8.8.8\n")
-	w.tick()
-	if atomic.LoadInt32(&reloads) != 2 {
+	w.tick(cb)
+	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("the appearing file must reload, count = %d", reloads)
 	}
 	if _, ok := e.Match(mustAddr("8.8.8.8")); !ok {
@@ -490,7 +496,8 @@ func TestWatcher_TornReadRetries(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
 	var reloads int32
-	w := &watcher{e: e, files: []string{f}, onReload: func(*Engine) { atomic.AddInt32(&reloads, 1) }, log: discardLog()}
+	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
+	w := NewWatcher(e, []string{f}, "", 0, discardLog())
 	// Seed the last-loaded baseline so the tick sees a change and proceeds past the fast-path check.
 	base := time.Now()
 	w.last = map[string]fileState{f: {exists: true, modTime: base, size: 11}}
@@ -510,7 +517,7 @@ func TestWatcher_TornReadRetries(t *testing.T) {
 		calls++
 		return seq[i]
 	}
-	w.tick()
+	w.tick(cb)
 	if calls != 3 {
 		t.Errorf("expected a torn-read retry (3 fingerprint reads), got %d", calls)
 	}

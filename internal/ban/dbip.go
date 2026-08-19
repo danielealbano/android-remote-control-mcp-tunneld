@@ -13,14 +13,15 @@ import (
 )
 
 // ExpandCountries reads a DB-IP Country Lite CSV (columns: start_ip,end_ip,country_code) and returns
-// the covering prefixes for the requested country codes (via netipx.IPRange.Prefixes()). Malformed
-// rows are skipped. It returns (nil, err) when csvPath == "", the file is unreadable, OR it yields
-// zero parseable rows (corrupt/empty): on the present-but-unusable case the caller keeps the previous
-// snapshot, and it skip-and-warns ONLY when the CSV is absent. A valid CSV whose wanted country code
-// is simply absent yields an empty result with no error.
+// the covering prefixes for the requested country codes (via netipx.IPRange.Prefixes()), keyed by
+// country code so a matched geo-ban can report WHICH country fired. Malformed rows are skipped. It
+// returns (nil, err) when csvPath == "", the file is unreadable, OR it yields zero parseable rows
+// (corrupt/empty): on the present-but-unusable case the caller keeps the previous snapshot, and it
+// skip-and-warns ONLY when the CSV is absent. A valid CSV whose wanted country code is simply absent
+// yields an empty (non-nil) map with no error.
 //
 // The file is tens of MB and parsed only on reload, so it is streamed with ReuseRecord.
-func ExpandCountries(csvPath string, wanted map[string]struct{}) ([]netip.Prefix, error) {
+func ExpandCountries(csvPath string, wanted map[string]struct{}) (map[string][]netip.Prefix, error) {
 	if csvPath == "" {
 		return nil, errors.New("no dbip-country-lite-csv configured")
 	}
@@ -34,7 +35,7 @@ func ExpandCountries(csvPath string, wanted map[string]struct{}) ([]netip.Prefix
 	r.FieldsPerRecord = -1 // tolerate stray rows; validate width per-row below
 	r.ReuseRecord = true
 
-	var out []netip.Prefix
+	out := map[string][]netip.Prefix{}
 	validRows := 0
 	for {
 		rec, err := r.Read()
@@ -58,7 +59,7 @@ func ExpandCountries(csvPath string, wanted map[string]struct{}) ([]netip.Prefix
 		if !rng.IsValid() {
 			continue
 		}
-		out = append(out, rng.Prefixes()...)
+		out[cc] = append(out[cc], rng.Prefixes()...)
 	}
 	if validRows == 0 {
 		// A present CSV that produced no parseable rows is corrupt/empty — error so the caller keeps the

@@ -44,8 +44,9 @@ var knownRejectReasons = func() map[string]struct{} {
 	return set
 }()
 
-// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink so the recorder
-// never carries nil collaborators.
+// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink; a nil admin
+// store is accepted and treated as a no-op admin sink (flush becomes a no-op) — used by metrics-only
+// test wiring that never records per-tunnel counters.
 func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slog.Logger) *PromRecorder {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -160,6 +161,9 @@ func (p *PromRecorder) FlushCapLog() { p.caplog.Flush() }
 // re-accumulates its delta into the (new) map so the next flush retries it — a counter write is never
 // dropped on a transient admin.Store error.
 func (p *PromRecorder) flush(ctx context.Context) {
+	if p.admin == nil {
+		return // no admin sink wired (e.g. metrics-only test wiring) — nothing to flush
+	}
 	p.mu.Lock()
 	drained := p.agg
 	p.agg = map[string]*aggEntry{}

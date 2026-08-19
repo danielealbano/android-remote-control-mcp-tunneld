@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,11 +173,6 @@ func TestValidateMeshPoolSizeRange(t *testing.T) {
 	c.MeshPoolSize = 0
 	if err := c.Validate(); err == nil {
 		t.Error("--mesh-pool-size 0 expected error")
-	}
-	c = validCfg(t)
-	c.MeshPoolSize = 0
-	if err := c.Validate(); err == nil {
-		t.Error("--mesh-pool-size > max expected error")
 	}
 }
 
@@ -376,6 +372,58 @@ func TestValidate_HostAndDomain(t *testing.T) {
 	}
 }
 
+func TestValidate_ListenAddressesRejectGarbage(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"listen", func(c *ServeCmd) { c.Listen = "not-an-addr" }},
+		{"mesh-listen", func(c *ServeCmd) { c.MeshListen = "nope" }},
+		{"internal-listen", func(c *ServeCmd) { c.InternalListen = "bad" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s: a non-host:port address must be rejected", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_EnrollControlHostCollision(t *testing.T) {
+	c := validCfg(t)
+	c.ControlHost = "ENROLL.example.test" // equal to EnrollHost modulo case
+	if err := c.Validate(); err == nil {
+		t.Fatal("equal enroll/control hosts must be rejected (case-insensitive)")
+	}
+}
+
+func TestValidate_NamePrefixCharset(t *testing.T) {
+	cases := []struct {
+		name    string
+		prefix  string
+		wantErr bool
+	}{
+		{"lowercase ok", "ab-1", false},
+		{"empty ok", "", false},
+		{"uppercase normalized ok", "Ab", false}, // lowercased at runtime → valid, not rejected
+		{"underscore", "a_b", true},
+		{"leading dash", "-ab", true},
+		{"dot", "a.b", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.NamePrefix = tc.prefix
+			if gotErr := c.Validate() != nil; gotErr != tc.wantErr {
+				t.Errorf("prefix %q: gotErr=%v wantErr=%v", tc.prefix, gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestParseByteSize_Overflow(t *testing.T) {
 	for _, in := range []string{"9223372036854775807kb", "9999999999999gb"} {
 		if _, err := ParseByteSize(in); err == nil {
@@ -468,8 +516,15 @@ func TestRemovedLegacyFlagsRejected(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := parser.Parse([]string{"serve", flag}); err == nil {
-			t.Errorf("removed flag %q must be rejected as unknown", flag)
+		// Assert the error is specifically an UNKNOWN-FLAG error: parsing with no required flags would
+		// fail Validate() regardless, so a bare err != nil would pass even if the legacy flag were re-added.
+		_, perr := parser.Parse([]string{"serve", flag})
+		if perr == nil {
+			t.Errorf("removed flag %q must be rejected", flag)
+			continue
+		}
+		if !strings.Contains(perr.Error(), "unknown flag") {
+			t.Errorf("removed flag %q must yield an unknown-flag error, got: %v", flag, perr)
 		}
 	}
 }

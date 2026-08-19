@@ -24,11 +24,12 @@ func ctxT(t *testing.T) context.Context {
 	return ctx
 }
 
-// freezeClock pins the window limiter's clock so a burst never straddles a real window boundary
-// (deterministic + instant). Restored on cleanup. Callers must not run in parallel.
-func freezeClock(t *testing.T) {
+// newFrozenLimiter builds a Limiter with a FROZEN clock (deterministic + instant) so a window burst never
+// straddles a real second/minute boundary. Returns the limiter + its miniredis (for Keys/TTL/FastForward).
+func newFrozenLimiter(t *testing.T) (*Limiter, *miniredis.Miniredis) {
 	t.Helper()
-	base := time.Unix(1_700_000_000, 0)
-	nowFunc = func() time.Time { return base }
-	t.Cleanup(func() { nowFunc = time.Now })
+	rdb, mr := newTestRedis(t)
+	l := NewLimiter(rdb, 125000, 1<<40, 1<<40, time.Hour)
+	l.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+	return l, mr
 }

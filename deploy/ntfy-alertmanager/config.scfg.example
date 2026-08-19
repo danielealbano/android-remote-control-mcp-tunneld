@@ -1,5 +1,7 @@
 # The bridge listens on :8080 by default, which alertmanager.yml's webhook URL targets. If your pinned
 # ntfy-alertmanager version's default differs, set its HTTP-address directive per that version's docs.
+#
+# Copy this file to config.scfg (which is gitignored) and set the real ntfy write token below.
 base-url http://ntfy
 ntfy {
     topic alerts
