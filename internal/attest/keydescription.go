@@ -78,6 +78,7 @@ type KeyDescription struct {
 	SignatureDigests   [][]byte
 	DeviceLocked       bool
 	VerifiedBootState  int
+	HasRootOfTrust     bool // rootOfTrust was present in the TEE-enforced authorization list
 	OSVersion          int
 	OSPatch            int
 	VendorPatch        int
@@ -85,8 +86,10 @@ type KeyDescription struct {
 }
 
 // ParseKeyDescription locates the attestation extension on the leaf and decodes the fields the
-// seven-point predicate needs (attestationApplicationId lives in softwareEnforced; rootOfTrust in
-// teeEnforced — exactly as validated on the real device).
+// seven-point predicate needs. attestationApplicationId and the OS/patch levels are read from whichever
+// list carries them, but rootOfTrust is read ONLY from the TEE-enforced list (a copy in softwareEnforced
+// is platform-supplied and ignored); its ABSENCE from teeEnforced is a hard failure at Verify (see
+// verify.go point 5) — the zero-value boot state would otherwise read as Verified+unlocked.
 func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 	var raw []byte
 	for _, ext := range leaf.Extensions {
@@ -108,17 +111,18 @@ func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 		SecurityLevel:      int(kd.AttestationSecurityLevel),
 		Challenge:          kd.AttestationChallenge,
 	}
-	if err := walkAuthList(kd.SoftwareEnforced.Bytes, out); err != nil {
+	if err := walkAuthList(kd.SoftwareEnforced.Bytes, out, false); err != nil {
 		return nil, fmt.Errorf("attest: softwareEnforced: %w", err)
 	}
-	if err := walkAuthList(kd.TeeEnforced.Bytes, out); err != nil {
+	if err := walkAuthList(kd.TeeEnforced.Bytes, out, true); err != nil {
 		return nil, fmt.Errorf("attest: teeEnforced: %w", err)
 	}
 	return out, nil
 }
 
-// walkAuthList decodes the context-tagged entries of an authorization list into out.
-func walkAuthList(raw []byte, out *KeyDescription) error {
+// walkAuthList decodes the context-tagged entries of an authorization list into out. tee reports whether
+// this is the TEE-enforced list: rootOfTrust is honored ONLY from it.
+func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 	rest := raw
 	for len(rest) > 0 {
 		var rv asn1.RawValue
@@ -129,10 +133,14 @@ func walkAuthList(raw []byte, out *KeyDescription) error {
 		}
 		switch rv.Tag {
 		case tagRootOfTrust:
+			if !tee {
+				continue // rootOfTrust is only trustworthy from the TEE-enforced list
+			}
 			var rot rootOfTrust
 			if _, err := asn1.Unmarshal(rv.Bytes, &rot); err != nil {
 				return fmt.Errorf("rootOfTrust: %w", err)
 			}
+			out.HasRootOfTrust = true
 			out.DeviceLocked = rot.DeviceLocked
 			out.VerifiedBootState = int(rot.VerifiedBootState)
 		case tagAttestationAppID:

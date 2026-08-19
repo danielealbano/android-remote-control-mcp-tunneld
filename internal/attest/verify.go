@@ -104,7 +104,12 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 		return Result{}, ErrSecurityLevel
 	}
 
-	// (5) verifiedBootState == Verified.
+	// (5) verifiedBootState == Verified — but ONLY when rootOfTrust was TEE-asserted. A chain whose
+	// teeEnforced list carries no rootOfTrust proves nothing about boot state and is rejected (the
+	// zero-value fields would otherwise read as Verified+unlocked). See docs/PROTOCOL.md §2.
+	if !kd.HasRootOfTrust {
+		return Result{}, ErrBootState
+	}
 	if kd.VerifiedBootState != BootVerified {
 		return Result{}, ErrBootState
 	}

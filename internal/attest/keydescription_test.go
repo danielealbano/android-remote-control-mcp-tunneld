@@ -36,6 +36,28 @@ func TestParseKeyDescriptionFields(t *testing.T) {
 	if string(kd.Challenge) != string(p.challenge) {
 		t.Errorf("challenge = %q", kd.Challenge)
 	}
+	if !kd.HasRootOfTrust {
+		t.Error("a TEE-asserted rootOfTrust must set HasRootOfTrust")
+	}
+}
+
+// TestParseKeyDescription_RootOfTrustOnlyFromTEE verifies a rootOfTrust that appears only in the
+// software-enforced list is ignored: HasRootOfTrust stays false and the boot fields stay zero.
+func TestParseKeyDescription_RootOfTrustOnlyFromTEE(t *testing.T) {
+	ca := newFakeCA(t)
+	p := defaultParams()
+	p.rootInSoftwareOnly = true
+	chain, _ := ca.buildChain(t, p)
+	kd, err := ParseKeyDescription(chain[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kd.HasRootOfTrust {
+		t.Error("a softwareEnforced-only rootOfTrust must NOT set HasRootOfTrust")
+	}
+	if kd.VerifiedBootState != 0 || kd.DeviceLocked {
+		t.Errorf("boot fields must stay zero when no TEE rootOfTrust: boot=%d locked=%v", kd.VerifiedBootState, kd.DeviceLocked)
+	}
 }
 
 // TestVerifyRealRealmeT70Chain validates the REAL device chain when the fixture is committed (captured

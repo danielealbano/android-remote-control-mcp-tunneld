@@ -78,6 +78,8 @@ func TestVerifyNegativeMatrix(t *testing.T) {
 		{"wrong root", nil, true, ErrChainUntrusted},
 		{"software level", func(p *chainParams) { p.securityLevel = SecuritySoftware }, false, ErrSecurityLevel},
 		{"unverified boot", func(p *chainParams) { p.bootState = BootUnverified }, false, ErrBootState},
+		{"no rootOfTrust anywhere", func(p *chainParams) { p.noRootOfTrust = true }, false, ErrBootState},
+		{"rootOfTrust only in software", func(p *chainParams) { p.rootInSoftwareOnly = true }, false, ErrBootState},
 		{"device unlocked", func(p *chainParams) { p.deviceLocked = false }, false, ErrDeviceUnlocked},
 		{"broken signature", func(p *chainParams) { p.breakSignature = true }, false, ErrChainUntrusted},
 		{"tampered extension", func(p *chainParams) { p.tamperExtension = true }, false, ErrChainUntrusted},
