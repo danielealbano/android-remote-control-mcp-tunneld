@@ -48,6 +48,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	cfg.TunnelDomain = strings.ToLower(cfg.TunnelDomain)
 	cfg.EnrollHost = strings.ToLower(cfg.EnrollHost)
 	cfg.ControlHost = strings.ToLower(cfg.ControlHost)
+	// The name prefix feeds BOTH name generation and validNameFunc; lowercase it once so a generated CN
+	// matches the lowercased SNI at the edge (an uppercase prefix would otherwise no-route every tunnel).
+	cfg.NamePrefix = strings.ToLower(cfg.NamePrefix)
 
 	redisOpts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
@@ -145,8 +148,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		OnIssue: issueFunc(enrollSvc),
 	})
 
-	// Mesh cert (hot-swappable) + client + listener.
-	meshCert := newMeshCertHolder(caObj, nodeID, cfg.MeshCertTTL, logger)
+	// Mesh cert (hot-swappable) + client + listener. A failed initial mint is fatal — :9443 must never
+	// bind without a servable cert.
+	meshCert, err := newMeshCertHolder(caObj, nodeID, cfg.MeshCertTTL, logger)
+	if err != nil {
+		return err
+	}
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
 	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout})
 
@@ -210,6 +217,14 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		_ = rawLn.Close() // never leak a bound listener on a construction error
 		return fmt.Errorf("mesh listen %s: %w", cfg.MeshListen, err)
 	}
+	// The internal (metrics/healthz/admin) listener binds HERE too — a bind failure must be fatal, not a
+	// silent Warn that leaves health checking and metrics dead forever.
+	internalLn, err := net.Listen("tcp", cfg.InternalListen)
+	if err != nil {
+		_ = rawLn.Close()
+		_ = meshLn.Close()
+		return fmt.Errorf("internal listen %s: %w", cfg.InternalListen, err)
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -227,7 +242,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error {
 		return serveTLS(gctx, meshSrv, tls.NewListener(meshLn, meshSrv.TLSConfig), logger, "mesh")
 	})
-	g.Go(func() error { return serveInternal(gctx, internalSrv, logger) })
+	g.Go(func() error { return serveTLS(gctx, internalSrv, internalLn, logger, "internal") })
 
 	// Edge accept loop.
 	g.Go(func() error { ed.Serve(gctx, rawLn); return nil })
@@ -246,7 +261,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
 	g.Go(func() error { return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, cfg.RouteTTL, logger) })
-	g.Go(func() error { meshCert.rotateLoop(gctx, caObj); return nil })
+	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
 	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
 	g.Go(func() error {
 		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, nonce: challengeFunc(enrollSvc), logger: logger}

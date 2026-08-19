@@ -21,23 +21,17 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-// serveTLS runs srv on ln until ctx is cancelled, then closes the listener. The listener is already a
-// tls.Listener (and, for HTTP/2 servers, http2.ConfigureServer was applied at the call site).
+// serveTLS runs srv on ln until ctx is cancelled, then closes the listener. ln is a tls.Listener for the
+// TLS servers (enroll/control/mesh — http2.ConfigureServer was applied at the call site), or the plain
+// internal (metrics/healthz/admin) listener. A non-shutdown Serve error is returned so the errgroup
+// cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
+// normal drain signals and stay non-fatal (the drain's srv.Shutdown bounds in-flight requests).
 func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger, which string) error {
 	go func() { <-ctx.Done(); _ = ln.Close() }()
 	err := srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("listener exited", "which", which, "err", err)
-	}
-	return nil
-}
-
-// serveInternal runs the internal (metrics/healthz/admin) listener until ctx is cancelled.
-func serveInternal(ctx context.Context, srv *http.Server, logger *slog.Logger) error {
-	go func() { <-ctx.Done(); _ = srv.Close() }()
-	err := srv.ListenAndServe()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Warn("internal listener exited", "err", err)
+		return err
 	}
 	return nil
 }

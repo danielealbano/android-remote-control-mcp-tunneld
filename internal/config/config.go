@@ -138,6 +138,23 @@ func (c ServeCmd) Validate() error {
 	if len(c.NamePrefix)+c.NameLength > 63 {
 		return fmt.Errorf("--name-prefix + --name-length must be ≤ 63 (DNS label limit), got %d", len(c.NamePrefix)+c.NameLength)
 	}
+	// The prefix is lowercased at runtime (server.Run) so it matches the lowercased SNI at the edge; a
+	// non-DNS-label character would otherwise fail late at ACME issuance. Validate case-insensitively.
+	for _, r := range strings.ToLower(c.NamePrefix) {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("--name-prefix must be [a-z0-9-] only, got %q", c.NamePrefix)
+		}
+	}
+	if strings.HasPrefix(c.NamePrefix, "-") {
+		return fmt.Errorf("--name-prefix must not start with '-', got %q", c.NamePrefix)
+	}
+	for _, a := range []struct{ name, v string }{
+		{"--listen", c.Listen}, {"--mesh-listen", c.MeshListen}, {"--internal-listen", c.InternalListen},
+	} {
+		if _, _, err := net.SplitHostPort(a.v); err != nil {
+			return fmt.Errorf("%s must be host:port or :port, got %q: %w", a.name, a.v, err)
+		}
+	}
 	if err := checkReadable("--ca-cert", c.CACert); err != nil {
 		return err
 	}
@@ -155,6 +172,9 @@ func (c ServeCmd) Validate() error {
 	}
 	if c.ControlHost == "" || !strings.Contains(c.ControlHost, ".") {
 		return fmt.Errorf("--control-host must be a dotted host, got %q", c.ControlHost)
+	}
+	if strings.EqualFold(c.EnrollHost, c.ControlHost) {
+		return fmt.Errorf("--enroll-host and --control-host must differ (SNI dispatch would hide the control plane), both %q", c.EnrollHost)
 	}
 	if _, err := redis.ParseURL(c.RedisURL); err != nil {
 		return fmt.Errorf("--redis-url is not parseable: %w", err)

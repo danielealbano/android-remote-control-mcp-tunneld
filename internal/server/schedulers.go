@@ -42,32 +42,45 @@ func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger
 	return attest.NewVerifier(roots, status, signers, cfg.AttestStatusMaxStale), roots, status, signers, nil
 }
 
+// meshRotateRetry is the short backoff between a FAILED mesh-cert rotation and the next attempt (so a
+// transient CA-signing blip does not leave a dead :9443 until the next 2/3-TTL tick).
+const meshRotateRetry = 5 * time.Minute
+
+// meshSigner mints one mesh-role cert/key PEM pair (default ca.CA.SignMesh; a seam so tests can drive a
+// mint failure / rotation retry without a real signing failure).
+type meshSigner func(nodeID string, ttl time.Duration) (certPEM, keyPEM []byte, err error)
+
 // meshCertHolder holds this node's hot-swappable mesh-role cert, re-minted before --mesh-cert-ttl.
 type meshCertHolder struct {
 	nodeID string
 	ttl    time.Duration
 	logger *slog.Logger
+	sign   meshSigner
 	cur    atomic.Pointer[tls.Certificate]
+	after  func(time.Duration) <-chan time.Time // seam: default time.After; overridden in tests
 }
 
-func newMeshCertHolder(caObj *ca.CA, nodeID string, ttl time.Duration, logger *slog.Logger) *meshCertHolder {
-	h := &meshCertHolder{nodeID: nodeID, ttl: ttl, logger: logger}
-	h.mint(caObj)
-	return h
+// newMeshCertHolder mints the first mesh cert; a failure is FATAL — the caller must not bind :9443 with
+// no servable cert (docs/ARCHITECTURE.md §1: a socket is never bound while it cannot be served).
+func newMeshCertHolder(caObj *ca.CA, nodeID string, ttl time.Duration, logger *slog.Logger) (*meshCertHolder, error) {
+	h := &meshCertHolder{nodeID: nodeID, ttl: ttl, logger: logger, sign: caObj.SignMesh, after: time.After}
+	if err := h.mint(); err != nil {
+		return nil, fmt.Errorf("mesh cert initial mint: %w", err)
+	}
+	return h, nil
 }
 
-func (h *meshCertHolder) mint(caObj *ca.CA) {
-	certPEM, keyPEM, err := caObj.SignMesh(h.nodeID, h.ttl)
+func (h *meshCertHolder) mint() error {
+	certPEM, keyPEM, err := h.sign(h.nodeID, h.ttl)
 	if err != nil {
-		h.logger.Warn("mesh cert mint failed", "err", err)
-		return
+		return err
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		h.logger.Warn("mesh cert parse failed", "err", err)
-		return
+		return err
 	}
 	h.cur.Store(&cert)
+	return nil
 }
 
 // getCert is the mesh listener's tls.Config.GetCertificate.
@@ -128,19 +141,25 @@ func meshVerifyConnection(roots *x509.CertPool) func(tls.ConnectionState) error 
 }
 
 // rotateLoop re-mints the mesh cert at 2/3 of its TTL so a fresh cert is always available before expiry.
-func (h *meshCertHolder) rotateLoop(ctx context.Context, caObj *ca.CA) {
+// A FAILED rotation retries after meshRotateRetry (not a full interval), so a transient signing blip does
+// not leave the current cert to expire.
+func (h *meshCertHolder) rotateLoop(ctx context.Context) {
 	interval := h.ttl * 2 / 3
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	d := interval
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			h.mint(caObj)
+		case <-h.after(d):
+		}
+		if err := h.mint(); err != nil {
+			h.logger.Warn("mesh cert rotation failed (retrying on backoff)", "err", err)
+			d = meshRotateRetry
+		} else {
+			d = interval
 		}
 	}
 }
