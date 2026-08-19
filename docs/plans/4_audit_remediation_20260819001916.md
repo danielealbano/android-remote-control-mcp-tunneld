@@ -1703,7 +1703,7 @@ Acceptance criteria:
   await Run's return while the pre-existing `t.Cleanup` remains safe (the second `drain` is a no-op
   returning the recorded result). No production code changed.
 
-- **Task 9.4 (`internal/server/us9_integration_test.go`) — hang-listener `release()` fast-fail.** The
+- **Task 9.4 (`internal/server/drain_startup_integration_test.go`) — hang-listener `release()` fast-fail.** The
   plan specifies an "accept-and-hang" ACME listener for `TestIntegration_StartupBindsAfterConstruction`.
   lego's directory fetch at client construction does not honor context cancellation (verified: lego
   v4.35.2 `lego/client_config.go` `createDefaultHTTPClient` builds an `http.Client` with fixed

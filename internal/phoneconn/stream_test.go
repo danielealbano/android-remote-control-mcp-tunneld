@@ -21,7 +21,7 @@ func (b *blockingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestHTTPDataStream_CloseUnblocksBlockedWrite covers C-1: a Write blocked inside the response writer
+// TestHTTPDataStream_CloseUnblocksBlockedWrite proves that a Write blocked inside the response writer
 // (holding d.mu) must be released by Close via the unblock hook, so Close does not deadlock on the mutex.
 func TestHTTPDataStream_CloseUnblocksBlockedWrite(t *testing.T) {
 	bw := &blockingWriter{entered: make(chan struct{}), release: make(chan struct{})}

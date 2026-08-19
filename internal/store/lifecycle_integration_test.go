@@ -17,8 +17,9 @@ import (
 
 // TestEnsureLifecycles_MergePreservesForeignRules verifies against a real MinIO backend that a boot-time
 // EnsureLifecycles UPSERTS tunneld's two rules while PRESERVING an operator-added rule, and that a second
-// run is idempotent (no duplication). It also confirms the NoSuchLifecycleConfiguration error code the
-// merge relies on is the one the backend actually returns (an empty bucket exercises that path first).
+// run is idempotent (no duplication). The FIRST call runs against a bucket with NO lifecycle
+// configuration, confirming the NoSuchLifecycleConfiguration error code the merge relies on is the one
+// the backend actually returns; an operator override (replacing the whole config) is then merged back.
 func TestEnsureLifecycles_MergePreservesForeignRules(t *testing.T) {
 	s3URL, access, secret := tunneltest.StartMinIO(t)
 	const bucket = "tunneld-lifecycle"
@@ -32,7 +33,22 @@ func TestEnsureLifecycles_MergePreservesForeignRules(t *testing.T) {
 		UsePathStyle: true,
 	})
 
-	// Seed an operator-added rule the boot-time provisioning must NOT delete.
+	st, err := store.NewS3Store(ctx, store.S3Config{
+		Endpoint: s3URL, Region: "us-east-1", Bucket: bucket, AccessKey: access, SecretKey: secret, ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First run on a lifecycle-less bucket: exercises the NoSuchLifecycleConfiguration branch for real
+	// and lands exactly the two tunneld rules.
+	if err := st.EnsureLifecycles(ctx, 90, 30); err != nil {
+		t.Fatalf("first EnsureLifecycles (empty bucket): %v", err)
+	}
+	assertLifecycleRules(t, raw, bucket, map[string]int32{"tunnel-logs-expire": 90, "rejected-enroll-expire": 30})
+
+	// An operator override replaces the WHOLE configuration with their single rule (the destructive
+	// pattern the merge must survive): the next boot must merge tunneld's rules back while keeping it.
 	if _, err := raw.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 		LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: []types.LifecycleRule{{
@@ -45,23 +61,16 @@ func TestEnsureLifecycles_MergePreservesForeignRules(t *testing.T) {
 		t.Fatalf("seed operator rule: %v", err)
 	}
 
-	st, err := store.NewS3Store(ctx, store.S3Config{
-		Endpoint: s3URL, Region: "us-east-1", Bucket: bucket, AccessKey: access, SecretKey: secret, ForcePathStyle: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	want := map[string]int32{"operator-archive": 7, "tunnel-logs-expire": 90, "rejected-enroll-expire": 30}
 
 	if err := st.EnsureLifecycles(ctx, 90, 30); err != nil {
-		t.Fatalf("first EnsureLifecycles: %v", err)
+		t.Fatalf("second EnsureLifecycles (merge): %v", err)
 	}
 	assertLifecycleRules(t, raw, bucket, want)
 
-	// A second run is idempotent: still exactly those three rules (operator rule intact, no duplication).
+	// A third run is idempotent: still exactly those three rules (operator rule intact, no duplication).
 	if err := st.EnsureLifecycles(ctx, 90, 30); err != nil {
-		t.Fatalf("second EnsureLifecycles: %v", err)
+		t.Fatalf("third EnsureLifecycles: %v", err)
 	}
 	assertLifecycleRules(t, raw, bucket, want)
 }

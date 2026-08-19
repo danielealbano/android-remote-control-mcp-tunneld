@@ -27,7 +27,7 @@ import (
 
 // TestIntegration_DrainWritesShutdownEndEvents holds a LIVE public splice open across a server drain and
 // asserts its close_reason=server-shutdown end event lands in MinIO — the ordered drain (join public
-// handlers → flush the async conn-log queue) must not lose it (W-2).
+// handlers → flush the async conn-log queue) must not lose it.
 func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	env := startIntegrationServer(t)
 	ctx := context.Background()
@@ -99,7 +99,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 
 // TestIntegration_MeshListenFailureClosesRawListener pre-occupies the mesh port so the mesh bind (the last
 // construction step) fails, and asserts Run errors AND the raw :443 listener was closed on that error, so
-// cfg.Listen is immediately rebindable (I-2 — no leaked bound-but-unserved socket).
+// cfg.Listen is immediately rebindable (no leaked bound-but-unserved socket).
 func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	redisURL := tunneltest.StartValkey(t)
 	s3URL, access, secret := tunneltest.StartMinIO(t)
@@ -149,7 +149,7 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 
 // TestIntegration_StartupBindsAfterConstruction points all three ACME directory URLs at an in-process
 // accept-and-hang listener, so the reserved-cert obtain (a construction step) blocks. A dial to :443 at
-// +500 ms MUST be connection-refused (nothing bound while construction is in flight, W-1); cancelling +
+// +500 ms MUST be connection-refused (nothing bound while construction is in flight); cancelling +
 // releasing the hang then lets construction finish and Run return.
 func TestIntegration_StartupBindsAfterConstruction(t *testing.T) {
 	redisURL := tunneltest.StartValkey(t)

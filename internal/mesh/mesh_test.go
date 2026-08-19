@@ -337,7 +337,7 @@ func (b *meshBlockingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestOwnerStream_CloseUnblocksBlockedWrite covers C-1 on the mesh owner side: a Write blocked inside the
+// TestOwnerStream_CloseUnblocksBlockedWrite proves, on the mesh owner side, that a Write blocked inside the
 // response writer (holding o.mu) must be released by Close via the unblock hook, so Close never deadlocks.
 func TestOwnerStream_CloseUnblocksBlockedWrite(t *testing.T) {
 	bw := &meshBlockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
@@ -372,7 +372,7 @@ func TestOwnerStream_CloseUnblocksBlockedWrite(t *testing.T) {
 	}
 }
 
-// TestClient_ReapSkipsActivePools covers W-11: a pool that is idle by lastUse but still carries an active
+// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an active
 // stream (active>0) survives the reaper, and is reaped on the first tick after the stream closes.
 func TestClient_ReapSkipsActivePools(t *testing.T) {
 	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1)
@@ -406,7 +406,7 @@ func TestClient_ReapSkipsActivePools(t *testing.T) {
 	t.Fatal("an idle pool must be reaped once its active streams close")
 }
 
-// TestClient_OpenStreamErrorDecrementsActive covers W-11: a failed OpenStream must not leak the active
+// TestClient_OpenStreamErrorDecrementsActive proves a failed OpenStream must not leak the active
 // count it took in pool(), or the pool would never be reaped.
 func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
 	c := NewClient(func() *tls.Config {

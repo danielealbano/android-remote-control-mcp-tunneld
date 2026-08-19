@@ -380,7 +380,7 @@ func (s *closeableStream) Write(p []byte) (int, error) { return len(p), nil }
 func (s *closeableStream) Close() error                { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
 func (s *closeableStream) isClosed() bool              { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }
 
-// TestManager_Teardown_StopsHeartbeatBeforeUnbind covers W-7: teardown cancels the conn and waits for
+// TestManager_Teardown_StopsHeartbeatBeforeUnbind proves teardown cancels the conn and waits for
 // the heartbeat loop (incl. any in-flight self-heal) to exit BEFORE unbinding, so no Heartbeat or
 // self-heal rebind can run after the Unbind.
 func TestManager_Teardown_StopsHeartbeatBeforeUnbind(t *testing.T) {
@@ -429,7 +429,7 @@ func TestManager_Teardown_StopsHeartbeatBeforeUnbind(t *testing.T) {
 	}
 }
 
-// TestManager_ConcurrentSameNameBind_LocalMatchesValkey covers W-8: two concurrent registers for one
+// TestManager_ConcurrentSameNameBind_LocalMatchesValkey proves two concurrent registers for one
 // name (backed by a real miniredis registry) are serialized by the striped bind lock, so the conn left
 // in the local map is always the one whose connID Valkey holds.
 func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
@@ -471,7 +471,7 @@ func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 	}
 }
 
-// TestHeartbeatLoop_TinyRouteTTLNoPanic covers I-4: a pathological --route-ttl (routeTTL/3 == 0) must
+// TestHeartbeatLoop_TinyRouteTTLNoPanic proves a pathological --route-ttl (routeTTL/3 == 0) must
 // not panic time.NewTicker; the floor guard substitutes a 1s interval.
 func TestHeartbeatLoop_TinyRouteTTLNoPanic(t *testing.T) {
 	m, _, _, _ := newMgr(t)

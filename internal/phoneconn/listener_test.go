@@ -339,7 +339,7 @@ func TestHeartbeatMissingSelfHeals(t *testing.T) {
 	t.Fatal("a missing route must be self-healed by the heartbeat loop")
 }
 
-// TestServeControl_BindFailureStatuses covers I-3: a fingerprint conflict answers 409, any other
+// TestServeControl_BindFailureStatuses proves a fingerprint conflict answers 409, any other
 // (transient) bind failure answers 503 retryable.
 func TestServeControl_BindFailureStatuses(t *testing.T) {
 	tests := []struct {
@@ -368,7 +368,7 @@ func TestServeControl_BindFailureStatuses(t *testing.T) {
 	}
 }
 
-// TestServeControl_CertExpiryCloses covers I-5: a bound phone whose identity cert has passed NotAfter is
+// TestServeControl_CertExpiryCloses proves a bound phone whose identity cert has passed NotAfter is
 // closed cert-expired on the ping tick (the CA's exposure bound enforced live, not only at reconnect).
 func TestServeControl_CertExpiryCloses(t *testing.T) {
 	m, _, st, _ := newMgr(t)
