@@ -69,8 +69,10 @@ func TestWatcher_TornReadNeverGoesLive(t *testing.T) {
 	}
 }
 
-// TestWatcher_SingleLoadNoDoubleExpansion verifies Initial loads exactly once and an UNCHANGED tick is a
-// no-op (no re-commit / re-expansion) — the double-load that used to happen at startup is gone.
+// TestWatcher_SingleLoadNoDoubleExpansion verifies that after Initial(), an UNCHANGED tick does NOT
+// rebuild/re-commit/re-expand: it fires no reload callback AND leaves the live snapshot pointer exactly
+// as Initial() set it (a re-commit — the double-expansion this guards against — would swap the pointer).
+// (The removal of the separate startup pre-load in server.Run is covered by the integration tier.)
 func TestWatcher_SingleLoadNoDoubleExpansion(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
@@ -79,8 +81,12 @@ func TestWatcher_SingleLoadNoDoubleExpansion(t *testing.T) {
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
 	w := NewWatcher(e, []string{f}, "", 0, discardLog())
 	w.Initial()
-	w.tick(cb) // no change since Initial → must not reload
+	snapAfterInitial := e.current.Load() // the single startup load's snapshot
+	w.tick(cb)                           // no change since Initial → must not rebuild/re-commit/reload
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("an unchanged tick after Initial must not reload, got %d", reloads)
+	}
+	if e.current.Load() != snapAfterInitial {
+		t.Error("an unchanged tick must NOT swap in a new snapshot (no re-load / re-expansion)")
 	}
 }
