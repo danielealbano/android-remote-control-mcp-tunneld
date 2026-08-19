@@ -75,13 +75,13 @@ func LogKey(ev Event) string {
 		ev.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), conn8, ev.Event)
 }
 
-// NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
-// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision;
-// pending-stream duplicate refusal) — a collision is detected and retried, never silent.
 // connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure
 // path that exercises MustConnID's fallback. Production always uses crypto/rand.
 var connIDRand = rand.Read
 
+// NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
+// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision;
+// pending-stream duplicate refusal) — a collision is detected and retried, never silent.
 func NewConnID() (string, error) {
 	var buf [4]byte
 	if _, err := connIDRand(buf[:]); err != nil {

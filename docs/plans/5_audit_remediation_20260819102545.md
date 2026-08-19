@@ -1482,3 +1482,14 @@ EVERYTHING from the ground up.
   `connIDRand` package var (defaulting to `crypto/rand.Read`) so a white-box test
   (`event_internal_test.go`) can force the rand-failure path and assert the non-empty `"00000000"`
   fallback — the planned `TestNewConnIDFallback_NonEmpty` alone could not reach that branch.
+- **Task 1.3 tests — three RoT tests folded into the negative matrix.** The planned
+  `TestVerify_NoRootOfTrustAnywhere_Fails`, `TestVerify_RootOfTrustOnlyInSoftware_Fails`, and
+  `TestVerify_TEERootOfTrust_StillPasses` were folded into two new `TestVerifyNegativeMatrix` rows
+  ("no rootOfTrust anywhere" and "rootOfTrust only in software", both asserting `ErrBootState`) plus the
+  existing `TestVerifyRealisticChainPasses` (whose default fixture places rootOfTrust in `teeEnforced`) —
+  reusing the established table-driven matrix rather than adding standalone duplicates. The scenarios are
+  fully covered; only the standalone `TestParseKeyDescription_RootOfTrustOnlyFromTEE` was added by name.
+- **Task 3.6 test — `TestWatcher_VanishAfterInitialIsRefused` folded.** Its scenario (a file present at
+  `Initial()` then removed → refused on tick, bans kept, Error logged) is exercised by the migrated
+  `TestWatcher_VanishedFileKeepsSnapshot`; a separate identically-scoped test would duplicate it (US12
+  forbids duplicates), so it was not added under that name.
