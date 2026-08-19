@@ -75,7 +75,7 @@ func TestBridgeAdapter_TranslatesDuplicateStreamID(t *testing.T) {
 	}
 }
 
-// TestBridgeCopyReturnsPromptlyOnPhoneEOF is the W-001 regression: when the phone side (ds) EOFs while
+// TestBridgeCopyReturnsPromptlyOnPhoneEOF proves that when the phone side (ds) EOFs while
 // the mesh client read blocks forever, bridgeCopy must return promptly (via ds.Close/client.Close),
 // NOT stall waiting for the client→phone copy to unblock.
 func TestBridgeCopyReturnsPromptlyOnPhoneEOF(t *testing.T) {
