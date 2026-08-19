@@ -47,29 +47,24 @@ func NewRootSet(ctx context.Context, url string, client *http.Client, logger *sl
 // Pool returns the current root pool (lock-free).
 func (r *RootSet) Pool() *x509.CertPool { return r.pool.Load() }
 
-// rootResponse is the published root-set JSON: an array of PEM certificate strings.
-type rootResponse struct {
-	Roots []string `json:"roots"`
-}
-
 func (r *RootSet) fetch(ctx context.Context) (*x509.CertPool, error) {
 	body, err := httpGet(ctx, r.client, r.url)
 	if err != nil {
 		return nil, fmt.Errorf("attest: fetch roots: %w", err)
 	}
-	pool := x509.NewCertPool()
-	// Accept either a JSON {"roots":[pem,...]} document or a raw concatenated PEM bundle.
-	var rr rootResponse
-	if json.Unmarshal(body, &rr) == nil && len(rr.Roots) > 0 {
-		for _, p := range rr.Roots {
-			if !pool.AppendCertsFromPEM([]byte(p)) {
-				return nil, fmt.Errorf("attest: root PEM parse failed")
-			}
-		}
-		return pool, nil
+	// Google's attestation root endpoint publishes a JSON array of PEM certificate strings.
+	var pems []string
+	if err := json.Unmarshal(body, &pems); err != nil {
+		return nil, fmt.Errorf("attest: parse root bundle: %w", err)
 	}
-	if !pool.AppendCertsFromPEM(body) {
-		return nil, fmt.Errorf("attest: root bundle parse failed")
+	if len(pems) == 0 {
+		return nil, fmt.Errorf("attest: root bundle is empty")
+	}
+	pool := x509.NewCertPool()
+	for _, p := range pems {
+		if !pool.AppendCertsFromPEM([]byte(p)) {
+			return nil, fmt.Errorf("attest: root PEM parse failed")
+		}
 	}
 	return pool, nil
 }
