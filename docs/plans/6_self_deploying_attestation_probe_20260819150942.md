@@ -85,7 +85,7 @@ nonce and writes the chain where the e2e test can read it.
   ```
 - [x] Create `support/attest-probe/gradle.properties`:
   ```properties
-  org.gradle.jvmargs=-Xmx1536m
+  org.gradle.jvmargs=-Xmx1536m -Dfile.encoding=UTF-8
   android.useAndroidX=false
   kotlin.code.style=official
   ```
@@ -457,3 +457,6 @@ root at all (fail-closed → no attestation ever verifies). Parse ONLY the real 
 - **US3 — adb remote-command quoting.** The `run-as sh -c <script>` calls send the whole remote command
   to `exec-out` as ONE pre-quoted argument (helper `adbRunAs`), because adb splits multiple args on
   spaces and corrupted the multi-word script (`rm`/status/`cat`).
+- **Task 1.1 — gradle.properties `-Dfile.encoding=UTF-8`.** `org.gradle.jvmargs` carries an explicit
+  `-Dfile.encoding=UTF-8` (matching the local companion app) for build reproducibility across locales,
+  beyond the plan action's `-Xmx1536m` alone.
