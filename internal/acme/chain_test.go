@@ -38,7 +38,7 @@ func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *li
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	lim := limit.NewLimiter(rdb, 1, 1, 1)
+	lim := limit.NewLimiter(rdb, 1, 1, 1, time.Hour)
 	lim.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	cfg.Limiter = lim
 	if cfg.CooldownDefault == 0 {
@@ -220,8 +220,9 @@ func TestObtainSelfSelfCert(t *testing.T) {
 	if info.CA != CAGTS || le.calls != 0 {
 		t.Fatalf("a cooling LE must be skipped for the self cert, got CA=%s leCalls=%d", info.CA, le.calls)
 	}
-	// The per-tunnel issuance counter is untouched (it is keyed on tunnel names in enroll, not here).
-	if ok, _ := lim.IssuanceAllowed(context.Background(), "enroll.example.test", 1); !ok {
+	// The per-tunnel issuance counter is untouched (it is keyed on tunnel names in enroll, not here): a
+	// fresh Begin against cap 1 still admits, which it could not if ObtainSelf had committed a success.
+	if ok, _, _ := lim.IssuanceBegin(context.Background(), "enroll.example.test", 1); !ok {
 		t.Fatal("ObtainSelf must not consume the per-tunnel issuance counter")
 	}
 }

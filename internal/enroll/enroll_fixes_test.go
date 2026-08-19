@@ -410,3 +410,60 @@ func TestIssueRejectsExtraIdentifiers(t *testing.T) {
 		t.Fatalf("the exact CSR must still issue: %v", ee)
 	}
 }
+
+// blockingIssuer blocks in Obtain until proceed is closed, so a test can hold one Issue in-flight (its
+// issuance slot reserved) while a second concurrent Issue runs against the same name.
+type blockingIssuer struct {
+	entered chan struct{}
+	proceed chan struct{}
+}
+
+func (b *blockingIssuer) Obtain(_ context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	b.entered <- struct{}{}
+	<-b.proceed
+	return []byte("PUBLIC-CERT-PEM"), store.CertInfo{CA: "letsencrypt", Serial: "01", NotBefore: time.Now(), NotAfter: time.Now().Add(160 * time.Hour)}, nil
+}
+
+func (b *blockingIssuer) Renew(_ context.Context, _ *x509.CertificateRequest, _ string, _ store.CertInfo) ([]byte, store.CertInfo, error) {
+	return nil, store.CertInfo{}, errors.New("renew not expected")
+}
+
+// TestIssue_ConcurrentCallsRespectCap: with cap 1, a first Issue holds its in-flight issuance slot while
+// a concurrent second Issue for the same name is refused with issuance_cap.
+func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	iss := &blockingIssuer{entered: make(chan struct{}, 1), proceed: make(chan struct{})}
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: iss, IssuePerWeek: 1,
+	})
+	name := doEnroll(t, svc, idCSR)
+	tlsCSR := newTLSCSR(t, name+".example.test")
+
+	type outcome struct {
+		res Result
+		err *Error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		r, e := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+			Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
+		})
+		done <- outcome{r, e}
+	}()
+	<-iss.entered // the first Issue holds its in-flight slot and is now inside Obtain
+
+	// A concurrent second Issue for the same name must be refused by the in-flight cap.
+	_, e2 := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
+	})
+	if e2 == nil || e2.Reason != "issuance_cap" {
+		t.Fatalf("a concurrent second issue must hit issuance_cap, got %v", e2)
+	}
+
+	close(iss.proceed) // let the first Issue finish
+	if got := <-done; got.err != nil {
+		t.Fatalf("the first issue must succeed: %v", got.err)
+	}
+}

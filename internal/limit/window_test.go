@@ -81,7 +81,7 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 	if _, _, err := Allow(ctx, rdb, "enroll-min", testIP, 2, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewLimiter(rdb, 0, 0, 0).AcquireStream(ctx, "tunnel-x", 4); err != nil {
+	if _, err := NewLimiter(rdb, 0, 0, 0, time.Hour).AcquireStream(ctx, "tunnel-x", 4); err != nil {
 		t.Fatal(err)
 	}
 	keys := mr.Keys()
