@@ -1,0 +1,2 @@
+# Debug signing-cert SHA-256 for the attest-probe APK (regenerate via 'make attest-probe').
+c8f495ab1d840d63e67c7c94e7151ae137a79db14f71c5202d174664e3cd7c0a
