@@ -17,3 +17,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # Docker Compose is a distinct ecosystem from "docker" — this covers the pinned images in
+  # deploy/docker-compose.yml (valkey, minio, prometheus, grafana, ntfy, …).
+  - package-ecosystem: "docker-compose"
+    directory: "/deploy"
+    schedule:
+      interval: "weekly"
