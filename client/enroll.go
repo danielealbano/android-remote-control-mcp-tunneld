@@ -123,13 +123,16 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)})
+	body, _ := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)}) // string-only fields cannot fail
 	resp, err := post(ctx, hc, "https://"+enrollHost+"/enroll", body)
 	if err != nil {
 		return nil, err
 	}
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("enroll: read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		var er errorResponse
 		_ = json.Unmarshal(raw, &er)
@@ -150,7 +153,15 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert })
 	defer mtlsTr.CloseIdleConnections()
 	mtls := &http.Client{Transport: mtlsTr}
-	return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", er.IssueNonce)
+	id, err := issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", er.IssueNonce)
+	if err != nil {
+		// Preserve the Phase-1 bootstrap identity (name + identity cert + key, no public cert yet) so the
+		// caller can execute the documented retry path (fresh nonce → Renew over the SAME mTLS identity)
+		// WITHOUT re-enrolling — re-enrolling would orphan this name in the registry (PROTOCOL §2: the name
+		// is never rolled back). See docs/PROTOCOL.md §3.
+		return bootIdent, err
+	}
+	return id, nil
 }
 
 // issueCerts performs the mTLS POST /issue exchange over hc: it generates a FRESH identity + TLS keypair,
@@ -178,7 +189,7 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(issueRequestBody{
+	body, _ := json.Marshal(issueRequestBody{ // string-only fields cannot fail
 		Nonce: nonceHex, AttestChainPEM: string(attest), IdentityCSR: string(idCSR), TLSCSR: string(tlsCSR),
 	})
 	resp, err := post(ctx, hc, "https://"+controlHost+"/issue", body)
@@ -186,7 +197,10 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("issue: read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		var er errorResponse
 		_ = json.Unmarshal(raw, &er)
@@ -221,13 +235,19 @@ func tlsCSRForTunnel(key *ecdsa.PrivateKey, name, tunnelDomain string) ([]byte, 
 }
 
 func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+enrollHost+"/enroll/nonce", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+enrollHost+"/enroll/nonce", nil)
+	if err != nil {
+		return "", err
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return "", fmt.Errorf("enroll: read nonce response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("enroll: nonce status %d", resp.StatusCode)
 	}
