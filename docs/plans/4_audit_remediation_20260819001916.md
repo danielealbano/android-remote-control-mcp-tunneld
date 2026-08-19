@@ -1215,18 +1215,18 @@ func isNoLifecycle(err error) bool {
 
 ---
 
-## [ ] US9 — Server assembly: construct-then-bind, atomic persist, ordered drain (W-1, W-2, W-4, I-2, I-7, I-8)
+## [x] US9 — Server assembly: construct-then-bind, atomic persist, ordered drain (W-1, W-2, W-4, I-2, I-7, I-8)
 
 Acceptance criteria:
-- [ ] `:443` and `:9443` are bound only after ALL construction (reserved-cert issuance included) completes; nothing is ever bound-but-unserved.
-- [ ] Shutdown: close listeners → close phones → drain HTTP → join public handlers → drain the conn-log queue → final admin flush + caplog flush → deregister.
-- [ ] The reserved-cert cache persists atomically (single-file bundle + rename); a legacy triple-file cache still loads.
-- [ ] Construction error paths close any already-bound listener.
-- [ ] An admin flush error re-accumulates the delta; pending caplog summaries flush at shutdown.
+- [x] `:443` and `:9443` are bound only after ALL construction (reserved-cert issuance included) completes; nothing is ever bound-but-unserved.
+- [x] Shutdown: close listeners → close phones → drain HTTP → join public handlers → drain the conn-log queue → final admin flush + caplog flush → deregister.
+- [x] The reserved-cert cache persists atomically (single-file bundle + rename); a legacy triple-file cache still loads.
+- [x] Construction error paths close any already-bound listener.
+- [x] An admin flush error re-accumulates the delta; pending caplog summaries flush at shutdown.
 
-### [ ] Task 9.1 — W-1: bind last
+### [x] Task 9.1 — W-1: bind last
 
-- [ ] Action: modify `internal/server/server.go` `Run` — move BOTH `net.Listen` calls (raw + mesh) to
+- [x] Action: modify `internal/server/server.go` `Run` — move BOTH `net.Listen` calls (raw + mesh) to
   AFTER `newReservedCerts` and all other construction, immediately before the errgroup block. The edge
   is constructed from a resolved static address instead of the live listener:
 
@@ -1252,12 +1252,12 @@ if err != nil {
   The `http2.ConfigureServer` calls (fallible) run BEFORE the binds. Update the `newReservedCerts`
   doc comment ("NEVER blocks startup") to state the new truth: it runs BEFORE any listener binds, so a
   cold-start issuance delays readiness but never leaves a bound-unserved socket.
-- [ ] Definition of Done: between process start and the first `Accept`, no socket is bound while
+- [x] Definition of Done: between process start and the first `Accept`, no socket is bound while
   unserved; the integration suite's 120 s readiness allowance still passes.
 
-### [ ] Task 9.2 — W-4: atomic reserved-cert cache
+### [x] Task 9.2 — W-4: atomic reserved-cert cache
 
-- [ ] Action: modify `internal/server/reserved.go` — persist ONE atomic bundle; load prefers the
+- [x] Action: modify `internal/server/reserved.go` — persist ONE atomic bundle; load prefers the
   bundle, falls back to the legacy triple (upgrade path):
 
 ```go
@@ -1290,12 +1290,12 @@ func (rc *reservedCerts) persist(host string, certPEM, keyPEM []byte, info store
   `loadCached` reads `bundle.json` first (parse → `tls.X509KeyPair` → NotAfter fallback as today);
   when absent, it falls back to the existing `cert.pem`/`key.pem`/`meta.json` reads (legacy caches
   from before this change keep working; the next persist writes the bundle).
-- [ ] Definition of Done: kill-between-any-two-syscalls leaves either the old complete bundle or the
+- [x] Definition of Done: kill-between-any-two-syscalls leaves either the old complete bundle or the
   new complete bundle.
 
-### [ ] Task 9.3 — I-7/I-8: flush integrity + ordered drain
+### [x] Task 9.3 — I-7/I-8: flush integrity + ordered drain
 
-- [ ] Action: modify `internal/metrics/recorder.go`:
+- [x] Action: modify `internal/metrics/recorder.go`:
   - `flush` re-accumulates failed deltas:
 
 ```go
@@ -1327,7 +1327,7 @@ func (p *PromRecorder) FinalFlush() {
 // FlushCapLog emits any pending cap-hit summaries (shutdown).
 func (p *PromRecorder) FlushCapLog() { p.caplog.Flush() }
 ```
-- [ ] Action: modify `internal/server/server.go` — the shutdown sequence becomes:
+- [x] Action: modify `internal/server/server.go` — the shutdown sequence becomes:
 
 ```go
 sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
@@ -1348,10 +1348,10 @@ if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 }
 ```
 
-- [ ] Definition of Done: a drain with live public conns writes their `server-shutdown` end events
+- [x] Definition of Done: a drain with live public conns writes their `server-shutdown` end events
   before `Run` returns (integration-verified below).
 
-### [ ] Task 9.4 — US9 tests
+### [x] Task 9.4 — US9 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -1365,7 +1365,7 @@ if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 | `TestIntegration_MeshListenFailureClosesRawListener` (integration) | mesh port pre-occupied → `Run` errors AND `cfg.Listen` is immediately rebindable (rawLn closed) | I-2 |
 | `TestIntegration_StartupBindsAfterConstruction` (integration) | all three ACME directory URLs point at an in-process accept-and-hang listener; a `:443` dial probe 500 ms after `Run` starts MUST fail with connection-refused (construction still in flight, nothing bound); then cancel the ctx and require `Run` to return | race-free: the assertion window is the deliberately-hung construction, not the readiness edge |
 
-- [ ] Definition of Done: all US9 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: all US9 tests present and passing at the Stage-4 gates.
 
 ---
 
@@ -1692,3 +1692,23 @@ Acceptance criteria:
   now asserts the vanish-guard: the reload is refused and the previous bans stay enforced. The
   equal/older-mtime detection portion is unchanged. Required to keep the suite green under the mandated
   behaviour change.
+
+- **Task 9.4 (`internal/server/integration_test.go`) — shared integration-harness refactor for the US9
+  tests.** To implement the three mandated US9 integration tests without duplicating the large (and
+  fragile-to-validate) `ServeCmd` literal, the config construction in `startIntegrationServer` was
+  extracted verbatim into a new `itServeConfig(...)` builder (the ACME directory URLs, mesh address and
+  DNS resolvers are parameterized) that both `startIntegrationServer` and the new tests call — the values
+  are unchanged, so `TestIntegration_EnrollConnectRoundtrip` reuses the identical known-good config. Also
+  added an idempotent (`sync.Once`) `drain()` on `itEnv` so a shutdown-exercising test can trigger and
+  await Run's return while the pre-existing `t.Cleanup` remains safe (the second `drain` is a no-op
+  returning the recorded result). No production code changed.
+
+- **Task 9.4 (`internal/server/us9_integration_test.go`) — hang-listener `release()` fast-fail.** The
+  plan specifies an "accept-and-hang" ACME listener for `TestIntegration_StartupBindsAfterConstruction`.
+  lego's directory fetch at client construction does not honor context cancellation (verified: lego
+  v4.35.2 `lego/client_config.go` `createDefaultHTTPClient` builds an `http.Client` with fixed
+  `TLSHandshakeTimeout`/`Timeout`, no ctx seam), so a bare hang would leave `Run` blocked for up to
+  ~30 s per CA after cancel. `release()` therefore closes the held connections and the listener, which
+  makes the in-flight obtain fail immediately (EOF) and every subsequent CA attempt fail fast
+  (connection-refused), bounding the post-cancel return. The +500 ms connection-refused assertion — the
+  actual W-1 proof — is unchanged.

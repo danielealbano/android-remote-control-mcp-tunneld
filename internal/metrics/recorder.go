@@ -129,17 +129,15 @@ func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 	p.mu.Unlock()
 }
 
-// RunFlusher periodically drains the accumulated deltas into the admin.Store (a real async write
-// path). A final flush runs on ctx cancel.
+// RunFlusher periodically drains the accumulated deltas into the admin.Store (a real async write path).
+// On ctx cancel it returns WITHOUT a final flush: the ordered server drain calls FinalFlush AFTER every
+// producer has stopped, so no late delta is lost to a flush that races the still-running data plane.
 func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) error {
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.Background(), flushShutdownTimeout)
-			p.flush(fctx)
-			cancel()
 			return ctx.Err()
 		case <-ticker.C:
 			p.flush(ctx)
@@ -147,7 +145,20 @@ func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) erro
 	}
 }
 
-// flush swaps in a fresh empty map (so flushed names are dropped) and applies the deltas.
+// FinalFlush drains the accumulated deltas once, bounded by flushShutdownTimeout (called from the
+// ordered server drain AFTER every producer has stopped).
+func (p *PromRecorder) FinalFlush() {
+	ctx, cancel := context.WithTimeout(context.Background(), flushShutdownTimeout)
+	defer cancel()
+	p.flush(ctx)
+}
+
+// FlushCapLog emits any pending cap-hit summaries (shutdown).
+func (p *PromRecorder) FlushCapLog() { p.caplog.Flush() }
+
+// flush swaps in a fresh empty map (so flushed names are dropped) and applies the deltas. A failed Incr
+// re-accumulates its delta into the (new) map so the next flush retries it — a counter write is never
+// dropped on a transient admin.Store error.
 func (p *PromRecorder) flush(ctx context.Context) {
 	p.mu.Lock()
 	drained := p.agg
@@ -157,12 +168,14 @@ func (p *PromRecorder) flush(ctx context.Context) {
 	for name, e := range drained {
 		if e.bytesIn != 0 {
 			if err := p.admin.Incr(ctx, name, "bytes_in", e.bytesIn); err != nil {
-				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_in", "err", err)
+				p.accum(name, func(a *aggEntry) { a.bytesIn += e.bytesIn }) // retried next flush
+				p.log.Warn("admin counter flush failed (delta re-queued)", "tunnel", name, "field", "bytes_in", "err", err)
 			}
 		}
 		if e.bytesOut != 0 {
 			if err := p.admin.Incr(ctx, name, "bytes_out", e.bytesOut); err != nil {
-				p.log.Warn("admin counter flush failed", "tunnel", name, "field", "bytes_out", "err", err)
+				p.accum(name, func(a *aggEntry) { a.bytesOut += e.bytesOut }) // retried next flush
+				p.log.Warn("admin counter flush failed (delta re-queued)", "tunnel", name, "field", "bytes_out", "err", err)
 			}
 		}
 	}

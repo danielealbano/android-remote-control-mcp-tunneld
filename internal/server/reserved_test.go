@@ -159,3 +159,61 @@ func TestReservedCerts_RenewsExpiringCache(t *testing.T) {
 		t.Fatalf("renewed cert must be re-persisted with a later NotAfter (old=%v new=%v)", oldInfo.NotAfter, got.NotAfter)
 	}
 }
+
+func TestReservedCerts_PersistAtomicBundle(t *testing.T) {
+	dir := t.TempDir()
+	host := "enroll.example.test"
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	rc := &reservedCerts{dir: filepath.Join(dir, "self"), logger: testLogger(), now: time.Now}
+
+	rc.persist(host, certPEM, keyPEM, info)
+
+	hd := filepath.Join(dir, "self", host)
+	if _, err := os.Stat(filepath.Join(hd, "bundle.json")); err != nil {
+		t.Fatalf("persist must write bundle.json via rename: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hd, "bundle.json.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("the temp file must not survive a successful persist (err=%v)", err)
+	}
+	cert, gotInfo, ok := rc.loadCached(host)
+	if !ok || cert == nil {
+		t.Fatal("the persisted bundle must load back")
+	}
+	if !gotInfo.NotAfter.Equal(info.NotAfter) {
+		t.Fatalf("loaded NotAfter mismatch: got %v want %v", gotInfo.NotAfter, info.NotAfter)
+	}
+}
+
+func TestReservedCerts_LoadLegacyTriple(t *testing.T) {
+	dir := t.TempDir()
+	host := "connect.example.test"
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	seedCache(t, dir, host, certPEM, keyPEM, info) // pre-bundle cert.pem/key.pem/meta.json triple
+	rc := &reservedCerts{dir: filepath.Join(dir, "self"), logger: testLogger(), now: time.Now}
+
+	cert, gotInfo, ok := rc.loadCached(host)
+	if !ok || cert == nil {
+		t.Fatal("a legacy cert.pem/key.pem/meta.json triple must still load")
+	}
+	if gotInfo.NotAfter.IsZero() {
+		t.Fatal("legacy load must recover NotAfter")
+	}
+}
+
+func TestReservedCerts_CorruptBundleTreatedAbsent(t *testing.T) {
+	dir := t.TempDir()
+	host := "enroll.example.test"
+	hd := filepath.Join(dir, "self", host)
+	if err := os.MkdirAll(hd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A truncated bundle.json with no legacy fallback must report absent, never crash.
+	if err := os.WriteFile(filepath.Join(hd, "bundle.json"), []byte(`{"cert_pem":"---BEGIN`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rc := &reservedCerts{dir: filepath.Join(dir, "self"), logger: testLogger(), now: time.Now}
+
+	if _, _, ok := rc.loadCached(host); ok {
+		t.Fatal("a corrupt bundle.json with no legacy fallback must report absent")
+	}
+}

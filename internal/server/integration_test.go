@@ -70,6 +70,51 @@ type itEnv struct {
 	s3Secret string
 	rdb      *redis.Client
 	st       *store.S3Store
+	drain    func() error // cancels Run and waits for it to return (idempotent; also run by t.Cleanup)
+}
+
+// itServeConfig builds a valid ServeCmd for the integration server against the given infra endpoints.
+// The three ACME directory URLs and the DNS-01 resolvers are parameterized so a test can point them at
+// Pebble (real issuance) or at a hang/unreachable endpoint (startup-ordering tests).
+func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, meshAddr,
+	acmeDirLE, acmeDirGTS, acmeDirZeroSSL string, dnsResolvers []string) config.ServeCmd {
+	t.Helper()
+	caCert, caKey := writeCA(t)
+	return config.ServeCmd{
+		RedisURL:       redisURL,
+		Listen:         edgeAddr,
+		MeshListen:     meshAddr,
+		InternalListen: freeAddr(t),
+		MeshAdvertise:  "127.0.0.1:19443",
+		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
+
+		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
+		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
+
+		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
+		S3AccessKey: access, S3SecretKey: secret, S3ForcePathStyle: true,
+		RegistryClaimTimeout: 3 * time.Second, RegistryClaimSettle: 5 * time.Second,
+
+		AttestSignerDigestFile: emptyFile(t),
+		AttestRootURL:          "http://127.0.0.1:1/root", AttestStatusURL: "http://127.0.0.1:1/status",
+		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: true,
+
+		ACMEDirLE: acmeDirLE, ACMEDirGTS: acmeDirGTS, ACMEDirZeroSSL: acmeDirZeroSSL,
+		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEDNSResolvers: dnsResolvers, ACMEDNSSkipPropagationCheck: true,
+		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
+		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
+
+		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
+		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: 8, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
+		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 10 * time.Second,
+		LimitConnMinRate: "1kb", LimitConnProtectRate: "10kb", LimitBandwidth: "1mbit",
+		LimitTrafficDay: "1gb", LimitTrafficWeek: "4gb",
+		BanPoll: time.Second, ShutdownGrace: 3 * time.Second,
+		Log: []string{"output=std;level=error"},
+	}
 }
 
 // startIntegrationServer stands up Valkey + MinIO + Pebble/challtestsrv + the DNS shim, runs the real
@@ -88,44 +133,9 @@ func startIntegrationServer(t *testing.T) *itEnv {
 	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 
-	caCert, caKey := writeCA(t)
 	edgeAddr := freeAddr(t)
-
-	cfg := config.ServeCmd{
-		RedisURL:       redisURL,
-		Listen:         edgeAddr,
-		MeshListen:     freeAddr(t),
-		InternalListen: freeAddr(t),
-		MeshAdvertise:  "127.0.0.1:19443",
-		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
-
-		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
-		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
-
-		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
-		S3AccessKey: access, S3SecretKey: secret, S3ForcePathStyle: true,
-		RegistryClaimTimeout: 3 * time.Second, RegistryClaimSettle: 5 * time.Second,
-
-		AttestSignerDigestFile: emptyFile(t),
-		AttestRootURL:          "http://127.0.0.1:1/root", AttestStatusURL: "http://127.0.0.1:1/status",
-		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: true,
-
-		ACMEDirLE: pebble.DirectoryURL, ACMEDirGTS: pebble.DirectoryURL, ACMEDirZeroSSL: pebble.DirectoryURL,
-		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
-		ACMEDNSResolvers: []string{pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
-		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
-		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
-
-		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
-		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
-		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: 8, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
-		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 10 * time.Second,
-		LimitConnMinRate: "1kb", LimitConnProtectRate: "10kb", LimitBandwidth: "1mbit",
-		LimitTrafficDay: "1gb", LimitTrafficWeek: "4gb",
-		BanPoll: time.Second, ShutdownGrace: 3 * time.Second,
-		Log: []string{"output=std;level=error"},
-	}
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
+		pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, []string{pebble.DNSResolver})
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
@@ -133,12 +143,25 @@ func startIntegrationServer(t *testing.T) *itEnv {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, cfg, testLogger(), "it") }()
+
+	// drain cancels the server and waits for Run to return, AT MOST ONCE: both t.Cleanup and a test that
+	// exercises shutdown explicitly may call it — the second call is a no-op returning the recorded result.
+	var drainOnce sync.Once
+	var drainErr error
+	drain := func() error {
+		drainOnce.Do(func() {
+			cancel()
+			select {
+			case drainErr = <-done:
+			case <-time.After(20 * time.Second):
+				drainErr = fmt.Errorf("server did not drain within 20s of cancellation")
+			}
+		})
+		return drainErr
+	}
 	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Error("server did not drain within 20s of cancellation")
+		if err := drain(); err != nil {
+			t.Error(err)
 		}
 	})
 
@@ -163,7 +186,7 @@ func startIntegrationServer(t *testing.T) *itEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &itEnv{edgeAddr: edgeAddr, pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st}
+	return &itEnv{edgeAddr: edgeAddr, pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st, drain: drain}
 }
 
 // TestIntegration_EnrollConnectRoundtrip exercises the full E2E path against the real assembled server +

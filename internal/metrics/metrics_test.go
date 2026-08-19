@@ -251,3 +251,64 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 		t.Fatal("a non-no-route reason must still be logged via caplog")
 	}
 }
+
+// TestPromRecorder_FlushErrorRequeuesDelta: a failed admin.Incr must re-accumulate the delta so the next
+// flush retries it — a counter write is never dropped on a transient store error.
+func TestPromRecorder_FlushErrorRequeuesDelta(t *testing.T) {
+	_, rec, _, mr, _ := setup(t)
+	rec.Bytes("tunA", "in", 100)
+	rec.Bytes("tunA", "out", 50)
+	mr.Close() // admin.Incr now errors (Redis down)
+
+	rec.flush(context.Background())
+
+	rec.mu.Lock()
+	e := rec.agg["tunA"]
+	rec.mu.Unlock()
+	if e == nil || e.bytesIn != 100 || e.bytesOut != 50 {
+		t.Fatalf("a failed flush must re-queue the delta for the next flush, got %+v", e)
+	}
+}
+
+// TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the ordered
+// server drain owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
+func TestRunFlusher_NoFlushOnCancel(t *testing.T) {
+	_, rec, store, _, _ := setup(t)
+	rec.Bytes("tunA", "in", 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rec.RunFlusher(ctx, time.Hour); err == nil {
+		t.Fatal("RunFlusher must return ctx.Err() on cancel")
+	}
+	stats, _ := store.TopN(context.Background(), 10)
+	if len(stats) != 0 {
+		t.Fatalf("RunFlusher must NOT flush on cancel, got %+v", stats)
+	}
+	rec.mu.Lock()
+	e := rec.agg["tunA"]
+	rec.mu.Unlock()
+	if e == nil || e.bytesIn != 100 {
+		t.Fatalf("the delta must remain accumulated (FinalFlush will drain it), got %+v", e)
+	}
+}
+
+// TestPromRecorder_FlushCapLogEmitsPending: a pending multi-hit cap summary is emitted by FlushCapLog at
+// shutdown (the first hit logs immediately; the second accrues a summary that only a flush emits).
+func TestPromRecorder_FlushCapLogEmitsPending(t *testing.T) {
+	m := NewMetrics()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	rec := NewPromRecorder(m, caplog.New(logger), nil, logger)
+
+	rec.Reject("stream-cap", "tunA", "1.1.1.1")
+	rec.Reject("stream-cap", "tunA", "1.1.1.2")
+	if strings.Contains(buf.String(), "cap hit summary") {
+		t.Fatal("the pending summary must NOT be emitted before FlushCapLog")
+	}
+
+	rec.FlushCapLog()
+
+	if !strings.Contains(buf.String(), "cap hit summary") {
+		t.Fatalf("FlushCapLog must emit the pending cap-hit summary, got %q", buf.String())
+	}
+}
