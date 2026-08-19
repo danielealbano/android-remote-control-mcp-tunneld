@@ -158,11 +158,12 @@ func TestReadPumpPongStampsLiveness(t *testing.T) {
 	}
 
 	c2 := newConn("phonef")
-	// A frame with an oversize length prefix is malformed: the read fails and tears the conn down.
+	// A frame with an oversize length prefix is a wire-protocol violation → close reason protocol-error
+	// (distinct from a graceful phone-close), so forensics can tell a misbehaving phone from a disconnect.
 	bad := []byte{0x01, 0xff, 0xff, 0xff, 0xff}
 	h.readPump(bytes.NewReader(bad), c2)
-	if c2.closeReason() != "phone-close" {
-		t.Fatalf("close reason = %q, want phone-close", c2.closeReason())
+	if c2.closeReason() != "protocol-error" {
+		t.Fatalf("close reason = %q, want protocol-error", c2.closeReason())
 	}
 	if !c2.isClosed() {
 		t.Fatal("a malformed frame must tear the connection down")
@@ -290,6 +291,21 @@ func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
 	}
 	if m.HasConn("abcdef234567") {
 		t.Fatal("a mesh-role cert must never bind a phone connection")
+	}
+}
+
+// TestControlData_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §3–§4): /control and
+// /data are POST; a GET that passes the cert + CN gates is refused 405.
+func TestControlData_NonPostIs405(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		ValidName: func(string) bool { return true }})
+	for _, path := range []string{"/control", "/data"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, tlsRequest(t, path, selfSignedCert(t, "abcdef234567", false)))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s must be 405, got %d", path, rec.Code)
+		}
 	}
 }
 

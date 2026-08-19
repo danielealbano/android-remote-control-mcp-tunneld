@@ -100,6 +100,19 @@ func TestMeshRejectsMissingHeaders(t *testing.T) {
 	}
 }
 
+// TestMesh_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §5): a mesh stream is a
+// POST /mesh; a GET with a valid mesh-role cert is refused 405.
+func TestMesh_NonPostIs405(t *testing.T) {
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true})
+	r := httptest.NewRequest("GET", "https://node/mesh", nil)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 405 {
+		t.Fatalf("GET /mesh must be 405, got %d", w.Code)
+	}
+}
+
 func TestMeshNotOwner(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return false }, &fakeBridge{})
 	r := httptest.NewRequest("POST", "https://node/mesh", nil)

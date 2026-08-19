@@ -85,3 +85,14 @@ func NewConnID() (string, error) {
 	}
 	return hex.EncodeToString(buf[:]), nil
 }
+
+// MustConnID mints a conn/stream id, falling back to a deterministic non-empty id ("00000000") on the
+// practically impossible crypto/rand failure — an EMPTY id would be refused by the dial-back match
+// (serveData / the mesh header check both reject "") and turn every connection into a no-route.
+func MustConnID() string {
+	id, err := NewConnID()
+	if err != nil {
+		return "00000000"
+	}
+	return id
+}

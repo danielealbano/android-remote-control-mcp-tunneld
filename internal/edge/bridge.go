@@ -138,9 +138,10 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		return
 	}
 
-	// NewConnID fails only if crypto/rand fails (practically impossible); a zero id would still be
-	// delivered/matched consistently, so the error is intentionally ignored.
-	streamID, _ := store.NewConnID()
+	// A stream id is required for the dial-back match: an EMPTY id would be 400-refused by serveData/mesh
+	// and turn the connection into a no-route, so use the non-empty fallback on the (practically
+	// impossible) crypto/rand failure rather than an empty id.
+	streamID := store.MustConnID()
 
 	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
@@ -177,7 +178,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// close) — and retry once when the fresh route differs (re-checking the ban on its fingerprint).
 	far, closeFar, ferr := e.openFar(ctx, name, nodeID, connID, streamID)
 	if isDuplicateStream(ferr) {
-		streamID, _ = store.NewConnID()
+		streamID = store.MustConnID()
 		far, closeFar, ferr = e.openFar(ctx, name, nodeID, connID, streamID)
 	}
 	if ferr != nil {
@@ -189,7 +190,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 				return
 			}
 			fp = fp2 // the splice now targets the re-bound route: the active stream must carry ITS fingerprint (ban sweeps match on it)
-			streamID, _ = store.NewConnID()
+			streamID = store.MustConnID()
 			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
 		}
 	}

@@ -169,8 +169,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/control":
+		if r.Method != http.MethodPost { // docs/PROTOCOL.md §3: the control stream is a POST /control
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		h.serveControl(w, r, id)
 	case "/data":
+		if r.Method != http.MethodPost { // docs/PROTOCOL.md §4: the dial-back is a POST /data
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		h.serveData(w, r, id.name)
 	case "/issue":
 		h.serveIssue(w, r, id.name, id.fingerprint)
@@ -331,6 +339,13 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {
 		frame, err := readControlFrame(body)
 		if err != nil {
+			// A wire-protocol violation (oversize frame) is distinct from a graceful EOF / transport
+			// close: attribute it to protocol-error so forensics can tell a misbehaving phone from an
+			// ordinary disconnect.
+			if errors.Is(err, wire.ErrControlTooLarge) {
+				c.close("protocol-error")
+				return
+			}
 			c.close("phone-close")
 			return
 		}
@@ -388,11 +403,6 @@ func metaFromRequest(r *http.Request) ConnMeta {
 	return m
 }
 
-// mustConnID mints a phone connID (best-effort; falls back to a zero id on a crypto/rand failure).
-func mustConnID() string {
-	id, err := store.NewConnID()
-	if err != nil {
-		return "00000000"
-	}
-	return id
-}
+// mustConnID mints a phone connID (delegates to store.MustConnID — the single source of truth for the
+// non-empty rand-failure fallback).
+func mustConnID() string { return store.MustConnID() }

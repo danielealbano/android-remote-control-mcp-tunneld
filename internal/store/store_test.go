@@ -186,3 +186,19 @@ func TestFakePutRejectedEnrollment(t *testing.T) {
 		t.Errorf("evidence not captured: %+v", s.Rejected)
 	}
 }
+
+// TestNewConnIDFallback_NonEmpty verifies MustConnID never returns an EMPTY id — an empty id would be
+// 400-refused by the dial-back match (serveData / the mesh header check), turning a connection into a
+// no-route. The rand-failure fallback is a fixed non-empty id.
+func TestNewConnIDFallback_NonEmpty(t *testing.T) {
+	id := store.MustConnID()
+	if id == "" {
+		t.Fatal("MustConnID must never return an empty id")
+	}
+	if len(id) != 8 {
+		t.Errorf("id = %q, want 8 lowercase hex chars", id)
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Errorf("id %q must be hex: %v", id, err)
+	}
+}
