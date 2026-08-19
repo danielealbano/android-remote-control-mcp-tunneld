@@ -164,7 +164,9 @@ MUST NOT be relaxed without explicit user direction.
   authenticates). No HTTP request inspection / method-path allowlist on relayed traffic. No per-path cap
   exceptions or bulk-transfer support. No CRL (bans are the only revocation). No cross-replica exact
   bandwidth accounting. No server-side content storage or caching. No TLS mutual auth on the public side.
-- The Android (Kotlin) client integration is **out of scope** of this repo — it lives with the app.
+- The Android (Kotlin) client integration is **out of scope** of this repo — it lives with the app. The
+  one exception is a minimal on-device **attestation test probe** under `support/attest-probe/`, built
+  only to drive the adb-gated `TestE2E_DeviceAttestation` gate — it is not the client.
 
 ---
 

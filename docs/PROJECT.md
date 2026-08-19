@@ -156,4 +156,6 @@ No database / persistent server-side identity store (the phone holds its cert). 
 relayed traffic (it is opaque TLS; the app authenticates). No per-path cap exceptions or bulk transfers.
 No CRL (bans are the only revocation). No per-slice-exact bandwidth accounting (batch-credit draws).
 No server-side content storage or caching. No TLS mutual auth on the public side. The Android (Kotlin)
-client lives with the app, not here.
+client lives with the app, not here. (The one exception is a minimal on-device **attestation test
+probe** under `support/attest-probe/`, built only to exercise the adb-gated `TestE2E_DeviceAttestation`
+gate — it is not the client.)
