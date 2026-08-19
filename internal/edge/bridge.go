@@ -32,7 +32,7 @@ type activeStream struct {
 	cancel   context.CancelFunc
 	evicted  atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
 	banned   atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over evicted/shutdown
-	release  func()      // frees this stream's global slot exactly once (nil for a fail-open admission)
+	release  func()      // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
 	bytesIn  int64
 	bytesOut int64
 }
