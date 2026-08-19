@@ -3,8 +3,10 @@ package acme
 import (
 	"context"
 	"crypto/x509"
-	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -20,8 +22,8 @@ type lazyCA struct {
 	renewMargin time.Duration // configured --acme-renew-margin for the degraded renewal floor
 	build       func() (caIssuer, error)
 
-	mu    sync.Mutex
-	inner caIssuer
+	group singleflight.Group        // dedups concurrent first-use registration
+	inner atomic.Pointer[caIssuer]  // fast-path read; nil until first successful build
 }
 
 var _ caIssuer = (*lazyCA)(nil)
@@ -46,22 +48,45 @@ func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
 
 func (l *lazyCA) id() string { return l.caID }
 
-func (l *lazyCA) resolve() (caIssuer, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.inner != nil {
-		return l.inner, nil
+// cached returns the built client only if already constructed (never triggers a network build).
+func (l *lazyCA) cached() (caIssuer, bool) {
+	if c := l.inner.Load(); c != nil {
+		return *c, true
 	}
-	c, err := l.build()
-	if err != nil {
-		return nil, err
+	return nil, false
+}
+
+// resolve returns the built client, performing first-use registration once (deduped via singleflight).
+// It is ctx-aware: a cancelled/shutdown caller returns promptly while the build completes+caches in the
+// background; a build error is surfaced to the caller and retried on the next call.
+func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
+	if c, ok := l.cached(); ok {
+		return c, nil
 	}
-	l.inner = c
-	return c, nil
+	ch := l.group.DoChan("build", func() (any, error) {
+		if c, ok := l.cached(); ok {
+			return c, nil
+		}
+		c, err := l.build()
+		if err != nil {
+			return nil, err // not cached → retried on the next call
+		}
+		l.inner.Store(&c)
+		return c, nil
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(caIssuer), nil
+	}
 }
 
 func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
-	c, err := l.resolve()
+	c, err := l.resolve(ctx)
 	if err != nil {
 		return nil, store.CertInfo{}, transient(err)
 	}
@@ -69,10 +94,11 @@ func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name 
 }
 
 func (l *lazyCA) shouldRenew(ctx context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
-	c, err := l.resolve()
-	if err != nil {
-		// The CA client is unavailable: fall back to the CONFIGURED fixed floor so renewal still fires
-		// on the operator's schedule (defaults guard a zero config in tests).
+	c, ok := l.cached()
+	if !ok {
+		// The CA client is not yet built: fall back to the CONFIGURED fixed floor WITHOUT triggering a
+		// network registration, so a hung CA never pins the renewal scheduler (defaults guard a zero
+		// config in tests). The actual renewal via obtain builds the client when it is due.
 		shortlived, margin := l.shortlived, l.renewMargin
 		if shortlived <= 0 {
 			shortlived = 160 * time.Hour

@@ -73,6 +73,9 @@ func (cfg LegoConfig) dnsChallengeOpts() []dns01.ChallengeOption {
 type legoClient struct {
 	cfg    LegoConfig
 	client *lego.Client
+	// obtainCSR is the (ctx-less) lego call, seamed so a test can drive a blocking obtain against the
+	// ctx-cancel path. Defaults to client.Certificate.ObtainForCSR.
+	obtainCSR func(certificate.ObtainForCSRRequest) (*certificate.Resource, error)
 }
 
 var _ caIssuer = (*legoClient)(nil)
@@ -121,25 +124,43 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 		}
 		user.reg = reg
 	}
-	return &legoClient{cfg: cfg, client: client}, nil
+	lc2 := &legoClient{cfg: cfg, client: client}
+	lc2.obtainCSR = lc2.client.Certificate.ObtainForCSR
+	return lc2, nil
 }
 
 func (l *legoClient) id() string { return l.cfg.CAID }
 
-func (l *legoClient) obtain(_ context.Context, csr *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
 	req := certificate.ObtainForCSRRequest{CSR: csr, Bundle: true, Profile: l.cfg.Profile}
 	if l.cfg.Validity > 0 {
 		req.NotAfter = time.Now().Add(l.cfg.Validity)
 	}
-	res, err := l.client.Certificate.ObtainForCSR(req)
-	if err != nil {
-		return nil, store.CertInfo{}, classifyLego(err)
+	// lego's ObtainForCSR takes no context (DNS-01 propagation polling can run for minutes, bounded only
+	// by lego's internal per-request HTTP timeout). Run it off-goroutine and honor the caller's ctx so a
+	// shutdown / aborted /issue stops waiting; the abandoned call completes and is discarded.
+	type result struct {
+		res *certificate.Resource
+		err error
 	}
-	info, err := certInfoFromPEM(l.cfg.CAID, res.Certificate)
-	if err != nil {
-		return nil, store.CertInfo{}, permanent(err)
+	ch := make(chan result, 1)
+	go func() {
+		res, err := l.obtainCSR(req)
+		ch <- result{res, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, store.CertInfo{}, transient(ctx.Err())
+	case r := <-ch:
+		if r.err != nil {
+			return nil, store.CertInfo{}, classifyLego(r.err)
+		}
+		info, err := certInfoFromPEM(l.cfg.CAID, r.res.Certificate)
+		if err != nil {
+			return nil, store.CertInfo{}, permanent(err)
+		}
+		return r.res.Certificate, info, nil
 	}
-	return res.Certificate, info, nil
 }
 
 func (l *legoClient) shouldRenew(_ context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
@@ -155,17 +176,26 @@ func (l *legoClient) shouldRenew(_ context.Context, cur store.CertInfo, now time
 	return !now.Before(at), at, nil
 }
 
+// dnsProviderTimeout bounds one TXT publish/cleanup against our neutral DNSProvider seam. lego's
+// challenge.Provider interface is ctx-less, so this is the only place a deadline can be imposed; the
+// record publish/remove is a quick API call (propagation waiting is lego's own concern).
+const dnsProviderTimeout = 2 * time.Minute
+
 // legoDNSAdapter adapts our DNSProvider to lego's challenge.Provider (computing the record).
 type legoDNSAdapter struct{ p DNSProvider }
 
 func (a *legoDNSAdapter) Present(domain, _, keyAuth string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dnsProviderTimeout)
+	defer cancel()
 	info := dns01.GetChallengeInfo(domain, keyAuth)
-	return a.p.Present(context.Background(), info.EffectiveFQDN, info.Value)
+	return a.p.Present(ctx, info.EffectiveFQDN, info.Value)
 }
 
 func (a *legoDNSAdapter) CleanUp(domain, _, keyAuth string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), dnsProviderTimeout)
+	defer cancel()
 	info := dns01.GetChallengeInfo(domain, keyAuth)
-	return a.p.CleanUp(context.Background(), info.EffectiveFQDN, info.Value)
+	return a.p.CleanUp(ctx, info.EffectiveFQDN, info.Value)
 }
 
 // certInfoFromPEM parses the issued leaf for serial/validity metadata.
