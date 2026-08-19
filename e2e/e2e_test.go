@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -75,8 +76,24 @@ type replicaOpts struct {
 }
 
 // startReplica runs a real server.Run on loopback against the shared infra and returns its public edge
-// address. It waits until the replica is serving (internal /healthz is 200).
+// address. It waits until the replica is serving (internal /healthz is 200). freeAddr probes-and-closes
+// ports, so server.Run's bind can lose a race to another process — and the internal-listener bind is now
+// fatal — so a boot that exits before serving is retried with fresh ports (bounded).
 func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
+	t.Helper()
+	for range 5 {
+		if addr, ok := inf.runReplicaOnce(t, opts); ok {
+			return addr
+		}
+	}
+	t.Fatal("startReplica: replica never bound its listeners after 5 attempts (port races)")
+	return ""
+}
+
+// runReplicaOnce attempts one replica boot on fresh freeAddr ports. It returns (edgeAddr, true) once the
+// replica is serving, or ("", false) when server.Run exits before becoming ready (a freeAddr port race —
+// the caller retries with fresh ports).
+func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, bool) {
 	t.Helper()
 	edgeAddr := freeAddr(t)
 	meshAddr := freeAddr(t)
@@ -127,20 +144,33 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx, cfg, discardLogger(), "e2e") }()
-	t.Cleanup(func() {
-		cancel()
+
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
 		select {
 		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Error("replica did not drain within 20s")
+			cancel() // Run exited before serving (freeAddr port race) — retry with fresh ports
+			return "", false
+		default:
 		}
-	})
-
-	if !waitBool(120*time.Second, func() bool { return healthOK(internalAddr) }) {
-		t.Fatal("replica never became ready (reserved-host cert obtain may have failed)")
+		if healthOK(internalAddr) {
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(20 * time.Second):
+					t.Error("replica did not drain within 20s")
+				}
+			})
+			inf.internal[edgeAddr] = internalAddr
+			return edgeAddr, true
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	inf.internal[edgeAddr] = internalAddr
-	return edgeAddr
+	cancel()
+	<-done
+	t.Fatal("replica never became ready (reserved-host cert obtain may have failed)")
+	return "", false
 }
 
 // echoPhone enrolls a tunnel via enrollAddr, connects the phone control to controlAddr, and serves an
@@ -165,15 +195,22 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(c.Close)
 	runCtx, cancel := context.WithCancel(ctx)
-	t.Cleanup(cancel)
-	go func() { _ = c.Run(runCtx) }()
+	runDone := make(chan struct{})
+	go func() { _ = c.Run(runCtx); close(runDone) }()
+	// Close honors its "call once Run has returned" contract: cancel, JOIN Run, then Close (no leaked
+	// control transport, no Close-before-Run-return).
+	t.Cleanup(func() {
+		cancel()
+		<-runDone
+		_ = c.Close()
+	})
 	return ident
 }
 
 // TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves both the cross-node
-// mesh path (frontend on A → owner B) and — after rebinding — the same-node fast path work.
+// mesh path (frontend on A → owner B) and the same-node fast path (entering at the owner replica B) work.
+// The phone stays bound to B throughout; no route rebinding occurs.
 func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 	inf := startE2EInfra(t)
 	edgeA := inf.startReplica(t, replicaOpts{})
@@ -279,6 +316,32 @@ func TestE2E_Eviction(t *testing.T) {
 		t.Fatalf("the over-cap connection must evict an idle stream and round-trip: %v", err)
 	}
 	_ = c3.Close()
+
+	// The over-cap admission must have EVICTED one of the two idle victims (not silently admitted a
+	// third): exactly one of c1/c2 must observe its socket closed by the edge. If the concurrency cap
+	// were unenforced, both would stay open and this assertion would fail.
+	isEvicted := func(c *tls.Conn) bool {
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, rerr := c.Read(make([]byte, 1))
+		if rerr == nil {
+			return false // read data on an idle conn → not the evicted victim
+		}
+		var ne net.Error
+		if errors.As(rerr, &ne) && ne.Timeout() {
+			return false // read deadline hit on a still-open idle conn → not evicted
+		}
+		return true // EOF / reset → the edge closed this (evicted) victim
+	}
+	evicted := 0
+	if isEvicted(c1) {
+		evicted++
+	}
+	if isEvicted(c2) {
+		evicted++
+	}
+	if evicted != 1 {
+		t.Fatalf("exactly one of c1/c2 must be evicted by the over-cap admission, got %d", evicted)
+	}
 }
 
 // --- helpers ---
@@ -338,7 +401,10 @@ func writeCA(t *testing.T) (certPath, keyPath string) {
 	dir := t.TempDir()
 	certPath = filepath.Join(dir, "ca.pem")
 	keyPath = filepath.Join(dir, "ca-key.pem")
-	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
 	}

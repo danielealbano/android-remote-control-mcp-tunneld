@@ -118,7 +118,10 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 		writeJSON(w, issueResponseBody{IdentityCert: idCert, PublicCert: pubCert, CA: "test"})
 	})
 
-	srvKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srvCertPEM := ca.signLeaf(t, testEnrollHost, &srvKey.PublicKey, true, []string{testEnrollHost, testControlHost})
 	srvCert, err := tls.X509KeyPair(srvCertPEM, keyPEM(t, srvKey))
 	if err != nil {

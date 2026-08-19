@@ -50,7 +50,10 @@ func newTestCA(t *testing.T) *testCA {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, _ := x509.ParseCertificate(der)
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
 	return &testCA{cert: cert, key: key, pool: pool}
@@ -77,7 +80,10 @@ func (ca *testCA) signLeaf(t *testing.T, cn string, pub crypto.PublicKey, server
 
 func keyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
 	t.Helper()
-	der, _ := x509.MarshalECPrivateKey(key)
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 }
 
@@ -109,11 +115,17 @@ func startTestServer(t *testing.T) *testServer {
 	// SAN = <name>.<tunnel-domain>) — the mTLS certificate-generation endpoint for initial + renewal.
 	onIssue := func(_ context.Context, name, _, _ string, req phoneconn.IssueRequest) (phoneconn.IssueResponse, *phoneconn.IssueError) {
 		idBlock, _ := pem.Decode([]byte(req.IdentityCSR))
+		if idBlock == nil {
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_identity_csr"}
+		}
 		idCSR, err := x509.ParseCertificateRequest(idBlock.Bytes)
 		if err != nil {
 			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_identity_csr"}
 		}
 		tlsBlock, _ := pem.Decode([]byte(req.TLSCSR))
+		if tlsBlock == nil {
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
+		}
 		tlsCSR, err := x509.ParseCertificateRequest(tlsBlock.Bytes)
 		if err != nil {
 			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
@@ -132,7 +144,10 @@ func startTestServer(t *testing.T) *testServer {
 	})
 
 	// Server cert for the control host.
-	srvKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	srvKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	srvCertPEM := ca.signLeaf(t, testControlHost, &srvKey.PublicKey, true, []string{testControlHost})
 	srvCert, err := tls.X509KeyPair(srvCertPEM, keyPEM(t, srvKey))
 	if err != nil {
@@ -160,7 +175,10 @@ func startTestServer(t *testing.T) *testServer {
 // newClient builds a client with a fresh identity signed by the test CA, wired to backend.
 func (ts *testServer) newClient(t *testing.T, backend Backend) *Client {
 	t.Helper()
-	idKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	idKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idCertPEM := ts.ca.signLeaf(t, testName, &idKey.PublicKey, false, nil)
 	ident := &Identity{Name: testName, IdentityCertPEM: idCertPEM, IdentityKey: idKey, CA: "test"}
 	c, err := New(ts.dialAdr, testControlHost, testTunnelDomain, ts.ca.pool, ident, backend)
