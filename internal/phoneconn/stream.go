@@ -12,11 +12,12 @@ import (
 // handler to return, NO further Write touches the HTTP/2 response writer — the http2 library finalizes
 // the response writer as the handler returns, and writing it concurrently is a data race.
 type httpDataStream struct {
-	r     io.Reader
-	w     io.Writer
-	flush func()
-	done  chan struct{}
-	once  sync.Once
+	r       io.Reader
+	w       io.Writer
+	flush   func()
+	done    chan struct{}
+	unblock func() // resets the HTTP/2 stream so a flow-control-blocked Write fails and releases d.mu
+	once    sync.Once
 
 	mu     sync.Mutex
 	closed bool
@@ -39,8 +40,12 @@ func (d *httpDataStream) Write(p []byte) (int, error) {
 
 func (d *httpDataStream) Close() error {
 	d.once.Do(func() {
-		// Wait for any in-flight Write to finish and block future ones BEFORE releasing the handler: after
-		// close(done) the handler returns and the http2 library touches the response writer.
+		// Reset the HTTP/2 stream FIRST: an in-flight Write blocked on stream flow control (a peer
+		// withholding WINDOW_UPDATE) fails immediately and releases d.mu — otherwise Close would
+		// deadlock on the mutex and pin the watcher, both copies, and every held slot.
+		if d.unblock != nil {
+			d.unblock()
+		}
 		d.mu.Lock()
 		d.closed = true
 		d.mu.Unlock()

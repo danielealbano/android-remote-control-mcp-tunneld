@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,7 +235,8 @@ func TestClientReportsPoolSizeOnce(t *testing.T) {
 func TestClientReapsIdlePools(t *testing.T) {
 	rec := &poolRec{}
 	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, WithRecorder(rec))
-	_ = c.pool("10.0.0.5:9443")
+	p := c.pool("10.0.0.5:9443")
+	p.active.Add(-1) // pool() counted this acquisition; release it (no live stream) so the reaper can run
 	if len(c.pools) != 1 {
 		t.Fatal("pool must exist after first use")
 	}
@@ -318,5 +320,110 @@ func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("PING health did not unblock the dial in time (took %s)", elapsed)
+	}
+}
+
+// meshBlockingWriter blocks every Write (holding ownerStream.mu) until release is closed, and signals
+// via entered once the first Write is in progress.
+type meshBlockingWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *meshBlockingWriter) Write(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return len(p), nil
+}
+
+// TestOwnerStream_CloseUnblocksBlockedWrite covers C-1 on the mesh owner side: a Write blocked inside the
+// response writer (holding o.mu) must be released by Close via the unblock hook, so Close never deadlocks.
+func TestOwnerStream_CloseUnblocksBlockedWrite(t *testing.T) {
+	bw := &meshBlockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	os := &ownerStream{
+		w:       bw,
+		done:    make(chan struct{}),
+		unblock: func() { close(bw.release) },
+	}
+
+	writeReturned := make(chan struct{})
+	go func() {
+		_, _ = os.Write([]byte("hello"))
+		close(writeReturned)
+	}()
+	<-bw.entered // the Write now holds o.mu, blocked in the writer
+
+	closeReturned := make(chan struct{})
+	go func() {
+		_ = os.Close()
+		close(closeReturned)
+	}()
+
+	select {
+	case <-closeReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked: unblock did not release the mutex-holding Write")
+	}
+	select {
+	case <-writeReturned:
+	case <-time.After(time.Second):
+		t.Fatal("the blocked Write was not released by unblock")
+	}
+}
+
+// TestClient_ReapSkipsActivePools covers W-11: a pool that is idle by lastUse but still carries an active
+// stream (active>0) survives the reaper, and is reaped on the first tick after the stream closes.
+func TestClient_ReapSkipsActivePools(t *testing.T) {
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1)
+	p := c.pool("10.0.0.9:9443") // active == 1 (simulating an open stream)
+	p.lastUse.Store(0)           // force the pool to look idle so only `active` protects it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx, 20*time.Millisecond) }()
+
+	// With active==1 the pool must survive many reap ticks.
+	time.Sleep(200 * time.Millisecond)
+	c.mu.Lock()
+	n := len(c.pools)
+	c.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("a pool with an active stream must not be reaped, pools=%d", n)
+	}
+
+	p.active.Add(-1) // the stream closes
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		n := len(c.pools)
+		c.mu.Unlock()
+		if n == 0 {
+			return // reaped once idle AND inactive
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("an idle pool must be reaped once its active streams close")
+}
+
+// TestClient_OpenStreamErrorDecrementsActive covers W-11: a failed OpenStream must not leak the active
+// count it took in pool(), or the pool would never be reaped.
+func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
+	c := NewClient(func() *tls.Config {
+		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond))
+
+	const peer = "127.0.0.1:1" // nothing listening → the dial fails
+	if _, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1"); err == nil {
+		t.Fatal("a dial to a closed port must fail")
+	}
+	c.mu.Lock()
+	p := c.pools[peer]
+	c.mu.Unlock()
+	if p == nil {
+		t.Fatal("the pool must exist after the attempt")
+	}
+	if got := p.active.Load(); got != 0 {
+		t.Fatalf("active after a failed OpenStream = %d, want 0", got)
 	}
 }

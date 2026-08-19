@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -335,4 +337,63 @@ func TestHeartbeatMissingSelfHeals(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("a missing route must be self-healed by the heartbeat loop")
+}
+
+// TestServeControl_BindFailureStatuses covers I-3: a fingerprint conflict answers 409, any other
+// (transient) bind failure answers 503 retryable.
+func TestServeControl_BindFailureStatuses(t *testing.T) {
+	tests := []struct {
+		name     string
+		bindErr  error
+		wantCode int
+	}{
+		{name: "fingerprint conflict → 409", bindErr: router.ErrNameHeldByOther, wantCode: http.StatusConflict},
+		{name: "transient error → 503", bindErr: errors.New("valkey down"), wantCode: http.StatusServiceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, fr, _, _ := newMgr(t)
+			fr.bindErr = tc.bindErr
+			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
+			rec := newFlushRecorder()
+			req := httptest.NewRequest("GET", "/control", newBlockedReader())
+			h.serveControl(rec, req, phoneIdentity{name: "phonex", fingerprint: "sha256:fp"})
+			if rec.code() != tc.wantCode {
+				t.Fatalf("code = %d, want %d", rec.code(), tc.wantCode)
+			}
+			if m.HasConn("phonex") {
+				t.Fatal("a failed bind must not register a connection")
+			}
+		})
+	}
+}
+
+// TestServeControl_CertExpiryCloses covers I-5: a bound phone whose identity cert has passed NotAfter is
+// closed cert-expired on the ping tick (the CA's exposure bound enforced live, not only at reconnect).
+func TestServeControl_CertExpiryCloses(t *testing.T) {
+	m, _, st, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: 5 * time.Millisecond, StreamPending: 4})
+	body := newBlockedReader()
+	defer body.close()
+	req := httptest.NewRequest("GET", "/control", body)
+	done := make(chan struct{})
+	go func() {
+		h.serveControl(newFlushRecorder(), req,
+			phoneIdentity{name: "phoneexp", fingerprint: "sha256:fp", notAfter: time.Now().Add(-time.Minute)})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an expired identity cert must close the conn on the ping tick")
+	}
+	var reason string
+	for _, e := range st.ConnLogs {
+		if e.Event == "end" {
+			reason = e.CloseReason
+		}
+	}
+	if reason != store.CloseCertExpired {
+		t.Fatalf("end close_reason = %q, want %q", reason, store.CloseCertExpired)
+	}
 }

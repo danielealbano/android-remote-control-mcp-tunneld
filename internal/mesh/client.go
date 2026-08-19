@@ -90,6 +90,7 @@ type peerPool struct {
 	clients []*http.Client
 	next    atomic.Uint64
 	lastUse atomic.Int64 // unix nanos of the last OpenStream through this pool (reap bookkeeping)
+	active  atomic.Int64 // in-flight streams held through this pool (a pool with active>0 is never reaped)
 }
 
 func (c *Client) pool(peer string) *peerPool {
@@ -107,6 +108,9 @@ func (c *Client) pool(peer string) *peerPool {
 		}
 	}
 	p.lastUse.Store(time.Now().UnixNano())
+	// Count this acquisition under c.mu so the increment is atomic with map membership vs the reaper
+	// (which also holds c.mu): the pool can never be reaped between this lookup and the increment.
+	p.active.Add(1)
 	return p
 }
 
@@ -129,6 +133,9 @@ func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
 			for peer, p := range c.pools {
 				if p.lastUse.Load() >= cutoff {
 					continue
+				}
+				if p.active.Load() > 0 {
+					continue // carrying live streams — CloseIdleConnections would orphan the busy conn
 				}
 				delete(c.pools, peer)
 				for _, hc := range p.clients {
@@ -161,7 +168,13 @@ func (c *Client) newH2Client() *http.Client {
 // OpenStream dials peer and opens a connID-checked mesh stream for (tunnel, connID, streamID). The
 // far side verifies connID against its live phone connection before bridging.
 func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (io.ReadWriteCloser, error) {
-	p := c.pool(peer)
+	p := c.pool(peer) // active++ (released by clientStream.Close on success, or here on any failure)
+	success := false
+	defer func() {
+		if !success {
+			p.active.Add(-1) // decrement on EVERY failure return so the reaper is not blocked forever
+		}
+	}()
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
 
 	pr, pw := io.Pipe() // request body: entry→owner (client→phone bytes)
@@ -186,12 +199,14 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 		}
 		return nil, ErrNoOwner
 	}
-	return &clientStream{pw: pw, resp: resp}, nil
+	success = true
+	return &clientStream{pw: pw, resp: resp, p: p}, nil
 }
 
 type clientStream struct {
 	pw   *io.PipeWriter
 	resp *http.Response
+	p    *peerPool
 	once sync.Once
 }
 
@@ -201,6 +216,7 @@ func (s *clientStream) Close() error {
 	s.once.Do(func() {
 		_ = s.pw.Close()
 		_ = s.resp.Body.Close()
+		s.p.active.Add(-1)
 	})
 	return nil
 }

@@ -3,10 +3,14 @@ package phoneconn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -18,7 +22,9 @@ type fakeRouter struct {
 	bound    map[string]string // name → bound connID
 	hbResult router.HeartbeatResult
 	unbound  map[string]bool
-	collide  int // upcoming BindRoute calls that return router.ErrConnIDCollision
+	collide  int      // upcoming BindRoute calls that return router.ErrConnIDCollision
+	bindErr  error    // when set (and not colliding), BindRoute returns it
+	calls    []string // ordered router-method call log (teardown-ordering assertions)
 }
 
 func newFakeRouter() *fakeRouter {
@@ -27,25 +33,35 @@ func newFakeRouter() *fakeRouter {
 func (f *fakeRouter) BindRoute(_ context.Context, name, _, _, connID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, "BindRoute")
 	if f.collide > 0 {
 		f.collide--
 		return router.ErrConnIDCollision
+	}
+	if f.bindErr != nil {
+		return f.bindErr
 	}
 	f.bound[name] = connID
 	return nil
 }
 func (f *fakeRouter) Heartbeat(_ context.Context, _, _ string) (router.HeartbeatResult, error) {
-	return f.hbResult, nil
+	f.mu.Lock()
+	f.calls = append(f.calls, "Heartbeat")
+	res := f.hbResult
+	f.mu.Unlock()
+	return res, nil
 }
 func (f *fakeRouter) Unbind(_ context.Context, name, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, "Unbind")
 	f.unbound[name] = true
 	return nil
 }
 func (f *fakeRouter) BindRouteIfAbsentOrOwner(_ context.Context, name, _, _, connID string) (router.SelfHealResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls = append(f.calls, "BindRouteIfAbsentOrOwner")
 	f.bound[name] = connID
 	return router.SelfHealBound, nil
 }
@@ -82,16 +98,20 @@ func newConn(name string) *conn {
 	return &conn{name: name, fingerprint: "sha256:fp", keyFP: "sha256:keyfp", certSerial: "0a1b",
 		connID:       "aabbccdd",
 		sessionStart: time.Unix(1_700_000_000, 0), send: make(chan []byte, 8),
-		pending: map[string]chan DataStream{}, cancel: func() {}}
+		pending: map[string]chan DataStream{}, cancel: func() {},
+		hbDone: make(chan struct{})}
 }
 
 func TestRegisterBindsAndLogsStart(t *testing.T) {
 	m, fr, st, rec := newMgr(t)
 	c := newConn("abc")
-	teardown, err := m.register(context.Background(), c)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	teardown, err := m.register(ctx, c)
 	if err != nil {
 		t.Fatal(err)
 	}
+	go m.heartbeatLoop(ctx, c) // teardown waits on the heartbeat loop's exit (hbDone)
 	if got, ok := fr.boundConnID("abc"); !ok || got != c.connID {
 		t.Errorf("route bound connID = %q, want %q", got, c.connID)
 	}
@@ -127,10 +147,13 @@ func TestManager_Register_RerollsOnCollision(t *testing.T) {
 	fr.collide = 2 // two collisions, then the third connID binds
 	c := newConn("abc")
 	first := c.connID
-	teardown, err := m.register(context.Background(), c)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	teardown, err := m.register(ctx, c)
 	if err != nil {
 		t.Fatalf("register must succeed after re-rolling past collisions: %v", err)
 	}
+	go m.heartbeatLoop(ctx, c) // teardown waits on the heartbeat loop's exit (hbDone)
 	defer teardown()
 	if c.connID == first {
 		t.Error("a collision must re-mint the connID")
@@ -162,14 +185,20 @@ func TestCloseAll(t *testing.T) {
 	m, fr, st, _ := newMgr(t)
 	c1 := newConn("abc")
 	c2 := newConn("xyz")
-	td1, err := m.register(context.Background(), c1)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	c1.cancel = cancel1
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	c2.cancel = cancel2
+	td1, err := m.register(ctx1, c1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	td2, err := m.register(context.Background(), c2)
+	td2, err := m.register(ctx2, c2)
 	if err != nil {
 		t.Fatal(err)
 	}
+	go m.heartbeatLoop(ctx1, c1) // teardown waits on each heartbeat loop's exit (hbDone)
+	go m.heartbeatLoop(ctx2, c2)
 
 	m.CloseAll(store.CloseServerShutdown)
 	if !c1.isClosed() || !c2.isClosed() {
@@ -350,3 +379,114 @@ func (s *closeableStream) Read([]byte) (int, error)    { return 0, nil }
 func (s *closeableStream) Write(p []byte) (int, error) { return len(p), nil }
 func (s *closeableStream) Close() error                { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
 func (s *closeableStream) isClosed() bool              { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }
+
+// TestManager_Teardown_StopsHeartbeatBeforeUnbind covers W-7: teardown cancels the conn and waits for
+// the heartbeat loop (incl. any in-flight self-heal) to exit BEFORE unbinding, so no Heartbeat or
+// self-heal rebind can run after the Unbind.
+func TestManager_Teardown_StopsHeartbeatBeforeUnbind(t *testing.T) {
+	m, fr, _, _ := newMgr(t)
+	fr.hbResult = router.HeartbeatMissing // the loop self-heals (BindRouteIfAbsentOrOwner) every tick
+	m.routeTTL = 3 * time.Millisecond
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	teardown, err := m.register(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go m.heartbeatLoop(ctx, c)
+
+	// Let the heartbeat loop tick a few times before tearing down.
+	waitCond(t, func() bool {
+		fr.mu.Lock()
+		defer fr.mu.Unlock()
+		hb := 0
+		for _, name := range fr.calls {
+			if name == "Heartbeat" {
+				hb++
+			}
+		}
+		return hb >= 2
+	})
+
+	teardown() // c.close → cancel → heartbeat exits (hbDone) BEFORE Unbind
+
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	unbindIdx := -1
+	for i, name := range fr.calls {
+		if name == "Unbind" {
+			unbindIdx = i
+		}
+	}
+	if unbindIdx < 0 {
+		t.Fatalf("teardown must Unbind; calls=%v", fr.calls)
+	}
+	for _, name := range fr.calls[unbindIdx+1:] {
+		if name == "Heartbeat" || name == "BindRouteIfAbsentOrOwner" {
+			t.Fatalf("no heartbeat/self-heal may run after Unbind, saw %q; calls=%v", name, fr.calls)
+		}
+	}
+}
+
+// TestManager_ConcurrentSameNameBind_LocalMatchesValkey covers W-8: two concurrent registers for one
+// name (backed by a real miniredis registry) are serialized by the striped bind lock, so the conn left
+// in the local map is always the one whose connID Valkey holds.
+func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	reg := router.NewRegistry(rdb, 30*time.Second)
+	st := tunneltest.NewStore()
+	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, NodeID: "nodeA",
+		NodeHost: "host-a", NodeStart: "2026-08-19T00:00:00Z", RouteTTL: 30 * time.Second})
+
+	const name = "concurrent01"
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			c := newConn(name)
+			c.connID = fmt.Sprintf("cid%05d", i) // distinct ids so both bind (same fp → no conflict)
+			if _, err := m.register(context.Background(), c); err != nil {
+				t.Errorf("register %d failed: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	m.mu.RLock()
+	surviving := m.conns[name]
+	m.mu.RUnlock()
+	if surviving == nil {
+		t.Fatal("one conn must survive in the local map")
+	}
+	_, _, storedConnID, ok, err := reg.LookupRoute(context.Background(), name)
+	if err != nil || !ok {
+		t.Fatalf("route must be bound: ok=%v err=%v", ok, err)
+	}
+	if surviving.connID != storedConnID {
+		t.Fatalf("local survivor connID %q != Valkey connID %q (bind not serialized)", surviving.connID, storedConnID)
+	}
+}
+
+// TestHeartbeatLoop_TinyRouteTTLNoPanic covers I-4: a pathological --route-ttl (routeTTL/3 == 0) must
+// not panic time.NewTicker; the floor guard substitutes a 1s interval.
+func TestHeartbeatLoop_TinyRouteTTLNoPanic(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	m.routeTTL = time.Nanosecond // routeTTL/3 == 0 → the floor guard must prevent a NewTicker panic
+	c := newConn("tiny01")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	if _, err := m.register(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	go m.heartbeatLoop(ctx, c)
+	cancel() // let the loop exit promptly; the test only asserts NewTicker did not panic
+	select {
+	case <-c.hbDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("heartbeatLoop did not exit")
+	}
+}

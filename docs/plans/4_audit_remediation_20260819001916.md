@@ -255,19 +255,19 @@ if isDuplicateStream(ferr) {
 
 ---
 
-## [ ] US3 — Phone control plane: teardown deadlock, race-free lifecycle (C-1, W-7, W-8, I-3, I-4, I-5)
+## [x] US3 — Phone control plane: teardown deadlock, race-free lifecycle (C-1, W-7, W-8, I-3, I-4, I-5)
 
 Acceptance criteria:
-- [ ] `DataStream.Close` (and mesh `ownerStream.Close`) unblocks a flow-control-blocked `Write` and never deadlocks.
-- [ ] A dead connection's heartbeat can never re-bind its route after teardown started (heartbeat fully stopped before unbind).
-- [ ] Two concurrent binds for one name are serialized: the local winner is always the Valkey owner.
-- [ ] A transient bind failure answers 503 retryable; a fingerprint conflict stays 409.
-- [ ] A pathological `--route-ttl` cannot panic the heartbeat ticker.
-- [ ] A bound phone whose identity cert passes `NotAfter` is closed (`cert-expired`).
+- [x] `DataStream.Close` (and mesh `ownerStream.Close`) unblocks a flow-control-blocked `Write` and never deadlocks.
+- [x] A dead connection's heartbeat can never re-bind its route after teardown started (heartbeat fully stopped before unbind).
+- [x] Two concurrent binds for one name are serialized: the local winner is always the Valkey owner.
+- [x] A transient bind failure answers 503 retryable; a fingerprint conflict stays 409.
+- [x] A pathological `--route-ttl` cannot panic the heartbeat ticker.
+- [x] A bound phone whose identity cert passes `NotAfter` is closed (`cert-expired`).
 
-### [ ] Task 3.1 — C-1: interruptible stream writes
+### [x] Task 3.1 — C-1: interruptible stream writes
 
-- [ ] Action: modify `internal/phoneconn/stream.go` — add an `unblock func()` field to
+- [x] Action: modify `internal/phoneconn/stream.go` — add an `unblock func()` field to
   `httpDataStream`; `Close` calls it BEFORE taking the mutex:
 
 ```go
@@ -288,7 +288,7 @@ func (d *httpDataStream) Close() error {
 }
 ```
 
-- [ ] Action: modify `internal/phoneconn/listener.go` `serveData` — wire the unblock through
+- [x] Action: modify `internal/phoneconn/listener.go` `serveData` — wire the unblock through
   `http.NewResponseController` (supported by the x/net h2 response writer at the pinned version):
 
 ```go
@@ -297,15 +297,15 @@ ds := &httpDataStream{r: r.Body, w: w, flush: flusher.Flush, done: done,
 	unblock: func() { _ = rc.SetWriteDeadline(time.Now()) }}
 ```
 
-- [ ] Action: modify `internal/mesh/listener.go` — identical `unblock` field + `Close` ordering on
+- [x] Action: modify `internal/mesh/listener.go` — identical `unblock` field + `Close` ordering on
   `ownerStream`, wired in `ServeHTTP` via `http.NewResponseController(w)`. Add the `time` import
   (the immediate deadline).
-- [ ] Definition of Done: no code path takes `d.mu`/`o.mu` while performing a network write that
+- [x] Definition of Done: no code path takes `d.mu`/`o.mu` while performing a network write that
   `Close` cannot interrupt.
 
-### [ ] Task 3.2 — W-7: heartbeat fully stopped before unbind
+### [x] Task 3.2 — W-7: heartbeat fully stopped before unbind
 
-- [ ] Action: modify `internal/phoneconn/manager.go` — `conn` gains `hbDone chan struct{}` (created in
+- [x] Action: modify `internal/phoneconn/manager.go` — `conn` gains `hbDone chan struct{}` (created in
   `serveControl`'s conn literal); `heartbeatLoop` gains `defer close(c.hbDone)`. `register`'s teardown
   is reordered:
 
@@ -331,11 +331,11 @@ teardown := func() {
   Note `c.close("phone-close")` moves from last to first (first-close-wins keeps any earlier real
   reason). The heartbeat goroutine is ALWAYS started when teardown can run (`serveControl` has no
   return between `register` and the `go` statements), so `<-c.hbDone` cannot hang.
-- [ ] Definition of Done: after teardown returns, no self-heal rebind of that connID is possible.
+- [x] Definition of Done: after teardown returns, no self-heal rebind of that connID is possible.
 
-### [ ] Task 3.3 — W-8: per-name bind serialization
+### [x] Task 3.3 — W-8: per-name bind serialization
 
-- [ ] Action: modify `internal/phoneconn/manager.go` — `Manager` gains
+- [x] Action: modify `internal/phoneconn/manager.go` — `Manager` gains
   `bindMu [64]sync.Mutex` and
 
 ```go
@@ -350,12 +350,12 @@ func (m *Manager) bindLock(name string) *sync.Mutex {
 
   `register` wraps the bind-reroll loop (Task 2.2) AND the supersede-and-insert critical section in
   `l := m.bindLock(c.name); l.Lock(); defer l.Unlock()`. Add the `hash/fnv` import.
-- [ ] Definition of Done: with two concurrent registers for one name, the conn left in `m.conns` is
+- [x] Definition of Done: with two concurrent registers for one name, the conn left in `m.conns` is
   the one whose connID Valkey holds.
 
-### [ ] Task 3.4 — I-3 / I-4 / I-5
+### [x] Task 3.4 — I-3 / I-4 / I-5
 
-- [ ] Action: modify `internal/phoneconn/listener.go` `serveControl` — distinguish bind failures:
+- [x] Action: modify `internal/phoneconn/listener.go` `serveControl` — distinguish bind failures:
 
 ```go
 teardown, err := h.mgr.register(ctx, c)
@@ -372,11 +372,11 @@ if err != nil {
   Add the
   `github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router` import to
   `listener.go` (`errors` is already imported there).
-- [ ] Action: modify `internal/phoneconn/manager.go` `heartbeatLoop` — guard the ticker like the node
+- [x] Action: modify `internal/phoneconn/manager.go` `heartbeatLoop` — guard the ticker like the node
   heartbeat: `interval := m.routeTTL / 3; if interval <= 0 { interval = time.Second }`.
-- [ ] Action: modify `internal/store/event.go` — add `CloseCertExpired = "cert-expired"` to the
+- [x] Action: modify `internal/store/event.go` — add `CloseCertExpired = "cert-expired"` to the
   close-reason enum.
-- [ ] Action: modify `internal/phoneconn/listener.go` — `phoneIdentity` gains `notAfter time.Time`
+- [x] Action: modify `internal/phoneconn/listener.go` — `phoneIdentity` gains `notAfter time.Time`
   (set from `leaf.NotAfter` in `identity()`); `conn` gains `notAfter time.Time` (set in the
   `serveControl` literal); the ping tick adds, before the liveness check:
 
@@ -387,10 +387,10 @@ if !c.notAfter.IsZero() && time.Now().After(c.notAfter) {
 }
 ```
 
-- [ ] Definition of Done: conflict→409 / transient→503 verified; a tiny route-ttl cannot panic; an
+- [x] Definition of Done: conflict→409 / transient→503 verified; a tiny route-ttl cannot panic; an
   expired identity cert closes the conn as `cert-expired` within one ping interval.
 
-### [ ] Task 3.5 — US3 tests
+### [x] Task 3.5 — US3 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -402,7 +402,7 @@ if !c.notAfter.IsZero() && time.Now().After(c.notAfter) {
 | `TestServeControl_CertExpiryCloses` | conn with past `notAfter` closed `cert-expired` on the ping tick | injectable clock or short ping interval |
 | `TestHeartbeatLoop_TinyRouteTTLNoPanic` | `routeTTL=1ns` does not panic | |
 
-- [ ] Definition of Done: all above passing; existing phoneconn tests updated for the new teardown
+- [x] Definition of Done: all above passing; existing phoneconn tests updated for the new teardown
   ordering and signatures.
 
 ---
@@ -634,14 +634,14 @@ if ferr != nil {
 
 ---
 
-## [ ] US5 — Mesh pool reap must not orphan active connections (W-11)
+## [x] US5 — Mesh pool reap must not orphan active connections (W-11)
 
 Acceptance criteria:
-- [ ] A pool with ANY active stream is never reaped, regardless of `lastUse`.
+- [x] A pool with ANY active stream is never reaped, regardless of `lastUse`.
 
-### [ ] Task 5.1 — active-stream count on the pool
+### [x] Task 5.1 — active-stream count on the pool
 
-- [ ] Action: modify `internal/mesh/client.go` — `peerPool` gains `active atomic.Int64`. `pool()`
+- [x] Action: modify `internal/mesh/client.go` — `peerPool` gains `active atomic.Int64`. `pool()`
   increments it under `c.mu` before returning (so the increment is atomic with map membership vs the
   reaper); `OpenStream` decrements on EVERY failure return, and `clientStream` gains `p *peerPool`
   with `Close` decrementing once:
@@ -659,17 +659,17 @@ func (s *clientStream) Close() error {
 
   `Run`'s reap loop skips pools with `p.active.Load() > 0` (they are carrying live streams —
   `CloseIdleConnections` would orphan the busy conn forever).
-- [ ] Definition of Done: a pool idle by `lastUse` but with an open stream survives the reaper; it is
+- [x] Definition of Done: a pool idle by `lastUse` but with an open stream survives the reaper; it is
   reaped on the first tick after the stream closes.
 
-### [ ] Task 5.2 — US5 tests
+### [x] Task 5.2 — US5 tests
 
 | Test | Verifies |
 |---|---|
 | `TestClient_ReapSkipsActivePools` | pool with active=1 survives a reap tick; reaped after Close |
 | `TestClient_OpenStreamErrorDecrementsActive` | dial failure leaves active back at 0 |
 
-- [ ] Definition of Done: both US5 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: both US5 tests present and passing at the Stage-4 gates.
 
 ---
 

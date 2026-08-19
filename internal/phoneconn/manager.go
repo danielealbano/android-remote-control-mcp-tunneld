@@ -3,6 +3,7 @@ package phoneconn
 import (
 	"context"
 	"errors"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"sync"
@@ -52,6 +53,8 @@ type conn struct {
 	connID       string
 	sessionStart time.Time
 	meta         ConnMeta
+	notAfter     time.Time     // identity-cert expiry (the conn is closed cert-expired once past it)
+	hbDone       chan struct{} // closed by heartbeatLoop on exit (teardown waits on it before unbinding)
 
 	send     chan []byte // control frames to write to the phone (control-stream response body)
 	cancel   context.CancelFunc
@@ -82,7 +85,17 @@ type Manager struct {
 	mu    sync.RWMutex
 	conns map[string]*conn // name → conn
 
+	bindMu [64]sync.Mutex // striped per-name locks serializing BindRoute + the local-map insert
+
 	now func() time.Time
+}
+
+// bindLock returns the striped per-name mutex serializing BindRoute + the local-map insert, so a
+// concurrent same-name bind can never leave the Valkey owner different from the local winner.
+func (m *Manager) bindLock(name string) *sync.Mutex {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return &m.bindMu[h.Sum32()%uint32(len(m.bindMu))]
 }
 
 // Config wires the Manager.
@@ -134,6 +147,12 @@ func (m *Manager) HasConn(name string) bool {
 // register binds the route, writes the phone start event, and records the connection. Returns the conn
 // and a teardown func to defer.
 func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
+	// Serialize BindRoute + the local-map insert per name: a concurrent same-name bind must never leave
+	// the Valkey owner different from the local winner.
+	l := m.bindLock(c.name)
+	l.Lock()
+	defer l.Unlock()
+
 	for attempt := 0; ; attempt++ {
 		err := m.router.BindRoute(ctx, c.name, m.nodeID, c.fingerprint, c.connID)
 		if err == nil {
@@ -156,6 +175,8 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 	m.writeEvent(ctx, c, "start", "")
 
 	teardown := func() {
+		c.close("phone-close") // cancel the conn ctx FIRST: no further heartbeat/self-heal can run
+		<-c.hbDone             // wait for the heartbeat loop (incl. an in-flight self-heal) to exit
 		m.mu.Lock()
 		if m.conns[c.name] == c {
 			delete(m.conns, c.name)
@@ -169,7 +190,6 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		m.writeEvent(tctx, c, "end", c.closeReason())
 		m.rec.PhoneConnClose(c.closeReason())
-		c.close("phone-close")
 	}
 	return teardown, nil
 }
@@ -177,7 +197,12 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 // heartbeatLoop refreshes the route while the connection is owner, handling the three-state result:
 // not-owner → close this superseded connection without unbinding; missing → epoch-preserving self-heal.
 func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
-	ticker := time.NewTicker(m.routeTTL / 3)
+	defer close(c.hbDone)
+	interval := m.routeTTL / 3
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

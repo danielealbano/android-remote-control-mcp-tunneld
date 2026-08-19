@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 )
@@ -86,7 +87,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The mesh request/response bodies ARE the client stream from the owner's perspective:
 	// Read = request body (client→phone), Write = response body (phone→client).
-	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{})}
+	rc := http.NewResponseController(w)
+	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{}),
+		unblock: func() { _ = rc.SetWriteDeadline(time.Now()) }}
 	h.bridge.SpliceMesh(ds, cs)
 	<-cs.done
 }
@@ -96,11 +99,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // + closed flag so that once Close releases the handler, NO further Write touches the HTTP/2 response
 // writer (which the http2 library finalizes as the handler returns).
 type ownerStream struct {
-	r     io.Reader
-	w     io.Writer
-	flush func()
-	done  chan struct{}
-	once  sync.Once
+	r       io.Reader
+	w       io.Writer
+	flush   func()
+	done    chan struct{}
+	unblock func() // resets the HTTP/2 stream so a flow-control-blocked Write fails and releases o.mu
+	once    sync.Once
 
 	mu     sync.Mutex
 	closed bool
@@ -121,6 +125,11 @@ func (o *ownerStream) Write(p []byte) (int, error) {
 }
 func (o *ownerStream) Close() error {
 	o.once.Do(func() {
+		// Reset the HTTP/2 stream FIRST so an in-flight flow-control-blocked Write fails and releases
+		// o.mu — otherwise Close would deadlock on the mutex and pin the mesh splice.
+		if o.unblock != nil {
+			o.unblock()
+		}
 		o.mu.Lock()
 		o.closed = true
 		o.mu.Unlock()
