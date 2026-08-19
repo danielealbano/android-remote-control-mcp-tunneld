@@ -46,7 +46,7 @@ func (h *captureHandler) count(level slog.Level) int {
 	return n
 }
 
-// rootsEndpoint serves a switchable root-set response: a JSON {"roots":[pem]} document, or a 500.
+// switchServer serves a switchable root-set response: a JSON array of PEM strings, or a 500.
 type switchServer struct {
 	fail atomic.Bool
 	body atomic.Pointer[[]byte]
@@ -70,7 +70,7 @@ func rootsJSON(t *testing.T, certs ...*x509.Certificate) []byte {
 	for _, c := range certs {
 		pems = append(pems, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})))
 	}
-	b, err := json.Marshal(map[string][]string{"roots": pems})
+	b, err := json.Marshal(pems)
 	if err != nil {
 		t.Fatal(err)
 	}
