@@ -60,7 +60,9 @@ func TestE2E_DeviceAttestation(t *testing.T) {
 	}
 
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
-	adb(t, serial, "install", "-r", apkPath)
+	// `adb install` triggers a Play Protect scan of the APK on-device, which can take a couple of minutes
+	// on a fresh install — far longer than a quick command — so it gets a generous ceiling of its own.
+	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
@@ -134,11 +136,26 @@ func attestDeviceSerial(t *testing.T) (string, bool) {
 	return serials[0], true
 }
 
-// adb runs `adb -s <serial> <args…>` under a bounded timeout, returning stdout; it fails the test on any
-// non-zero exit or timeout (so a hung command can never block the suite forever).
+const (
+	// adbTimeout bounds a quick adb command (shell/run-as/am start/uninstall).
+	adbTimeout = 60 * time.Second
+	// adbInstallTimeout is generous because `adb install` triggers an on-device Play Protect scan of the
+	// APK that can take well over a minute on a fresh install (~80s observed), far longer than a quick
+	// command. The larger bound reflects that real device behaviour, not a hidden hang.
+	adbInstallTimeout = 120 * time.Second
+)
+
+// adb runs `adb -s <serial> <args…>` under the quick-command timeout. See adbCtx.
 func adb(t *testing.T, serial string, args ...string) []byte {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return adbCtx(t, serial, adbTimeout, args...)
+}
+
+// adbCtx runs `adb -s <serial> <args…>` under an explicit timeout, returning stdout; it fails the test on
+// any non-zero exit or timeout (so a hung command can never block the suite forever).
+func adbCtx(t *testing.T, serial string, timeout time.Duration, args ...string) []byte {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	full := append([]string{"-s", serial}, args...)
 	cmd := exec.CommandContext(ctx, "adb", full...)
