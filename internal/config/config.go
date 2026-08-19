@@ -141,7 +141,7 @@ func (c ServeCmd) Validate() error {
 	// The prefix is lowercased at runtime (server.Run) so it matches the lowercased SNI at the edge; a
 	// non-DNS-label character would otherwise fail late at ACME issuance. Validate case-insensitively.
 	for _, r := range strings.ToLower(c.NamePrefix) {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 			return fmt.Errorf("--name-prefix must be [a-z0-9-] only, got %q", c.NamePrefix)
 		}
 	}

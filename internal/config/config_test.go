@@ -408,9 +408,10 @@ func TestValidate_NamePrefixCharset(t *testing.T) {
 	}{
 		{"lowercase ok", "ab-1", false},
 		{"empty ok", "", false},
-		{"uppercase", "Ab", true},
+		{"uppercase normalized ok", "Ab", false}, // lowercased at runtime → valid, not rejected
 		{"underscore", "a_b", true},
 		{"leading dash", "-ab", true},
+		{"dot", "a.b", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

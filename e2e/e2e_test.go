@@ -203,7 +203,7 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) *cli
 	t.Cleanup(func() {
 		cancel()
 		<-runDone
-		_ = c.Close()
+		c.Close()
 	})
 	return ident
 }

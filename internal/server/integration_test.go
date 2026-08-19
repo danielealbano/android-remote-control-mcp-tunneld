@@ -29,6 +29,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -380,8 +381,9 @@ func TestIntegration_Registry(t *testing.T) {
 	st := newS3Store(t, s3URL, access, secret, bucket)
 
 	t.Run("rejected-enrollment-evidence", func(t *testing.T) {
+		rdb := newRedis(t, redisURL)
 		svc := enroll.NewService(enroll.Config{
-			RDB: newRedis(t, redisURL), CA: loadCA(t), Names: st, Evidence: st,
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
 			Verifier: rejectVerifier{}, Issuer: stubIssuer{},
 			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
 			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
@@ -406,8 +408,9 @@ func TestIntegration_Registry(t *testing.T) {
 
 	t.Run("concurrent-claim-one-winner", func(t *testing.T) {
 		const fixed = "collide23456"
+		rdb := newRedis(t, redisURL)
 		svc := enroll.NewService(enroll.Config{
-			RDB: newRedis(t, redisURL), CA: loadCA(t), Names: st, Evidence: st,
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
 			Verifier: stubVerifier{}, Issuer: stubIssuer{}, AttestOptional: true,
 			TunnelDomain: itTunnelDomain, NameLength: 12, IssuePerWeek: 3,
 			EnrollHour: 1000, EnrollMinute: 1000,

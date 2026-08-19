@@ -22,8 +22,8 @@ type lazyCA struct {
 	renewMargin time.Duration // configured --acme-renew-margin for the degraded renewal floor
 	build       func() (caIssuer, error)
 
-	group singleflight.Group        // dedups concurrent first-use registration
-	inner atomic.Pointer[caIssuer]  // fast-path read; nil until first successful build
+	group singleflight.Group       // dedups concurrent first-use registration
+	inner atomic.Pointer[caIssuer] // fast-path read; nil until first successful build
 }
 
 var _ caIssuer = (*lazyCA)(nil)

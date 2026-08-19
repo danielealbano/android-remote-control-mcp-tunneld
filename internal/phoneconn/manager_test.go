@@ -52,10 +52,7 @@ func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	go m.heartbeatLoop(ctx, c)
 
 	deadline := time.After(2 * time.Second)
-	for {
-		if strings.Contains(buf.String(), "heartbeat failed") {
-			break
-		}
+	for !strings.Contains(buf.String(), "heartbeat failed") {
 		select {
 		case <-deadline:
 			cancel()

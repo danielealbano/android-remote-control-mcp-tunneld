@@ -100,7 +100,7 @@ func (l *Limiter) issuanceHeartbeat(ctx context.Context, name, orderID string) {
 	now := l.now().UnixMilli()
 	if err := issuanceHeartbeatScript.Run(ctx, l.rdb, []string{inflightKey(name)},
 		orderID, now, issuanceSlotTTL.Milliseconds(),
-		(issuanceSlotTTL+issuanceKeyTTLMargin).Milliseconds()).Err(); err != nil {
+		(issuanceSlotTTL + issuanceKeyTTLMargin).Milliseconds()).Err(); err != nil {
 		l.logger.Warn("issuance slot heartbeat failed (slot may expire; a concurrent order could then start)",
 			"tunnel", name, "order", orderID, "err", err)
 	}
