@@ -56,14 +56,21 @@ func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slo
 	return &PromRecorder{m: m, caplog: cl, admin: store, log: log, agg: map[string]*aggEntry{}}
 }
 
-// Reject bumps the reason counter AND emits a deduped cap-hit log. A reason outside
-// observ.RejectReasons is refused (logged as an error) so call sites cannot invent labels.
+// Reject bumps the reason counter and emits a deduped cap-hit log — except "no-route", whose tunnel
+// value is attacker-controlled and so gets a metric + Debug-only line (never the dedup map). A reason
+// outside observ.RejectReasons is refused (logged as an error) so call sites cannot invent labels.
 func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
 	if _, ok := knownRejectReasons[reason]; !ok {
 		p.log.Error("unregistered rejection reason refused", "reason", reason, "tunnel", tunnelName)
 		return
 	}
 	p.m.rejections.WithLabelValues(reason).Inc()
+	if reason == "no-route" {
+		// The tunnel value on this path is attacker-controlled (raw SNI / unrouted name): it must
+		// never key the dedup map or emit per-hit WARNs. Metric + debug-only line.
+		p.log.Debug("no-route rejection", "sni", tunnelName, "client_ip", clientIP)
+		return
+	}
 	p.caplog.Hit(tunnelName, reason, clientIP)
 }
 

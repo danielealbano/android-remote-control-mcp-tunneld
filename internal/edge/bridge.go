@@ -25,11 +25,14 @@ var rollingWindow = time.Minute
 // eviction-on-saturation ranking).
 type activeStream struct {
 	tunnel   string
+	fp       string       // the route fingerprint this stream targets (ban sweeps match on it)
 	lastAct  atomic.Int64 // unix nanos of last byte activity
 	recent   atomic.Int64 // bytes in the current rolling window
 	started  time.Time
 	cancel   context.CancelFunc
 	evicted  atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
+	banned   atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over evicted/shutdown
+	release  func()      // frees this stream's global slot exactly once (nil for a fail-open admission)
 	bytesIn  int64
 	bytesOut int64
 }
@@ -75,9 +78,29 @@ func (e *Edge) evictLeastActive(tunnel string) bool {
 	if victim != nil {
 		victim.evicted.Store(true)
 		victim.cancel()
+		if victim.release != nil {
+			victim.release() // free the Valkey slot NOW; the victim's own deferred release becomes a no-op
+		}
 		return true
 	}
 	return false
+}
+
+// EvictBannedStreams cancels every ACTIVE public splice whose (tunnel, fingerprint) matches: bans are
+// the ONLY revocation, so a reload must stop in-flight traffic, not only new admissions.
+func (e *Edge) EvictBannedStreams(match func(name, fingerprint string) bool) {
+	e.smu.Lock()
+	var victims []*activeStream
+	for s := range e.streams {
+		if match(s.tunnel, s.fp) {
+			victims = append(victims, s)
+		}
+	}
+	e.smu.Unlock()
+	for _, s := range victims {
+		s.banned.Store(true)
+		s.cancel()
+	}
 }
 
 // handleTunnel resolves the route, enforces the ban + global stream cap (with one evict-and-retry),
@@ -135,10 +158,19 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		_ = client.Close()
 		return
 	}
-	// A ReleaseStream error is intentionally ignored: the global conc:{name} counter self-heals at its
-	// TTL, so a transient Valkey failure here at worst delays freeing one slot — it never leaks
-	// permanently, and there is no logger on the edge's hot path.
-	defer func() { _ = e.lim.ReleaseStream(context.Background(), name) }()
+	// Release-once: fires only when a slot was REALLY acquired (a fail-open admission must not DECR a
+	// slot it never took) and at most once (the saturation evictor releases the victim's slot
+	// synchronously so the retry can admit). The release error stays intentionally ignored: the global
+	// conc:{name} counter self-heals at its TTL, so a transient Valkey failure at worst delays freeing
+	// one slot — and there is no logger on the edge's hot path.
+	slotHeld := aerr == nil
+	var slotOnce sync.Once
+	releaseSlot := func() {
+		if slotHeld {
+			slotOnce.Do(func() { _ = e.lim.ReleaseStream(context.Background(), name) })
+		}
+	}
+	defer releaseSlot()
 
 	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
 	// owner/connID while we held stale values (docs/PROTOCOL.md §5: one fresh route lookup + retry, then
@@ -150,8 +182,14 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	}
 	if ferr != nil {
 		n2, fp2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
-		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) && (e.banTun == nil || !e.banTun(name, fp2)) {
-			streamID, _ = store.NewConnID() // same crypto/rand-only failure mode as above
+		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) {
+			if e.banTun != nil && e.banTun(name, fp2) {
+				e.rec.Reject("ban", name, peerAddr(client))
+				_ = client.Close()
+				return
+			}
+			fp = fp2 // the splice now targets the re-bound route: the active stream must carry ITS fingerprint (ban sweeps match on it)
+			streamID, _ = store.NewConnID()
 			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
 		}
 	}
@@ -164,7 +202,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	as := &activeStream{tunnel: name, started: e.now(), cancel: cancel}
+	as := &activeStream{tunnel: name, fp: fp, started: e.now(), cancel: cancel}
+	as.release = releaseSlot
 	as.lastAct.Store(e.now().UnixNano())
 	e.trackStream(as)
 	defer e.untrackStream(as)
@@ -204,6 +243,7 @@ func isDuplicateStream(err error) bool {
 // from a public SNI `<name>.<tunnel-domain>`. It rejects an SNI that is not a single label under the
 // configured tunnel domain.
 func (e *Edge) tunnelName(sni string) (string, bool) {
+	sni = strings.ToLower(sni)
 	suffix := "." + e.cfg.TunnelDomain
 	if e.cfg.TunnelDomain == "" || !strings.HasSuffix(sni, suffix) {
 		return "", false
@@ -304,9 +344,12 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 			case <-stopWatch:
 				return
 			case <-ctx.Done():
-				// The stream ctx cancels on saturation eviction (evictLeastActive, which marks the
-				// stream first) OR on server drain (the parent ctx) — attribute each accurately.
-				if as.evicted.Load() {
+				// The stream ctx cancels on a ban reload (EvictBannedStreams marks banned first), on
+				// saturation eviction (evictLeastActive marks evicted first), OR on server drain (the
+				// parent ctx) — attribute each accurately, banned taking precedence.
+				if as.banned.Load() {
+					setReason(store.CloseBanEvict)
+				} else if as.evicted.Load() {
 					setReason(store.CloseEvicted)
 				} else {
 					setReason(store.CloseServerShutdown)

@@ -3,12 +3,15 @@ package edge
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +32,7 @@ func TestEdge_HandleTunnel_QuotaAdmissionRefusal(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40) // 4-byte day cap
+	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40, time.Hour) // 4-byte day cap
 	// Exhaust the day window before the new stream arrives.
 	_, _, err := te.e.lim.ClaimTraffic(context.Background(), "abcdef012345", 10)
 	if err != nil {
@@ -123,7 +126,7 @@ func TestEdge_PacedCopy_TrafficErrorFailsOpen(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	te.e.lim = limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40)
+	te.e.lim = limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour)
 	mr.Close() // every Valkey call now errors
 
 	src := &pipeStream{r: bytes.NewReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
@@ -167,7 +170,7 @@ func TestEdge_Pace_EmptyBucketBlocks(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	te.e.lim = limit.NewLimiter(rdb, 1, 1<<40, 1<<40) // 1 B/s: the bucket is empty immediately
+	te.e.lim = limit.NewLimiter(rdb, 1, 1<<40, 1<<40, time.Hour) // 1 B/s: the bucket is empty immediately
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -529,5 +532,241 @@ func TestEdge_HandleTunnel_MeshDuplicateRetries(t *testing.T) {
 	}
 	if containsStr(te.rec.rejectReasons(), "no-route") {
 		t.Fatalf("the re-minted stream must not be rejected, got %v", te.rec.rejectReasons())
+	}
+}
+
+// --- US4: edge accept-loop, SNI case-insensitivity, slot accounting, ban eviction ---
+
+// countingLimiter wraps a real limiter to (a) force AcquireStream to fail-open and (b) count
+// ReleaseStream calls, so a fail-open admission's release-once behaviour is observable.
+type countingLimiter struct {
+	*limit.Limiter
+	acquireErr error
+	releases   atomic.Int64
+}
+
+func (c *countingLimiter) AcquireStream(ctx context.Context, name string, maxN int) (bool, error) {
+	if c.acquireErr != nil {
+		return false, c.acquireErr
+	}
+	return c.Limiter.AcquireStream(ctx, name, maxN)
+}
+
+func (c *countingLimiter) ReleaseStream(ctx context.Context, name string) error {
+	c.releases.Add(1)
+	return c.Limiter.ReleaseStream(ctx, name)
+}
+
+// scriptedListener returns a scripted sequence of Accept results, recording each call's timestamp so a
+// test can observe the accept-loop backoff spacing.
+type scriptedListener struct {
+	mu    sync.Mutex
+	times []time.Time
+	steps []func() (net.Conn, error)
+	i     int
+}
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	l.times = append(l.times, time.Now())
+	step := func() (net.Conn, error) { return nil, net.ErrClosed }
+	if l.i < len(l.steps) {
+		step = l.steps[l.i]
+		l.i++
+	}
+	l.mu.Unlock()
+	return step()
+}
+
+func (l *scriptedListener) Close() error { return nil }
+func (l *scriptedListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
+}
+
+// TestAcceptLoop_BackoffOnPersistentError: persistent accept errors must back off (no hot-spin) and a
+// successful accept must reset the backoff.
+func TestAcceptLoop_BackoffOnPersistentError(t *testing.T) {
+	te := newTestEdge(t, baseConfig(), nil, nil)
+	tmp := errors.New("temporary accept error")
+	ln := &scriptedListener{steps: []func() (net.Conn, error){
+		func() (net.Conn, error) { return nil, tmp }, // 1: backoff 5ms
+		func() (net.Conn, error) { return nil, tmp }, // 2: backoff 10ms
+		func() (net.Conn, error) { return nil, tmp }, // 3: backoff 20ms
+		func() (net.Conn, error) {
+			return &closingConn{scriptConn: newScriptConn("203.0.113.7", nil), eof: true}, nil
+		}, // 4: success → reset
+		func() (net.Conn, error) { return nil, tmp },           // 5: backoff 5ms again
+		func() (net.Conn, error) { return nil, net.ErrClosed }, // 6: stop the loop
+	}}
+
+	te.e.acceptLoop(context.Background(), ln) // returns when the listener reports ErrClosed
+	wctx, wcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	te.e.Wait(wctx) // the success handler goroutine must finish
+	wcancel()
+
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	if len(ln.times) != 6 {
+		t.Fatalf("expected 6 Accept calls, got %d", len(ln.times))
+	}
+	firstBackoff := ln.times[1].Sub(ln.times[0])    // ~5ms
+	gapAfterErrors := ln.times[2].Sub(ln.times[1])  // ~10ms
+	gapAfterSuccess := ln.times[4].Sub(ln.times[3]) // ~0: the success reset the backoff
+	if firstBackoff < 4*time.Millisecond {
+		t.Fatalf("a persistent accept error must back off (no hot-spin), first gap = %s", firstBackoff)
+	}
+	if gapAfterSuccess >= gapAfterErrors {
+		t.Fatalf("a successful accept must RESET the backoff: after-success %s should be < after-errors %s",
+			gapAfterSuccess, gapAfterErrors)
+	}
+}
+
+// TestHandleConn_SNICaseInsensitive: an uppercased reserved-host SNI still reaches its local terminator.
+func TestHandleConn_SNICaseInsensitive(t *testing.T) {
+	te := newTestEdge(t, baseConfig(), nil, nil)
+	hello := buildClientHello("", []uint16{0x1301}, []extension{sniExt("ENROLL.EXAMPLE.TEST")})
+	te.e.handleConn(context.Background(), newScriptConn("203.0.113.40", hello))
+
+	accepted := make(chan net.Conn, 1)
+	go func() { c, _ := te.e.EnrollListener().Accept(); accepted <- c }()
+	select {
+	case c := <-accepted:
+		if c == nil {
+			t.Fatal("uppercased enroll SNI must be pushed to the enroll listener")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the enroll listener received no connection for an uppercased SNI")
+	}
+}
+
+// TestTunnelName_CaseInsensitive: a mixed-case public SNI resolves to the lowercase tunnel name.
+func TestTunnelName_CaseInsensitive(t *testing.T) {
+	te := newTestEdge(t, baseConfig(), nil, nil)
+	name, ok := te.e.tunnelName("NAME.Example.TEST")
+	if !ok || name != "name" {
+		t.Fatalf("mixed-case SNI must resolve to %q, got %q ok=%v", "name", name, ok)
+	}
+}
+
+// TestHandleTunnel_FailOpenNeverReleases: an AcquireStream error fails open (admits) but must NEVER
+// release a slot it never took.
+func TestHandleTunnel_FailOpenNeverReleases(t *testing.T) {
+	sni := "abcdef01.example.test"
+	cfg := baseConfig()
+	cfg.Concurrent = 4
+	te := newTestEdge(t, cfg, nil, nil)
+
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	cl := &countingLimiter{
+		Limiter:    limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour),
+		acquireErr: errors.New("valkey down"),
+	}
+	te.e.lim = cl
+	te.e.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+
+	te.rtr.ok = true
+	te.rtr.nodeID = "node-a"
+	te.rtr.fp = "fp"
+	te.rtr.connID = "conn"
+	te.local.has = false // openFar fails → the reject path runs the deferred release-once
+	te.rtr.nodeOK = false
+
+	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.50", nil), ClientHelloInfo{SNI: sni})
+
+	if cl.releases.Load() != 0 {
+		t.Fatalf("a fail-open admission must never DECR a slot it did not take, releases=%d", cl.releases.Load())
+	}
+}
+
+// TestEvictLeastActive_ReleasesVictimSlotOnce: eviction frees the victim's slot immediately, and the
+// victim's own deferred release then no-ops.
+func TestEvictLeastActive_ReleasesVictimSlotOnce(t *testing.T) {
+	cfg := baseConfig()
+	cfg.ProtectRate = 1 << 20
+	te := newTestEdge(t, cfg, nil, nil)
+
+	var releases atomic.Int64
+	var once sync.Once
+	rel := func() { once.Do(func() { releases.Add(1) }) }
+	victim := &activeStream{tunnel: "t1", cancel: func() {}, release: rel}
+	victim.lastAct.Store(0) // maximally idle → evictable
+	te.e.trackStream(victim)
+
+	if !te.e.evictLeastActive("t1") {
+		t.Fatal("an idle stream must be evictable")
+	}
+	if releases.Load() != 1 {
+		t.Fatalf("eviction must release the victim slot once, got %d", releases.Load())
+	}
+	rel() // the victim's OWN deferred release now runs
+	if releases.Load() != 1 {
+		t.Fatalf("the victim's deferred release must no-op after eviction, got %d", releases.Load())
+	}
+}
+
+// TestEvictBannedStreams_KillsMatching: a ban reload cancels the matching active splice (close_reason
+// ban-evict) and leaves a non-matching stream untouched.
+func TestEvictBannedStreams_KillsMatching(t *testing.T) {
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0
+	cfg.MinRate = 0
+	te := newTestEdge(t, cfg, nil, nil)
+
+	client := newScriptConn("203.0.113.30", nil) // blocks until closed
+	far := newScriptConn("203.0.113.30", nil)    // blocks until closed
+	ctx, cancel := context.WithCancel(context.Background())
+	victim := &activeStream{tunnel: "t1", fp: "fp-ban", started: time.Now(), cancel: cancel}
+	victim.lastAct.Store(time.Now().UnixNano())
+	te.e.trackStream(victim)
+	defer te.e.untrackStream(victim)
+
+	other := &activeStream{tunnel: "t1", fp: "fp-clean", started: time.Now(), cancel: func() {}}
+	te.e.trackStream(other)
+	defer te.e.untrackStream(other)
+
+	reasonCh := make(chan string, 1)
+	go func() { reasonCh <- te.e.splice(ctx, "t1", client, far, victim) }()
+	time.Sleep(20 * time.Millisecond) // let the splice watcher start
+
+	te.e.EvictBannedStreams(func(name, fp string) bool { return name == "t1" && fp == "fp-ban" })
+
+	select {
+	case reason := <-reasonCh:
+		if reason != store.CloseBanEvict {
+			t.Fatalf("a ban-evicted splice must record %q, got %q", store.CloseBanEvict, reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the banned splice was not torn down")
+	}
+	if !victim.banned.Load() {
+		t.Fatal("the matching stream must be marked banned")
+	}
+	if other.banned.Load() {
+		t.Fatal("a non-matching stream must be left untouched")
+	}
+}
+
+// TestHandleTunnel_RetryPathBanRecordsBan: a fresh route that is banned on the retry path is recorded
+// as reason "ban", never "no-route".
+func TestHandleTunnel_RetryPathBanRecordsBan(t *testing.T) {
+	sni := "abcdef01.example.test"
+	te := newTestEdge(t, baseConfig(), nil, func(_, fp string) bool { return fp == "fp-ban" })
+	te.rtr.queue = []fakeRoute{
+		{nodeID: "node-a", fp: "fp-clean", connID: "conn1", ok: true}, // initial: passes the ban check
+		{nodeID: "node-b", fp: "fp-ban", connID: "conn2", ok: true},   // retry: a DIFFERENT, banned route
+	}
+	te.local.has = false
+	te.rtr.nodeOK = false // openFar (mesh) fails → triggers the fresh-route retry
+
+	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.60", nil), ClientHelloInfo{SNI: sni})
+
+	reasons := te.rec.rejectReasons()
+	if !containsStr(reasons, "ban") {
+		t.Fatalf("a banned fresh route must reject with reason ban, got %v", reasons)
+	}
+	if containsStr(reasons, "no-route") {
+		t.Fatalf("a banned fresh route must NOT be recorded as no-route, got %v", reasons)
 	}
 }

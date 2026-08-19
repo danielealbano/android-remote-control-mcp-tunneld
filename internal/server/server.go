@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -42,6 +43,12 @@ const (
 
 // Run constructs every component and runs the process until ctx is cancelled, then drains gracefully.
 func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version string) error {
+	// SNI dispatch is case-insensitive: normalize the routing hosts once so every downstream comparison
+	// (edge dispatch, reserved-cert issuance, enroll reserved labels) uses the canonical lowercase form.
+	cfg.TunnelDomain = strings.ToLower(cfg.TunnelDomain)
+	cfg.EnrollHost = strings.ToLower(cfg.EnrollHost)
+	cfg.ControlHost = strings.ToLower(cfg.ControlHost)
+
 	redisOpts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return err
@@ -74,7 +81,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	bwRate, _ := config.ParseBitrate(cfg.LimitBandwidth)
 	dayCap, _ := config.ParseByteSize(cfg.LimitTrafficDay)
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
-	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap)
+	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle)
 
 	// Durable store.
 	st, err := store.NewS3Store(ctx, store.S3Config{
@@ -230,6 +237,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error {
 		ban.Watch(gctx, banEng, cfg.BanFile, cfg.DBIPCountryLiteCSV, cfg.BanPoll, func(e *ban.Engine) {
 			phoneMgr.EvictBanned(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
+			ed.EvictBannedStreams(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
 		}, logger)
 		return nil
 	})

@@ -407,19 +407,19 @@ if !c.notAfter.IsZero() && time.Now().After(c.notAfter) {
 
 ---
 
-## [ ] US4 — Edge: attacker-proof logging, accept-loop and slot correctness (C-2, W-5, W-6, W-9, W-12, W-14, I-1)
+## [x] US4 — Edge: attacker-proof logging, accept-loop and slot correctness (C-2, W-5, W-6, W-9, W-12, W-14, I-1)
 
 Acceptance criteria:
-- [ ] `no-route` rejections write NO caplog entry and NO WARN — metric + Debug line only.
-- [ ] The accept loop backs off exponentially on persistent accept errors (cap 1 s).
-- [ ] SNI dispatch and tunnel-name derivation are case-insensitive; config hosts are normalized once.
-- [ ] A ban reload kills matching ACTIVE public splices (`close_reason=ban-evict`), not just the phone control conn.
-- [ ] A fail-open stream admission never DECRs `conc:{name}`; evict-and-retry releases the victim's slot synchronously so the retry actually admits.
-- [ ] A banned fresh route on the retry path records reason `ban`.
+- [x] `no-route` rejections write NO caplog entry and NO WARN — metric + Debug line only.
+- [x] The accept loop backs off exponentially on persistent accept errors (cap 1 s).
+- [x] SNI dispatch and tunnel-name derivation are case-insensitive; config hosts are normalized once.
+- [x] A ban reload kills matching ACTIVE public splices (`close_reason=ban-evict`), not just the phone control conn.
+- [x] A fail-open stream admission never DECRs `conc:{name}`; evict-and-retry releases the victim's slot synchronously so the retry actually admits.
+- [x] A banned fresh route on the retry path records reason `ban`.
 
-### [ ] Task 4.1 — C-2: no-route → metric + debug only
+### [x] Task 4.1 — C-2: no-route → metric + debug only
 
-- [ ] Action: modify `internal/metrics/recorder.go` `Reject`:
+- [x] Action: modify `internal/metrics/recorder.go` `Reject`:
 
 ```go
 func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
@@ -438,12 +438,12 @@ func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
 }
 ```
 
-- [ ] Definition of Done: no `caplog` state is created for any `no-route` hit; all other reasons
+- [x] Definition of Done: no `caplog` state is created for any `no-route` hit; all other reasons
   unchanged.
 
-### [ ] Task 4.2 — W-5 + W-2 groundwork: accept backoff + handler WaitGroup
+### [x] Task 4.2 — W-5 + W-2 groundwork: accept backoff + handler WaitGroup
 
-- [ ] Action: modify `internal/edge/accept.go` `acceptLoop` + `internal/edge/edge.go`:
+- [x] Action: modify `internal/edge/accept.go` `acceptLoop` + `internal/edge/edge.go`:
 
 ```go
 // edge.go: Edge gains `wg sync.WaitGroup`; new method:
@@ -490,12 +490,12 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 }
 ```
 
-- [ ] Definition of Done: persistent accept errors are paced (≤1 s cap, reset on success); `Wait`
+- [x] Definition of Done: persistent accept errors are paced (≤1 s cap, reset on success); `Wait`
   returns once all handler goroutines finish (or ctx expires).
 
-### [ ] Task 4.3 — W-6: case-insensitive SNI + normalized config hosts
+### [x] Task 4.3 — W-6: case-insensitive SNI + normalized config hosts
 
-- [ ] Action: modify `internal/server/server.go` `Run` — normalize once at entry (before any use):
+- [x] Action: modify `internal/server/server.go` `Run` — normalize once at entry (before any use):
 
 ```go
 cfg.TunnelDomain = strings.ToLower(cfg.TunnelDomain)
@@ -505,16 +505,16 @@ cfg.ControlHost = strings.ToLower(cfg.ControlHost)
 
   Add the `strings` import to `server.go` and to `internal/edge/accept.go` (the lowered-SNI dispatch).
 
-- [ ] Action: modify `internal/edge/accept.go` `handleConn` — dispatch on the lowered SNI:
+- [x] Action: modify `internal/edge/accept.go` `handleConn` — dispatch on the lowered SNI:
   `sni := strings.ToLower(info.SNI)` and switch on `sni` (raw `info.SNI` stays in logs/JA4 untouched).
-- [ ] Action: modify `internal/edge/bridge.go` `tunnelName` — operate on
+- [x] Action: modify `internal/edge/bridge.go` `tunnelName` — operate on
   `sni = strings.ToLower(sni)` first.
-- [ ] Definition of Done: an uppercased client SNI reaches the right listener; a mixed-case
+- [x] Definition of Done: an uppercased client SNI reaches the right listener; a mixed-case
   `TUNNELD_ENROLL_HOST` works.
 
-### [ ] Task 4.4 — W-12 + W-14: slot accounting via a per-stream release-once
+### [x] Task 4.4 — W-12 + W-14: slot accounting via a per-stream release-once
 
-- [ ] Action: modify `internal/edge/bridge.go` — `activeStream` gains
+- [x] Action: modify `internal/edge/bridge.go` — `activeStream` gains
   `fp string`, `banned atomic.Bool`, `release func()`. In `handleTunnel`, replace the acquire/release
   block:
 
@@ -551,7 +551,7 @@ defer releaseSlot()
   `as.fp` and `as.release = releaseSlot` are set in/immediately after the `activeStream` literal,
   BEFORE `trackStream` publishes it (the `e.smu` critical sections give the evictor a happens-before
   on both fields).
-- [ ] Action: modify `internal/edge/bridge.go` `evictLeastActive` — after `victim.cancel()`:
+- [x] Action: modify `internal/edge/bridge.go` `evictLeastActive` — after `victim.cancel()`:
 
 ```go
 if victim.release != nil {
@@ -559,12 +559,12 @@ if victim.release != nil {
 }
 ```
 
-- [ ] Definition of Done: fail-open streams never DECR; after an eviction the immediate re-acquire
+- [x] Definition of Done: fail-open streams never DECR; after an eviction the immediate re-acquire
   sees the freed slot.
 
-### [ ] Task 4.5 — W-9: ban reload kills active public splices
+### [x] Task 4.5 — W-9: ban reload kills active public splices
 
-- [ ] Action: modify `internal/edge/bridge.go` — new method:
+- [x] Action: modify `internal/edge/bridge.go` — new method:
 
 ```go
 // EvictBannedStreams cancels every ACTIVE public splice whose (tunnel, fingerprint) matches: bans are
@@ -587,14 +587,14 @@ func (e *Edge) EvictBannedStreams(match func(name, fingerprint string) bool) {
 
   In the splice watcher's `<-ctx.Done()` case, attribute in order:
   `banned → store.CloseBanEvict`, `evicted → store.CloseEvicted`, else `store.CloseServerShutdown`.
-- [ ] Action: modify `internal/server/server.go` — the `ban.Watch` reload hook additionally calls
+- [x] Action: modify `internal/server/server.go` — the `ban.Watch` reload hook additionally calls
   `ed.EvictBannedStreams(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })`.
-- [ ] Definition of Done: banning a tunnel terminates its in-flight public connections within one
+- [x] Definition of Done: banning a tunnel terminates its in-flight public connections within one
   ban-poll interval, logged `close_reason=ban-evict`.
 
-### [ ] Task 4.6 — I-1: ban recorded on the retry path
+### [x] Task 4.6 — I-1: ban recorded on the retry path
 
-- [ ] Action: modify `internal/edge/bridge.go` `handleTunnel` retry block — split the ban check out of
+- [x] Action: modify `internal/edge/bridge.go` `handleTunnel` retry block — split the ban check out of
   the retry predicate:
 
 ```go
@@ -614,10 +614,10 @@ if ferr != nil {
 ```
 
   (signature already updated by US2; the duplicate-stream retry from Task 2.3 sits before this block).
-- [ ] Definition of Done: a banned fresh route rejects with reason `ban`; a successful retry leaves
+- [x] Definition of Done: a banned fresh route rejects with reason `ban`; a successful retry leaves
   `as.fp` = the fresh route's fingerprint.
 
-### [ ] Task 4.7 — US4 tests
+### [x] Task 4.7 — US4 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -630,7 +630,7 @@ if ferr != nil {
 | `TestEvictBannedStreams_KillsMatching` | matching active stream cancelled, reason `ban-evict`; others untouched | |
 | `TestHandleTunnel_RetryPathBanRecordsBan` | banned fresh route → reason `ban`, not `no-route` | |
 
-- [ ] Definition of Done: all US4 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: all US4 tests present and passing at the Stage-4 gates.
 
 ---
 
@@ -673,16 +673,16 @@ func (s *clientStream) Close() error {
 
 ---
 
-## [ ] US6 — Limits: clock-safe bandwidth, crash-safe issuance cap, live stream-counter TTL (W-13, W-17, W-18)
+## [x] US6 — Limits: clock-safe bandwidth, crash-safe issuance cap, live stream-counter TTL (W-13, W-17, W-18)
 
 Acceptance criteria:
-- [ ] The bandwidth bucket's `last` anchor never moves backward.
-- [ ] `--issue-per-week` counts committed + in-flight orders atomically; a crashed order's slot frees in ≤ 30 s; failed orders don't burn the weekly window.
-- [ ] `conc:{name}`'s TTL = 3 × `--limit-conn-idle` and is refreshed by every traffic chunk, only if the key exists.
+- [x] The bandwidth bucket's `last` anchor never moves backward.
+- [x] `--issue-per-week` counts committed + in-flight orders atomically; a crashed order's slot frees in ≤ 30 s; failed orders don't burn the weekly window.
+- [x] `conc:{name}`'s TTL = 3 × `--limit-conn-idle` and is refreshed by every traffic chunk, only if the key exists.
 
-### [ ] Task 6.1 — W-13: monotone refill anchor
+### [x] Task 6.1 — W-13: monotone refill anchor
 
-- [ ] Action: modify `internal/limit/limiter.go` `claimBandwidthScript` — replace the elapsed/HSET
+- [x] Action: modify `internal/limit/limiter.go` `claimBandwidthScript` — replace the elapsed/HSET
   section:
 
 ```lua
@@ -700,14 +700,14 @@ redis.call('PEXPIRE', KEYS[1], ttl)
 return math.floor(granted)
 ```
 
-- [ ] Definition of Done: a `now < last` call grants from the existing tokens without advancing or
+- [x] Definition of Done: a `now < last` call grants from the existing tokens without advancing or
   regressing `last`.
 
-### [ ] Task 6.2 — W-18: derived TTL + per-chunk refresh
+### [x] Task 6.2 — W-18: derived TTL + per-chunk refresh
 
-- [ ] Action: modify `internal/limit/concurrency.go` — delete the `streamCapTTL` const; `AcquireStream`
+- [x] Action: modify `internal/limit/concurrency.go` — delete the `streamCapTTL` const; `AcquireStream`
   uses `l.streamTTL`.
-- [ ] Action: modify `internal/limit/limiter.go` — `Limiter` gains `streamTTL time.Duration`;
+- [x] Action: modify `internal/limit/limiter.go` — `Limiter` gains `streamTTL time.Duration`;
   `NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, streamTTL time.Duration) *Limiter`.
   `claimTrafficScript` gains `KEYS[3]` = `conc:{name}` and `ARGV[6]` = the TTL — the full modified
   script (the PEXPIRE sits BEFORE the final `return`, which must stay the last statement):
@@ -733,13 +733,13 @@ return {dayOK, weekOK}
 ```
 
   `ClaimTraffic` passes `"conc:" + name` and `l.streamTTL.Milliseconds()`.
-- [ ] Action: modify `internal/server/server.go` — `limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle)`.
-- [ ] Definition of Done: a stream older than the TTL whose tunnel still moves ≥1 chunk per idle
+- [x] Action: modify `internal/server/server.go` — `limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle)`.
+- [x] Definition of Done: a stream older than the TTL whose tunnel still moves ≥1 chunk per idle
   window keeps its counter alive; all limiter constructor call sites (tests included) updated.
 
-### [ ] Task 6.3 — W-17: inflight issuance slots
+### [x] Task 6.3 — W-17: inflight issuance slots
 
-- [ ] Action: modify `internal/limit/issuance.go` — replace `IssuanceAllowed` (delete it and its uses)
+- [x] Action: modify `internal/limit/issuance.go` — replace `IssuanceAllowed` (delete it and its uses)
   with the slot API. `iss:{name}` semantics unchanged (successes only):
 
 ```go
@@ -803,7 +803,7 @@ func (l *Limiter) IssuanceEnd(ctx context.Context, name, orderID string) error
   `IssuanceEnd` = `HDEL`. Slot deadlines use `l.now().UnixMilli()` passed from Go (matches the
   existing `claimBandwidthScript` convention; inter-node skew > 30 s costs at most one transient slot
   purge, bounded and NTP-assumed).
-- [ ] Action: modify `internal/enroll/enroll.go` `Issue` — replace the `IssuanceAllowed` block:
+- [x] Action: modify `internal/enroll/enroll.go` `Issue` — replace the `IssuanceAllowed` block:
 
 ```go
 ok, orderID, err := s.cfg.Limiter.IssuanceBegin(ctx, name, s.cfg.IssuePerWeek)
@@ -828,10 +828,10 @@ go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
 
   `IssuanceRecord` stays post-success and unchanged. Add the `crypto/rand` and `encoding/hex`
   imports to `issuance.go` (the locally-minted order id).
-- [ ] Definition of Done: concurrent `/issue` calls for one name admit at most `maxN − committed`
+- [x] Definition of Done: concurrent `/issue` calls for one name admit at most `maxN − committed`
   orders; a heartbeat-less slot frees in ≤ 30 s; a failed order leaves the weekly window unconsumed.
 
-### [ ] Task 6.4 — US6 tests
+### [x] Task 6.4 — US6 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -844,7 +844,7 @@ go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
 | `TestIssuanceEnd_FreesSlotOnFailure` | Begin→End (no Record) leaves the weekly window unconsumed | |
 | `TestIssue_ConcurrentCallsRespectCap` (enroll) | two parallel Issues, cap 1 → one `issuance_cap` | stub issuer that blocks |
 
-- [ ] Definition of Done: all US6 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: all US6 tests present and passing at the Stage-4 gates.
 
 ---
 
@@ -1659,6 +1659,15 @@ Acceptance criteria:
 ## Deviations
 
 (recorded during implementation per agent.md §2)
+
+- **Task 4.4 (`internal/edge/edge.go`) — `Edge.lim` field type.** The plan's Task 4.7 mandates a
+  `TestHandleTunnel_FailOpenNeverReleases` test driven by a "fake limiter", which the concrete
+  `*limit.Limiter` field cannot accept. Introduced a consumer-side interface `StreamLimiter`
+  (the five data-plane limiting methods the edge uses: `AcquireStream`, `ReleaseStream`, `ClaimTraffic`,
+  `ClaimBandwidth`, `TrafficExhausted`) and changed `Edge.lim` + the `New(...)` parameter from
+  `*limit.Limiter` to `StreamLimiter`. `*limit.Limiter` still satisfies it (compile-asserted), so the
+  `server.Run` wiring and every existing test are unchanged; the change only enables the required fake
+  and follows go.md's "accept interfaces" rule (mirrors the Task 2.3 `dialBackOpener` deviation).
 
 - **Task 2.3 (`internal/server/serve.go`) — `bridgeAdapter.mgr` field type.** The plan's code block kept
   `mgr *phoneconn.Manager` (a concrete type). Task 2.4 mandates a `TestBridgeAdapter_TranslatesDuplicateStreamID`

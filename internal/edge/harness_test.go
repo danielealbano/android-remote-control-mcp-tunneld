@@ -247,7 +247,7 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	lim := limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40) // generous caps unless a test overrides via keys
+	lim := limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour) // generous caps unless a test overrides via keys
 
 	rec := &recRecorder{}
 	sink := &fakeSink{}

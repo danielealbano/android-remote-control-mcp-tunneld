@@ -217,3 +217,37 @@ func TestQuotaExhaustedDedupedViaCaplog(t *testing.T) {
 		t.Fatalf("an immediate repeat must be deduped (no new log), got %d lines", second)
 	}
 }
+
+// TestPromRecorder_Reject_NoRouteDebugOnly: a no-route rejection increments the metric and logs a
+// Debug line only — it must NEVER key the attacker-controlled tunnel value into the caplog dedup map
+// (which would emit a WARN), while every other reason still routes through caplog.
+func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rec := NewPromRecorder(m, caplog.New(logger), store, logger)
+
+	rec.Reject("no-route", "ATTACKER-CONTROLLED-sni", "203.0.113.7")
+
+	// The reason counter is still incremented (observed via the /metrics endpoint).
+	h := Handler(m.Registry(), rdb, store, discardLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="no-route"} 1`) {
+		t.Fatalf("no-route rejection metric not incremented:\n%s", rr.Body.String())
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "no-route rejection") {
+		t.Fatalf("no-route must log a Debug line, got %q", out)
+	}
+	if strings.Contains(out, "level=WARN") || strings.Contains(out, "cap hit") {
+		t.Fatalf("no-route must NOT hit caplog (no WARN cap-hit line), got %q", out)
+	}
+
+	// A different reason DOES go through caplog (control): it emits the WARN cap-hit line.
+	rec.Reject("stream-cap", "tunA", "203.0.113.8")
+	if !strings.Contains(buf.String(), "cap hit") {
+		t.Fatal("a non-no-route reason must still be logged via caplog")
+	}
+}
