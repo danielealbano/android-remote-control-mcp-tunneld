@@ -85,7 +85,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	bwRate, _ := config.ParseBitrate(cfg.LimitBandwidth)
 	dayCap, _ := config.ParseByteSize(cfg.LimitTrafficDay)
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
-	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle)
+	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle, limit.WithLogger(logger))
 
 	// Durable store.
 	st, err := store.NewS3Store(ctx, store.S3Config{

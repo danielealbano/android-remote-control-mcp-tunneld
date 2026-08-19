@@ -89,7 +89,7 @@ func (rc *reservedCerts) ensure(ctx context.Context, rh *reservedHost) {
 	if ok {
 		notAfter := info.NotAfter
 		switch {
-		case time.Until(notAfter) > rc.renewMargin:
+		case notAfter.Sub(rc.now()) > rc.renewMargin:
 			rh.store(cert, info)
 			return // valid cache — reuse, order nothing
 		case rc.now().Before(notAfter):
@@ -151,7 +151,11 @@ func (rc *reservedCerts) maybeRenew(ctx context.Context, rh *reservedHost) {
 		return
 	}
 	due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
-	if err != nil || !due {
+	if err != nil {
+		rc.logger.Warn("reserved-host renewal check failed (will retry next scan)", "host", rh.host, "err", err)
+		return
+	}
+	if !due {
 		return
 	}
 	certPEM, keyPEM, info, err := rc.obtain(ctx, rh.host)

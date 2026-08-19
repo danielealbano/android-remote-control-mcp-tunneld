@@ -198,6 +198,16 @@ func TestPromRecorderFlushesTcnt(t *testing.T) {
 	}
 }
 
+// TestPromRecorder_NilAdminStoreFlushNoPanic verifies flush/FinalFlush do not panic when the admin
+// store is nil (metrics-only test wiring): the recorder treats a nil store as a no-op admin sink.
+func TestPromRecorder_NilAdminStoreFlushNoPanic(t *testing.T) {
+	m := NewMetrics()
+	rec := NewPromRecorder(m, nil, nil, nil) // nil admin store
+	rec.Bytes("tunA", "in", 100)             // accumulate a delta so flush has work
+	rec.flush(context.Background())          // must not panic
+	rec.FinalFlush()                         // must not panic
+}
+
 // TestQuotaExhaustedDedupedViaCaplog: the exhaustion LOG is caplog-deduped — the first hit per
 // (tunnel, window) logs immediately, an immediate repeat does not.
 func TestQuotaExhaustedDedupedViaCaplog(t *testing.T) {

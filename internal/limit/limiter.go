@@ -2,6 +2,7 @@ package limit
 
 import (
 	"context"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -19,13 +20,25 @@ type Limiter struct {
 	weekCap   int64
 	streamTTL time.Duration // conc:{name} safety TTL (= 3 × --limit-conn-idle), refreshed per chunk
 	now       func() time.Time
+	logger    *slog.Logger
 }
+
+// Option configures a Limiter (functional-options pattern).
+type Option func(*Limiter)
+
+// WithLogger sets the Limiter's logger (used for the issuance-slot heartbeat failure surface).
+func WithLogger(l *slog.Logger) Option { return func(lm *Limiter) { lm.logger = l } }
 
 // NewLimiter builds the Limiter. bwRate is --limit-bandwidth in bytes/sec; dayCap/weekCap are the
 // combined-direction traffic caps in bytes; streamTTL is the global stream-counter safety TTL,
 // refreshed by every traffic chunk (derived = 3 × --limit-conn-idle).
-func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, streamTTL time.Duration) *Limiter {
-	return &Limiter{rdb: rdb, bwRate: bwRate, dayCap: dayCap, weekCap: weekCap, streamTTL: streamTTL, now: time.Now}
+func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, streamTTL time.Duration, opts ...Option) *Limiter {
+	l := &Limiter{rdb: rdb, bwRate: bwRate, dayCap: dayCap, weekCap: weekCap, streamTTL: streamTTL,
+		now: time.Now, logger: slog.New(slog.DiscardHandler)}
+	for _, o := range opts {
+		o(l)
+	}
+	return l
 }
 
 // SetClock overrides the clock (tests only).

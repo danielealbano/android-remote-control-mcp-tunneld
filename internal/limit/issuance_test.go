@@ -1,11 +1,32 @@
 package limit
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// TestIssuanceHeartbeat_LogsOnError verifies a failed slot heartbeat is logged at Warn with identifiers
+// (a voided slot could otherwise let a second concurrent order start, silently).
+func TestIssuanceHeartbeat_LogsOnError(t *testing.T) {
+	rdb, mr := newTestRedis(t)
+	var buf bytes.Buffer
+	l := NewLimiter(rdb, 1<<20, 1<<30, 1<<30, time.Hour,
+		WithLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))))
+	mr.Close() // every rdb op now fails
+	l.issuanceHeartbeat(context.Background(), "tun", "order1")
+	if !strings.Contains(buf.String(), "heartbeat failed") {
+		t.Fatalf("a failed heartbeat must be logged at Warn; log = %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "order1") || !strings.Contains(buf.String(), "tun") {
+		t.Errorf("the log must carry the tunnel + order identifiers; log = %q", buf.String())
+	}
+}
 
 // TestIssuanceBegin_ConcurrentGate: with 2 committed successes and cap 3, exactly one of many
 // concurrent Begins may reserve the last in-flight slot.

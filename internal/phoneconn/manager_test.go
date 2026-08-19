@@ -1,9 +1,12 @@
 package phoneconn
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,10 +20,59 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
+// syncBuf is a concurrency-safe io.Writer + reader for capturing slog output from a background goroutine.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestHeartbeatLoop_LogsPersistentError verifies a persistent route-heartbeat error is logged at Warn
+// with identifiers (a silent failure would let route:{name} TTL-expire with no operator signal).
+func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
+	fr := newFakeRouter()
+	fr.hbErr = errors.New("valkey unreachable")
+	buf := &syncBuf{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
+		RouteTTL: 30 * time.Millisecond, Logger: logger})
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.Background())
+	go m.heartbeatLoop(ctx, c)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(buf.String(), "heartbeat failed") {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			<-c.hbDone
+			t.Fatalf("a persistent heartbeat error must be logged at Warn; log = %q", buf.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-c.hbDone
+}
+
 type fakeRouter struct {
 	mu       sync.Mutex
 	bound    map[string]string // name → bound connID
 	hbResult router.HeartbeatResult
+	hbErr    error // when set, Heartbeat returns it (persistent-failure test)
 	unbound  map[string]bool
 	collide  int      // upcoming BindRoute calls that return router.ErrConnIDCollision
 	bindErr  error    // when set (and not colliding), BindRoute returns it
@@ -47,9 +99,9 @@ func (f *fakeRouter) BindRoute(_ context.Context, name, _, _, connID string) err
 func (f *fakeRouter) Heartbeat(_ context.Context, _, _ string) (router.HeartbeatResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, "Heartbeat")
-	res := f.hbResult
+	res, err := f.hbResult, f.hbErr
 	f.mu.Unlock()
-	return res, nil
+	return res, err
 }
 func (f *fakeRouter) Unbind(_ context.Context, name, _ string) error {
 	f.mu.Lock()

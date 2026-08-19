@@ -211,6 +211,11 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 		case <-ticker.C:
 			res, err := m.router.Heartbeat(ctx, c.name, c.connID)
 			if err != nil {
+				// Retrying next tick is fine for a blip, but a PERSISTENT failure (Valkey ACL/auth or a
+				// partition to Valkey only) lets route:{name} TTL-expire — public clients then get
+				// no-route while the phone still believes it is connected. Surface it, don't swallow it.
+				m.logger.Warn("route heartbeat failed (route expires by TTL if this persists)",
+					"tunnel", c.name, "conn", c.connID, "err", err)
 				continue
 			}
 			switch res {
