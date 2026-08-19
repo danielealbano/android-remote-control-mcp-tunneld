@@ -38,21 +38,21 @@ nonexistent key returns 0 and never creates the key (valkey.io/commands/pexpire)
 
 ---
 
-## [ ] US1 — Fail-fast configuration & logging validation (W-20, I-11, I-12, I-13)
+## [x] US1 — Fail-fast configuration & logging validation (W-20, I-11, I-12, I-13)
 
 Silent misconfigurations must fail at startup, not at runtime.
 
 Acceptance criteria:
-- [ ] `--s3-endpoint` without an `http(s)://` scheme is rejected by `Validate()`.
-- [ ] `--attest-status-max-stale` ≤ `--attest-refresh` is rejected.
-- [ ] `--acme-gts-validity` ≤ (160h − `--acme-renew-margin`) is rejected (cert would expire before the fixed non-LE renewal point).
-- [ ] A `--log` spec containing two `output=` keys is a parse error (not silent std-wins).
+- [x] `--s3-endpoint` without an `http(s)://` scheme is rejected by `Validate()`.
+- [x] `--attest-status-max-stale` ≤ `--attest-refresh` is rejected.
+- [x] `--acme-gts-validity` ≤ (160h − `--acme-renew-margin`) is rejected (cert would expire before the fixed non-LE renewal point).
+- [x] A `--log` spec containing two `output=` keys is a parse error (not silent std-wins).
 
-### [ ] Task 1.1 — config cross-field guards
+### [x] Task 1.1 — config cross-field guards
 
-- [ ] Action: modify `internal/config/config.go` — add `{"--s3-endpoint", c.S3Endpoint}` to the
+- [x] Action: modify `internal/config/config.go` — add `{"--s3-endpoint", c.S3Endpoint}` to the
   existing URL-prefix loop (the loop currently checks the five ACME/attest URLs).
-- [ ] Action: modify `internal/config/config.go` — after the duration loop, add:
+- [x] Action: modify `internal/config/config.go` — after the duration loop, add:
 
 ```go
 if c.AttestStatusMaxStale <= c.AttestRefresh {
@@ -63,12 +63,12 @@ if c.ACMEGTSValidity <= shortlivedLifetime-c.ACMERenewMargin {
 }
 ```
 
-- [ ] Definition of Done: both guards reject the bad values and accept the defaults (`24h`/`1h`,
+- [x] Definition of Done: both guards reject the bad values and accept the defaults (`24h`/`1h`,
   `168h`/`48h`); `Validate()` unit tests cover accept + reject per guard.
 
-### [ ] Task 1.2 — duplicate `output=` keys rejected
+### [x] Task 1.2 — duplicate `output=` keys rejected
 
-- [ ] Action: modify `internal/logging/logging.go` `parseSpec` — in the `case "output":` branch, add
+- [x] Action: modify `internal/logging/logging.go` `parseSpec` — in the `case "output":` branch, add
   before the existing logic:
 
 ```go
@@ -77,10 +77,10 @@ if haveOutput {
 }
 ```
 
-- [ ] Definition of Done: `output=std;output=/x.log` and `output=/x.log;output=std` both error; a
+- [x] Definition of Done: `output=std;output=/x.log` and `output=/x.log;output=std` both error; a
   single `output=` still parses.
 
-### [ ] Task 1.3 — US1 tests
+### [x] Task 1.3 — US1 tests
 
 | Test | Verifies |
 |---|---|
@@ -89,25 +89,25 @@ if haveOutput {
 | `TestServeCmd_Validate_GTSValidityVsRenewal` | 72h validity + 48h margin rejected; default 168h accepted |
 | `TestParseSpecs_DuplicateOutput` | both duplicate orderings error; message names the spec |
 
-- [ ] Definition of Done: all four tests present and passing (tests run at Stage-4 quality gates only).
+- [x] Definition of Done: all four tests present and passing (tests run at Stage-4 quality gates only).
 
 ---
 
-## [ ] US2 — Connection/stream ID scheme with deterministic collision handling (W-10)
+## [x] US2 — Connection/stream ID scheme with deterministic collision handling (W-10)
 
 Phone connIDs currently carry 16 bits of entropy (`NewConnID(now, now)` zeroes the 3 time bytes for
 every phone conn by construction); the owner-conditional route guarantee is only probabilistic. New
 scheme: 4 random bytes, collisions detected and re-rolled at the two serialization points.
 
 Acceptance criteria:
-- [ ] `store.NewConnID()` returns 8 lowercase hex chars from 4 `crypto/rand` bytes; no time argument.
-- [ ] `BindRoute` refuses a bind whose connID equals the currently-stored connID for the name (re-roll signal); the phone bind re-mints and retries (bounded).
-- [ ] `OpenStream` refuses a duplicate pending streamID instead of overwriting; the edge re-mints once and retries (local and mesh paths).
-- [ ] The unused `startedAt` route field and every signature carrying it are removed.
+- [x] `store.NewConnID()` returns 8 lowercase hex chars from 4 `crypto/rand` bytes; no time argument.
+- [x] `BindRoute` refuses a bind whose connID equals the currently-stored connID for the name (re-roll signal); the phone bind re-mints and retries (bounded).
+- [x] `OpenStream` refuses a duplicate pending streamID instead of overwriting; the edge re-mints once and retries (local and mesh paths).
+- [x] The unused `startedAt` route field and every signature carrying it are removed.
 
-### [ ] Task 2.1 — `store.NewConnID`
+### [x] Task 2.1 — `store.NewConnID`
 
-- [ ] Action: modify `internal/store/event.go` — replace `NewConnID` (and its doc comment):
+- [x] Action: modify `internal/store/event.go` — replace `NewConnID` (and its doc comment):
 
 ```go
 // NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
@@ -123,11 +123,11 @@ func NewConnID() (string, error) {
 ```
 
   Drop the now-unused `binary` import. `LogKey`'s `conn8` slicing needs no change (ids are now 8 chars).
-- [ ] Definition of Done: every minted id is 8 lowercase hex chars; no caller passes time arguments.
+- [x] Definition of Done: every minted id is 8 lowercase hex chars; no caller passes time arguments.
 
-### [ ] Task 2.2 — router: connID-collision re-roll + `startedAt` removal
+### [x] Task 2.2 — router: connID-collision re-roll + `startedAt` removal
 
-- [ ] Action: modify `internal/router/route_e2e.go` — `bindRouteScript` becomes:
+- [x] Action: modify `internal/router/route_e2e.go` — `bindRouteScript` becomes:
 
 ```lua
 local fp = redis.call('HGET', KEYS[1], 'fingerprint')
@@ -148,7 +148,7 @@ return 'ok'
   `BindRouteIfAbsentOrOwner` and `LookupRoute` drop `startedAt` from signature/return; the file-top
   comment about the conn-id epoch is deleted. Add the `errors` import to `route_e2e.go` (the
   sentinel; per-file imports) and drop its now-unused `strconv` and `time` imports.
-- [ ] Action: modify `internal/phoneconn/manager.go` — `Router` interface: drop `startedAt` params.
+- [x] Action: modify `internal/phoneconn/manager.go` — `Router` interface: drop `startedAt` params.
   `register` re-rolls on collision (inside the Task 3.3 stripe lock):
 
 ```go
@@ -167,15 +167,15 @@ for attempt := 0; ; attempt++ {
   `heartbeatLoop`'s self-heal call drops `c.sessionStart`. `mustConnID` in
   `internal/phoneconn/listener.go` becomes zero-argument (`store.NewConnID()`, fallback `"00000000"`).
   Add the `errors` import to `manager.go` (the sentinels + `errors.Is`).
-- [ ] Action: modify `internal/edge/edge.go` + `internal/edge/bridge.go` — `Router` interface
+- [x] Action: modify `internal/edge/edge.go` + `internal/edge/bridge.go` — `Router` interface
   `LookupRoute` drops `startedAt`; both `store.NewConnID(...)` streamID mints become
   `store.NewConnID()`; delete the now-unused `startedAt`/`s2` variables.
-- [ ] Definition of Done: `grep -r startedAt internal/ client/` finds no route-record remnant; a bind
+- [x] Definition of Done: `grep -r startedAt internal/ client/` finds no route-record remnant; a bind
   colliding with the stored connID re-rolls (bounded) instead of binding.
 
-### [ ] Task 2.3 — pending-stream duplicate refusal + edge re-mint
+### [x] Task 2.3 — pending-stream duplicate refusal + edge re-mint
 
-- [ ] Action: modify `internal/phoneconn/manager.go` — new sentinel
+- [x] Action: modify `internal/phoneconn/manager.go` — new sentinel
   `var ErrDuplicateStreamID = errors.New("phoneconn: duplicate stream id")`; in `OpenStream`, under
   `c.mu` before registering the waiter:
 
@@ -186,7 +186,7 @@ if _, exists := c.pending[streamID]; exists {
 }
 ```
 
-- [ ] Action: modify `internal/mesh/listener.go` — the current handler commits the 200 response
+- [x] Action: modify `internal/mesh/listener.go` — the current handler commits the 200 response
   BEFORE `BridgeMesh` runs, so an open-phase error could never change the status. Restructure the
   owner side into an explicit open phase followed by the splice — `Bridge` becomes two-phase (mesh
   MUST NOT import phoneconn, so the error crosses as a mesh-owned sentinel):
@@ -209,16 +209,16 @@ type Bridge interface {
   (409 stays = not-owner); on any other error → `http.Error(w, "dial-back failed", http.StatusBadGateway)`;
   ONLY on success `w.WriteHeader(http.StatusOK)` + flush → build the `ownerStream` → `h.bridge.SpliceMesh(ds, cs)`
   → `<-cs.done`. Add the `errors` import.
-- [ ] Action: modify `internal/server/serve.go` — `bridgeAdapter` implements the two-phase `Bridge`:
+- [x] Action: modify `internal/server/serve.go` — `bridgeAdapter` implements the two-phase `Bridge`:
   `OpenMesh` is the current `BridgeMesh` dial-back logic (bounded by `dialBackTimeout`) returning the
   stream, translating `phoneconn.ErrDuplicateStreamID` → `mesh.ErrDuplicateStream` (wrap:
   `fmt.Errorf("…: %w", mesh.ErrDuplicateStream)` or return the sentinel directly); `SpliceMesh` is the
   existing `bridgeCopy(ds, client)`. Delete `BridgeMesh`. Add the
   `github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh` import.
-- [ ] Action: modify `internal/mesh/client.go` — `OpenStream` maps the response status:
+- [x] Action: modify `internal/mesh/client.go` — `OpenStream` maps the response status:
   200 → stream; `http.StatusUnprocessableEntity` → `ErrDuplicateStream`; any other → `ErrNoOwner`
   (as today).
-- [ ] Action: modify `internal/edge/bridge.go` `handleTunnel` — before the existing stale-route retry,
+- [x] Action: modify `internal/edge/bridge.go` `handleTunnel` — before the existing stale-route retry,
   add ONE duplicate-stream retry that re-mints the streamID and re-opens against the SAME route:
 
 ```go
@@ -233,10 +233,10 @@ if isDuplicateStream(ferr) {
   Add the `errors`, `phoneconn`, and `mesh` imports to `bridge.go` (imports are per-file:
   `bridge.go` does not import phoneconn today — `edge.go`/`accept.go` do — and mesh imports nothing
   from edge, so no cycle).
-- [ ] Definition of Done: a duplicate pending streamID is refused (never overwritten) on both paths;
+- [x] Definition of Done: a duplicate pending streamID is refused (never overwritten) on both paths;
   the edge retries exactly once with a fresh id.
 
-### [ ] Task 2.4 — US2 tests
+### [x] Task 2.4 — US2 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -250,7 +250,7 @@ if isDuplicateStream(ferr) {
 | `TestMeshClient_Maps422ToDuplicateStream` | h2 test server answering 422 → `ErrDuplicateStream`; 409 → `ErrNoOwner` | |
 | `TestBridgeAdapter_TranslatesDuplicateStreamID` | fake manager returning `phoneconn.ErrDuplicateStreamID` → `mesh.ErrDuplicateStream` from `OpenMesh` | |
 
-- [ ] Definition of Done: all router/phoneconn/edge tests updated for the removed `startedAt`
+- [x] Definition of Done: all router/phoneconn/edge tests updated for the removed `startedAt`
   parameters; no reference to the old 10-char id format survives outside git history.
 
 ---
@@ -1659,3 +1659,11 @@ Acceptance criteria:
 ## Deviations
 
 (recorded during implementation per agent.md §2)
+
+- **Task 2.3 (`internal/server/serve.go`) — `bridgeAdapter.mgr` field type.** The plan's code block kept
+  `mgr *phoneconn.Manager` (a concrete type). Task 2.4 mandates a `TestBridgeAdapter_TranslatesDuplicateStreamID`
+  test driven by a "fake manager", which a concrete `*phoneconn.Manager` field cannot accept. Introduced a
+  narrow consumer-side interface `dialBackOpener` (single method `OpenStream(ctx, name, streamID) (phoneconn.DataStream, error)`)
+  and changed the field to `mgr dialBackOpener`. `*phoneconn.Manager` still satisfies it, so the
+  `server.Run` wiring (`&bridgeAdapter{mgr: phoneMgr, ...}`) is unchanged; the change only enables the
+  required unit test and follows go.md's "accept interfaces" rule.

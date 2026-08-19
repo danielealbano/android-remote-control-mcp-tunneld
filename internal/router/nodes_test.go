@@ -51,47 +51,41 @@ func TestNodesEnumerates(t *testing.T) {
 func TestBindLookupRouteRoundTrip(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	start := time.Unix(1_700_000_000, 500)
-	if err := reg.BindRoute(ctx, "abc", "nodeA", "sha256:fp", "conn1", start); err != nil {
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "sha256:fp", "conn1"); err != nil {
 		t.Fatal(err)
 	}
-	node, fp, cid, got, ok, err := reg.LookupRoute(ctx, "abc")
+	node, fp, cid, ok, err := reg.LookupRoute(ctx, "abc")
 	if err != nil || !ok {
 		t.Fatalf("lookup route: ok=%v err=%v", ok, err)
 	}
 	if node != "nodeA" || fp != "sha256:fp" || cid != "conn1" {
 		t.Errorf("route fields = %q/%q/%q", node, fp, cid)
 	}
-	if !got.Equal(start) {
-		t.Errorf("startedAt = %v, want %v", got, start)
-	}
 }
 
 func TestBindRouteFingerprintGuard(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	start := time.Unix(1, 0)
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp1", "conn1", start)
-	if err := reg.BindRoute(ctx, "abc", "nodeB", "fp2", "conn2", start); err != ErrNameHeldByOther {
+	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp1", "conn1")
+	if err := reg.BindRoute(ctx, "abc", "nodeB", "fp2", "conn2"); err != ErrNameHeldByOther {
 		t.Errorf("different fingerprint should conflict, got %v", err)
 	}
 }
 
-func TestSelfHealRoutePreservesEpoch(t *testing.T) {
+func TestSelfHealRouteConnIDOwner(t *testing.T) {
 	reg, mr := newReg(t)
 	ctx := context.Background()
-	start := time.Unix(1_700_000_000, 0)
-	// Route lapsed (TTL): self-heal re-binds preserving the epoch.
-	res, err := reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeA", "fp", "conn1", start)
+	// Route lapsed (TTL): self-heal re-binds THIS owner's route under its connID.
+	res, err := reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeA", "fp", "conn1")
 	if err != nil || res != SelfHealBound {
 		t.Fatalf("self-heal bound: res=%v err=%v", res, err)
 	}
-	_, _, _, got, ok, _ := reg.LookupRoute(ctx, "abc")
-	if !ok || !got.Equal(start) {
-		t.Errorf("epoch not preserved: got=%v ok=%v", got, ok)
+	_, _, cid, ok, _ := reg.LookupRoute(ctx, "abc")
+	if !ok || cid != "conn1" {
+		t.Errorf("self-heal must bind this conn's id: cid=%q ok=%v", cid, ok)
 	}
 	// A different connID must NOT clobber.
-	res, _ = reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeB", "fp", "conn2", start.Add(time.Hour))
+	res, _ = reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeB", "fp", "conn2")
 	if res != SelfHealNotOwner {
 		t.Errorf("different connID should be not-owner, got %v", res)
 	}

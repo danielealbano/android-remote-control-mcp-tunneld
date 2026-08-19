@@ -112,7 +112,6 @@ func TestEdge_HandleTunnel_RouteBan_Close(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.rtr.startedAt = time.Unix(1_700_000_000, 0)
 	conn := newScriptConn("198.51.100.13", nil)
 	te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: name})
 	if !conn.isClosed() {

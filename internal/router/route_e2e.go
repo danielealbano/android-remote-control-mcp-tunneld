@@ -2,31 +2,33 @@ package router
 
 import (
 	"context"
-	"strconv"
-	"time"
+	"errors"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// The route record carries a startedAt field (the tunnel-session start = the phone control
-// connection's establishment time, unix nanos). startedAt is the conn-id epoch:
-// any edge node minting a public conn id for a tunnel reads it from the LookupRoute it already does.
+// ErrConnIDCollision is returned by BindRoute when the connID it is asked to bind equals the connID
+// already stored for the name (a re-roll signal): the caller re-mints the connID and retries.
+var ErrConnIDCollision = errors.New("router: connID collides with the current route owner")
 
 var bindRouteScript = redis.NewScript(`
 local fp = redis.call('HGET', KEYS[1], 'fingerprint')
 if fp and fp ~= ARGV[2] then
   return 'conflict'
 end
-redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3], 'startedAt', ARGV[4])
-redis.call('PEXPIRE', KEYS[1], ARGV[5])
+if redis.call('HGET', KEYS[1], 'connID') == ARGV[3] then
+  return 'reroll'
+end
+redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
 return 'ok'
 `)
 
 var selfHealRouteScript = redis.NewScript(`
 local v = redis.call('HMGET', KEYS[1], 'node', 'fingerprint', 'connID')
 if v[1] == false then
-  redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3], 'startedAt', ARGV[4])
-  redis.call('PEXPIRE', KEYS[1], ARGV[5])
+  redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3])
+  redis.call('PEXPIRE', KEYS[1], ARGV[4])
   return 'bound'
 end
 if v[2] ~= ARGV[2] then
@@ -35,31 +37,35 @@ end
 if v[3] ~= ARGV[3] then
   return 'not-owner'
 end
-redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3], 'startedAt', ARGV[4])
-redis.call('PEXPIRE', KEYS[1], ARGV[5])
+redis.call('HSET', KEYS[1], 'node', ARGV[1], 'fingerprint', ARGV[2], 'connID', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
 return 'bound'
 `)
 
-// BindRoute writes route:{name} with node, fingerprint, per-connection connID, and the tunnel-session
-// startedAt (fingerprint guard → ErrNameHeldByOther). Heartbeat/Unbind stay owner-conditional on
-// connID.
-func (r *Registry) BindRoute(ctx context.Context, name, nodeID, fingerprint, connID string, startedAt time.Time) error {
+// BindRoute writes route:{name} with node, fingerprint, and per-connection connID (fingerprint guard →
+// ErrNameHeldByOther; a connID equal to the currently-stored one → ErrConnIDCollision, the re-roll
+// signal). Heartbeat/Unbind stay owner-conditional on connID.
+func (r *Registry) BindRoute(ctx context.Context, name, nodeID, fingerprint, connID string) error {
 	res, err := bindRouteScript.Run(ctx, r.rdb, []string{key(name)},
-		nodeID, fingerprint, connID, strconv.FormatInt(startedAt.UnixNano(), 10), r.ttl.Milliseconds()).Text()
+		nodeID, fingerprint, connID, r.ttl.Milliseconds()).Text()
 	if err != nil {
 		return err
 	}
-	if res == "conflict" {
+	switch res {
+	case "conflict":
 		return ErrNameHeldByOther
+	case "reroll":
+		return ErrConnIDCollision
+	default:
+		return nil
 	}
-	return nil
 }
 
-// BindRouteIfAbsentOrOwner is the epoch-preserving self-heal variant used by the phone heartbeat's
-// "missing" path: it binds only if the key is absent or still owned by this connID (same fingerprint).
-func (r *Registry) BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, fingerprint, connID string, startedAt time.Time) (SelfHealResult, error) {
+// BindRouteIfAbsentOrOwner is the self-heal variant used by the phone heartbeat's "missing" path: it
+// binds only if the key is absent or still owned by this connID (same fingerprint).
+func (r *Registry) BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, fingerprint, connID string) (SelfHealResult, error) {
 	res, err := selfHealRouteScript.Run(ctx, r.rdb, []string{key(name)},
-		nodeID, fingerprint, connID, strconv.FormatInt(startedAt.UnixNano(), 10), r.ttl.Milliseconds()).Text()
+		nodeID, fingerprint, connID, r.ttl.Milliseconds()).Text()
 	if err != nil {
 		return SelfHealNotOwner, err
 	}
@@ -73,23 +79,18 @@ func (r *Registry) BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, f
 	}
 }
 
-// LookupRoute returns the owning node, the identity-cert fingerprint, the phone-connection connID, and
-// the tunnel-session startedAt (the conn-id epoch), or ok=false when no tunnel is bound.
-func (r *Registry) LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, startedAt time.Time, ok bool, err error) {
-	vals, err := r.rdb.HMGet(ctx, key(name), "node", "fingerprint", "connID", "startedAt").Result()
+// LookupRoute returns the owning node, the identity-cert fingerprint, and the phone-connection connID,
+// or ok=false when no tunnel is bound.
+func (r *Registry) LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, ok bool, err error) {
+	vals, err := r.rdb.HMGet(ctx, key(name), "node", "fingerprint", "connID").Result()
 	if err != nil {
-		return "", "", "", time.Time{}, false, err
+		return "", "", "", false, err
 	}
 	node, _ := vals[0].(string)
 	fp, _ := vals[1].(string)
 	cid, _ := vals[2].(string)
 	if node == "" {
-		return "", "", "", time.Time{}, false, nil
+		return "", "", "", false, nil
 	}
-	if s, _ := vals[3].(string); s != "" {
-		if ns, perr := strconv.ParseInt(s, 10, 64); perr == nil {
-			startedAt = time.Unix(0, ns)
-		}
-	}
-	return node, fp, cid, startedAt, true, nil
+	return node, fp, cid, true, nil
 }

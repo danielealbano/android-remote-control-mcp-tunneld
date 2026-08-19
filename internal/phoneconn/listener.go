@@ -266,7 +266,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 
 	c := &conn{
 		name: id.name, fingerprint: id.fingerprint, keyFP: id.keyFP, certSerial: id.certSerial,
-		connID:       mustConnID(time.Now()),
+		connID:       mustConnID(),
 		sessionStart: h.mgr.now(), meta: metaFromRequest(r),
 		send: make(chan []byte, 32), cancel: cancel, pending: map[string]chan DataStream{},
 	}
@@ -373,11 +373,11 @@ func metaFromRequest(r *http.Request) ConnMeta {
 	return m
 }
 
-// mustConnID mints a phone connID seeded by the session start (best-effort; falls back to a zero id).
-func mustConnID(now time.Time) string {
-	id, err := store.NewConnID(now, now)
+// mustConnID mints a phone connID (best-effort; falls back to a zero id on a crypto/rand failure).
+func mustConnID() string {
+	id, err := store.NewConnID()
 	if err != nil {
-		return "0000000000"
+		return "00000000"
 	}
 	return id
 }

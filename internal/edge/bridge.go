@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -86,7 +89,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		_ = client.Close()
 		return
 	}
-	nodeID, fp, connID, startedAt, ok, err := e.router.LookupRoute(ctx, name)
+	nodeID, fp, connID, ok, err := e.router.LookupRoute(ctx, name)
 	if err != nil || !ok {
 		e.rec.Reject("no-route", name, peerAddr(client))
 		_ = client.Close()
@@ -114,7 +117,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	// NewConnID fails only if crypto/rand fails (practically impossible); a zero id would still be
 	// delivered/matched consistently, so the error is intentionally ignored.
-	streamID, _ := store.NewConnID(startedAt, e.now())
+	streamID, _ := store.NewConnID()
 
 	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
@@ -141,10 +144,14 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// owner/connID while we held stale values (docs/PROTOCOL.md §5: one fresh route lookup + retry, then
 	// close) — and retry once when the fresh route differs (re-checking the ban on its fingerprint).
 	far, closeFar, ferr := e.openFar(ctx, name, nodeID, connID, streamID)
+	if isDuplicateStream(ferr) {
+		streamID, _ = store.NewConnID()
+		far, closeFar, ferr = e.openFar(ctx, name, nodeID, connID, streamID)
+	}
 	if ferr != nil {
-		n2, fp2, c2, s2, ok2, lerr := e.router.LookupRoute(ctx, name)
+		n2, fp2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) && (e.banTun == nil || !e.banTun(name, fp2)) {
-			streamID, _ = store.NewConnID(s2, e.now()) // same crypto/rand-only failure mode as above
+			streamID, _ = store.NewConnID() // same crypto/rand-only failure mode as above
 			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
 		}
 	}
@@ -187,6 +194,12 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	_ = client.Close()
 }
 
+// isDuplicateStream reports whether opening the far side failed because the minted stream id was
+// already pending on the owner's phone connection (local or mesh) — the edge re-mints once and retries.
+func isDuplicateStream(err error) bool {
+	return errors.Is(err, phoneconn.ErrDuplicateStreamID) || errors.Is(err, mesh.ErrDuplicateStream)
+}
+
 // tunnelName derives the bare tunnel name (the phone identity-cert CN, under which the route is bound)
 // from a public SNI `<name>.<tunnel-domain>`. It rejects an SNI that is not a single label under the
 // configured tunnel domain.
@@ -205,7 +218,7 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 // openFar opens the phone data stream locally (fast path) or over the mesh. The local dial-back wait is
 // bounded by --limit-dialback-timeout so a connected phone that never opens the /data stream fails fast
 // and releases the stream slot rather than pinning it. On the mesh path the owner node bounds its own
-// dial-back the same way (see server.bridgeAdapter.BridgeMesh); the entry node's mesh dial returns once
+// dial-back the same way (see server.bridgeAdapter.OpenMesh); the entry node's mesh dial returns once
 // the owner has accepted, so this local timeout governs only the fast path.
 func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID string) (io.ReadWriteCloser, func(), error) {
 	if e.local != nil && e.local.HasConn(name) && e.local.OwnsConn(name, connID) {

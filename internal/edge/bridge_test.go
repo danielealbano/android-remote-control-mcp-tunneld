@@ -82,7 +82,6 @@ func TestEdge_HandleTunnel_ReleasesStreamSlotOnce(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.rtr.startedAt = time.Unix(1_700_000_000, 0)
 	// openFar fails (no local, no mesh route) so handleTunnel takes the acquire→release path once.
 	te.local.has = false
 	te.rtr.nodeOK = false

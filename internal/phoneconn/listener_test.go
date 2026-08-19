@@ -306,7 +306,7 @@ func TestServeHTTPRejectsInvalidCN(t *testing.T) {
 }
 
 // TestHeartbeatMissingSelfHeals covers the three-state heartbeat's missing branch: a lapsed route is
-// re-bound via the epoch-preserving self-heal (the original sessionStart survives).
+// re-bound by the self-heal (this connection's route is restored under its own connID).
 func TestHeartbeatMissingSelfHeals(t *testing.T) {
 	m, fr, _, _ := newMgr(t)
 	fr.hbResult = router.HeartbeatMissing
@@ -326,9 +326,9 @@ func TestHeartbeatMissingSelfHeals(t *testing.T) {
 	go m.heartbeatLoop(ctx, c)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got, ok := fr.boundAt("selfheal01"); ok {
-			if !got.Equal(c.sessionStart) {
-				t.Fatalf("self-heal must PRESERVE the session epoch: got %v want %v", got, c.sessionStart)
+		if got, ok := fr.boundConnID("selfheal01"); ok {
+			if got != c.connID {
+				t.Fatalf("self-heal must re-bind THIS conn's id: got %q want %q", got, c.connID)
 			}
 			return
 		}

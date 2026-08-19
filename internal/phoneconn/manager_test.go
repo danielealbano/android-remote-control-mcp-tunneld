@@ -2,6 +2,7 @@ package phoneconn
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,18 +15,23 @@ import (
 
 type fakeRouter struct {
 	mu       sync.Mutex
-	bound    map[string]time.Time // name → startedAt
+	bound    map[string]string // name → bound connID
 	hbResult router.HeartbeatResult
 	unbound  map[string]bool
+	collide  int // upcoming BindRoute calls that return router.ErrConnIDCollision
 }
 
 func newFakeRouter() *fakeRouter {
-	return &fakeRouter{bound: map[string]time.Time{}, unbound: map[string]bool{}}
+	return &fakeRouter{bound: map[string]string{}, unbound: map[string]bool{}}
 }
-func (f *fakeRouter) BindRoute(_ context.Context, name, _, _, _ string, startedAt time.Time) error {
+func (f *fakeRouter) BindRoute(_ context.Context, name, _, _, connID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.bound[name] = startedAt
+	if f.collide > 0 {
+		f.collide--
+		return router.ErrConnIDCollision
+	}
+	f.bound[name] = connID
 	return nil
 }
 func (f *fakeRouter) Heartbeat(_ context.Context, _, _ string) (router.HeartbeatResult, error) {
@@ -37,14 +43,14 @@ func (f *fakeRouter) Unbind(_ context.Context, name, _ string) error {
 	f.unbound[name] = true
 	return nil
 }
-func (f *fakeRouter) BindRouteIfAbsentOrOwner(_ context.Context, name, _, _, _ string, s time.Time) (router.SelfHealResult, error) {
+func (f *fakeRouter) BindRouteIfAbsentOrOwner(_ context.Context, name, _, _, connID string) (router.SelfHealResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.bound[name] = s
+	f.bound[name] = connID
 	return router.SelfHealBound, nil
 }
 
-func (f *fakeRouter) boundAt(name string) (time.Time, bool) {
+func (f *fakeRouter) boundConnID(name string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	v, ok := f.bound[name]
@@ -74,7 +80,7 @@ func newMgr(t *testing.T) (*Manager, *fakeRouter, *tunneltest.Store, *fakeRec) {
 
 func newConn(name string) *conn {
 	return &conn{name: name, fingerprint: "sha256:fp", keyFP: "sha256:keyfp", certSerial: "0a1b",
-		connID:       "aabbccddee",
+		connID:       "aabbccdd",
 		sessionStart: time.Unix(1_700_000_000, 0), send: make(chan []byte, 8),
 		pending: map[string]chan DataStream{}, cancel: func() {}}
 }
@@ -86,8 +92,8 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := fr.boundAt("abc"); !ok || !got.Equal(c.sessionStart) {
-		t.Errorf("route startedAt = %v, want %v", got, c.sessionStart)
+	if got, ok := fr.boundConnID("abc"); !ok || got != c.connID {
+		t.Errorf("route bound connID = %q, want %q", got, c.connID)
 	}
 	if rec.opens.Load() != 1 {
 		t.Error("PhoneConnOpen not recorded")
@@ -111,6 +117,32 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	}
 	if !endSeen || rec.closes.Load() != 1 {
 		t.Error("end event / PhoneConnClose missing")
+	}
+}
+
+// TestManager_Register_RerollsOnCollision covers the connID-collision re-roll: BindRoute returning
+// ErrConnIDCollision makes register re-mint and retry (bounded); three collisions in a row give up.
+func TestManager_Register_RerollsOnCollision(t *testing.T) {
+	m, fr, _, _ := newMgr(t)
+	fr.collide = 2 // two collisions, then the third connID binds
+	c := newConn("abc")
+	first := c.connID
+	teardown, err := m.register(context.Background(), c)
+	if err != nil {
+		t.Fatalf("register must succeed after re-rolling past collisions: %v", err)
+	}
+	defer teardown()
+	if c.connID == first {
+		t.Error("a collision must re-mint the connID")
+	}
+	if got, ok := fr.boundConnID("abc"); !ok || got != c.connID {
+		t.Errorf("bound connID = %q, want the re-minted %q", got, c.connID)
+	}
+
+	m2, fr2, _, _ := newMgr(t)
+	fr2.collide = 3 // never resolves within the bound
+	if _, err := m2.register(context.Background(), newConn("xyz")); !errors.Is(err, router.ErrConnIDCollision) {
+		t.Fatalf("three collisions must fail with ErrConnIDCollision, got %v", err)
 	}
 }
 
@@ -204,7 +236,7 @@ func TestOpenStreamDialbackCorrelates(t *testing.T) {
 }
 
 // TestOpenStreamTimesOut covers the bounded dial-back wait both the local (edge.openFar) and the mesh
-// (bridgeAdapter.BridgeMesh) paths rely on: a connected phone that never opens /data must make OpenStream
+// (bridgeAdapter.OpenMesh) paths rely on: a connected phone that never opens /data must make OpenStream
 // return within the caller's deadline and drop the pending waiter (releasing the caller's stream slot).
 func TestOpenStreamTimesOut(t *testing.T) {
 	m, _, _, _ := newMgr(t)
@@ -226,6 +258,40 @@ func TestOpenStreamTimesOut(t *testing.T) {
 	c.mu.Unlock()
 	if pending {
 		t.Error("a timed-out OpenStream must drop the pending waiter")
+	}
+}
+
+// TestManager_OpenStream_DuplicateRefused covers the pending-stream duplicate refusal: a second
+// OpenStream with an already-pending stream id is refused (ErrDuplicateStreamID) and the first waiter
+// stays intact.
+func TestManager_OpenStream_DuplicateRefused(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("abc")
+	_, _ = m.register(context.Background(), c)
+
+	go func() { <-c.send }() // accept the first OPEN frame; never deliver a stream
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := m.OpenStream(ctx1, "abc", "dup1")
+		firstDone <- err
+	}()
+	waitCond(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		_, ok := c.pending["dup1"]
+		return ok
+	})
+
+	if _, err := m.OpenStream(context.Background(), "abc", "dup1"); !errors.Is(err, ErrDuplicateStreamID) {
+		t.Fatalf("a duplicate pending stream id must be refused, got %v", err)
+	}
+	c.mu.Lock()
+	_, stillPending := c.pending["dup1"]
+	c.mu.Unlock()
+	if !stillPending {
+		t.Fatal("the first waiter must remain pending after a duplicate is refused")
 	}
 }
 

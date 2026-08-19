@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/edge"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -92,15 +94,21 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 	}
 }
 
-// bridgeAdapter implements mesh.Bridge on the OWNER node: it opens the local phone dial-back stream and
-// splices the incoming mesh stream to it. The entry node already accounted bytes + enforced caps, so the
-// owner only relays.
+// dialBackOpener opens the local phone dial-back stream for a tunnel (satisfied by *phoneconn.Manager).
+// bridgeAdapter depends on this narrow surface so the OpenMesh sentinel translation is unit-testable.
+type dialBackOpener interface {
+	OpenStream(ctx context.Context, name, streamID string) (phoneconn.DataStream, error)
+}
+
+// bridgeAdapter implements mesh.Bridge on the OWNER node: OpenMesh opens the local phone dial-back
+// stream (open phase) and SpliceMesh relays the incoming mesh stream to it. The entry node already
+// accounted bytes + enforced caps, so the owner only relays.
 type bridgeAdapter struct {
-	mgr             *phoneconn.Manager
+	mgr             dialBackOpener
 	dialBackTimeout time.Duration
 }
 
-func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string, client io.ReadWriteCloser) error {
+func (b *bridgeAdapter) OpenMesh(ctx context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
 	// Bound the owner-side dial-back wait (mirrors the local fast path in edge.openFar): a phone that never
 	// opens the /data stream fails fast so the entry node's held stream slot is released, rather than
 	// pinning it until the idle timeout.
@@ -112,10 +120,18 @@ func (b *bridgeAdapter) BridgeMesh(ctx context.Context, tunnel, streamID string,
 	defer cancel() // bounds ONLY the dial-back wait; the returned ds does not depend on octx
 	ds, err := b.mgr.OpenStream(octx, tunnel, streamID)
 	if err != nil {
-		return err
+		// Translate the phone-side sentinel to the mesh-owned one (mesh MUST NOT import phoneconn), so the
+		// listener answers 422 and the entry node re-mints the stream id.
+		if errors.Is(err, phoneconn.ErrDuplicateStreamID) {
+			return nil, fmt.Errorf("mesh dial-back: %w", mesh.ErrDuplicateStream)
+		}
+		return nil, err
 	}
+	return ds, nil
+}
+
+func (b *bridgeAdapter) SpliceMesh(ds, client io.ReadWriteCloser) {
 	bridgeCopy(ds, client)
-	return nil
 }
 
 // bridgeCopy splices the phone stream `ds` ↔ the mesh stream `client`, returning once the phone→client

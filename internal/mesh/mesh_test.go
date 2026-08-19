@@ -8,9 +8,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,18 +36,32 @@ func meshCert(t *testing.T, mesh bool) *x509.Certificate {
 
 type fakeBridge struct {
 	called   bool
+	openErr  error
 	closeNow bool
 }
 
-func (f *fakeBridge) BridgeMesh(_ context.Context, tunnel, streamID string, client io.ReadWriteCloser) error {
+func (f *fakeBridge) OpenMesh(_ context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
 	f.called = true
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return nopRWC{}, nil
+}
+
+func (f *fakeBridge) SpliceMesh(ds, client io.ReadWriteCloser) {
 	if f.closeNow {
 		_ = client.Close() // signal done so the handler returns
 	} else {
 		go func() { time.Sleep(10 * time.Millisecond); _ = client.Close() }()
 	}
-	return nil
 }
+
+// nopRWC is a stand-in phone dial-back stream (OpenMesh's return) for the mesh handler tests.
+type nopRWC struct{}
+
+func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
+func (nopRWC) Close() error                { return nil }
 
 func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -108,6 +125,68 @@ func TestMeshBridgesValidStream(t *testing.T) {
 	h.ServeHTTP(w, r)
 	if w.Code != 200 || !fb.called {
 		t.Errorf("valid mesh stream should bridge: code=%d called=%v", w.Code, fb.called)
+	}
+}
+
+// TestMeshHandler_DuplicateStreamAnswers422 covers the two-phase open: OpenMesh returning
+// ErrDuplicateStream answers 422, any other open error answers 502, and success answers 200 — the
+// status is picked in the open phase, before the response body commits.
+func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
+	tests := []struct {
+		name     string
+		openErr  error
+		wantCode int
+	}{
+		{name: "duplicate stream → 422", openErr: ErrDuplicateStream, wantCode: http.StatusUnprocessableEntity},
+		{name: "other error → 502", openErr: errors.New("dial-back failed"), wantCode: http.StatusBadGateway},
+		{name: "success → 200", openErr: nil, wantCode: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := &fakeBridge{openErr: tc.openErr, closeNow: true}
+			h := NewHandler(func(_, _ string) bool { return true }, fb)
+			r := httptest.NewRequest("POST", "https://node/mesh", nil)
+			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
+			r.Header.Set("X-Tunnel", "t")
+			r.Header.Set("X-Conn-Id", "c")
+			r.Header.Set("X-Stream-Id", "s")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d", w.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestMeshClient_Maps422ToDuplicateStream covers the client status mapping: 422 → ErrDuplicateStream,
+// 409 → ErrNoOwner.
+func TestMeshClient_Maps422ToDuplicateStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		wantErr error
+	}{
+		{name: "422 → duplicate stream", status: http.StatusUnprocessableEntity, wantErr: ErrDuplicateStream},
+		{name: "409 → no owner", status: http.StatusConflict, wantErr: ErrNoOwner},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+			peer := strings.TrimPrefix(ts.URL, "https://")
+			c := NewClient(func() *tls.Config {
+				return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+			}, 1)
+			_, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("status %d: err = %v, want %v", tc.status, err, tc.wantErr)
+			}
+		})
 	}
 }
 

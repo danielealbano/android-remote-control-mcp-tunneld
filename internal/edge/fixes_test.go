@@ -16,6 +16,8 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -336,7 +338,6 @@ func TestEdge_HandleTunnel_ConnLogStartEnd(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.rtr.startedAt = time.Unix(1_700_000_000, 0)
 
 	// A local phone that echoes: the client sends some bytes, the phone splices them back, then EOF.
 	te.local.has = true
@@ -455,4 +456,78 @@ func (c *closingConn) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	return c.scriptConn.Read(p)
+}
+
+// TestEdge_HandleTunnel_DuplicateStreamRetries covers the local-path duplicate-stream retry: a
+// dial-back that reports a duplicate pending stream id makes the edge re-mint the streamID once and
+// re-open against the SAME route.
+func TestEdge_HandleTunnel_DuplicateStreamRetries(t *testing.T) {
+	cfg := baseConfig()
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.ok = true
+	te.rtr.nodeID = "node-a"
+	te.rtr.fp = "fp"
+	te.rtr.connID = "conn"
+	te.local.has = true
+	te.local.owns = true
+	te.local.ds = &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})}
+	te.local.errQueue = []error{phoneconn.ErrDuplicateStreamID, nil} // first mint duplicates, re-mint succeeds
+
+	conn := newScriptConn("198.51.100.30", nil)
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleTunnel did not finish")
+	}
+	if te.local.opened != 2 {
+		t.Fatalf("want one duplicate-stream re-mint (2 local opens), got %d", te.local.opened)
+	}
+	if te.rtr.lookups != 1 {
+		t.Fatalf("a duplicate-stream retry must reuse the same route (1 lookup), got %d", te.rtr.lookups)
+	}
+	if containsStr(te.rec.rejectReasons(), "no-route") {
+		t.Fatalf("the re-minted stream must not be rejected, got %v", te.rec.rejectReasons())
+	}
+}
+
+// TestEdge_HandleTunnel_MeshDuplicateRetries covers the mesh-path duplicate-stream retry: a mesh dial
+// answering mesh.ErrDuplicateStream makes the edge re-mint the streamID once and re-dial the SAME owner.
+func TestEdge_HandleTunnel_MeshDuplicateRetries(t *testing.T) {
+	cfg := baseConfig()
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.ok = true
+	te.rtr.nodeID = "node-a"
+	te.rtr.fp = "fp"
+	te.rtr.connID = "conn"
+	te.rtr.nodeAdv = "10.0.0.9:9443"
+	te.rtr.nodeOK = true
+	te.local.has = false // mesh path
+	te.mesh.rwc = &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})}
+	te.mesh.errQueue = []error{mesh.ErrDuplicateStream, nil}
+
+	conn := newScriptConn("198.51.100.31", nil)
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleTunnel did not finish")
+	}
+	if te.mesh.opened != 2 {
+		t.Fatalf("want one duplicate-stream re-mint (2 mesh dials), got %d", te.mesh.opened)
+	}
+	if te.rtr.lookups != 1 {
+		t.Fatalf("a duplicate-stream retry must reuse the same route (1 lookup), got %d", te.rtr.lookups)
+	}
+	if containsStr(te.rec.rejectReasons(), "no-route") {
+		t.Fatalf("the re-minted stream must not be rejected, got %v", te.rec.rejectReasons())
+	}
 }

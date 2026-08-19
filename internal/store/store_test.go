@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -69,7 +70,7 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 }
 
 func TestEventJSONOmitEmpty(t *testing.T) {
-	start := store.Event{Schema: 1, Event: "start", Conn: "aabbccddee", Type: "phone", Tunnel: "t"}
+	start := store.Event{Schema: 1, Event: "start", Conn: "aabbccdd", Type: "phone", Tunnel: "t"}
 	b, _ := json.Marshal(start)
 	if strings.Contains(string(b), "ts_end") || strings.Contains(string(b), "bytes_in") ||
 		strings.Contains(string(b), "sni") {
@@ -83,27 +84,32 @@ func TestEventJSONOmitEmpty(t *testing.T) {
 	}
 }
 
-var connIDRe = regexp.MustCompile(`^[0-9a-f]{10}$`)
+var connIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
 
-func TestNewConnIDShapeAndEpoch(t *testing.T) {
-	sess := time.Unix(1_000_000, 0)
-	id, err := store.NewConnID(sess, sess.Add(5*time.Second))
-	if err != nil {
-		t.Fatal(err)
+func TestNewConnID_Format(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		id, err := store.NewConnID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !connIDRe.MatchString(id) {
+			t.Errorf("conn id %q is not 8 lowercase hex", id)
+		}
+		if _, err := hex.DecodeString(id); err != nil {
+			t.Errorf("conn id %q is not hex-parseable: %v", id, err)
+		}
+		seen[id] = true
 	}
-	if !connIDRe.MatchString(id) {
-		t.Errorf("conn id %q is not 10 lowercase hex", id)
-	}
-	// The 3-byte seconds prefix is deterministic for a fixed elapsed time; only the last 2 bytes (4
-	// hex) are random.
-	id2, _ := store.NewConnID(sess, sess.Add(5*time.Second))
-	if id[:6] != id2[:6] {
-		t.Errorf("seconds prefix should be stable: %s vs %s", id, id2)
+	// Not a constant: a handful of mints must not all collapse to one value. (No large-sample
+	// distinctness assert — collisions are handled by design via re-roll.)
+	if len(seen) == 1 {
+		t.Error("NewConnID returned a constant across several mints")
 	}
 }
 
 func TestLogKeyLayoutAndSort(t *testing.T) {
-	ev := store.Event{Event: "start", Conn: "aabbccddee", Tunnel: "k7m2x9qwp4",
+	ev := store.Event{Event: "start", Conn: "aabbccdd", Tunnel: "k7m2x9qwp4",
 		TSStart: time.Date(2026, 8, 17, 14, 12, 33, 482910114, time.UTC)}
 	key := store.LogKey(ev)
 	want := "tunnel-logs/k7m2x9qwp4/2026/08/17/20260817T141233.482910114Z-aabbccdd-start.json"

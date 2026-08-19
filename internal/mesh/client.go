@@ -181,6 +181,9 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		_ = pw.Close()
+		if resp.StatusCode == http.StatusUnprocessableEntity {
+			return nil, ErrDuplicateStream
+		}
 		return nil, ErrNoOwner
 	}
 	return &clientStream{pw: pw, resp: resp}, nil

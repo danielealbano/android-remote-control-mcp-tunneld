@@ -16,9 +16,9 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
 
-// Router resolves a tunnel name to its owner + fingerprint + connID + session-start epoch.
+// Router resolves a tunnel name to its owner + fingerprint + connID.
 type Router interface {
-	LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, startedAt time.Time, ok bool, err error)
+	LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, ok bool, err error)
 	LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error)
 }
 

@@ -2,6 +2,7 @@ package phoneconn
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -13,13 +14,18 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
+// ErrDuplicateStreamID reports a dial-back stream id already pending on this phone connection (the
+// caller re-mints the id and retries).
+var ErrDuplicateStreamID = errors.New("phoneconn: duplicate stream id")
+
 // Router is the consumer-side routing surface phoneconn needs (BindRoute + owner-conditional
-// heartbeat/unbind + epoch-preserving self-heal).
+// heartbeat/unbind + self-heal). BindRoute returns router.ErrConnIDCollision when the connID collides
+// with the current owner, so register re-mints and retries.
 type Router interface {
-	BindRoute(ctx context.Context, name, nodeID, fingerprint, connID string, startedAt time.Time) error
+	BindRoute(ctx context.Context, name, nodeID, fingerprint, connID string) error
 	Heartbeat(ctx context.Context, name, connID string) (router.HeartbeatResult, error)
 	Unbind(ctx context.Context, name, connID string) error
-	BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, fingerprint, connID string, startedAt time.Time) (router.SelfHealResult, error)
+	BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, fingerprint, connID string) (router.SelfHealResult, error)
 }
 
 // ConnLogStore is the connection-event log surface.
@@ -128,8 +134,15 @@ func (m *Manager) HasConn(name string) bool {
 // register binds the route, writes the phone start event, and records the connection. Returns the conn
 // and a teardown func to defer.
 func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
-	if err := m.router.BindRoute(ctx, c.name, m.nodeID, c.fingerprint, c.connID, c.sessionStart); err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		err := m.router.BindRoute(ctx, c.name, m.nodeID, c.fingerprint, c.connID)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, router.ErrConnIDCollision) || attempt >= 2 {
+			return nil, err
+		}
+		c.connID = mustConnID() // collision with the previous conn's id — re-mint and retry
 	}
 	m.mu.Lock()
 	// Supersede any existing local conn for the same name.
@@ -182,7 +195,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 				return
 			case router.HeartbeatMissing:
 				// Best-effort self-heal: a transient error/loss here is retried on the next heartbeat tick.
-				_, _ = m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.fingerprint, c.connID, c.sessionStart)
+				_, _ = m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.fingerprint, c.connID)
 			}
 		}
 	}
@@ -201,6 +214,10 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	if c.closed {
 		c.mu.Unlock()
 		return nil, ErrNoConn
+	}
+	if _, exists := c.pending[streamID]; exists {
+		c.mu.Unlock()
+		return nil, ErrDuplicateStreamID
 	}
 	c.pending[streamID] = waiter
 	c.mu.Unlock()
