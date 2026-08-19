@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	asyncLogWorkers  = 8
-	asyncLogQueue    = 5000
-	asyncLogAttempts = 5
-	asyncLogBackoff  = time.Second // doubles per retry: 1s, 2s, 4s, 8s
+	asyncLogWorkers        = 8
+	asyncLogQueue          = 5000
+	asyncLogAttempts       = 5
+	defaultAsyncLogBackoff = time.Second // doubles per retry: 1s, 2s, 4s, 8s
 )
 
 // AsyncConnLog decouples connection-log writes from the data/teardown paths: PutConnLog enqueues and
@@ -19,9 +19,10 @@ const (
 // the new event (never blocks a caller) and reports it via onDrop; Drain flushes the queue at
 // shutdown (bounded by ctx) so end events are not lost.
 type AsyncConnLog struct {
-	inner  ConnLogStore
-	onDrop func()
-	logger *slog.Logger
+	inner       ConnLogStore
+	onDrop      func()
+	logger      *slog.Logger
+	backoffBase time.Duration
 
 	mu     sync.RWMutex
 	closed bool
@@ -29,14 +30,25 @@ type AsyncConnLog struct {
 	wg     sync.WaitGroup
 }
 
-func NewAsyncConnLog(inner ConnLogStore, onDrop func(), logger *slog.Logger) *AsyncConnLog {
+// AsyncOption configures an AsyncConnLog (functional-options pattern).
+type AsyncOption func(*AsyncConnLog)
+
+// WithBackoffBase sets the first per-item retry backoff (default 1s; doubles per retry). Tests use a tiny
+// value so the retry-exhaustion path runs in milliseconds rather than ~15s of real sleep.
+func WithBackoffBase(d time.Duration) AsyncOption { return func(a *AsyncConnLog) { a.backoffBase = d } }
+
+func NewAsyncConnLog(inner ConnLogStore, onDrop func(), logger *slog.Logger, opts ...AsyncOption) *AsyncConnLog {
 	if onDrop == nil {
 		onDrop = func() {}
 	}
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	a := &AsyncConnLog{inner: inner, onDrop: onDrop, logger: logger, ch: make(chan Event, asyncLogQueue)}
+	a := &AsyncConnLog{inner: inner, onDrop: onDrop, logger: logger,
+		backoffBase: defaultAsyncLogBackoff, ch: make(chan Event, asyncLogQueue)}
+	for _, o := range opts {
+		o(a)
+	}
 	for range asyncLogWorkers {
 		a.wg.Add(1)
 		go a.worker()
@@ -63,9 +75,9 @@ func (a *AsyncConnLog) PutConnLog(_ context.Context, ev Event) error {
 func (a *AsyncConnLog) worker() {
 	defer a.wg.Done()
 	for ev := range a.ch {
-		backoff := asyncLogBackoff
+		backoff := a.backoffBase
 		var err error
-		for attempt := 0; attempt < asyncLogAttempts; attempt++ {
+		for attempt := range asyncLogAttempts {
 			if attempt > 0 {
 				time.Sleep(backoff)
 				backoff *= 2

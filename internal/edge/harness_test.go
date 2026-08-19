@@ -255,7 +255,7 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	local := &fakeLocal{}
 	mesh := &fakeMesh{}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
-	e := New(cfg, rdb, banIP, banTun, rec, rtr, local, mesh, lim, sink, addr)
+	e := New(cfg, banIP, banTun, rec, rtr, local, mesh, lim, sink, addr)
 	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, local: local, mesh: mesh}
 }
 

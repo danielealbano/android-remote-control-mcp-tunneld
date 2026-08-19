@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,11 +173,6 @@ func TestValidateMeshPoolSizeRange(t *testing.T) {
 	c.MeshPoolSize = 0
 	if err := c.Validate(); err == nil {
 		t.Error("--mesh-pool-size 0 expected error")
-	}
-	c = validCfg(t)
-	c.MeshPoolSize = 0
-	if err := c.Validate(); err == nil {
-		t.Error("--mesh-pool-size > max expected error")
 	}
 }
 
@@ -519,8 +515,15 @@ func TestRemovedLegacyFlagsRejected(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := parser.Parse([]string{"serve", flag}); err == nil {
-			t.Errorf("removed flag %q must be rejected as unknown", flag)
+		// Assert the error is specifically an UNKNOWN-FLAG error: parsing with no required flags would
+		// fail Validate() regardless, so a bare err != nil would pass even if the legacy flag were re-added.
+		_, perr := parser.Parse([]string{"serve", flag})
+		if perr == nil {
+			t.Errorf("removed flag %q must be rejected", flag)
+			continue
+		}
+		if !strings.Contains(perr.Error(), "unknown flag") {
+			t.Errorf("removed flag %q must yield an unknown-flag error, got: %v", flag, perr)
 		}
 	}
 }

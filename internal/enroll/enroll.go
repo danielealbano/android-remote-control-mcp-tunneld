@@ -475,12 +475,12 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	if err != nil {
 		return &Error{Reason: "bad_source_ip"}
 	}
-	okMin, ra, err := limit.Allow(ctx, s.rdb, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
+	okMin, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
 	if err == nil && !okMin {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
-	okHour, ra, err := limit.Allow(ctx, s.rdb, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
+	okHour, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err == nil && !okHour {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
@@ -497,12 +497,12 @@ func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 	if err != nil {
 		return &Error{Reason: "bad_source_ip"}
 	}
-	overMin, ra, err := limit.Over(ctx, s.rdb, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
+	overMin, ra, err := s.cfg.Limiter.Over(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
 	if err == nil && overMin {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
-	overHour, ra, err := limit.Over(ctx, s.rdb, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
+	overHour, ra, err := s.cfg.Limiter.Over(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err == nil && overHour {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}

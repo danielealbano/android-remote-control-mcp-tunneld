@@ -151,6 +151,18 @@ func TestValidNameFunc(t *testing.T) {
 	if !validP("t-abcdef234567") || validP("abcdef234567") || validP("x-abcdef234567") {
 		t.Fatal("the prefix must be enforced literally")
 	}
+
+	// The reserved-label rejection is only REACHABLE when the label length matches the generator shape:
+	// with NameLength=6, "enroll" passes the length + charset gates and must then be rejected as the
+	// reserved enroll label (the table case above with NameLength=12 is rejected by length first).
+	cfg6 := config.ServeCmd{EnrollHost: "enroll.example.test", ControlHost: "connect.example.test", NameLength: 6}
+	valid6 := validNameFunc(cfg6)
+	if valid6("enroll") {
+		t.Fatal("the reserved enroll label must be rejected even when it matches the generator length")
+	}
+	if !valid6("abcde2") {
+		t.Fatal("a non-reserved 6-char base32 name must pass")
+	}
 }
 
 // TestMeshCertHolderHotSwap covers the mesh cert hot-swap path: mint installs a cert, a re-mint swaps

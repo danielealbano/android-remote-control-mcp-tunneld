@@ -103,9 +103,9 @@ func TestAsyncConnLog_FullQueueDropsNewest(t *testing.T) {
 func TestAsyncConnLog_RetriesThenDrops(t *testing.T) {
 	t.Run("retries then succeeds", func(t *testing.T) {
 		t.Parallel()
-		inner := &flakyLog{failFirst: 1} // fail attempt 0, succeed attempt 1 (one 1s backoff)
+		inner := &flakyLog{failFirst: 1} // fail attempt 0, succeed attempt 1 (one backoff)
 		var drops atomic.Int64
-		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, nil)
+		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, nil, store.WithBackoffBase(time.Millisecond))
 		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t"})
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -123,10 +123,10 @@ func TestAsyncConnLog_RetriesThenDrops(t *testing.T) {
 
 	t.Run("permanent failure drops", func(t *testing.T) {
 		t.Parallel()
-		inner := &flakyLog{failFirst: 1 << 30} // always fail: all 5 attempts (~15s of backoff)
+		inner := &flakyLog{failFirst: 1 << 30} // always fail: all 5 attempts (tiny backoff → milliseconds)
 		var drops atomic.Int64
 		log, buf := captureWarn()
-		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, log)
+		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, log, store.WithBackoffBase(time.Millisecond))
 		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t", Event: "end"})
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

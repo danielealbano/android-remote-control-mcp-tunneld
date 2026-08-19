@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"io"
 	"math/big"
@@ -190,7 +191,14 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 	req2.RemoteAddr = "198.51.100.98:40000"
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
-	if rec2.Code == 403 && rec2.Body.String() == "banned\n" {
+	// An unbanned IP must not hit the ban gate: decode the JSON body and assert the reason is anything
+	// but "banned" (it fails later at the identity gate → "forbidden"). The old string compare against
+	// "banned\n" could never match the JSON body, so it never actually tested this.
+	var er struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(rec2.Body.Bytes(), &er)
+	if er.Reason == "banned" {
 		t.Fatal("an unbanned IP must not hit the ban gate")
 	}
 }
