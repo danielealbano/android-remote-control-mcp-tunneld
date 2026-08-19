@@ -460,3 +460,7 @@ root at all (fail-closed → no attestation ever verifies). Parse ONLY the real 
 - **Task 1.1 — gradle.properties `-Dfile.encoding=UTF-8`.** `org.gradle.jvmargs` carries an explicit
   `-Dfile.encoding=UTF-8` (matching the local companion app) for build reproducibility across locales,
   beyond the plan action's `-Xmx1536m` alone.
+- **US3 — install-specific timeout.** `adb install` gets its own generous 120s ceiling
+  (`adbInstallTimeout`) separate from the 60s quick-command ceiling, because the on-device Play Protect
+  scan of a fresh APK install can take well over a minute (~80s observed) — a real device constraint,
+  not a hang. Quick commands and the poll deadline stay bounded at 60s.
