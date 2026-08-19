@@ -67,8 +67,7 @@ func TestE2E_DeviceAttestation(t *testing.T) {
 		_ = exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", attestProbePkg).Run()
 	})
 	// install -r keeps app data, so clear any stale result files from a prior interrupted run.
-	adb(t, serial, "shell", "run-as", attestProbePkg, "sh", "-c",
-		"rm -f files/done files/error files/chain.pem")
+	adbRunAs(t, serial, attestProbePkg, "rm -f files/done files/error files/chain.pem")
 
 	// Fresh server nonce → the app binds it into the attestation challenge (freshness).
 	var nonce [32]byte
@@ -151,6 +150,14 @@ func adb(t *testing.T, serial string, args ...string) []byte {
 	return stdout.Bytes()
 }
 
+// adbRunAs runs `sh -c <script>` inside the probe app's context via run-as, returning stdout. The whole
+// remote command is passed to exec-out as ONE argument because adb splits multiple args on spaces, which
+// would corrupt a multi-word script; the script must contain no single quotes (none of ours do).
+func adbRunAs(t *testing.T, serial, pkg, script string) []byte {
+	t.Helper()
+	return adb(t, serial, "exec-out", "run-as "+pkg+" sh -c '"+script+"'")
+}
+
 // pollProbeResult polls the app's result files (via run-as, so app-internal storage is readable because
 // the debug APK is debuggable) until a `done` marker (→ returns chain.pem) or an `error` file (→ fails)
 // appears, or the timeout elapses (→ fails). The [ -f ] guards make it robust to adb exit-code quirks.
@@ -158,7 +165,7 @@ func pollProbeResult(t *testing.T, serial, pkg string, timeout time.Duration) []
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		status := string(adb(t, serial, "exec-out", "run-as", pkg, "sh", "-c",
+		status := string(adbRunAs(t, serial, pkg,
 			"if [ -f files/error ]; then echo ERR; cat files/error; "+
 				"elif [ -f files/done ]; then echo DONE; fi"))
 		switch {
@@ -166,7 +173,7 @@ func pollProbeResult(t *testing.T, serial, pkg string, timeout time.Duration) []
 			t.Fatalf("attestation probe reported an error: %s",
 				strings.TrimSpace(strings.TrimPrefix(status, "ERR")))
 		case strings.HasPrefix(status, "DONE"):
-			return adb(t, serial, "exec-out", "run-as", pkg, "sh", "-c", "cat files/chain.pem")
+			return adbRunAs(t, serial, pkg, "cat files/chain.pem")
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("attestation probe produced no result within %s", timeout)
