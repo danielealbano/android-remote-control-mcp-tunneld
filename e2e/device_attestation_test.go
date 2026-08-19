@@ -104,12 +104,13 @@ func adbHasDevice(t *testing.T) bool {
 	if err != nil {
 		return false
 	}
+	count := 0
 	for _, line := range strings.Split(string(out), "\n")[1:] {
 		if strings.HasSuffix(strings.TrimSpace(line), "\tdevice") {
-			return true
+			count++
 		}
 	}
-	return false
+	return count == 1
 }
 
 func parsePEMChain(pemBytes []byte) ([]*x509.Certificate, error) {

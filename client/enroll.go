@@ -104,7 +104,9 @@ func (e *EnrollError) Error() string {
 // raw :443 edge (SNI routes enrollHost/controlHost to their listeners).
 func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain string, caPool *x509.CertPool) (*Identity, error) {
 	// --- Phase 1: identity enrollment (server-TLS) ---
-	hc := &http.Client{Transport: serverTLSTransport(dialAddr, enrollHost, caPool)}
+	tr := serverTLSTransport(dialAddr, enrollHost, caPool)
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
 	nonce, err := fetchNonce(ctx, hc, enrollHost)
 	if err != nil {
 		return nil, err
@@ -145,7 +147,9 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	if err != nil {
 		return nil, err
 	}
-	mtls := &http.Client{Transport: newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert })}
+	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert })
+	defer mtlsTr.CloseIdleConnections()
+	mtls := &http.Client{Transport: mtlsTr}
 	return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", er.IssueNonce)
 }
 
@@ -284,6 +288,8 @@ func serverTLSTransport(dialAddr, host string, caPool *x509.CertPool) *http.Tran
 // path after a RETRYABLE POST /issue failure (which consumed the previous nonce): fetch a fresh
 // nonce, wait retry_after_seconds, then call Client.Renew with it. See docs/PROTOCOL.md §3.
 func FetchIssueNonce(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertPool) (string, error) {
-	hc := &http.Client{Transport: serverTLSTransport(dialAddr, enrollHost, caPool)}
+	tr := serverTLSTransport(dialAddr, enrollHost, caPool)
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
 	return fetchNonce(ctx, hc, enrollHost)
 }

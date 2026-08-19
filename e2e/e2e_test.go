@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +50,7 @@ type e2eInfra struct {
 	pebble   *tunneltest.PebbleEnv
 	caCert   string
 	caKey    string
+	internal map[string]string // edge address → that replica's internal (metrics/healthz) address
 }
 
 func startE2EInfra(t *testing.T) *e2eInfra {
@@ -61,7 +64,7 @@ func startE2EInfra(t *testing.T) *e2eInfra {
 	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 	caCert, caKey := writeCA(t)
-	return &e2eInfra{redisURL: redisURL, s3URL: s3URL, access: access, secret: secret, pebble: pebble, caCert: caCert, caKey: caKey}
+	return &e2eInfra{redisURL: redisURL, s3URL: s3URL, access: access, secret: secret, pebble: pebble, caCert: caCert, caKey: caKey, internal: map[string]string{}}
 }
 
 // replicaOpts tweaks a replica's config for a specific scenario.
@@ -136,6 +139,7 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 	if !waitBool(120*time.Second, func() bool { return healthOK(internalAddr) }) {
 		t.Fatal("replica never became ready (reserved-host cert obtain may have failed)")
 	}
+	inf.internal[edgeAddr] = internalAddr
 	return edgeAddr
 }
 
@@ -161,6 +165,7 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) *cli
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(c.Close)
 	runCtx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
 	go func() { _ = c.Run(runCtx) }()
@@ -226,6 +231,11 @@ func TestE2E_Quota(t *testing.T) {
 	if err := frontendTransfer(edge, fqdn, inf.pebble.IssuingRoots, 256*1024); err == nil {
 		t.Fatal("a transfer well past --limit-traffic-day must be cut by the quota, but it completed")
 	}
+	if !waitBool(10*time.Second, func() bool {
+		return metricCounterPositive(inf.internal[edge], "tunneld_quota_exhausted_total")
+	}) {
+		t.Fatal("the cut must be attributed to the quota (tunneld_quota_exhausted_total)")
+	}
 }
 
 // TestE2E_Eviction fills a tunnel's concurrent-stream cap with idle connections, then opens one more:
@@ -256,7 +266,15 @@ func TestE2E_Eviction(t *testing.T) {
 	var c3 *tls.Conn
 	if !waitBool(15*time.Second, func() bool {
 		c3, err = dialTunnelTLS(edge, fqdn, inf.pebble.IssuingRoots)
-		return err == nil && echoOn(c3) == nil
+		if err != nil {
+			return false
+		}
+		if eerr := echoOn(c3); eerr != nil {
+			_ = c3.Close() // a leaked conn would join the eviction population under test
+			err = eerr
+			return false
+		}
+		return true
 	}) {
 		t.Fatalf("the over-cap connection must evict an idle stream and round-trip: %v", err)
 	}
@@ -342,6 +360,40 @@ func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
 		t.Fatalf("phone public keypair: %v", err)
 	}
 	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+}
+
+// metricCounterPositive GETs the replica's internal /metrics and reports whether any exposition line for
+// the given counter family carries a value > 0 (i.e. the counter fired at least once).
+func metricCounterPositive(internalAddr, family string) bool {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + internalAddr + "/metrics")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, family) {
+			continue
+		}
+		// The family name must be followed by a label set or a space — not by more name characters
+		// (skip prefix-sharing families such as <family>_created).
+		rest := line[len(family):]
+		if rest != "" && rest[0] != ' ' && rest[0] != '{' {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if v, err := strconv.ParseFloat(fields[len(fields)-1], 64); err == nil && v > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func healthOK(internalAddr string) bool {
