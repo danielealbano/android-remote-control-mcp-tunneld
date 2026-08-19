@@ -233,6 +233,7 @@ func TestFetchIssueNonce_RetryPathCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(c.Close) // Run was never started, so Close only releases the pooled transport
 	if err := c.Renew(ctx, nonce); err != nil {
 		t.Fatalf("Renew (retry) must complete after a fresh nonce: %v", err)
 	}
@@ -262,8 +263,11 @@ func (r *truncReader) Read(p []byte) (int, error) {
 // misleading decode/empty-reason error.
 func TestReadResponse_TruncatedBodyErrors(t *testing.T) {
 	hc := &http.Client{Transport: truncatedRT{}}
-	if _, err := fetchNonce(context.Background(), hc, testEnrollHost); err == nil {
-		t.Fatal("a truncated response body must surface a read error")
+	_, err := fetchNonce(context.Background(), hc, testEnrollHost)
+	// It must surface the READ error, not a decode error: assert the wrapped io.ErrUnexpectedEOF (a
+	// bare err != nil would also pass against the pre-fix code, which misreported it as a decode error).
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("a truncated body must surface the read error (io.ErrUnexpectedEOF), got %v", err)
 	}
 }
 

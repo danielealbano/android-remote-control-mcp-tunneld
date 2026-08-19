@@ -148,8 +148,11 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
-		case <-done:
-			cancel() // Run exited before serving (freeAddr port race) — retry with fresh ports
+		case runErr := <-done:
+			cancel()
+			// Run exited before serving. Usually a freeAddr port race (retry with fresh ports), but log
+			// the actual error so a NON-port failure (e.g. a fatal config/ACME error) is diagnosable.
+			t.Logf("replica boot attempt exited before serving: %v", runErr)
 			return "", false
 		default:
 		}

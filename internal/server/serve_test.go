@@ -32,6 +32,9 @@ func TestServeTLS_PropagatesNonShutdownError(t *testing.T) {
 	if err := serveTLS(context.Background(), &http.Server{}, errListener{err: net.ErrClosed}, testLogger(), "x"); err != nil {
 		t.Fatalf("net.ErrClosed must be non-fatal, got %v", err)
 	}
+	if err := serveTLS(context.Background(), &http.Server{}, errListener{err: http.ErrServerClosed}, testLogger(), "x"); err != nil {
+		t.Fatalf("http.ErrServerClosed must be non-fatal, got %v", err)
+	}
 }
 
 // TestServeInternal_DrainsGracefully verifies an in-flight request survives ctx cancellation: serveTLS

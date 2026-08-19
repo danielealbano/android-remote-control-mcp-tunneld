@@ -123,11 +123,20 @@ func TestIssue_RejectsNonP256TLSCSR(t *testing.T) {
 		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"}, Recorder: rec,
 	})
 	name := doEnroll(t, svc, idCSR)
-	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
 	fqdn := name + ".example.test"
-	der, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn}}, rsaKey)
-	rsaCSR, _ := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaCSR, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: rsaCSR})
 	if ee == nil || ee.Reason != "unsupported_key_type" {
 		t.Fatalf("a non-P256 TLS CSR must be refused unsupported_key_type, got %v", ee)

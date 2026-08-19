@@ -1467,3 +1467,18 @@ EVERYTHING from the ground up.
   lowercased at runtime, so an UPPERCASE prefix is normalized-and-accepted (not rejected). The planned
   "uppercase fails" test row was corrected to "uppercase normalized ok"; the charset guard rejects only
   non-`[a-z0-9-]` characters and a leading `-`.
+- **Task 7.4 test — `TestHandleNonce_EnrollRateIs429` folded.** The `enroll_rate`→429 nonce-route mapping
+  is already covered by the pre-existing `TestHandlerNonceRouteRateLimited` (it exhausts the per-IP minute
+  window and asserts 429), so a separate identically-named test would duplicate it (US12 forbids duplicate
+  tests). No new test was added under that name.
+- **Task 11.4 test — `TestReadPump_OversizeFrameIsProtocolError` folded.** The oversize-frame →
+  `protocol-error` case is exercised by the (plan-required) update to `TestReadPumpPongStampsLiveness`; a
+  separate identically-named test would duplicate the same oversize-frame assertion, so it was not added.
+- **Task 4.3 test — signer seam reachable through the constructor.** `newMeshCertHolder` gained an
+  optional `signOverride ...meshSigner` param (production passes none) so `TestMeshCert_InitialMintFatal`
+  drives the FATAL initial-mint path through the constructor (not just `mint()`), verifying the error
+  actually propagates out of `newMeshCertHolder`.
+- **US11 test — `store.MustConnID` rand-failure seam.** `internal/store/event.go` gained an unexported
+  `connIDRand` package var (defaulting to `crypto/rand.Read`) so a white-box test
+  (`event_internal_test.go`) can force the rand-failure path and assert the non-empty `"00000000"`
+  fallback — the planned `TestNewConnIDFallback_NonEmpty` alone could not reach that branch.

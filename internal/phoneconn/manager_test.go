@@ -314,14 +314,27 @@ func TestOpenStreamDialbackCorrelates(t *testing.T) {
 }
 
 // TestDeliverStream_RefusesClosedConn verifies a dial-back arriving after the phone conn was closed
-// (e.g. a ban reload evicted it) is refused, so no splice starts on a torn-down connection.
+// (e.g. a ban reload evicted it) is refused EVEN WHEN a matching waiter is still pending, so no splice
+// starts on a torn-down connection. The pending waiter is essential: without it, deliverStream returns
+// false via the pending-miss path regardless of the c.closed guard, and the test would not discriminate.
 func TestDeliverStream_RefusesClosedConn(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
-	_, _ = m.register(context.Background(), c)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	waiter := make(chan DataStream, 1)
+	c.mu.Lock()
+	c.pending["s1"] = waiter
+	c.mu.Unlock()
 	c.close("ban-evict")
 	if m.deliverStream("abc", "s1", &fakeDataStream{}) {
 		t.Fatal("deliverStream must refuse delivery once the conn is closed")
+	}
+	select {
+	case <-waiter:
+		t.Fatal("a closed conn's waiter must NOT receive a delivery")
+	default:
 	}
 }
 

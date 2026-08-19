@@ -62,8 +62,14 @@ type meshCertHolder struct {
 
 // newMeshCertHolder mints the first mesh cert; a failure is FATAL — the caller must not bind :9443 with
 // no servable cert (docs/ARCHITECTURE.md §1: a socket is never bound while it cannot be served).
-func newMeshCertHolder(caObj *ca.CA, nodeID string, ttl time.Duration, logger *slog.Logger) (*meshCertHolder, error) {
-	h := &meshCertHolder{nodeID: nodeID, ttl: ttl, logger: logger, sign: caObj.SignMesh, after: time.After}
+// signOverride is a test-only seam to drive a mint failure through the constructor; production passes none
+// and uses caObj.SignMesh.
+func newMeshCertHolder(caObj *ca.CA, nodeID string, ttl time.Duration, logger *slog.Logger, signOverride ...meshSigner) (*meshCertHolder, error) {
+	sign := caObj.SignMesh
+	if len(signOverride) > 0 {
+		sign = signOverride[0]
+	}
+	h := &meshCertHolder{nodeID: nodeID, ttl: ttl, logger: logger, sign: sign, after: time.After}
 	if err := h.mint(); err != nil {
 		return nil, fmt.Errorf("mesh cert initial mint: %w", err)
 	}

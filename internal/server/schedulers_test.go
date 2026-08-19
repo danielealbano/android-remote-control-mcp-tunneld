@@ -17,15 +17,17 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
 
-// TestMeshCert_InitialMintFatal verifies a failing signer makes mint return an error — the trigger that
-// makes newMeshCertHolder fatal (so :9443 never binds without a servable cert).
+// TestMeshCert_InitialMintFatal verifies a failing initial mint makes newMeshCertHolder return an error
+// (which server.Run then treats as fatal, so :9443 never binds without a servable cert).
 func TestMeshCert_InitialMintFatal(t *testing.T) {
-	h := &meshCertHolder{
-		nodeID: "node", ttl: time.Hour, logger: testLogger(), after: time.After,
-		sign: func(string, time.Duration) ([]byte, []byte, error) { return nil, nil, errors.New("boom") },
+	certPath, keyPath := writeCA(t)
+	caObj, err := ca.Load(certPath, keyPath, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := h.mint(); err == nil {
-		t.Fatal("a failing signer must make mint (and thus newMeshCertHolder) return an error")
+	failSign := func(string, time.Duration) ([]byte, []byte, error) { return nil, nil, errors.New("boom") }
+	if _, err := newMeshCertHolder(caObj, "node", time.Hour, testLogger(), failSign); err == nil {
+		t.Fatal("a failing initial mint must make newMeshCertHolder return an error")
 	}
 }
 
