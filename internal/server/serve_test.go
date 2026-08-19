@@ -1,10 +1,15 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
 
 // blockingRWC blocks Read forever until Close, and discards Write. It models the mesh request-body
@@ -47,7 +52,30 @@ func (e *eofThenBlockRWC) Close() error {
 	return nil
 }
 
-// TestBridgeCopyReturnsPromptlyOnPhoneEOF is the W-001 regression: when the phone side (ds) EOFs while
+// fakeOpener is a dial-back opener stub whose OpenStream always returns err (for the sentinel-translation test).
+type fakeOpener struct{ err error }
+
+func (f fakeOpener) OpenStream(context.Context, string, string) (phoneconn.DataStream, error) {
+	return nil, f.err
+}
+
+// TestBridgeAdapter_TranslatesDuplicateStreamID covers the owner-side sentinel translation: a phone
+// dial-back returning phoneconn.ErrDuplicateStreamID surfaces from OpenMesh as mesh.ErrDuplicateStream
+// (so the mesh listener answers 422), while any other error passes through unchanged.
+func TestBridgeAdapter_TranslatesDuplicateStreamID(t *testing.T) {
+	b := &bridgeAdapter{mgr: fakeOpener{err: phoneconn.ErrDuplicateStreamID}, dialBackTimeout: time.Second}
+	if _, err := b.OpenMesh(context.Background(), "t", "s1"); !errors.Is(err, mesh.ErrDuplicateStream) {
+		t.Fatalf("OpenMesh must translate ErrDuplicateStreamID → mesh.ErrDuplicateStream, got %v", err)
+	}
+
+	other := errors.New("boom")
+	b2 := &bridgeAdapter{mgr: fakeOpener{err: other}, dialBackTimeout: time.Second}
+	if _, err := b2.OpenMesh(context.Background(), "t", "s1"); !errors.Is(err, other) {
+		t.Fatalf("a non-duplicate error must pass through unchanged, got %v", err)
+	}
+}
+
+// TestBridgeCopyReturnsPromptlyOnPhoneEOF proves that when the phone side (ds) EOFs while
 // the mesh client read blocks forever, bridgeCopy must return promptly (via ds.Close/client.Close),
 // NOT stall waiting for the client→phone copy to unblock.
 func TestBridgeCopyReturnsPromptlyOnPhoneEOF(t *testing.T) {

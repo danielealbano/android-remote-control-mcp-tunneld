@@ -88,6 +88,7 @@ type testServer struct {
 	mgr     *phoneconn.Manager
 	store   *tunneltest.Store
 	dialAdr string
+	conns   *countingListener
 }
 
 func startTestServer(t *testing.T) *testServer {
@@ -149,10 +150,11 @@ func startTestServer(t *testing.T) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Serve(tls.NewListener(ln, srv.TLSConfig)) }()
+	cl := &countingListener{Listener: ln}
+	go func() { _ = srv.Serve(tls.NewListener(cl, srv.TLSConfig)) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	return &testServer{ca: ca, mgr: mgr, store: st, dialAdr: ln.Addr().String()}
+	return &testServer{ca: ca, mgr: mgr, store: st, dialAdr: ln.Addr().String(), conns: cl}
 }
 
 // newClient builds a client with a fresh identity signed by the test CA, wired to backend.
@@ -165,6 +167,7 @@ func (ts *testServer) newClient(t *testing.T, backend Backend) *Client {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(c.Close)
 	return c
 }
 

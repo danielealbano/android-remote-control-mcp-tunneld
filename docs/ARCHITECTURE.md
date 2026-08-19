@@ -8,7 +8,9 @@ This document maps the E2E-encrypted tunnel internals. The operational overview 
 
 `tunneld serve` assembles everything in `server.Run` (constructor DI — no package globals) and runs it
 under one `errgroup`. The public edge is a raw TCP `:443` listener; the phone control plane, the replica
-mesh, and the internal metrics listener are separate servers.
+mesh, and the internal metrics listener are separate servers. ALL construction — reserved-host cert
+issuance included — completes BEFORE the `:443` and `:9443` listeners bind: a socket is never bound while
+unserved (a cold-start issuance delays readiness, never leaves an accepting-but-dead port).
 
 ```mermaid
 flowchart TD
@@ -111,10 +113,13 @@ admission and closes in-flight streams. `wire.ChunkSize` = 32768 is the paced-co
 
 ## 5. Valkey state (all transient — TTL atomic with the write, single Lua)
 
-Routing (`route:{name}` → owner/fp/connID/epoch, owner-conditional teardown on `connID`), node registry
-(`node:{id}` → advertise), rate-limit windows, the global concurrency counter, per-tunnel counters
-(`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff. No permanent
-Valkey state; a stale connection never clobbers a re-bound route.
+Routing (`route:{name}` → owner/fp/connID, owner-conditional teardown on `connID`), node registry
+(`node:{id}` → advertise), rate-limit windows, the global concurrency counter (`conc:{name}`, TTL = 3 ×
+`--limit-conn-idle`, refreshed by every traffic chunk via a `PEXPIRE` that no-ops on a missing key), per-tunnel
+counters (`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff. No permanent
+Valkey state; a stale connection never clobbers a re-bound route. Connection/stream ids are 8 lowercase
+hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
+and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic.
 
 ## 6. Durable S3 state
 
@@ -128,9 +133,13 @@ startup by `EnsureLifecycles`.
 ## 7. Ban engine
 
 `internal/ban` parses the union of `--ban-file`s into an atomic-swap longest-prefix-match table over
-`netip`; `country XX` entries expand from the DB-IP CSV at reload. `ban.Watch` hot-reloads on mtime and
-fires an `EvictBanned` hook so a newly-banned tunnel's live phone connection is dropped. The ban check
-is the FIRST handler-level check on every ingress edge.
+`netip`; `country XX` entries expand from the DB-IP CSV at reload. `ban.Watch` hot-reloads on mtime and,
+on a reload, evicts BOTH the newly-banned tunnel's live phone control connection (`EvictBanned`) AND its
+in-flight public splices (`EvictBannedStreams`, `close_reason=ban-evict`) — bans are the only revocation,
+so a reload must stop live traffic, not just new admissions. A `--ban-file` or the DB-IP CSV that was
+present at the last successful load but VANISHES at runtime is refused: the previous snapshot is kept
+(Error-logged, retried), never silently unbanning (a first-deploy absence stays a benign skip). The ban
+check is the FIRST handler-level check on every ingress edge.
 
 ## 8. Observability wiring
 
@@ -153,25 +162,42 @@ other string, so labels cannot be invented at call sites). The writers:
 
 Distinct signals, no double-counting: `QuotaExhausted(tunnel, window)` fires when an IN-FLIGHT stream
 hits the window (its LOG is caplog-deduped), and forced closures of existing connections (`min-rate`,
-`evicted`, `idle-timeout`, `quota-exhausted`, …) are recorded via `PublicConnClose(reason)` /
-`PhoneConnClose(reason)` — never via `Reject`. `tunneld_enrollments_total{result}` carries the
-enrollment outcome; `tunneld_attest_verify_total{result}` the attestation verdicts; and
+`evicted`, `idle-timeout`, `quota-exhausted`, `cert-expired`, `ban-evict`, …) are recorded via
+`PublicConnClose(reason)` / `PhoneConnClose(reason)` — never via `Reject`.
+`tunneld_enrollments_total{result}` carries the enrollment outcome;
+`tunneld_attest_verify_total{result}` the attestation verdicts; and
 `tunneld_acme_renew_total{ca,result}` the tunnel-cert renewal outcomes (`ca="all"` on a failure, since
 every CA in the chain declined).
+
+Cap-hit logs are deduped via `internal/caplog` (first hit per `(tunnel, reason)` immediately, then ≤1
+summary/min) for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel value is
+attacker-controlled (raw SNI / unrouted name), so it is metric + Debug-line only — it never keys the
+dedup map nor emits a WARN, making log-flooding via that path impossible.
+
+Connection-log writes to S3 are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and never blocks an
+admission, splice, or teardown path. A fixed pool of 8 workers drains a bounded 5000-event queue with
+per-item exponential retry; a full queue drops the newest event and increments
+`tunneld_connlog_dropped_total`. The queue is drained (bounded) at shutdown so `server-shutdown` end
+events land.
 
 ## 9. Shutdown
 
 ```mermaid
 flowchart LR
   cancel["ctx cancel"] --> close["close raw :443 listener (stop new public conns)"]
-  close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + writes end events"]
+  close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + enqueues end events"]
   phones --> drain["Shutdown enroll / control / mesh / internal servers"]
-  drain --> group["errgroup unwinds: schedulers + flusher + watchers on the drain ctx"]
-  group --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
+  drain --> join["join public handlers (Edge.Wait): splice + end-event enqueue + slot release returned"]
+  join --> group["errgroup unwinds: schedulers + watchers on the drain ctx"]
+  group --> queue["drain conn-log queue: server-shutdown end events land"]
+  queue --> flush["final admin flush + cap-log flush"]
+  flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
 ```
 
 Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
-(`evicted` is reserved for saturation eviction).
+(`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload). The ordering is load-bearing:
+the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the async conn-log queue
+is drained, and only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
 
 ## 10. Configuration
 

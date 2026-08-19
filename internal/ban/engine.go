@@ -59,8 +59,10 @@ func (e *Engine) MatchTunnel(name, fingerprint string) (Source, bool) {
 // zero parseable rows returns an error and keeps the previous snapshot; a valid CSV whose wanted
 // country code is absent is legal (empty result, no error). A HARD read error on a configured file
 // (e.g. an I/O error or a path that is a directory — NOT not-exist) returns a non-nil error WITHOUT
-// swapping, so the previous snapshot is preserved (never emptied on error).
-func (e *Engine) Load(files []string, csvPath string, log *slog.Logger) error {
+// swapping, so the previous snapshot is preserved (never emptied on error). A path in `required` (one
+// that existed at the last successful load) that has now VANISHED returns an error WITHOUT swapping —
+// a mid-load deletion is an operator error, never a request to unban.
+func (e *Engine) Load(files []string, csvPath string, required map[string]struct{}, log *slog.Logger) error {
 	table := &bart.Table[Source]{}
 	names := map[string]Source{}
 	fps := map[string]Source{}
@@ -70,6 +72,10 @@ func (e *Engine) Load(files []string, csvPath string, log *slog.Logger) error {
 		p, err := parseFile(f, log)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
+				if _, req := required[f]; req {
+					log.Error("required ban file vanished, keeping previous ban state", "file", f)
+					return err // do NOT swap — a previously-loaded file MUST NOT silently unban
+				}
 				log.Warn("ban file absent, skipping (will load when it appears)", "file", f)
 				continue
 			}
@@ -94,6 +100,10 @@ func (e *Engine) Load(files []string, csvPath string, log *slog.Logger) error {
 				table.Insert(pfx, Source{Reason: ReasonCountry, File: csvPath, Detail: "country-expansion"})
 			}
 		case csvPath == "" || errors.Is(err, fs.ErrNotExist):
+			if _, req := required[csvPath]; req {
+				log.Error("required ban CSV vanished, keeping previous ban state", "csv", csvPath)
+				return err // do NOT swap — a previously-loaded CSV MUST NOT silently drop country bans
+			}
 			// First-deploy / geo-off: the CSV does not exist yet — skip country entries, keep ip/cidr.
 			log.Warn("country ban expansion skipped (CSV absent); ip/cidr bans still enforced", "csv", csvPath, "err", err)
 		default:

@@ -125,6 +125,9 @@ func parseSpec(raw string) (spec, error) {
 		k, v = strings.TrimSpace(strings.ToLower(k)), strings.TrimSpace(v)
 		switch k {
 		case "output":
+			if haveOutput {
+				return spec{}, fmt.Errorf("duplicate output= in log spec %q (use one --log flag per sink)", raw)
+			}
 			haveOutput = true
 			if v == "std" {
 				s.stdout = true

@@ -45,7 +45,7 @@ dockers:
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
-      - "--label=org.opencontainers.image.description=Self-hosted HTTP tunnel server (tunneld)"
+      - "--label=org.opencontainers.image.description=Self-hosted end-to-end-encrypted tunnel server (tunneld)"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"
@@ -59,7 +59,7 @@ dockers:
     build_flag_templates:
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
-      - "--label=org.opencontainers.image.description=Self-hosted HTTP tunnel server (tunneld)"
+      - "--label=org.opencontainers.image.description=Self-hosted end-to-end-encrypted tunnel server (tunneld)"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
       - "--label=org.opencontainers.image.licenses=MIT"

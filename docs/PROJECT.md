@@ -64,8 +64,9 @@ of the raw TCP connection.
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
   **mesh-role** certs (SAN = node id). The public edge does NO client-cert auth (it relays opaque TLS).
 - **Revocation is the ban engine ONLY** (no CRL): a `tunnel-name` / `tunnel-fingerprint` ban refuses new
-  connections at the control plane, blocks the resolved route at the public edge, and evicts live
-  connections on ban reload.
+  connections at the control plane, blocks the resolved route at the public edge, and on ban reload evicts
+  BOTH the live phone control connection and every in-flight public splice (`close_reason=ban-evict`) —
+  live traffic is stopped, not only new admissions.
 - **The tunnel authenticates NOTHING it relays** — it cannot (the bytes are opaque TLS). The phone's own
   app is the sole authenticator; a tunnelled deployment MUST keep the app's bearer/OAuth enabled.
 
@@ -132,7 +133,9 @@ The internal listener (`--internal-listen`, never published) serves `GET /metric
 aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable), and
 `GET /admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
 the data plane). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
-then ≤1 summary/min). The compose stack ships Prometheus, Grafana, Alertmanager, and ntfy on
+then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
+metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack
+ships Prometheus, Grafana, Alertmanager, and ntfy on
 `127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
 Secrets, key material, and tunnel payloads are NEVER logged.
 

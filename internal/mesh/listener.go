@@ -2,18 +2,26 @@ package mesh
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 )
 
-// Bridge splices a mesh-arriving client stream to the local phone for (tunnel, streamID). It is
-// implemented by the edge bridge wrapping phoneconn.OpenStream + the paced copy. Returning an
-// error means the owner could not deliver (the entry node closes the frontend connection).
+// ErrDuplicateStream reports a dial-back stream id already pending on the owner's phone connection
+// (the entry node re-mints the id and retries once). It crosses the mesh boundary as a mesh-owned
+// sentinel because mesh MUST NOT import phoneconn.
+var ErrDuplicateStream = errors.New("mesh: duplicate stream id")
+
+// Bridge opens the local phone dial-back stream (open phase — BEFORE the mesh response commits, so
+// an open failure can still pick the HTTP status) and then splices it with the mesh client stream. It
+// is implemented by the owner node's edge bridge wrapping phoneconn.OpenStream + the paced copy.
 type Bridge interface {
-	BridgeMesh(ctx context.Context, tunnel, streamID string, client io.ReadWriteCloser) error
+	OpenMesh(ctx context.Context, tunnel, streamID string) (io.ReadWriteCloser, error)
+	SpliceMesh(ds, client io.ReadWriteCloser)
 }
 
 // OwnerCheck reports whether this node holds the live phone connection for tunnel with connID.
@@ -63,16 +71,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no http/2", http.StatusBadRequest)
 		return
 	}
+	// Open phase BEFORE committing the response status, so a dial-back failure can still pick the code:
+	// a duplicate pending stream id is 422 (distinct from the 409 not-owner), any other failure is 502.
+	ds, err := h.bridge.OpenMesh(r.Context(), tunnel, streamID)
+	if err != nil {
+		if errors.Is(err, ErrDuplicateStream) {
+			http.Error(w, "duplicate stream", http.StatusUnprocessableEntity)
+			return
+		}
+		http.Error(w, "dial-back failed", http.StatusBadGateway)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
 	// The mesh request/response bodies ARE the client stream from the owner's perspective:
 	// Read = request body (client→phone), Write = response body (phone→client).
-	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{})}
-	if err := h.bridge.BridgeMesh(r.Context(), tunnel, streamID, cs); err != nil {
-		_ = cs.Close()
-		return
-	}
+	rc := http.NewResponseController(w)
+	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{}),
+		unblock: func() { _ = rc.SetWriteDeadline(time.Now()) }}
+	h.bridge.SpliceMesh(ds, cs)
 	<-cs.done
 }
 
@@ -81,11 +99,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // + closed flag so that once Close releases the handler, NO further Write touches the HTTP/2 response
 // writer (which the http2 library finalizes as the handler returns).
 type ownerStream struct {
-	r     io.Reader
-	w     io.Writer
-	flush func()
-	done  chan struct{}
-	once  sync.Once
+	r       io.Reader
+	w       io.Writer
+	flush   func()
+	done    chan struct{}
+	unblock func() // resets the HTTP/2 stream so a flow-control-blocked Write fails and releases o.mu
+	once    sync.Once
 
 	mu     sync.Mutex
 	closed bool
@@ -106,6 +125,11 @@ func (o *ownerStream) Write(p []byte) (int, error) {
 }
 func (o *ownerStream) Close() error {
 	o.once.Do(func() {
+		// Reset the HTTP/2 stream FIRST so an in-flight flow-control-blocked Write fails and releases
+		// o.mu — otherwise Close would deadlock on the mutex and pin the mesh splice.
+		if o.unblock != nil {
+			o.unblock()
+		}
 		o.mu.Lock()
 		o.closed = true
 		o.mu.Unlock()

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -139,10 +138,11 @@ func (s *S3Store) PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollme
 	return nil
 }
 
-// EnsureLifecycles applies one idempotent bucket-lifecycle configuration with two expiration rules:
-// tunnel-logs/ after connLogDays and rejected-enroll/ after rejectedDays.
+// EnsureLifecycles upserts tunneld's two expiration rules by ID, PRESERVING any operator-added rules
+// on the bucket (a blanket replace would silently delete them at every boot): tunnel-logs/ after
+// connLogDays and rejected-enroll/ after rejectedDays.
 func (s *S3Store) EnsureLifecycles(ctx context.Context, connLogDays, rejectedDays int) error {
-	rules := []types.LifecycleRule{
+	ours := []types.LifecycleRule{
 		{
 			ID:         aws.String("tunnel-logs-expire"),
 			Status:     types.ExpirationStatusEnabled,
@@ -156,9 +156,23 @@ func (s *S3Store) EnsureLifecycles(ctx context.Context, connLogDays, rejectedDay
 			Expiration: &types.LifecycleExpiration{Days: aws.Int32(int32(rejectedDays))},
 		},
 	}
-	_, err := s.cli.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
-		Bucket:                 &s.bucket,
-		LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: rules},
+	var merged []types.LifecycleRule
+	cur, err := s.cli.GetBucketLifecycleConfiguration(ctx, &s3.GetBucketLifecycleConfigurationInput{Bucket: &s.bucket})
+	switch {
+	case err == nil:
+		for _, r := range cur.Rules {
+			if r.ID == nil || (*r.ID != "tunnel-logs-expire" && *r.ID != "rejected-enroll-expire") {
+				merged = append(merged, r)
+			}
+		}
+	case isNoLifecycle(err):
+		// no configuration yet — start from empty
+	default:
+		return fmt.Errorf("store: read lifecycles: %w", err)
+	}
+	merged = append(merged, ours...)
+	_, err = s.cli.PutBucketLifecycleConfiguration(ctx, &s3.PutBucketLifecycleConfigurationInput{
+		Bucket: &s.bucket, LifecycleConfiguration: &types.BucketLifecycleConfiguration{Rules: merged},
 	})
 	if err != nil {
 		return fmt.Errorf("store: ensure lifecycles: %w", err)
@@ -166,7 +180,15 @@ func (s *S3Store) EnsureLifecycles(ctx context.Context, connLogDays, rejectedDay
 	return nil
 }
 
-// isNotFound reports whether err is an S3 "no such key"/404.
+// isNoLifecycle matches the absent-lifecycle-configuration error.
+func isNoLifecycle(err error) bool {
+	ae, ok := errors.AsType[smithy.APIError](err)
+	return ok && ae.ErrorCode() == "NoSuchLifecycleConfiguration"
+}
+
+// isNotFound reports whether err is a definitive KEY-absence (NoSuchKey / HeadObject NotFound). A
+// bucket-level or transport 404 (e.g. NoSuchBucket) is NOT key absence: callers map non-not-found
+// errors to retryable failures, and a bucket outage must never read as name_unknown.
 func isNotFound(err error) bool {
 	if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
 		return true
@@ -174,10 +196,7 @@ func isNotFound(err error) bool {
 	if _, ok := errors.AsType[*types.NotFound](err); ok {
 		return true
 	}
-	if re, ok := errors.AsType[*awshttp.ResponseError](err); ok && re.HTTPStatusCode() == http.StatusNotFound {
-		return true
-	}
-	if ae, ok := errors.AsType[smithy.APIError](err); ok && ae.ErrorCode() == "NoSuchKey" {
+	if ae, ok := errors.AsType[smithy.APIError](err); ok && (ae.ErrorCode() == "NoSuchKey" || ae.ErrorCode() == "NotFound") {
 		return true
 	}
 	return false

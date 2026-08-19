@@ -8,7 +8,7 @@ import (
 func newLimiter(t *testing.T, bw, day, week int64) *Limiter {
 	t.Helper()
 	rdb, _ := newTestRedis(t)
-	return NewLimiter(rdb, bw, day, week)
+	return NewLimiter(rdb, bw, day, week, time.Hour)
 }
 
 func TestClaimBandwidthPartialGrantAndRefill(t *testing.T) {
@@ -60,25 +60,21 @@ func TestClaimTrafficDayWeek(t *testing.T) {
 	}
 }
 
-func TestIssuanceReadOnlyAndRecord(t *testing.T) {
+func TestIssuanceRecordCountsSuccesses(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
-	ok, err := l.IssuanceAllowed(ctx, "t", 3)
-	if err != nil || !ok {
-		t.Fatalf("initial allowed: %v %v", ok, err)
-	}
-	// Read-only check does not mutate: still allowed after repeated checks.
-	_, _ = l.IssuanceAllowed(ctx, "t", 3)
-	if v := l.rdb.Get(ctx, issuanceKey("t")).Val(); v != "" {
-		t.Errorf("IssuanceAllowed must not create the counter, got %q", v)
-	}
 	for range 3 {
 		if err := l.IssuanceRecord(ctx, "t"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if ok, _ := l.IssuanceAllowed(ctx, "t", 3); ok {
-		t.Error("after 3 records, cap 3 should deny")
+	// Three committed successes fill cap 3: a fresh Begin (no in-flight slots) is refused.
+	if ok, _, _ := l.IssuanceBegin(ctx, "t", 3); ok {
+		t.Error("after 3 committed successes, cap 3 must deny a new begin")
+	}
+	// A higher cap still admits with 3 committed.
+	if ok, _, err := l.IssuanceBegin(ctx, "t", 4); err != nil || !ok {
+		t.Fatalf("cap 4 must admit with 3 committed: ok=%v err=%v", ok, err)
 	}
 }
 
@@ -145,5 +141,77 @@ func TestTrafficExhaustedReadOnly(t *testing.T) {
 	day2, _, _ := l.TrafficExhausted(ctx, "t")
 	if day2 != day {
 		t.Fatal("TrafficExhausted must be read-only")
+	}
+}
+
+// TestClaimBandwidth_ClockStepBackNoInflation: a now<last claim must not move the refill anchor
+// backward (which would fabricate tokens on the next forward advance).
+func TestClaimBandwidth_ClockStepBackNoInflation(t *testing.T) {
+	ctx := ctxT(t)
+	base := time.Unix(1_700_000_000, 0)
+	clk := base
+	l := newLimiter(t, 1000, 1<<40, 1<<40) // 1000 B/s → burst 1000
+	l.SetClock(func() time.Time { return clk })
+
+	// Seed + drain the bucket at base: full burst granted, tokens now 0, anchor = base.
+	if g, err := l.ClaimBandwidth(ctx, "t", "out", 1000); err != nil || g != 1000 {
+		t.Fatalf("seed drain = %d err=%v", g, err)
+	}
+	// Clock steps BACKWARD (skew): the empty bucket still grants 0 and the anchor must not regress.
+	clk = base.Add(-time.Second)
+	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 0 {
+		t.Fatalf("step-back claim must grant 0 (empty bucket), got %d", g)
+	}
+	// Back AT base: because the anchor never regressed, elapsed is 0 → no tokens are fabricated.
+	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 0 {
+		t.Fatalf("anchor regressed: a base-time claim fabricated %d tokens", g)
+	}
+	// A genuine forward advance still refills normally.
+	clk = base.Add(time.Second)
+	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 1000 {
+		t.Fatalf("forward refill = %d, want 1000", g)
+	}
+}
+
+// TestClaimTraffic_RefreshesConcTTLOnlyIfExists: the per-chunk claim refreshes an existing conc counter
+// TTL but never creates a missing one.
+func TestClaimTraffic_RefreshesConcTTLOnlyIfExists(t *testing.T) {
+	rdb, mr := newTestRedis(t)
+	ctx := ctxT(t)
+	l := NewLimiter(rdb, 0, 1<<40, 1<<40, 45*time.Minute)
+	const name = "t"
+
+	// No conc key yet: ClaimTraffic must NOT create it (PEXPIRE on a missing key is a no-op).
+	if _, _, err := l.ClaimTraffic(ctx, name, 100); err != nil {
+		t.Fatal(err)
+	}
+	if mr.Exists("conc:" + name) {
+		t.Fatal("ClaimTraffic must not create the conc counter")
+	}
+
+	// With an existing conc key whose TTL has been shrunk, ClaimTraffic refreshes it to streamTTL.
+	if ok, err := l.AcquireStream(ctx, name, 4); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	mr.SetTTL("conc:"+name, time.Minute)
+	if _, _, err := l.ClaimTraffic(ctx, name, 100); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL("conc:" + name); ttl <= time.Minute {
+		t.Fatalf("conc TTL must be refreshed to streamTTL, got %s", ttl)
+	}
+}
+
+// TestAcquireStream_UsesDerivedTTL: the conc counter's safety TTL is the configured streamTTL.
+func TestAcquireStream_UsesDerivedTTL(t *testing.T) {
+	rdb, mr := newTestRedis(t)
+	ctx := ctxT(t)
+	const ttl = 45 * time.Minute
+	l := NewLimiter(rdb, 0, 0, 0, ttl)
+	if ok, err := l.AcquireStream(ctx, "t", 4); err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	if got := mr.TTL("conc:t"); got != ttl {
+		t.Fatalf("conc TTL = %s, want the configured streamTTL %s", got, ttl)
 	}
 }

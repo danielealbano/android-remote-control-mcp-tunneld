@@ -5,8 +5,9 @@
 // never real country codes or names.
 package ban
 
-// Reason is the machine label recorded for a matched ban; it doubles as the
-// tunneld_rejections_total{reason} label via String() at rejection sites.
+// Reason is the machine label recorded for a matched ban. It feeds ban logs and Source.Detail ONLY:
+// every rejection site emits the literal "ban" as the tunneld_rejections_total{reason} label, so this
+// value never reaches the metric.
 type Reason string
 
 const (

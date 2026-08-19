@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,15 +94,32 @@ func peekClientHello(conn net.Conn, deadline time.Duration) (ClientHelloInfo, *p
 // acceptLoop accepts raw TCP connections and hands each to handleConn (which applies the accept-time
 // checks in the documented order). It runs until ctx is done or the listener closes.
 func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
+			// Exponential backoff (5ms→1s): persistent errors (e.g. EMFILE) must not hot-spin.
+			if delay == 0 {
+				delay = 5 * time.Millisecond
+			} else if delay *= 2; delay > time.Second {
+				delay = time.Second
+			}
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return
+			}
 			continue
 		}
-		go e.handleConn(ctx, conn)
+		delay = 0
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			e.handleConn(ctx, conn)
+		}()
 	}
 }
 
@@ -171,8 +189,9 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// Reserved SNIs → local TLS terminators. The max-clients slot moves to the pushed conn (heldConn
-	// releases it on Close) so reserved-host connections stay counted for their whole lifetime.
-	switch info.SNI {
+	// releases it on Close) so reserved-host connections stay counted for their whole lifetime. SNI is
+	// matched case-insensitively (DNS is case-insensitive); the raw info.SNI stays in logs/JA4.
+	switch strings.ToLower(info.SNI) {
 	case e.cfg.EnrollHost:
 		released = true
 		e.enrollLn.push(&heldConn{Conn: pc, release: e.release})

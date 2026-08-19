@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -42,6 +43,12 @@ const (
 
 // Run constructs every component and runs the process until ctx is cancelled, then drains gracefully.
 func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version string) error {
+	// SNI dispatch is case-insensitive: normalize the routing hosts once so every downstream comparison
+	// (edge dispatch, reserved-cert issuance, enroll reserved labels) uses the canonical lowercase form.
+	cfg.TunnelDomain = strings.ToLower(cfg.TunnelDomain)
+	cfg.EnrollHost = strings.ToLower(cfg.EnrollHost)
+	cfg.ControlHost = strings.ToLower(cfg.ControlHost)
+
 	redisOpts, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
 		return err
@@ -61,7 +68,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Ban engine + watcher.
 	banEng := ban.NewEngine()
-	if err := banEng.Load(cfg.BanFile, cfg.DBIPCountryLiteCSV, logger); err != nil {
+	if err := banEng.Load(cfg.BanFile, cfg.DBIPCountryLiteCSV, nil, logger); err != nil {
 		logger.Warn("initial ban load failed", "err", err)
 	}
 	banIP := func(ip netip.Addr) bool { _, b := banEng.Match(ip); return b }
@@ -74,7 +81,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	bwRate, _ := config.ParseBitrate(cfg.LimitBandwidth)
 	dayCap, _ := config.ParseByteSize(cfg.LimitTrafficDay)
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
-	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap)
+	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle)
 
 	// Durable store.
 	st, err := store.NewS3Store(ctx, store.S3Config{
@@ -90,6 +97,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	adminStore := admin.NewStore(rdb, time.Hour)
 	capLogger := caplog.New(logger)
 	rec := metrics.NewPromRecorder(m, capLogger, adminStore, logger)
+
+	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
+	// S3 write; a fixed worker pool drains with per-item retry, a full queue drops-newest and bumps the
+	// dropped-events counter. Both the phone control plane and the public edge log through it.
+	asyncLogs := store.NewAsyncConnLog(st, m.ConnLogDropped().Inc, logger)
 
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
 	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
@@ -117,7 +129,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Phone control plane.
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: st, Recorder: rec, Logger: logger,
+		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
@@ -133,10 +145,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
 	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout})
 
-	// Public edge.
-	rawLn, err := net.Listen("tcp", cfg.Listen)
+	// Public edge (constructed from the resolved static address — the raw listener is bound LAST, below,
+	// so the edge never depends on a live socket at construction time).
+	edgeAddr, err := net.ResolveTCPAddr("tcp", cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", cfg.Listen, err)
+		return fmt.Errorf("resolve %s: %w", cfg.Listen, err)
 	}
 	ed := edge.New(edge.Config{
 		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
@@ -145,7 +158,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
 	}, rdb, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: st, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, rawLn.Addr())
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, edgeAddr)
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
@@ -168,11 +181,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return fmt.Errorf("configure control http2: %w", err)
 	}
 
-	// Mesh listener (mTLS mesh-role, HTTP/2).
-	meshLn, err := net.Listen("tcp", cfg.MeshListen)
-	if err != nil {
-		return fmt.Errorf("mesh listen %s: %w", cfg.MeshListen, err)
-	}
+	// Mesh server (mTLS mesh-role, HTTP/2); its listener is bound LAST, below.
 	meshSrv := &http.Server{Handler: meshHandler, ReadHeaderTimeout: readHeaderTimeout,
 		TLSConfig: &tls.Config{GetCertificate: meshCert.getCert, ClientAuth: tls.RequireAndVerifyClientCert,
 			ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12}}
@@ -183,6 +192,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Internal server (metrics + healthz + admin; never proxied).
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: metrics.Handler(m.Registry(), rdb, adminStore, logger)}
+
+	// Bind the public + mesh listeners LAST: every fallible construction step above (reserved-cert
+	// issuance and both http2.ConfigureServer calls) has now succeeded, so no socket is ever left bound
+	// but unserved. A mesh-bind failure closes the already-bound raw listener before returning.
+	rawLn, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", cfg.Listen, err)
+	}
+	meshLn, err := net.Listen("tcp", cfg.MeshListen)
+	if err != nil {
+		_ = rawLn.Close() // never leak a bound listener on a construction error
+		return fmt.Errorf("mesh listen %s: %w", cfg.MeshListen, err)
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 
@@ -230,16 +252,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error {
 		ban.Watch(gctx, banEng, cfg.BanFile, cfg.DBIPCountryLiteCSV, cfg.BanPoll, func(e *ban.Engine) {
 			phoneMgr.EvictBanned(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
+			ed.EvictBannedStreams(func(name, fp string) bool { _, b := e.MatchTunnel(name, fp); return b })
 		}, logger)
 		return nil
 	})
 
 	<-gctx.Done()
-	// Shutdown order: stop accepting new public connections → actively close the live phone control
-	// connections (each /control handler returns, running its teardown: owner-conditional route unbind +
-	// the durable end event — a never-idle control stream would otherwise pin Shutdown for the full
-	// grace and skip both) → drain the HTTP servers → the schedulers + mesh goroutines unwind on gctx.
-	// The node is explicitly deregistered below; the route/node TTLs remain the crash backstop.
+	// Ordered drain: stop accepting new public connections (close the raw listener) → actively close the
+	// live phone control connections (each /control handler returns, running its teardown: owner-conditional
+	// route unbind + the durable end event — a never-idle control stream would otherwise pin Shutdown for
+	// the full grace and skip both) → drain the HTTP servers → join every in-flight public splice handler
+	// (so their end events are enqueued) → join the errgroup goroutines → flush the async conn-log queue
+	// (the server-shutdown end events land) → final admin-counter flush + pending cap-hit summaries → the
+	// node is explicitly deregistered last. The route/node TTLs remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	_ = rawLn.Close()
@@ -248,9 +273,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	_ = controlSrv.Shutdown(sctx)
 	_ = meshSrv.Shutdown(sctx)
 	_ = internalSrv.Shutdown(sctx)
+	ed.Wait(sctx) // every public handler (splice + end-event enqueue + slot release) has returned
 	werr := g.Wait()
-	// Explicit node deregistration once every goroutine (incl. the heartbeat) has stopped, so peers
-	// stop mesh-dialing this drained node immediately; the TTL remains the crash backstop.
+	asyncLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
+	rec.FinalFlush()      // after ALL producers stopped — no late deltas lost (self-bounded)
+	rec.FlushCapLog()     // pending cap-hit summaries
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 		logger.Warn("node deregister failed (expires by TTL)", "err", err)
 	}

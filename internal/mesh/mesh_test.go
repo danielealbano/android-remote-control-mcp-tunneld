@@ -8,9 +8,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,18 +37,32 @@ func meshCert(t *testing.T, mesh bool) *x509.Certificate {
 
 type fakeBridge struct {
 	called   bool
+	openErr  error
 	closeNow bool
 }
 
-func (f *fakeBridge) BridgeMesh(_ context.Context, tunnel, streamID string, client io.ReadWriteCloser) error {
+func (f *fakeBridge) OpenMesh(_ context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
 	f.called = true
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return nopRWC{}, nil
+}
+
+func (f *fakeBridge) SpliceMesh(ds, client io.ReadWriteCloser) {
 	if f.closeNow {
 		_ = client.Close() // signal done so the handler returns
 	} else {
 		go func() { time.Sleep(10 * time.Millisecond); _ = client.Close() }()
 	}
-	return nil
 }
+
+// nopRWC is a stand-in phone dial-back stream (OpenMesh's return) for the mesh handler tests.
+type nopRWC struct{}
+
+func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
+func (nopRWC) Close() error                { return nil }
 
 func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -111,6 +129,68 @@ func TestMeshBridgesValidStream(t *testing.T) {
 	}
 }
 
+// TestMeshHandler_DuplicateStreamAnswers422 covers the two-phase open: OpenMesh returning
+// ErrDuplicateStream answers 422, any other open error answers 502, and success answers 200 — the
+// status is picked in the open phase, before the response body commits.
+func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
+	tests := []struct {
+		name     string
+		openErr  error
+		wantCode int
+	}{
+		{name: "duplicate stream → 422", openErr: ErrDuplicateStream, wantCode: http.StatusUnprocessableEntity},
+		{name: "other error → 502", openErr: errors.New("dial-back failed"), wantCode: http.StatusBadGateway},
+		{name: "success → 200", openErr: nil, wantCode: http.StatusOK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fb := &fakeBridge{openErr: tc.openErr, closeNow: true}
+			h := NewHandler(func(_, _ string) bool { return true }, fb)
+			r := httptest.NewRequest("POST", "https://node/mesh", nil)
+			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
+			r.Header.Set("X-Tunnel", "t")
+			r.Header.Set("X-Conn-Id", "c")
+			r.Header.Set("X-Stream-Id", "s")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d", w.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestMeshClient_Maps422ToDuplicateStream covers the client status mapping: 422 → ErrDuplicateStream,
+// 409 → ErrNoOwner.
+func TestMeshClient_Maps422ToDuplicateStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		wantErr error
+	}{
+		{name: "422 → duplicate stream", status: http.StatusUnprocessableEntity, wantErr: ErrDuplicateStream},
+		{name: "409 → no owner", status: http.StatusConflict, wantErr: ErrNoOwner},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+			peer := strings.TrimPrefix(ts.URL, "https://")
+			c := NewClient(func() *tls.Config {
+				return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+			}, 1)
+			_, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("status %d: err = %v, want %v", tc.status, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestClientPoolRoundRobin(t *testing.T) {
 	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4)
 	p := c.pool("10.0.0.1:9443")
@@ -155,7 +235,8 @@ func TestClientReportsPoolSizeOnce(t *testing.T) {
 func TestClientReapsIdlePools(t *testing.T) {
 	rec := &poolRec{}
 	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, WithRecorder(rec))
-	_ = c.pool("10.0.0.5:9443")
+	p := c.pool("10.0.0.5:9443")
+	p.active.Add(-1) // pool() counted this acquisition; release it (no live stream) so the reaper can run
 	if len(c.pools) != 1 {
 		t.Fatal("pool must exist after first use")
 	}
@@ -239,5 +320,110 @@ func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("PING health did not unblock the dial in time (took %s)", elapsed)
+	}
+}
+
+// meshBlockingWriter blocks every Write (holding ownerStream.mu) until release is closed, and signals
+// via entered once the first Write is in progress.
+type meshBlockingWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *meshBlockingWriter) Write(p []byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return len(p), nil
+}
+
+// TestOwnerStream_CloseUnblocksBlockedWrite proves, on the mesh owner side, that a Write blocked inside the
+// response writer (holding o.mu) must be released by Close via the unblock hook, so Close never deadlocks.
+func TestOwnerStream_CloseUnblocksBlockedWrite(t *testing.T) {
+	bw := &meshBlockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	os := &ownerStream{
+		w:       bw,
+		done:    make(chan struct{}),
+		unblock: func() { close(bw.release) },
+	}
+
+	writeReturned := make(chan struct{})
+	go func() {
+		_, _ = os.Write([]byte("hello"))
+		close(writeReturned)
+	}()
+	<-bw.entered // the Write now holds o.mu, blocked in the writer
+
+	closeReturned := make(chan struct{})
+	go func() {
+		_ = os.Close()
+		close(closeReturned)
+	}()
+
+	select {
+	case <-closeReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked: unblock did not release the mutex-holding Write")
+	}
+	select {
+	case <-writeReturned:
+	case <-time.After(time.Second):
+		t.Fatal("the blocked Write was not released by unblock")
+	}
+}
+
+// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an active
+// stream (active>0) survives the reaper, and is reaped on the first tick after the stream closes.
+func TestClient_ReapSkipsActivePools(t *testing.T) {
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1)
+	p := c.pool("10.0.0.9:9443") // active == 1 (simulating an open stream)
+	p.lastUse.Store(0)           // force the pool to look idle so only `active` protects it
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx, 20*time.Millisecond) }()
+
+	// With active==1 the pool must survive many reap ticks.
+	time.Sleep(200 * time.Millisecond)
+	c.mu.Lock()
+	n := len(c.pools)
+	c.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("a pool with an active stream must not be reaped, pools=%d", n)
+	}
+
+	p.active.Add(-1) // the stream closes
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		n := len(c.pools)
+		c.mu.Unlock()
+		if n == 0 {
+			return // reaped once idle AND inactive
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("an idle pool must be reaped once its active streams close")
+}
+
+// TestClient_OpenStreamErrorDecrementsActive proves a failed OpenStream must not leak the active
+// count it took in pool(), or the pool would never be reaped.
+func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
+	c := NewClient(func() *tls.Config {
+		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond))
+
+	const peer = "127.0.0.1:1" // nothing listening → the dial fails
+	if _, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1"); err == nil {
+		t.Fatal("a dial to a closed port must fail")
+	}
+	c.mu.Lock()
+	p := c.pools[peer]
+	c.mu.Unlock()
+	if p == nil {
+		t.Fatal("the pool must exist after the attempt")
+	}
+	if got := p.active.Load(); got != 0 {
+		t.Fatalf("active after a failed OpenStream = %d, want 0", got)
 	}
 }

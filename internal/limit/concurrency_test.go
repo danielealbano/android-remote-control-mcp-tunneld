@@ -2,12 +2,13 @@ package limit
 
 import (
 	"testing"
+	"time"
 )
 
 func TestAcquireStreamCapsInFlight(t *testing.T) {
 	rdb, _ := newTestRedis(t)
 	ctx := ctxT(t)
-	lim := NewLimiter(rdb, 0, 0, 0)
+	lim := NewLimiter(rdb, 0, 0, 0, time.Hour)
 	const name = "tunnel-c"
 	for i := 0; i < 4; i++ {
 		ok, err := lim.AcquireStream(ctx, name, 4)
@@ -29,7 +30,7 @@ func TestAcquireStreamCapsInFlight(t *testing.T) {
 func TestReleaseStreamDeletesKeyAtZero(t *testing.T) {
 	rdb, mr := newTestRedis(t)
 	ctx := ctxT(t)
-	lim := NewLimiter(rdb, 0, 0, 0)
+	lim := NewLimiter(rdb, 0, 0, 0, time.Hour)
 	const name = "tunnel-idem"
 	if ok, err := lim.AcquireStream(ctx, name, 1); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)

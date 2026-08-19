@@ -88,6 +88,25 @@ func TestLogging_FileSinkProbeFails(t *testing.T) {
 	}
 }
 
+func TestParseSpecs_DuplicateOutput(t *testing.T) {
+	for _, spec := range []string{
+		"output=std;output=/x.log",
+		"output=/x.log;output=std",
+	} {
+		err := ParseSpecs([]string{spec})
+		if err == nil {
+			t.Fatalf("ParseSpecs(%q) expected a duplicate-output error", spec)
+		}
+		if !strings.Contains(err.Error(), spec) {
+			t.Errorf("error must name the offending spec %q, got %v", spec, err)
+		}
+	}
+	// A single output= still parses.
+	if err := ParseSpecs([]string{"output=/x.log;level=info"}); err != nil {
+		t.Errorf("single output= rejected: %v", err)
+	}
+}
+
 func TestParseSpecsRejectsBad(t *testing.T) {
 	for _, spec := range []string{
 		"level=info",             // missing output

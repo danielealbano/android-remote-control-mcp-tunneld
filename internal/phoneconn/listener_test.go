@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -306,7 +308,7 @@ func TestServeHTTPRejectsInvalidCN(t *testing.T) {
 }
 
 // TestHeartbeatMissingSelfHeals covers the three-state heartbeat's missing branch: a lapsed route is
-// re-bound via the epoch-preserving self-heal (the original sessionStart survives).
+// re-bound by the self-heal (this connection's route is restored under its own connID).
 func TestHeartbeatMissingSelfHeals(t *testing.T) {
 	m, fr, _, _ := newMgr(t)
 	fr.hbResult = router.HeartbeatMissing
@@ -326,13 +328,72 @@ func TestHeartbeatMissingSelfHeals(t *testing.T) {
 	go m.heartbeatLoop(ctx, c)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got, ok := fr.boundAt("selfheal01"); ok {
-			if !got.Equal(c.sessionStart) {
-				t.Fatalf("self-heal must PRESERVE the session epoch: got %v want %v", got, c.sessionStart)
+		if got, ok := fr.boundConnID("selfheal01"); ok {
+			if got != c.connID {
+				t.Fatalf("self-heal must re-bind THIS conn's id: got %q want %q", got, c.connID)
 			}
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("a missing route must be self-healed by the heartbeat loop")
+}
+
+// TestServeControl_BindFailureStatuses proves a fingerprint conflict answers 409, any other
+// (transient) bind failure answers 503 retryable.
+func TestServeControl_BindFailureStatuses(t *testing.T) {
+	tests := []struct {
+		name     string
+		bindErr  error
+		wantCode int
+	}{
+		{name: "fingerprint conflict → 409", bindErr: router.ErrNameHeldByOther, wantCode: http.StatusConflict},
+		{name: "transient error → 503", bindErr: errors.New("valkey down"), wantCode: http.StatusServiceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, fr, _, _ := newMgr(t)
+			fr.bindErr = tc.bindErr
+			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
+			rec := newFlushRecorder()
+			req := httptest.NewRequest("GET", "/control", newBlockedReader())
+			h.serveControl(rec, req, phoneIdentity{name: "phonex", fingerprint: "sha256:fp"})
+			if rec.code() != tc.wantCode {
+				t.Fatalf("code = %d, want %d", rec.code(), tc.wantCode)
+			}
+			if m.HasConn("phonex") {
+				t.Fatal("a failed bind must not register a connection")
+			}
+		})
+	}
+}
+
+// TestServeControl_CertExpiryCloses proves a bound phone whose identity cert has passed NotAfter is
+// closed cert-expired on the ping tick (the CA's exposure bound enforced live, not only at reconnect).
+func TestServeControl_CertExpiryCloses(t *testing.T) {
+	m, _, st, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: 5 * time.Millisecond, StreamPending: 4})
+	body := newBlockedReader()
+	defer body.close()
+	req := httptest.NewRequest("GET", "/control", body)
+	done := make(chan struct{})
+	go func() {
+		h.serveControl(newFlushRecorder(), req,
+			phoneIdentity{name: "phoneexp", fingerprint: "sha256:fp", notAfter: time.Now().Add(-time.Minute)})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an expired identity cert must close the conn on the ping tick")
+	}
+	var reason string
+	for _, e := range st.ConnLogs {
+		if e.Event == "end" {
+			reason = e.CloseReason
+		}
+	}
+	if reason != store.CloseCertExpired {
+		t.Fatalf("end close_reason = %q, want %q", reason, store.CloseCertExpired)
+	}
 }

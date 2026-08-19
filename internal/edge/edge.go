@@ -16,9 +16,9 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
 
-// Router resolves a tunnel name to its owner + fingerprint + connID + session-start epoch.
+// Router resolves a tunnel name to its owner + fingerprint + connID.
 type Router interface {
-	LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, startedAt time.Time, ok bool, err error)
+	LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, ok bool, err error)
 	LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error)
 }
 
@@ -34,6 +34,18 @@ type LocalDialer interface {
 type MeshDialer interface {
 	OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (io.ReadWriteCloser, error)
 }
+
+// StreamLimiter is the data-plane limiting surface the edge depends on. It is defined at the consumer
+// (Go convention) so tests can substitute a fake; *limit.Limiter is the production implementation.
+type StreamLimiter interface {
+	AcquireStream(ctx context.Context, name string, maxN int) (bool, error)
+	ReleaseStream(ctx context.Context, name string) error
+	ClaimTraffic(ctx context.Context, name string, n int64) (dayOK, weekOK bool, err error)
+	ClaimBandwidth(ctx context.Context, name, dir string, want int64) (int64, error)
+	TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error)
+}
+
+var _ StreamLimiter = (*limit.Limiter)(nil)
 
 // Recorder is the metrics surface the edge needs.
 type Recorder interface {
@@ -74,7 +86,7 @@ type Edge struct {
 	router Router
 	local  LocalDialer
 	mesh   MeshDialer
-	lim    *limit.Limiter
+	lim    StreamLimiter
 	logs   PhoneEventSink
 
 	enrollLn  *chanListener
@@ -83,8 +95,21 @@ type Edge struct {
 	clients atomic.Int64
 	now     func() time.Time
 
+	wg sync.WaitGroup
+
 	smu     sync.Mutex
 	streams map[*activeStream]struct{}
+}
+
+// Wait blocks until every in-flight public-connection handler has returned or ctx expires (server
+// drain: end events must be enqueued before the conn-log queue is flushed).
+func (e *Edge) Wait(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { e.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 var errNoOwner = errors.New("edge: no owner for tunnel")
@@ -107,7 +132,7 @@ type PublicEvent struct {
 
 // New builds the Edge. enrollLn/controlLn are the reserved-SNI listeners the http servers accept from.
 func New(cfg Config, rdb redis.UniversalClient, ban func(netip.Addr) bool, banTun func(string, string) bool,
-	rec Recorder, r Router, local LocalDialer, mesh MeshDialer, lim *limit.Limiter, logs PhoneEventSink,
+	rec Recorder, r Router, local LocalDialer, mesh MeshDialer, lim StreamLimiter, logs PhoneEventSink,
 	addr net.Addr) *Edge {
 	return &Edge{
 		cfg: cfg, rdb: rdb, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,

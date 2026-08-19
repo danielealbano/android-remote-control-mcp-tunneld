@@ -58,7 +58,7 @@ func TestEdge_PacedCopy_QuotaExhaustion(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40) // 4-byte day cap
+	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40, time.Hour) // 4-byte day cap
 	te.e.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 
 	src := &pipeStream{r: newBytesReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
@@ -82,7 +82,6 @@ func TestEdge_HandleTunnel_ReleasesStreamSlotOnce(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.rtr.startedAt = time.Unix(1_700_000_000, 0)
 	// openFar fails (no local, no mesh route) so handleTunnel takes the acquire→release path once.
 	te.local.has = false
 	te.rtr.nodeOK = false

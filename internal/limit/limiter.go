@@ -13,17 +13,19 @@ import (
 // tests. Every key's TTL is set in the SAME Lua script as its mutation (or SET EX for the cooldown
 // windows).
 type Limiter struct {
-	rdb     redis.UniversalClient
-	bwRate  int64 // bytes/sec per tunnel per direction
-	dayCap  int64
-	weekCap int64
-	now     func() time.Time
+	rdb       redis.UniversalClient
+	bwRate    int64 // bytes/sec per tunnel per direction
+	dayCap    int64
+	weekCap   int64
+	streamTTL time.Duration // conc:{name} safety TTL (= 3 × --limit-conn-idle), refreshed per chunk
+	now       func() time.Time
 }
 
 // NewLimiter builds the Limiter. bwRate is --limit-bandwidth in bytes/sec; dayCap/weekCap are the
-// combined-direction traffic caps in bytes.
-func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64) *Limiter {
-	return &Limiter{rdb: rdb, bwRate: bwRate, dayCap: dayCap, weekCap: weekCap, now: time.Now}
+// combined-direction traffic caps in bytes; streamTTL is the global stream-counter safety TTL,
+// refreshed by every traffic chunk (derived = 3 × --limit-conn-idle).
+func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, streamTTL time.Duration) *Limiter {
+	return &Limiter{rdb: rdb, bwRate: bwRate, dayCap: dayCap, weekCap: weekCap, streamTTL: streamTTL, now: time.Now}
 }
 
 // SetClock overrides the clock (tests only).
@@ -48,6 +50,8 @@ end
 local elapsed = (now - last) / 1e9
 if elapsed > 0 then
   tokens = math.min(burst, tokens + elapsed * rate)
+else
+  now = last -- clock skew / step-back: never move the refill anchor backward
 end
 local granted = math.min(want, tokens)
 if granted < 0 then granted = 0 end
@@ -87,6 +91,9 @@ local d = redis.call('INCRBY', KEYS[1], n)
 if d == n then redis.call('PEXPIRE', KEYS[1], dayTTL) end
 local w = redis.call('INCRBY', KEYS[2], n)
 if w == n then redis.call('PEXPIRE', KEYS[2], weekTTL) end
+-- Refresh the global stream counter's TTL from the active data path. PEXPIRE on a missing key is a
+-- no-op (returns 0, never creates the key), so a torn-down tunnel's counter is never resurrected.
+redis.call('PEXPIRE', KEYS[3], ARGV[6])
 local dayOK = 1
 local weekOK = 1
 if d > dayCap then dayOK = 0 end
@@ -102,8 +109,9 @@ func trafficKeys(name string) (dayKey, weekKey string) {
 // each window is still within its cap AFTER the add.
 func (l *Limiter) ClaimTraffic(ctx context.Context, name string, n int64) (dayOK, weekOK bool, err error) {
 	dayKey, weekKey := trafficKeys(name)
-	res, err := claimTrafficScript.Run(ctx, l.rdb, []string{dayKey, weekKey},
-		n, l.dayCap, l.weekCap, (24 * time.Hour).Milliseconds(), (7 * 24 * time.Hour).Milliseconds()).Slice()
+	res, err := claimTrafficScript.Run(ctx, l.rdb, []string{dayKey, weekKey, "conc:" + name},
+		n, l.dayCap, l.weekCap, (24 * time.Hour).Milliseconds(), (7 * 24 * time.Hour).Milliseconds(),
+		l.streamTTL.Milliseconds()).Slice()
 	if err != nil {
 		return false, false, err
 	}

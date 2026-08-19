@@ -89,6 +89,10 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 				continue
 			}
 			if a := pfx.Addr(); a.Is4In6() {
+				if pfx.Bits() < 96 {
+					log.Warn("skipping 4-in-6 cidr with prefix < /96 (not mappable to IPv4)", "file", path, "line", lineNo, "value", value)
+					continue
+				}
 				pfx = netip.PrefixFrom(a.Unmap(), pfx.Bits()-96)
 			}
 			src.Reason, src.Detail = ReasonCIDR, value

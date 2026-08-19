@@ -209,6 +209,41 @@ func TestValidateRegistrySettleGreaterThanTimeout(t *testing.T) {
 	}
 }
 
+func TestServeCmd_Validate_S3EndpointScheme(t *testing.T) {
+	c := validCfg(t)
+	c.S3Endpoint = "localhost:9000" // no scheme
+	if err := c.Validate(); err == nil {
+		t.Error("scheme-less --s3-endpoint expected error")
+	}
+	c.S3Endpoint = "http://localhost:9000"
+	if err := c.Validate(); err != nil {
+		t.Errorf("http:// --s3-endpoint expected pass, got %v", err)
+	}
+}
+
+func TestServeCmd_Validate_AttestStaleVsRefresh(t *testing.T) {
+	c := validCfg(t)
+	c.AttestStatusMaxStale = c.AttestRefresh // max-stale == refresh
+	if err := c.Validate(); err == nil {
+		t.Error("--attest-status-max-stale <= --attest-refresh expected error")
+	}
+	if err := validCfg(t).Validate(); err != nil {
+		t.Errorf("default 24h/1h expected pass, got %v", err)
+	}
+}
+
+func TestServeCmd_Validate_GTSValidityVsRenewal(t *testing.T) {
+	c := validCfg(t)
+	c.ACMEGTSValidity = 72 * time.Hour
+	c.ACMERenewMargin = 48 * time.Hour // renewal point = 160h-48h = 112h > 72h
+	if err := c.Validate(); err == nil {
+		t.Error("--acme-gts-validity 72h with 48h margin expected error")
+	}
+	if err := validCfg(t).Validate(); err != nil {
+		t.Errorf("default 168h validity expected pass, got %v", err)
+	}
+}
+
 func TestValidateAttestationOptionalFailClosed(t *testing.T) {
 	c := validCfg(t)
 	c.AttestationOptional = true

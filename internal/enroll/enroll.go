@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"time"
@@ -212,15 +213,28 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 
-	// Issuance read-only cap (keyed on the name).
-	allowed, err := s.cfg.Limiter.IssuanceAllowed(ctx, name, s.cfg.IssuePerWeek)
+	// Issuance cap (keyed on the name): reserve an in-flight slot atomically so concurrent /issue calls
+	// for one name cannot both pass the cap they only commit against on success. The slot is freed on
+	// BOTH success and failure (failed orders never burn the weekly window), refreshed by a heartbeat so
+	// a long ACME order does not self-expire, and self-expires if this node crashes mid-order.
+	ok, orderID, err := s.cfg.Limiter.IssuanceBegin(ctx, name, s.cfg.IssuePerWeek)
 	if err != nil {
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
-	if !allowed {
+	if !ok {
 		s.rec.Reject("issuance-cap", name, ip)
 		return Result{}, &Error{Reason: "issuance_cap", Retryable: true, RetryAfter: 7 * 24 * time.Hour}
 	}
+	defer func() {
+		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.cfg.Limiter.IssuanceEnd(ectx, name, orderID); err != nil {
+			s.logger.Warn("issuance slot release failed (slot self-expires)", "tunnel", name, "err", err)
+		}
+	}()
+	hbCtx, hbStop := context.WithCancel(ctx)
+	defer hbStop()
+	go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
 
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
@@ -353,12 +367,21 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		// Settle wait (strictly > the PUT timeout) so any zombie PUT has landed or died.
 		s.sleep(s.cfg.ClaimSettle)
 
-		got, err := s.cfg.Names.GetName(ctx, cand)
-		if err != nil {
-			continue // our PUT was lost — new name
+		got, gerr := s.cfg.Names.GetName(ctx, cand)
+		for r := 0; r < 2 && gerr != nil && !errors.Is(gerr, store.ErrNotFound); r++ {
+			s.sleep(time.Second)
+			got, gerr = s.cfg.Names.GetName(ctx, cand)
+		}
+		if errors.Is(gerr, store.ErrNotFound) {
+			continue // our PUT definitively did not land — this candidate is clean to abandon
+		}
+		if gerr != nil {
+			// Persistent verify failure: fail the enrollment (retryable) rather than drawing a new name —
+			// if the PUT landed, moving on would orphan the claim forever.
+			return "", "", fmt.Errorf("enroll: claim verify: %w", gerr)
 		}
 		if got.ClaimNonce == nonce {
-			return cand, nonce, nil // we won
+			return cand, nonce, nil
 		}
 		// Lost the race — new name.
 	}

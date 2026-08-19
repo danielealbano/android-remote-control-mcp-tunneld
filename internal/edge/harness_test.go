@@ -84,7 +84,6 @@ func tcpAddr(host string) net.Addr {
 // fakeRoute is one queued LookupRoute answer (for tests exercising the fresh-lookup retry).
 type fakeRoute struct {
 	nodeID, fp, connID string
-	startedAt          time.Time
 	ok                 bool
 	err                error
 }
@@ -93,7 +92,6 @@ type fakeRoute struct {
 // otherwise the static fields answer.
 type fakeRouter struct {
 	nodeID, fp, connID string
-	startedAt          time.Time
 	ok                 bool
 	err                error
 	nodeAdv            string
@@ -104,33 +102,46 @@ type fakeRouter struct {
 	lookups int
 }
 
-func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, string, time.Time, bool, error) {
+func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, string, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lookups++
 	if len(r.queue) > 0 {
 		q := r.queue[0]
 		r.queue = r.queue[1:]
-		return q.nodeID, q.fp, q.connID, q.startedAt, q.ok, q.err
+		return q.nodeID, q.fp, q.connID, q.ok, q.err
 	}
-	return r.nodeID, r.fp, r.connID, r.startedAt, r.ok, r.err
+	return r.nodeID, r.fp, r.connID, r.ok, r.err
 }
 func (r *fakeRouter) LookupNode(context.Context, string) (string, bool, error) {
 	return r.nodeAdv, r.nodeOK, nil
 }
 
-// fakeLocal fakes edge.LocalDialer.
+// fakeLocal fakes edge.LocalDialer. When `errQueue` is non-empty each OpenStream consumes one entry (a
+// nil entry means success, returning ds); otherwise the static ds/err answer.
 type fakeLocal struct {
 	has, owns bool
 	ds        phoneconn.DataStream
 	err       error
 	opened    int
+	mu        sync.Mutex
+	errQueue  []error
 }
 
 func (l *fakeLocal) HasConn(string) bool          { return l.has }
 func (l *fakeLocal) OwnsConn(string, string) bool { return l.owns }
 func (l *fakeLocal) OpenStream(context.Context, string, string) (phoneconn.DataStream, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.opened++
+	if len(l.errQueue) > 0 {
+		e := l.errQueue[0]
+		l.errQueue = l.errQueue[1:]
+		if e != nil {
+			return nil, e
+		}
+		return l.ds, nil
+	}
 	return l.ds, l.err
 }
 
@@ -236,7 +247,7 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	lim := limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40) // generous caps unless a test overrides via keys
+	lim := limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour) // generous caps unless a test overrides via keys
 
 	rec := &recRecorder{}
 	sink := &fakeSink{}

@@ -20,8 +20,9 @@ import (
 // bytes (the opaque splice to the phone's local target; an echo in tests).
 type Backend func(stream io.ReadWriteCloser)
 
-// Client is the HTTP/2 phone control client. It holds a hot-swappable identity (rotated by CERT_PUSH)
-// and opens dial-back data streams to a caller-supplied backend.
+// Client is the HTTP/2 phone control client. It holds a hot-swappable identity (rotated via the mTLS
+// POST /issue exchange in Renew, not a control frame) and opens dial-back data streams to a
+// caller-supplied backend.
 type Client struct {
 	dialAddr     string
 	controlHost  string
@@ -33,6 +34,7 @@ type Client struct {
 	ident *Identity
 	cert  *tls.Certificate
 
+	tr *http2.Transport
 	hc *http.Client
 
 	sendMu sync.Mutex
@@ -52,8 +54,14 @@ func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, iden
 		return nil, err
 	}
 	c.cert = &cert
-	c.hc = &http.Client{Transport: newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert)}
+	c.tr = newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert)
+	c.hc = &http.Client{Transport: c.tr}
 	return c, nil
+}
+
+// Close releases the control client's pooled TLS connections. Call it once Run has returned.
+func (c *Client) Close() {
+	c.tr.CloseIdleConnections()
 }
 
 // newMTLSTransport builds an HTTP/2 transport that dials dialAddr, negotiates TLS with SNI/Host
@@ -102,6 +110,18 @@ func (c *Client) Run(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("client: control connect rejected: " + resp.Status)
 	}
+	// Deterministic cancellation: closing the body/pipe unblocks the frame read and any in-flight
+	// control write immediately, without relying on the transport's own ctx propagation timing.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = resp.Body.Close()
+			_ = pw.CloseWithError(ctx.Err())
+		case <-watchDone:
+		}
+	}()
 	c.setSend(pw)
 
 	for {

@@ -7,14 +7,16 @@ set -eu
 OUT_DIR="${OUT_DIR:?OUT_DIR required}"
 DROP_URL="${DROP_URL:-https://www.spamhaus.org/drop/drop_v4.json}"
 
-feed="$OUT_DIR/droplist.feed.tmp"
-tmp="$OUT_DIR/droplist.bans.tmp"
+# $$-suffixed temps so concurrent invocations can't interleave into one file; the trap removes them on
+# ANY exit (success or failure), so an aborted run leaves no litter and the previous output untouched.
+feed="$OUT_DIR/droplist.feed.tmp.$$"
+tmp="$OUT_DIR/droplist.bans.tmp.$$"
+trap 'rm -f "$feed" "$tmp"' EXIT
 
-# On any curl failure `set -e` aborts here, leaving the previous droplist.bans untouched.
-curl -fsS "$DROP_URL" -o "$feed"
+# --max-time bounds a hung download; on any curl failure `set -e` aborts, leaving droplist.bans untouched.
+curl -fsS --max-time 300 "$DROP_URL" -o "$feed"
 
 # jq reads the feed file directly (no pipeline); select only records carrying a cidr.
 jq -r 'select(.cidr) | "cidr \(.cidr)"' "$feed" > "$tmp"
 
 mv "$tmp" "$OUT_DIR/droplist.bans"
-rm -f "$feed"

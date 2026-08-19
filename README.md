@@ -44,7 +44,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 2. **Create the operator-owned dirs** (bind-mounted):
    ```sh
-   mkdir -p deploy/logs
+   mkdir -p deploy/logs deploy/acme            # acme persists per-CA account keys + reserved-host certs across restarts
+   mkdir -p deploy/banfiles && : > deploy/banfiles/bans.txt   # host-edited manual bans (hot-reloaded within --ban-poll)
    mkdir -p deploy/attest && : > deploy/attest/signers.txt   # add accepted app signer SHA-256 digests, one per line
    ```
 3. **Configure**:
@@ -114,6 +115,10 @@ tunnel-fingerprint sha256:<hex>
 into a longest-prefix-match table (one lookup per connection); a missing CSV skips only the country
 entries. **Country codes in this repo are placeholders (`XX`, `YY`) only.** The ban check is the FIRST
 check on every ingress edge (public, `/enroll`, `/control`), keyed on the trusted client IP.
+
+**Revocation** (there is no CRL — bans are the only revocation): revoke a tunnel or a source by editing
+`deploy/banfiles/bans.txt` on the host (bind-mounted read-only at `/banfiles-manual/bans.txt`); the change
+is hot-reloaded within `--ban-poll` and evicts any live matching connection.
 
 ## Observability
 

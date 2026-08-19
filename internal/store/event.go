@@ -2,7 +2,6 @@ package store
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -19,6 +18,7 @@ const (
 	CloseMinRate        = "min-rate"
 	CloseEvicted        = "evicted"
 	CloseServerShutdown = "server-shutdown"
+	CloseCertExpired    = "cert-expired"
 	CloseError          = "error"
 )
 
@@ -29,7 +29,7 @@ const (
 type Event struct {
 	Schema       int    `json:"schema"`
 	Event        string `json:"event"` // "start" | "end"
-	Conn         string `json:"conn"`  // 10-hex conn id (see NewConnID)
+	Conn         string `json:"conn"`  // 8-hex conn id (see NewConnID)
 	Type         string `json:"type"`  // "public" | "phone"
 	Tunnel       string `json:"tunnel"`
 	NodeHostname string `json:"node_hostname"`
@@ -75,18 +75,12 @@ func LogKey(ev Event) string {
 		ev.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), conn8, ev.Event)
 }
 
-// NewConnID mints a 10-lowercase-hex connection id = 3 big-endian bytes of
-// int(now.Sub(sessionStart).Seconds()) & 0xFFFFFF (seconds since the tunnel-session start) ‖ 2
-// crypto/rand bytes. Both callers (phone control connections and public connections) seed sessionStart
-// with the SAME per-tunnel epoch — the phone control connection's establishment time — so every conn id
-// of one tunnel session counts from the same origin.
-func NewConnID(sessionStart, now time.Time) (string, error) {
-	secs := max(int64(now.Sub(sessionStart).Seconds()), 0)
-	v := uint32(secs) & 0xFFFFFF
-	var buf [5]byte
-	binary.BigEndian.PutUint32(buf[:4], v<<8) // v occupies the top 24 bits of the first 4 bytes...
-	// buf[0..2] now hold the 3 big-endian bytes of v; overwrite buf[3..4] with random.
-	if _, err := rand.Read(buf[3:]); err != nil {
+// NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
+// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision;
+// pending-stream duplicate refusal) — a collision is detected and retried, never silent.
+func NewConnID() (string, error) {
+	var buf [4]byte
+	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("store: conn id rand: %w", err)
 	}
 	return hex.EncodeToString(buf[:]), nil

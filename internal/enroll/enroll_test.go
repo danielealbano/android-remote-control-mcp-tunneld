@@ -111,7 +111,7 @@ func newService(t *testing.T, cfg Config) (*Service, *miniredis.Miniredis) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	cfg.RDB = rdb
-	cfg.Limiter = limit.NewLimiter(rdb, 125000, 1<<40, 1<<40)
+	cfg.Limiter = limit.NewLimiter(rdb, 125000, 1<<40, 1<<40, time.Hour)
 	if cfg.NameLength == 0 {
 		cfg.NameLength = 10
 	}
