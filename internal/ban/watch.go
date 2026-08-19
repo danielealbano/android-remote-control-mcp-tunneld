@@ -48,11 +48,14 @@ type watcher struct {
 	onReload func(*Engine)
 	log      *slog.Logger
 	last     map[string]fileState
+	// stat is the per-path fingerprint source; nil means os.Stat. Tests override it to script a torn
+	// read (a file changing between the pre- and post-load fingerprints).
+	stat func(string) fileState
 }
 
 func (w *watcher) initial() {
 	cur := w.fingerprint()
-	if err := w.e.Load(w.files, w.csv, w.log); err != nil {
+	if err := w.e.Load(w.files, w.csv, nil, w.log); err != nil {
 		w.log.Warn("initial ban load error; engine stays at empty/previous snapshot until next successful load", "err", err)
 		return // do NOT record cur — retry on the next tick
 	}
@@ -67,14 +70,60 @@ func (w *watcher) tick() {
 	if w.last != nil && sameStates(w.last, cur) {
 		return
 	}
-	if err := w.e.Load(w.files, w.csv, w.log); err != nil {
-		w.log.Warn("ban reload error; keeping previous snapshot (will retry)", "err", err)
-		return // do NOT advance w.last — retry on the next tick
+	// A path that existed at the last successful load and has now VANISHED is an operator error or a
+	// tooling race, NOT a request to unban: keep the previous snapshot and retry every tick (delete
+	// the entry from config + restart to drop a file on purpose). Load's `required` set
+	// enforces the same refusal even when the deletion lands between this check and the file reads.
+	req := w.required()
+	if p, vanished := w.vanished(cur); vanished {
+		w.log.Error("ban input file disappeared; refusing reload and keeping the previous bans", "file", p)
+		return
 	}
-	w.last = cur
-	if w.onReload != nil {
-		w.onReload(w.e)
+	// Torn-read guard: a non-atomic external writer can be caught mid-truncate; reload until the
+	// fingerprint is stable across the load (bounded).
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := w.e.Load(w.files, w.csv, req, w.log); err != nil {
+			w.log.Warn("ban reload error; keeping previous snapshot (will retry)", "err", err)
+			return
+		}
+		after := w.fingerprint()
+		if p, vanished := w.vanished(after); vanished {
+			// The deletion landed mid-tick: Load already refused via `required`, but a stability pass
+			// here must never commit the vanished state as the new baseline.
+			w.log.Error("ban input file disappeared during reload; keeping the previous bans", "file", p)
+			return
+		}
+		if sameStates(cur, after) {
+			w.last = cur
+			if w.onReload != nil {
+				w.onReload(w.e)
+			}
+			return
+		}
+		cur = after
 	}
+	w.log.Warn("ban files kept changing during reload; retrying next tick")
+}
+
+// required returns the paths present at the last successful load (they MUST still exist).
+func (w *watcher) required() map[string]struct{} {
+	req := map[string]struct{}{}
+	for p, st := range w.last {
+		if st.exists {
+			req[p] = struct{}{}
+		}
+	}
+	return req
+}
+
+// vanished reports the first last-loaded path absent from states, if any.
+func (w *watcher) vanished(states map[string]fileState) (string, bool) {
+	for p, prev := range w.last {
+		if prev.exists && !states[p].exists {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // fingerprint records (exists, mtime, size) for every configured path so a change of ANY kind —
@@ -89,14 +138,21 @@ func (w *watcher) fingerprint() map[string]fileState {
 		if p == "" {
 			continue
 		}
-		fi, err := os.Stat(p)
-		if err != nil {
-			states[p] = fileState{exists: false}
-			continue
-		}
-		states[p] = fileState{exists: true, modTime: fi.ModTime(), size: fi.Size()}
+		states[p] = w.statePath(p)
 	}
 	return states
+}
+
+// statePath returns one path's (exists, mtime, size) fingerprint via the stat seam (os.Stat by default).
+func (w *watcher) statePath(p string) fileState {
+	if w.stat != nil {
+		return w.stat(p)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		return fileState{exists: false}
+	}
+	return fileState{exists: true, modTime: fi.ModTime(), size: fi.Size()}
 }
 
 func sameStates(a, b map[string]fileState) bool {

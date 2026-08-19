@@ -68,7 +68,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Ban engine + watcher.
 	banEng := ban.NewEngine()
-	if err := banEng.Load(cfg.BanFile, cfg.DBIPCountryLiteCSV, logger); err != nil {
+	if err := banEng.Load(cfg.BanFile, cfg.DBIPCountryLiteCSV, nil, logger); err != nil {
 		logger.Warn("initial ban load failed", "err", err)
 	}
 	banIP := func(ip netip.Addr) bool { _, b := banEng.Match(ip); return b }
@@ -98,6 +98,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	capLogger := caplog.New(logger)
 	rec := metrics.NewPromRecorder(m, capLogger, adminStore, logger)
 
+	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
+	// S3 write; a fixed worker pool drains with per-item retry, a full queue drops-newest and bumps the
+	// dropped-events counter. Both the phone control plane and the public edge log through it.
+	asyncLogs := store.NewAsyncConnLog(st, m.ConnLogDropped().Inc, logger)
+
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
 	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
 	verifier, attRoots, attStatus, attSigners, err := buildVerifier(ctx, cfg, logger)
@@ -124,7 +129,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Phone control plane.
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: st, Recorder: rec, Logger: logger,
+		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
@@ -152,7 +157,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
 	}, rdb, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: st, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, rawLn.Addr())
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, rawLn.Addr())
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},

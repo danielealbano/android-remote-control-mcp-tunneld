@@ -848,17 +848,17 @@ go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
 
 ---
 
-## [ ] US7 — Ban engine: silent-unban and silent-drop hazards (W-15, W-16, I-9, I-10)
+## [x] US7 — Ban engine: silent-unban and silent-drop hazards (W-15, W-16, I-9, I-10)
 
 Acceptance criteria:
-- [ ] A 4-in-6 CIDR with prefix < /96 is warn-and-skipped, never silently ignored.
-- [ ] A configured ban file/CSV that VANISHES at runtime keeps the previous snapshot (Error-logged, retried); first-deploy absence stays a benign skip.
-- [ ] A file changing mid-reload is detected and reloaded (bounded retry), so a torn read cannot hold for a full poll interval.
-- [ ] `ban.Reason`'s doc comment matches reality.
+- [x] A 4-in-6 CIDR with prefix < /96 is warn-and-skipped, never silently ignored.
+- [x] A configured ban file/CSV that VANISHES at runtime keeps the previous snapshot (Error-logged, retried); first-deploy absence stays a benign skip.
+- [x] A file changing mid-reload is detected and reloaded (bounded retry), so a torn read cannot hold for a full poll interval.
+- [x] `ban.Reason`'s doc comment matches reality.
 
-### [ ] Task 7.1 — W-15: mapped-prefix guard
+### [x] Task 7.1 — W-15: mapped-prefix guard
 
-- [ ] Action: modify `internal/ban/parse.go` — in the `case "cidr":` branch:
+- [x] Action: modify `internal/ban/parse.go` — in the `case "cidr":` branch:
 
 ```go
 if a := pfx.Addr(); a.Is4In6() {
@@ -870,11 +870,11 @@ if a := pfx.Addr(); a.Is4In6() {
 }
 ```
 
-- [ ] Definition of Done: `::ffff:a.b.c.d/N` with N<96 is warned-and-skipped; N≥96 still maps.
+- [x] Definition of Done: `::ffff:a.b.c.d/N` with N<96 is warned-and-skipped; N≥96 still maps.
 
-### [ ] Task 7.2 — W-16 + I-10: watcher vanish-guard and torn-read retry
+### [x] Task 7.2 — W-16 + I-10: watcher vanish-guard and torn-read retry
 
-- [ ] Action: modify `internal/ban/engine.go` `Load` — gain a `required map[string]struct{}`
+- [x] Action: modify `internal/ban/engine.go` `Load` — gain a `required map[string]struct{}`
   parameter (paths that MUST exist because they were present at the last successful load): in the
   ban-file not-exist branch and the CSV not-exist branch, a REQUIRED path returns the error WITHOUT
   swapping (previous snapshot preserved even when the deletion lands mid-load); a non-required absent
@@ -883,7 +883,7 @@ if a := pfx.Addr(); a.Is4In6() {
   (a nil map = nothing required; update ALL existing call sites: `internal/server/server.go`, the
   watcher below, and the test callers in `internal/ban/engine_test.go` and
   `internal/ban/dbip_test.go` — pass `nil` where no requirement applies).
-- [ ] Action: modify `internal/ban/watch.go` `tick`:
+- [x] Action: modify `internal/ban/watch.go` `tick`:
 
 ```go
 func (w *watcher) tick() {
@@ -949,14 +949,14 @@ func (w *watcher) vanished(states map[string]fileState) (string, bool) {
 ```
 
   (`initial()` passes `nil` as `required` — first-deploy absence remains skip-and-warn.)
-- [ ] Action: modify `internal/ban/entry.go` — rewrite the `Reason` doc comment to state reality:
+- [x] Action: modify `internal/ban/entry.go` — rewrite the `Reason` doc comment to state reality:
   rejection metrics use the literal `"ban"` label at every site; `Source.Reason` feeds logs/detail
   only.
-- [ ] Definition of Done: a vanished previously-loaded input can never swap OR commit a reduced
+- [x] Definition of Done: a vanished previously-loaded input can never swap OR commit a reduced
   table — pre-check, in-Load `required` refusal, and post-load check all hold; the `Reason` comment
   no longer claims a metric wiring that does not exist.
 
-### [ ] Task 7.3 — US7 tests
+### [x] Task 7.3 — US7 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -966,22 +966,22 @@ func (w *watcher) vanished(states map[string]fileState) (string, bool) {
 | `TestWatcher_FirstDeployAbsenceStillSkips` | never-existed file → benign skip (regression) | |
 | `TestWatcher_TornReadRetries` | fingerprint changes between pre/post → reload retried within the tick | fake fingerprint sequence via file mutation |
 
-- [ ] Definition of Done: all US7 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: all US7 tests present and passing at the Stage-4 gates.
 
 ---
 
-## [ ] US8 — Store: async conn-log pipeline and S3 correctness (W-3, W-2-part, W-19, I-6, I-14)
+## [x] US8 — Store: async conn-log pipeline and S3 correctness (W-3, W-2-part, W-19, I-6, I-14)
 
 Acceptance criteria:
-- [ ] No S3 conn-log write ever blocks an admission, splice, or teardown path: enqueue is O(1); 8 workers drain with exponential per-item retry; full queue drops-newest and increments `tunneld_connlog_dropped_total`.
-- [ ] Shutdown drains the queue (bounded) — `server-shutdown` end events land.
-- [ ] `isNotFound` no longer matches bucket-level/transport 404s.
-- [ ] A transient claim-verify GET error retries and then fails the enrollment — it NEVER draws a new name (no orphaned claims).
-- [ ] `EnsureLifecycles` merges with existing bucket rules instead of replacing the whole configuration.
+- [x] No S3 conn-log write ever blocks an admission, splice, or teardown path: enqueue is O(1); 8 workers drain with exponential per-item retry; full queue drops-newest and increments `tunneld_connlog_dropped_total`.
+- [x] Shutdown drains the queue (bounded) — `server-shutdown` end events land.
+- [x] `isNotFound` no longer matches bucket-level/transport 404s.
+- [x] A transient claim-verify GET error retries and then fails the enrollment — it NEVER draws a new name (no orphaned claims).
+- [x] `EnsureLifecycles` merges with existing bucket rules instead of replacing the whole configuration.
 
-### [ ] Task 8.1 — async conn-log writer
+### [x] Task 8.1 — async conn-log writer
 
-- [ ] Action: create `internal/store/async.go`:
+- [x] Action: create `internal/store/async.go`:
 
 ```go
 package store
@@ -1087,20 +1087,20 @@ func (a *AsyncConnLog) Drain(ctx context.Context) {
 
   (Note: per-item retry sleeps run on worker goroutines only; the inner S3 client already carries a
   30 s per-request HTTP timeout, so one worker's item cycle is bounded.)
-- [ ] Action: modify `internal/metrics/metrics.go` — register a new counter
+- [x] Action: modify `internal/metrics/metrics.go` — register a new counter
   `tunneld_connlog_dropped_total` ("connection-log events dropped: queue full or retries exhausted")
   and expose it (e.g. `func (m *Metrics) ConnLogDropped() prometheus.Counter`) for server wiring.
-- [ ] Action: modify `internal/server/server.go` — construct
+- [x] Action: modify `internal/server/server.go` — construct
   `asyncLogs := store.NewAsyncConnLog(st, m.ConnLogDropped().Inc, logger)`; pass it as
   `phoneconn.Config.Logs` and as the `edgeLogSink.st`. (`edgeLogSink` keeps converting; its field type
   is already the `ConnLogStore` shape.) Rejected-enrollment evidence stays synchronous (not a data-path
   write).
-- [ ] Definition of Done: no `PutConnLog` call on the S3Store remains outside the workers; the
+- [x] Definition of Done: no `PutConnLog` call on the S3Store remains outside the workers; the
   `teardownTimeout` path no longer bounds an S3 write (enqueue only).
 
-### [ ] Task 8.2 — W-19: strict not-found
+### [x] Task 8.2 — W-19: strict not-found
 
-- [ ] Action: modify `internal/store/s3.go` `isNotFound` — remove the blanket
+- [x] Action: modify `internal/store/s3.go` `isNotFound` — remove the blanket
   `*awshttp.ResponseError` 404 branch:
 
 ```go
@@ -1122,12 +1122,12 @@ func isNotFound(err error) bool {
 ```
 
   Drop the now-unused `net/http` import (keep `awshttp` only if still used by the client setup).
-- [ ] Definition of Done: a bucket-level 404 surfaces as a wrapped (retryable-class) error, never
+- [x] Definition of Done: a bucket-level 404 surfaces as a wrapped (retryable-class) error, never
   `ErrNotFound`; key absence still maps to `ErrNotFound`.
 
-### [ ] Task 8.3 — I-6: claim-verify never draws a new name on error
+### [x] Task 8.3 — I-6: claim-verify never draws a new name on error
 
-- [ ] Action: modify `internal/enroll/enroll.go` `claimName` — replace the verify-GET error handling:
+- [x] Action: modify `internal/enroll/enroll.go` `claimName` — replace the verify-GET error handling:
 
 ```go
 got, gerr := s.cfg.Names.GetName(ctx, cand)
@@ -1150,12 +1150,12 @@ if got.ClaimNonce == nonce {
 ```
 
   Add the `fmt` import to `enroll.go`.
-- [ ] Definition of Done: a persistent verify error consumes exactly one candidate and fails
+- [x] Definition of Done: a persistent verify error consumes exactly one candidate and fails
   retryably; a definitive NotFound still draws a new candidate.
 
-### [ ] Task 8.4 — I-14: lifecycle merge, not replace
+### [x] Task 8.4 — I-14: lifecycle merge, not replace
 
-- [ ] Action: modify `internal/store/s3.go` `EnsureLifecycles` — read-merge-put by rule ID:
+- [x] Action: modify `internal/store/s3.go` `EnsureLifecycles` — read-merge-put by rule ID:
 
 ```go
 // EnsureLifecycles upserts tunneld's two expiration rules by ID, PRESERVING any operator-added rules
@@ -1195,10 +1195,10 @@ func isNoLifecycle(err error) bool {
 
   The `NoSuchLifecycleConfiguration` code MUST be verified against the real backend in the
   integration tier (MinIO) — the integration test below is the verification.
-- [ ] Definition of Done: operator-added rules survive startup; the two tunneld rules land; a second
+- [x] Definition of Done: operator-added rules survive startup; the two tunneld rules land; a second
   run is idempotent.
 
-### [ ] Task 8.5 — US8 tests
+### [x] Task 8.5 — US8 tests
 
 | Test | Verifies | Notes |
 |---|---|---|
@@ -1211,7 +1211,7 @@ func isNoLifecycle(err error) bool {
 | `TestClaimName_VerifyNotFoundDrawsNewName` | verify NotFound → next candidate (regression) | |
 | `TestEnsureLifecycles_MergePreservesForeignRules` (integration) | pre-existing operator rule survives; our two rules land; second run idempotent | MinIO testcontainer |
 
-- [ ] Definition of Done: all US8 tests present and passing at the Stage-4 gates.
+- [x] Definition of Done: all US8 tests present and passing at the Stage-4 gates.
 
 ---
 
@@ -1676,3 +1676,19 @@ Acceptance criteria:
   and changed the field to `mgr dialBackOpener`. `*phoneconn.Manager` still satisfies it, so the
   `server.Run` wiring (`&bridgeAdapter{mgr: phoneMgr, ...}`) is unchanged; the change only enables the
   required unit test and follows go.md's "accept interfaces" rule.
+
+- **Task 7.2 (`internal/ban/watch.go`) — added a per-path stat seam on `watcher`.** The plan's Task 7.3
+  mandates `TestWatcher_TornReadRetries` ("fake fingerprint sequence via file mutation"). A torn read —
+  the file changing between the pre-load and post-load fingerprints WITHIN one tick — cannot be produced
+  deterministically single-threaded (`Load` never mutates the file) and a concurrent mutator would be
+  non-deterministic (forbidden by the no-flake rule). Added an unexported `stat func(string) fileState`
+  field (nil → `os.Stat`) and routed the pre-existing `fingerprint()` through a new `statePath` helper.
+  Production behaviour is unchanged (nil seam = os.Stat); the plan's `tick`/`initial` code is verbatim
+  (still calling `w.fingerprint()`). Follows go.md's testability rule.
+
+- **Task 7.2 (`internal/ban/engine_test.go`) — updated the pre-existing
+  `TestWatcher_DetectsDeletionAndEqualMtime` deletion assertion.** That test predated US7 and asserted a
+  deleted previously-loaded file RELOADS (the silent-unban behaviour US7 fixes). Its deletion sub-block
+  now asserts the vanish-guard: the reload is refused and the previous bans stay enforced. The
+  equal/older-mtime detection portion is unchanged. Required to keep the suite green under the mandated
+  behaviour change.
