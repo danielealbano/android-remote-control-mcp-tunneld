@@ -101,26 +101,36 @@ attestation + key binding, write-verify-claims a name in S3, and signs a bootstr
 The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
 certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on schedule.
 
-## 4. Bandwidth model
+## 4. Unified per-window limit model
 
-Per-tunnel, per-direction pacing uses two **per-second fixed windows** — a byte window
-`bw:{name}:{dir}:{unix_second}` and a packet (read) window `pkt:{name}:{dir}:{unix_second}`. Each read
-does ONE plain pipelined round-trip (`INCRBY` bytes + `INCR` packet + `EXPIRE 2s NX` on both — NO Lua);
-if the returned byte count exceeds `--limit-bandwidth` OR the read count exceeds `--limit-packets`, the
-copy waits out the rest of the second (that wait IS the pacing) before forwarding. `EXPIRE NX` self-heals
-a skipped TTL on the next same-second write, so strict atomicity is unwarranted for these transient
-windows; a Valkey ERROR fails open so pacing never hard-depends on the control plane. Byte ACCOUNTING
-(day/week traffic) is still recorded per chunk via a TTL'd Lua INCR; an exhausted window refuses NEW
-streams at admission and closes in-flight streams. `wire.ChunkSize` = 16384 is the paced-copy read slice,
-so the per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
+Every read charges ONE unified `Charge` against ALL four per-window counters in a single plain pipelined
+round-trip (`INCRBY`/`INCR` + `EXPIRE … NX` — **NO Lua**, **NO TxPipeline**): the per-second byte window
+`bw:{name}:{dir}:{unix_second}`, the per-second packet (read) window `pkt:{name}:{dir}:{unix_second}`, and
+the per-direction day/week traffic windows `traf:{name}:{dir}:day:{unix_day}` /
+`traf:{name}:{dir}:week:{unix_week}` (`unix_day = unix_second/86400` UTC-midnight days,
+`unix_week = unix_day/7` epoch-aligned 7-day blocks — clock-aligned, so a window's reset is computed from
+the clock with no `PTTL` read). The returned action is: **Proceed** (under all caps → forward now);
+**Wait** (over a cap whose window resets within `maxPacingWait` = 5 s → wait that long, then forward — the
+wait IS the pacing); or **Kill** (over a cap whose window resets beyond 5 s → end the stream). Bandwidth is
+the always-`Wait` case (a per-second window resets in ≤ 1 s); day/week are almost always `Kill` (reset
+hours/days away) except in the last ≤ 5 s of a window. `Kill` takes precedence over `Wait` (an exhausted far
+window can't be waited out). `EXPIRE NX` self-heals a skipped TTL on the next same-window write, so strict
+atomicity is unwarranted for these transient windows; a Valkey ERROR yields `Proceed` (fail-open — pacing
+never hard-depends on the control plane). Each key's TTL is its window plus a small fixed 1 h margin
+(per-second = 2 s, day = 25 h, week = 7 d + 1 h). An exhausted day/week window also refuses NEW streams at
+admission (`TrafficExhausted`, read-only). `wire.ChunkSize` = 16384 is the paced-copy read slice, so the
+per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
 
-## 5. Valkey state (all transient — every key TTL'd alongside its write: single Lua, or a pipelined EXPIRE NX for the bw:/pkt: windows)
+## 5. Valkey state (all transient — every key TTL'd alongside its write: single Lua, or a pipelined EXPIRE NX for the bw:/pkt: and traf: windows)
 
 Routing (`route:{name}` → owner/fp/connID, owner-conditional teardown on `connID`), node registry
-(`node:{id}` → advertise), rate-limit windows, the global concurrency counter (`conc:{name}`, TTL = 3 ×
-`--limit-conn-idle`, refreshed by every traffic chunk via a `PEXPIRE` that no-ops on a missing key), per-tunnel
-counters (`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME cooldown/backoff. No permanent
-Valkey state; a stale connection never clobbers a re-bound route. Connection/stream ids are 8 lowercase
+(`node:{id}` → advertise), rate-limit windows, the per-direction day/week traffic windows
+(`traf:{name}:{dir}:day/week:{n}`, written via the same pipelined `EXPIRE NX` as the `bw:`/`pkt:` windows),
+the global concurrency counter (`conc:{name}`, TTL = 3 × `--limit-conn-idle`, refreshed by every traffic
+chunk via the `Charge` pipeline's `PEXPIRE` that no-ops on a missing key, and RESET — `DEL` — when the
+phone (re)binds), per-tunnel counters (`tcnt:{name}`), single-use enrollment nonces, and per-CA ACME
+cooldown/backoff. No permanent Valkey state; a stale connection never clobbers a re-bound route.
+Connection/stream ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
 and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic.
 
