@@ -92,8 +92,8 @@ own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
 |---|---|---|
 | Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` (≥ 16384 B/s) |
 | Reads/packets per second (per tunnel, per direction) | `--limit-packets` | `100` |
-| Traffic / tunnel / 24h window (both directions) | `--limit-traffic-day` | `1gb` |
-| Traffic / tunnel / 7d window | `--limit-traffic-week` | `4gb` |
+| Traffic / tunnel / 24h window (UTC-aligned, per direction) | `--limit-traffic-day` | `1gb` |
+| Traffic / tunnel / 7d window (epoch-aligned, per direction) | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
 | New public TCP connections / source IP | `--limit-conn-rate` | `10`/s |
 | Enrollments / source IP | `--limit-enroll-hour` + `--limit-enroll-minute` | `20`/h AND `2`/min |
@@ -117,10 +117,12 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 ## 5. State + retention
 
 - **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
-  counters, per-tunnel counters, the per-second bandwidth (`bw:`) + packet (`pkt:`) windows, single-use
-  enrollment nonces, ACME cooldown/backoff. Every key gets a TTL alongside its write — set atomically in
-  the same Lua script / `SET EX`, or via a pipelined `EXPIRE NX` right after the `INCR` for the
-  self-healing transient `bw:`/`pkt:` per-second windows. No permanent Valkey state.
+  counters (`conc:{name}` — reset on phone (re)bind; the day/week traffic quotas persist across
+  reconnects), per-tunnel counters, the per-second bandwidth (`bw:`) + packet (`pkt:`) windows and the
+  per-direction day/week traffic (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment
+  nonces, ACME cooldown/backoff. Every key gets a TTL alongside its write — set atomically in the same
+  Lua script / `SET EX`, or via a pipelined `EXPIRE NX` right after the `INCR` for the self-healing
+  transient `bw:`/`pkt:` per-second AND `traf:` day/week windows. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify

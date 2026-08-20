@@ -29,6 +29,13 @@ type Router interface {
 	BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, fingerprint, connID string) (router.SelfHealResult, error)
 }
 
+// StreamResetter clears a tunnel's live-scoped counters (the concurrent-stream count) when the phone
+// (re)binds — a fresh phone connection means all prior streams are dead. Satisfied by *limit.Limiter.
+// It MUST NOT touch identity-scoped quotas (day/week traffic), which persist across reconnects.
+type StreamResetter interface {
+	ResetStreams(ctx context.Context, name string) error
+}
+
 // ConnLogStore is the connection-event log surface.
 type ConnLogStore = store.ConnLogStore
 
@@ -76,6 +83,7 @@ type Manager struct {
 	router    Router
 	logs      ConnLogStore
 	rec       Recorder
+	streams   StreamResetter
 	logger    *slog.Logger
 	nodeID    string
 	nodeHost  string
@@ -103,6 +111,7 @@ type Config struct {
 	Router    Router
 	Logs      ConnLogStore
 	Recorder  Recorder
+	Streams   StreamResetter
 	Logger    *slog.Logger
 	NodeID    string
 	NodeHost  string
@@ -117,7 +126,7 @@ func NewManager(cfg Config) *Manager {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Manager{
-		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, logger: logger,
+		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, streams: cfg.Streams, logger: logger,
 		nodeID: cfg.NodeID, nodeHost: cfg.NodeHost, nodeStart: cfg.NodeStart, routeTTL: cfg.RouteTTL,
 		conns: map[string]*conn{}, now: time.Now,
 	}
@@ -162,6 +171,16 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 			return nil, err
 		}
 		c.connID = mustConnID() // collision with the previous conn's id — re-mint and retry
+	}
+	// route is ours now (BindRoute won) but not yet serviceable (conn not published) — so no legitimate
+	// stream can have acquired a slot for THIS connection. Reset the live concurrent-stream counter: a
+	// fresh phone connection means all prior (crashed-node) streams are dead → count is implicitly zero.
+	// Identity quotas (day/week traffic) are deliberately untouched. A reset error is non-fatal (the
+	// conc:{name} TTL is the backstop).
+	if m.streams != nil {
+		if err := m.streams.ResetStreams(ctx, c.name); err != nil {
+			m.logger.Warn("conc reset on bind failed (TTL is the backstop)", "tunnel", c.name, "err", err)
+		}
 	}
 	m.mu.Lock()
 	// Supersede any existing local conn for the same name.

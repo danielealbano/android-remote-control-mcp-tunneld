@@ -106,14 +106,20 @@ MUST NOT be relaxed without explicit user direction.
 
 ### Valkey (transient) + S3 (durable) state — SACRED
 - **NO permanent Valkey state, EVER.** Every key (routing, node registry, rate-limit windows,
-  concurrency counters, per-tunnel `tcnt:{name}`, the per-second `bw:`/`pkt:` bandwidth windows,
-  enrollment nonces, ACME cooldown/backoff) gets a TTL alongside its mutation — set **atomically in the
-  SAME Lua script** (or `SET EX`), OR, for the transient per-second `bw:`/`pkt:` bandwidth windows, via a
-  pipelined `EXPIRE NX` right after the `INCR`: `EXPIRE NX` self-heals a skipped TTL on the next
-  same-second write, so a plain pipeline (not `TxPipeline`/Lua) is the correct, simpler tool for these
-  self-healing transient counters — strict single-script atomicity is required only where an orphaned key
-  would actually matter. Route teardown/refresh is **owner-conditional on the per-connection `connID`** —
-  a stale connection MUST NOT clobber a re-bound route.
+  concurrency counters, per-tunnel `tcnt:{name}`, the per-second `bw:`/`pkt:` bandwidth windows and the
+  per-direction `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff)
+  gets a TTL alongside its mutation — set **atomically in the SAME Lua script** (or `SET EX`), OR, for the
+  transient per-second `bw:`/`pkt:` **AND `traf:` day/week** windows, via a pipelined `EXPIRE NX` right
+  after the `INCR`: `EXPIRE NX` self-heals a skipped TTL on the next same-window write, so a plain pipeline
+  (not `TxPipeline`/Lua) is the correct, simpler tool for these self-healing transient counters — strict
+  single-script atomicity is required only where an orphaned key would actually matter. Route
+  teardown/refresh is **owner-conditional on the per-connection `connID`** — a stale connection MUST NOT
+  clobber a re-bound route.
+- **Live-vs-identity reset invariant.** Live-tunnel-scoped counters (`conc:{name}` concurrent streams)
+  are RESET (`DEL`) when the phone (re)binds — a fresh phone connection means all prior streams are dead,
+  so the count is implicitly zero. Identity-scoped cumulative quotas (`traf:` day/week traffic,
+  issuance/`--issue-per-week`) MUST PERSIST across reconnects — a tunnel MUST NOT reset its quota just by
+  reconnecting. The bind-time reset hits `conc:{name}` ONLY and MUST NEVER touch the `traf:` counters.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
   Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
@@ -128,20 +134,27 @@ MUST NOT be relaxed without explicit user direction.
   `docs/PROTOCOL.md` and the Go client in `client/` together (the future Kotlin client conforms to the
   spec, not to the Go source).
 
-### Bandwidth model
-- Per-tunnel, per-direction pacing uses two **per-second fixed windows** — a byte window
-  `bw:{name}:{dir}:{unix_second}` and a packet (read) window `pkt:{name}:{dir}:{unix_second}`. Each read
-  does ONE plain pipelined round-trip (`INCRBY` bytes + `INCR` packet + `EXPIRE 2s NX` on both — **NO Lua**);
-  if the returned byte count exceeds `--limit-bandwidth` OR the read count exceeds `--limit-packets`, the
-  copy waits out the rest of the second (that wait IS the pacing) before forwarding. `EXPIRE NX` self-heals
-  a skipped TTL on the next same-second write (so strict atomicity is unwarranted for these transient
-  windows); a Valkey ERROR fails open. The read slice is `wire.ChunkSize` = 16384, so the per-second
-  overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`. `--limit-packets`
-  (default 100) is a loose tiny-packet-flood backstop; the byte rate is the primary limit. Byte ACCOUNTING
-  (day/week) is still recorded per chunk; an exhausted window refuses NEW streams at admission. The blocking
-  per-second wait MUST NEVER be held under a connection write mutex. The global stream-counter key
-  `conc:{name}` carries TTL = 3 × `--limit-conn-idle`, refreshed by a `PEXPIRE` piggybacked on the
-  per-chunk accounting script (a no-op on a missing key, so a torn-down counter is never resurrected).
+### Unified per-window limit model
+- Every read charges ONE unified `Charge` against ALL four per-window counters in a single plain pipelined
+  round-trip (`INCRBY`/`INCR` + `EXPIRE … NX` — **NO Lua**, **NO `TxPipeline`**): the per-second byte
+  window `bw:{name}:{dir}:{unix_second}`, the per-second packet window `pkt:{name}:{dir}:{unix_second}`,
+  and the **per-direction** day/week traffic windows `traf:{name}:{dir}:day:{unix_day}` /
+  `traf:{name}:{dir}:week:{unix_week}` (`unix_day = unix_second/86400` UTC-midnight days,
+  `unix_week = unix_day/7` epoch-aligned 7-day blocks — clock-aligned; the reset is computed from the
+  clock, no `PTTL`). `Charge` returns an action: **Proceed** (under all caps), **Wait** (over a cap whose
+  window resets within `maxPacingWait` = **5 s** → wait, then forward — that wait IS the pacing), or
+  **Kill** (over a cap whose window resets beyond 5 s → end the stream, with the window label for the
+  metric). `Kill` takes precedence over `Wait`. `EXPIRE NX` self-heals a skipped TTL on the next
+  same-window write (so strict atomicity is unwarranted for these transient windows); a Valkey ERROR
+  yields `Proceed` (fail-open). Each key's TTL is its window plus a fixed **1 h** margin (per-second = 2 s,
+  day = 25 h, week = 7 d + 1 h). The read slice is `wire.ChunkSize` = 16384, so the per-second overshoot is
+  bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`. `--limit-packets` (default 100)
+  is a loose tiny-packet-flood backstop; the byte rate is the primary limit. An exhausted day/week window
+  also refuses NEW streams at admission (`TrafficExhausted`, read-only). The blocking wait MUST NEVER be
+  held under a connection write mutex. The global stream-counter key `conc:{name}` carries
+  TTL = 3 × `--limit-conn-idle`, refreshed by a `PEXPIRE` piggybacked on the `Charge` pipeline (a no-op on
+  a missing key, so a torn-down counter is never resurrected), and is RESET (`DEL`) on phone (re)bind
+  (see the live-vs-identity reset invariant above).
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry

@@ -86,7 +86,7 @@ func TestEdge_OpenFar_MeshWhenRemote(t *testing.T) {
 func TestEdge_PacedCopy_QuotaExhaustion(t *testing.T) {
 	cfg := baseConfig()
 	te := newTestEdge(t, cfg, nil, nil)
-	// Swap in a limiter with a tiny day cap so ClaimTraffic refuses immediately.
+	// Swap in a limiter with a tiny day cap so Charge kills on the day cap immediately.
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })

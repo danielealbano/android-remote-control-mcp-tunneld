@@ -99,8 +99,8 @@ type ServeCmd struct {
 	IssuePerWeek        int           `name:"issue-per-week" default:"3" help:"Max SUCCESSFUL public-cert issuances per tunnel per 7d window (anchored at the first issuance)."`
 
 	// --- Traffic / connection caps ---
-	LimitTrafficDay      string        `name:"limit-traffic-day" default:"1gb" help:"Per-tunnel bytes per 24h window (anchored at the first byte), both directions combined (BINARY)."`
-	LimitTrafficWeek     string        `name:"limit-traffic-week" default:"4gb" help:"Per-tunnel bytes per 7d window (anchored at the first byte), both directions combined (BINARY)."`
+	LimitTrafficDay      string        `name:"limit-traffic-day" default:"1gb" help:"Per-tunnel bytes per 24h window (UTC-aligned), per direction (BINARY)."`
+	LimitTrafficWeek     string        `name:"limit-traffic-week" default:"4gb" help:"Per-tunnel bytes per 7d window (epoch-aligned), per direction (BINARY)."`
 	LimitConnRate        int           `name:"limit-conn-rate" default:"10" help:"New public TCP connections/sec per source IP."`
 	LimitStreamPending   int           `name:"limit-stream-pending" default:"64" help:"Max concurrent pre-bind phone control handshakes per node."`
 	LimitDialBackTimeout time.Duration `name:"limit-dialback-timeout" default:"10s" help:"Max wait for the phone to open the dial-back /data stream before failing the public connection and releasing its stream slot."`

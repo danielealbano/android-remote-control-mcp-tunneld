@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -125,7 +126,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	}
 
 	// Admission-time quota gate: an exhausted day/week window refuses every NEW stream (in-flight
-	// streams are closed by the splice's ClaimTraffic accounting). A control-plane error fails open,
+	// streams are closed by the splice's Charge accounting). A control-plane error fails open,
 	// like connRate — never a hard outage.
 	dayOver, weekOver, qerr := e.lim.TrafficExhausted(ctx, name)
 	if qerr == nil && (dayOver || weekOver) {
@@ -417,38 +418,31 @@ const (
 	copyWriteErr = -2
 )
 
-// pacedCopy copies src→dst in ≤ChunkSize (16 KiB) slices, charging each read against the per-second
-// bandwidth (byte + packet) windows and accounting day/week traffic; on quota exhaustion it stops and
-// returns quotaHit. When a per-second cap is exceeded the copy waits out the rest of the second (that
-// wait IS the pacing); a control-plane error on either call fails open so a live stream is never killed
-// on a Valkey blip.
+// pacedCopy copies src→dst in ≤ChunkSize (16 KiB) slices, charging each read against ALL per-window
+// counters (per-second byte/packet + per-direction day/week traffic) in one unified Charge. Proceed →
+// forward; Wait → pace out the rest of the (near) window then forward (that wait IS the pacing); Kill →
+// a day/week cap is exhausted with its reset too far to wait out, so stop and return quotaHit. A
+// control-plane error fails open (forward unpaced) so a live stream is never killed on a Valkey blip.
 func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, src io.Reader, as *activeStream, counter *int64) int64 {
 	buf := make([]byte, wire.ChunkSize)
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			// Bandwidth pacing: charge this read against the per-second byte + packet windows; if either
-			// cap is now exceeded, wait out the rest of the second (that wait IS the pacing) before
-			// forwarding. A Valkey error fails open (forward unpaced) — never kill a live stream on a blip.
-			if over, wait, berr := e.lim.ChargeBandwidth(ctx, name, dir, int64(nr)); berr == nil && over {
-				select {
-				case <-ctx.Done(): // teardown — abandon the wait, don't hold the copy hostage
-				case <-time.After(wait):
+			// One charge covers the per-second bandwidth windows AND the day/week traffic quotas. Proceed →
+			// forward; Wait → pace out the rest of the (near) window then forward; Kill → the tunnel exceeded
+			// a day/week cap whose reset is too far to wait out. A Valkey error yields Proceed (fail-open —
+			// never kill a live stream on a control-plane blip).
+			if action, wait, win, cerr := e.lim.Charge(ctx, name, dir, int64(nr)); cerr == nil {
+				switch action {
+				case limit.ChargeWait:
+					select {
+					case <-ctx.Done(): // teardown — abandon the wait, don't hold the copy hostage
+					case <-time.After(wait):
+					}
+				case limit.ChargeKill:
+					e.rec.QuotaExhausted(name, win)
+					return quotaHit
 				}
-			}
-			dayOK, weekOK, terr := e.lim.ClaimTraffic(ctx, name, int64(nr))
-			if terr != nil {
-				// Control-plane blip: fail open — never kill a live stream on a Valkey error (the next
-				// successful claim re-applies the caps).
-				dayOK, weekOK = true, true
-			}
-			if !dayOK || !weekOK {
-				win := "day"
-				if !weekOK {
-					win = "week"
-				}
-				e.rec.QuotaExhausted(name, win)
-				return quotaHit
 			}
 			if _, ew := dst.Write(buf[:nr]); ew != nil {
 				return copyWriteErr

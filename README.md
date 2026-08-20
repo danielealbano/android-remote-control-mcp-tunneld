@@ -98,8 +98,8 @@ app is the sole authenticator, so a tunnelled deployment MUST keep the app's bea
 |---|---|---|
 | Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` |
 | Reads/packets per second (per tunnel, per direction) | `--limit-packets` | `100` |
-| Traffic / tunnel / day | `--limit-traffic-day` | `1gb` |
-| Traffic / tunnel / rolling 7d | `--limit-traffic-week` | `4gb` |
+| Traffic / tunnel / 24h window (UTC-aligned, per direction) | `--limit-traffic-day` | `1gb` |
+| Traffic / tunnel / 7d window (epoch-aligned, per direction) | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
 | New connections / source IP | `--limit-conn-rate` | `10`/s |
 | Enrollments / source IP | `--limit-enroll-hour` / `--limit-enroll-minute` | `20`/h AND `2`/min |
