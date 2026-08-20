@@ -2,7 +2,7 @@ VERSION ?= dev
 GO_PACKAGES = $(shell go list ./...)
 
 .PHONY: build lint vet govulncheck test-unit test-integration test-e2e test-all test-scripts \
-        tidy compose-config mermaid-check attest-probe
+        tidy compose-config mermaid-check attest-probe tunnel-app
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/tunneld ./cmd/tunneld
@@ -76,3 +76,21 @@ attest-probe:
 	  $(APKSIGNER) verify --print-certs fixtures/attest-probe/attest-probe.apk \
 	    | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}'; \
 	} > fixtures/attest-probe/signers.allow
+
+# Builds, signs (debug keystore), and publishes the on-device REFERENCE TUNNEL CLIENT used by the adb-gated
+# TestE2E_ReferenceTunnelApp e2e test (see support/tunnel-app/README.md). Requires the LOCAL Android SDK —
+# Gradle finds it via support/tunnel-app/local.properties (gitignored) or ANDROID_HOME — plus the
+# build-tools apksigner. NOT a default quality gate. Regenerates the committed fixtures under
+# fixtures/tunnel-app/.
+tunnel-app:
+	@test -n "$(APKSIGNER)" || { echo "apksigner not found under $(ANDROID_SDK)/build-tools; set ANDROID_HOME"; exit 1; }
+	cd support/tunnel-app && ./gradlew assembleDebug
+	mkdir -p fixtures/tunnel-app
+	cp support/tunnel-app/app/build/outputs/apk/debug/app-debug.apk \
+	    fixtures/tunnel-app/tunnel-app.apk
+	sha256sum fixtures/tunnel-app/tunnel-app.apk | awk '{print $$1}' \
+	    > fixtures/tunnel-app/tunnel-app.apk.sha256
+	{ echo "# Debug signing-cert SHA-256 for the tunnel-app APK (regenerate via 'make tunnel-app')."; \
+	  $(APKSIGNER) verify --print-certs fixtures/tunnel-app/tunnel-app.apk \
+	    | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}'; \
+	} > fixtures/tunnel-app/signers.allow

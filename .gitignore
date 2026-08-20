@@ -18,3 +18,11 @@
 /support/attest-probe/app/build/
 /support/attest-probe/local.properties
 /support/attest-probe/.idea/
+
+# tunnel-app Gradle build outputs & machine-specific SDK pointer (the built APK fixture under
+# fixtures/tunnel-app/ IS committed — only these are ignored).
+/support/tunnel-app/.gradle/
+/support/tunnel-app/build/
+/support/tunnel-app/app/build/
+/support/tunnel-app/local.properties
+/support/tunnel-app/.idea/
