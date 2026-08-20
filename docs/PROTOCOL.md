@@ -164,11 +164,17 @@ TLS session — NO framing (HTTP/2 provides framing; `END_STREAM` is the teardow
 ## 5. Replica mesh
 
 When the accepting edge node is not the node holding the phone, it bridges to the owner over an internal
-HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh stream is a `POST /mesh` whose identity
-travels in the request headers `X-Tunnel`, `X-Conn-Id`, and `X-Stream-Id`; the request/response bodies
-are the opaque splice. The owner verifies `X-Conn-Id` against its live phone connection before bridging
-(the entry node takes one fresh route lookup + retry on a mismatch/stale route, then closes). The mesh
-is replica↔replica only — it is NOT part of the phone-client contract.
+HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh data stream is a `POST /mesh/data` whose
+identity travels in the request headers `X-Tunnel`, `X-Conn-Id`, and `X-Stream-Id`; the request/response
+bodies are the opaque splice. The owner verifies `X-Conn-Id` against its live phone connection before
+bridging (the entry node takes one fresh route lookup + retry on a mismatch/stale route, then closes).
+The mesh is replica↔replica only — it is NOT part of the phone-client contract.
+
+The mesh also carries a control RPC, `POST /mesh/control`: a JSON request `{op, tunnel}` → response
+`{nudged}` (mesh-role mTLS, replica↔replica only). The first op is `renew`, which forces the owner node
+to mint a fresh renewal nonce and enqueue a `RENEW_NUDGE` to the named tunnel's live phone connection —
+the mechanism behind the internal `POST /admin/renew` endpoint. Unknown op → `400`, missing tunnel →
+`400`, non-POST → `405`.
 
 ## 6. Security invariants
 
