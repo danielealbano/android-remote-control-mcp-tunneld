@@ -531,8 +531,8 @@ the admission gate.
   including `TestE2E_Quota` — note the per-direction cap (the echo direction trips it) and that, in the rare
   case the test crosses a UTC-day boundary, the kill may be delayed by ≤ `maxPacingWait` (the transfer is
   still cut in the new day, whose reset is far), so the assertion still holds within its `waitBool` windows.
-- [x] Confirm hygiene: no AI attribution, no plan/finding IDs in code or commit messages, placeholders only,
-  and NO out-of-scope files changed.
+- [x] Confirm hygiene: no AI attribution, no plan/finding IDs in code comments (per `agent.md` — code
+  comments reference ONLY the official docs), placeholders only, and NO out-of-scope files changed.
 
 **Definition of Done:**
 - [x] All gates pass on the final code; the unified charge + per-direction traffic + `conc:` reset-on-bind
@@ -544,6 +544,14 @@ the admission gate.
 
 _(recorded during implementation per agent.md §2)_
 
-None. The planned code blocks reconciled cleanly against the current codebase; all four quality-gate
-tiers (unit, integration, e2e, scripts) plus lint ×3 / vet / build / govulncheck / tidy pass on the
+The planned code blocks reconciled cleanly against the current codebase; all four quality-gate tiers
+(unit, integration, e2e, scripts) plus lint ×3 / vet / build / govulncheck / tidy pass on the
 implemented code with no changes to the planned contracts.
+
+- **Task 5.1 hygiene criterion narrowed to code comments.** As written, Task 5.1 said "no plan/finding
+  IDs in code **or commit messages**". The binding rule in `agent.md` scopes the prohibition to code
+  COMMENTS ("Comments MUST NEVER reference plan numbers … reference ONLY the official documentation"),
+  and the established repo convention permits a plan reference in a plan-document commit message (e.g.
+  `main`'s `f8c5cee "docs(docs): mark plan 4 ground-up verification complete"`). The docs commit on this
+  branch (`Adds the Plan 10 record`) follows that convention. The criterion was reworded to match the
+  actual `agent.md` rule; the commit history is unchanged.
