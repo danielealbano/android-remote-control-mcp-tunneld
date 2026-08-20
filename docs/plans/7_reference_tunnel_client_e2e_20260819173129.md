@@ -82,35 +82,35 @@ quality.
 
 ---
 
-## User Story 1 — [ ] Reference app scaffolding + TEE keys, attestation, CSRs
+## User Story 1 — [x] Reference app scaffolding + TEE keys, attestation, CSRs
 
 A buildable Kotlin/Gradle app project with the crypto foundation: two non-exportable AndroidKeyStore EC
 P-256 keys, a real hardware-attestation chain over the server nonce for the identity key, and PKCS#10
 CSRs signed by the keystore keys.
 
 **Acceptance criteria:**
-- [ ] `support/tunnel-app/` is a self-contained Gradle **Kotlin** project (`minSdk 33`) that builds a
+- [x] `support/tunnel-app/` is a self-contained Gradle **Kotlin** project (`minSdk 33`) that builds a
   debug APK with `./gradlew assembleDebug` using only the local SDK (no SDK downloads), with the
   dependencies OkHttp (4.12.x), BouncyCastle (`bcpkix`+`bcprov`), and Ktor
   (`ktor-server-core`+`ktor-server-netty` 3.4.x — Netty engine + platform Conscrypt; no explicit Netty or
   Conscrypt dependency).
-- [ ] A crypto module generates an EC **P-256** identity key in AndroidKeyStore
+- [x] A crypto module generates an EC **P-256** identity key in AndroidKeyStore
   (`setAttestationChallenge(<server nonce>)`, non-exportable, purpose SIGN), and an EC **P-256** TLS key
   in AndroidKeyStore (non-exportable, purpose SIGN — server-side handshake signing), and returns the
   identity key's attestation chain (leaf-first) exactly as the enrollment expects.
-- [ ] A CSR builder produces PKCS#10 CSRs (identity: CN `phone`; TLS: CN + DNS SAN =
+- [x] A CSR builder produces PKCS#10 CSRs (identity: CN `phone`; TLS: CN + DNS SAN =
   `<name>.<tunnel-domain>`) signed by the corresponding AndroidKeyStore key via a keystore-backed
   `ContentSigner` (the private key never leaves the TEE).
 
-### Task 1.1 — [ ] Gradle project scaffolding
+### Task 1.1 — [x] Gradle project scaffolding
 
 **Actions:**
-- [ ] `support/tunnel-app/` already holds pre-existing sources that are NOT part of this reference client
+- [x] `support/tunnel-app/` already holds pre-existing sources that are NOT part of this reference client
   (which is service/receiver driven — no launcher activity). Delete them:
   `app/src/main/java/com/example/tunnelapp/{MainActivity.kt,TunnelReference.kt,KtorTlsProbe.kt,KeystoreProbe.kt}`.
   The pre-existing project files this task and US5 define below (`settings.gradle.kts`, `build.gradle.kts`,
   `gradle.properties`, `app/build.gradle.kts`, `AndroidManifest.xml`) are OVERWRITTEN with the content here.
-- [ ] Create (overwrite) `support/tunnel-app/settings.gradle.kts`:
+- [x] Create (overwrite) `support/tunnel-app/settings.gradle.kts`:
 
   ```kotlin
   pluginManagement {
@@ -124,7 +124,7 @@ CSRs signed by the keystore keys.
   include(":app")
   ```
 
-- [ ] Create `support/tunnel-app/build.gradle.kts` (AGP/Kotlin pinned to the locally-cached versions —
+- [x] Create `support/tunnel-app/build.gradle.kts` (AGP/Kotlin pinned to the locally-cached versions —
   record the exact versions in `## Deviations`):
 
   ```kotlin
@@ -134,7 +134,7 @@ CSRs signed by the keystore keys.
   }
   ```
 
-- [ ] Create `support/tunnel-app/gradle.properties`:
+- [x] Create `support/tunnel-app/gradle.properties`:
 
   ```properties
   org.gradle.jvmargs=-Xmx1536m -Dfile.encoding=UTF-8
@@ -142,11 +142,11 @@ CSRs signed by the keystore keys.
   kotlin.code.style=official
   ```
 
-- [ ] Copy the Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.{jar,properties}` —
+- [x] Copy the Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.{jar,properties}` —
   locally-cached Gradle 8.14.4) from `support/attest-probe/`. `local.properties` (`sdk.dir=…`) is
   machine-local and gitignored (Task 6.1).
 
-- [ ] Create `support/tunnel-app/app/build.gradle.kts` (`compileSdk`/`targetSdk` pinned to the
+- [x] Create `support/tunnel-app/app/build.gradle.kts` (`compileSdk`/`targetSdk` pinned to the
   locally-available versions — record in `## Deviations`):
 
   ```kotlin
@@ -199,13 +199,13 @@ CSRs signed by the keystore keys.
     here that Task 5.3 owns.
 
 **Definition of Done:**
-- [ ] `cd support/tunnel-app && ./gradlew assembleDebug` produces a debug APK with all dependencies
+- [x] `cd support/tunnel-app && ./gradlew assembleDebug` produces a debug APK with all dependencies
   resolved and no Android-SDK download.
 
-### Task 1.2 — [ ] Keystore keys + attestation (`Keys.kt`)
+### Task 1.2 — [x] Keystore keys + attestation (`Keys.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Keys.kt`. The rotation is a **staged-alias** scheme: the live key stays under its
+- [x] Create `…/tunnelapp/Keys.kt`. The rotation is a **staged-alias** scheme: the live key stays under its
   alias for the in-flight `/issue` mTLS while the fresh key is minted under a distinct alias; the CALLER
   (Enroll/Identity) tracks which alias is live and deletes the old one only AFTER `/issue` installs the new
   certs (mirrors `client/enroll.go` keeping `bootKey` alive through `issueCerts`; `docs/PROTOCOL.md` §3).
@@ -275,13 +275,13 @@ CSRs signed by the keystore keys.
   ```
 
 **Definition of Done:**
-- [ ] Both keys generate as non-exportable P-256 (`getEncoded()==null`, `KeyInfo.securityLevel` = TEE); the
+- [x] Both keys generate as non-exportable P-256 (`getEncoded()==null`, `KeyInfo.securityLevel` = TEE); the
   identity chain verifies with the production `attest.Verifier` for a supplied nonce (exercised by US7).
 
-### Task 1.3 — [ ] CSR builder (`Csr.kt`)
+### Task 1.3 — [x] CSR builder (`Csr.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Csr.kt` (matches `client/enroll.go`'s `csrPEM`/`tlsCSRForTunnel` shapes):
+- [x] Create `…/tunnelapp/Csr.kt` (matches `client/enroll.go`'s `csrPEM`/`tlsCSRForTunnel` shapes):
 
   ```kotlin
   package com.example.tunnelapp
@@ -335,33 +335,33 @@ CSRs signed by the keystore keys.
   ```
 
 **Definition of Done:**
-- [ ] Both CSRs are valid PKCS#10, ECDSA-P256-signed by the keystore key, and parse server-side (proven
+- [x] Both CSRs are valid PKCS#10, ECDSA-P256-signed by the keystore key, and parse server-side (proven
   by a successful enrollment in US7).
 
 ---
 
-## User Story 2 — [ ] Two-phase attested enrollment client
+## User Story 2 — [x] Two-phase attested enrollment client
 
 The app performs the real two-phase enrollment over OkHttp with mTLS, mirroring the wire shapes in
 `client/enroll.go` and `docs/PROTOCOL.md` §2–§3, but with a REAL attestation chain.
 
 **Acceptance criteria:**
-- [ ] Phase 1: `GET /enroll/nonce` → generate the attested identity key over that nonce → `POST /enroll`
+- [x] Phase 1: `GET /enroll/nonce` → generate the attested identity key over that nonce → `POST /enroll`
   `{nonce, attestation_chain, identity_csr}` → parse `{name, identity_cert, issue_nonce}`.
-- [ ] Phase 2 (mTLS): generate fresh identity + TLS keys, re-attest the identity key over `issue_nonce`,
+- [x] Phase 2 (mTLS): generate fresh identity + TLS keys, re-attest the identity key over `issue_nonce`,
   `POST /issue` `{nonce, attestation_chain, identity_csr, tls_csr}` → parse `{identity_cert, public_cert,
   ca}`.
-- [ ] mTLS presents the Phase-1 identity cert + signs with the AndroidKeyStore identity key; the app
+- [x] mTLS presents the Phase-1 identity cert + signs with the AndroidKeyStore identity key; the app
   trusts tunneld's server certs via the pushed Pebble CA. SNI overrides the dial target (dial
   `localhost:<edgePort>`, `ServerName = enroll.`/`connect.<tunnel-domain>`), exactly as
   `client/enroll.go`'s `serverTLSTransport`/`newMTLSTransport` do.
-- [ ] Structured error handling per `docs/PROTOCOL.md` §2–§3 (`{reason, retryable, retry_after_seconds}`,
+- [x] Structured error handling per `docs/PROTOCOL.md` §2–§3 (`{reason, retryable, retry_after_seconds}`,
   the status taxonomy) and the retry path (fresh `GET /enroll/nonce` → wait → re-`POST /issue`).
 
-### Task 2.1 — [ ] Trust + mTLS wiring (`Tls.kt`)
+### Task 2.1 — [x] Trust + mTLS wiring (`Tls.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Tls.kt`. SNI/dial split: `loopbackDns` forces every hostname to `127.0.0.1` (the
+- [x] Create `…/tunnelapp/Tls.kt`. SNI/dial split: `loopbackDns` forces every hostname to `127.0.0.1` (the
   adb-reversed edge port) while the URL host carries both the SNI AND the hostname the default verifier
   checks against the Pebble-signed server cert — so no `hostnameVerifier` override is needed. The custom
   `X509ExtendedKeyManager` drives mTLS with the non-exportable EC identity key (TLS 1.2/1.3, `ECDHE_ECDSA`;
@@ -441,13 +441,13 @@ The app performs the real two-phase enrollment over OkHttp with mTLS, mirroring 
   ```
 
 **Definition of Done:**
-- [ ] An mTLS request to tunneld's `connect.<tunnel-domain>` succeeds using the keystore identity key,
+- [x] An mTLS request to tunneld's `connect.<tunnel-domain>` succeeds using the keystore identity key,
   validated against the pushed Pebble CA.
 
-### Task 2.2 — [ ] Enrollment exchange (`Enroll.kt`)
+### Task 2.2 — [x] Enrollment exchange (`Enroll.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Enroll.kt` (JSON shapes exactly per `client/enroll.go`
+- [x] Create `…/tunnelapp/Enroll.kt` (JSON shapes exactly per `client/enroll.go`
   `enrollRequestBody`/`enrollResponse`/`issueRequestBody`/`issueResponseBody`; `renew` mirrors
   `client/renew.go`). The `/issue` mTLS authenticates with the CURRENT live identity; a fresh attested
   identity key + TLS key are minted under a new alias generation and the old aliases dropped only AFTER the
@@ -656,33 +656,33 @@ The app performs the real two-phase enrollment over OkHttp with mTLS, mirroring 
   ```
 
 **Definition of Done:**
-- [ ] A full enrollment against tunneld (attestation ON) yields the assigned name + a Pebble-issued
+- [x] A full enrollment against tunneld (attestation ON) yields the assigned name + a Pebble-issued
   `<name>.<tunnel-domain>` public cert (proven in US7).
 
 ---
 
-## User Story 3 — [ ] HTTP/2 control plane + opaque data splice
+## User Story 3 — [x] HTTP/2 control plane + opaque data splice
 
 The app maintains the outbound mTLS HTTP/2 control connection and services dial-backs, mirroring
 `docs/PROTOCOL.md` §3–§4 and `internal/wire/frame_v2.go`.
 
 **Acceptance criteria:**
-- [ ] The control-frame codec encodes/decodes `[type:1][payloadLen:4 BE][payload JSON]` with the FROZEN
+- [x] The control-frame codec encodes/decodes `[type:1][payloadLen:4 BE][payload JSON]` with the FROZEN
   types `OPEN=0x01`, `PING=0x02`, `PONG=0x03`, `RENEW_NUDGE=0x04` and payloads `{stream_id}` /
   `{nonce, ari_window}`.
-- [ ] The control connection is a **duplex** `POST /control` (OkHttp `isDuplex()=true`): the response
+- [x] The control connection is a **duplex** `POST /control` (OkHttp `isDuplex()=true`): the response
   body is read as the server→phone frame stream; the request body writes `PONG` in reply to `PING`; the
   stream stays open for the connection lifetime.
-- [ ] On `OPEN{stream_id}` the app opens a `POST /data` dial-back with header `X-Stream-Id`, and splices
+- [x] On `OPEN{stream_id}` the app opens a `POST /data` dial-back with header `X-Stream-Id`, and splices
   its request body (phone→client) / response body (client→phone) to a fresh TCP connection to the local
   HTTPS server (US4) — an OPAQUE byte copy, no framing.
-- [ ] On `RENEW_NUDGE{nonce}` the app calls `Enroll.issue(id, nonce)` and hot-swaps the local server's
+- [x] On `RENEW_NUDGE{nonce}` the app calls `Enroll.issue(id, nonce)` and hot-swaps the local server's
   identity/cert (US4/US5), keeping the connection up on the old certs until the swap.
 
-### Task 3.1 — [ ] Frame codec (`Frames.kt`)
+### Task 3.1 — [x] Frame codec (`Frames.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Frames.kt` (layout per `internal/wire/frame_v2.go`):
+- [x] Create `…/tunnelapp/Frames.kt` (layout per `internal/wire/frame_v2.go`):
 
   ```kotlin
   package com.example.tunnelapp
@@ -714,12 +714,12 @@ The app maintains the outbound mTLS HTTP/2 control connection and services dial-
   ```
 
 **Definition of Done:**
-- [ ] Round-trip decode matches `internal/wire`'s layout byte-for-byte (verified against the server in US7).
+- [x] Round-trip decode matches `internal/wire`'s layout byte-for-byte (verified against the server in US7).
 
-### Task 3.2 — [ ] Control + data client (`Tunnel.kt`)
+### Task 3.2 — [x] Control + data client (`Tunnel.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Tunnel.kt` (mirrors `client/control.go`/`client/datastream.go`; `docs/PROTOCOL.md`
+- [x] Create `…/tunnelapp/Tunnel.kt` (mirrors `client/control.go`/`client/datastream.go`; `docs/PROTOCOL.md`
   §3–§4). **Duplex constraint:** OkHttp's `CallServerInterceptor` calls `RequestBody.writeTo(sink)`
   synchronously inside `execute()` BEFORE reading response headers, so for a duplex body `writeTo` MUST
   capture the sink and return immediately — blocking there deadlocks the control connection; both stream
@@ -822,33 +822,33 @@ The app maintains the outbound mTLS HTTP/2 control connection and services dial-
   ```
 
 **Definition of Done:**
-- [ ] A public connection through the edge reaches the local server and round-trips (proven in US7);
+- [x] A public connection through the edge reaches the local server and round-trips (proven in US7);
   `PING`/`PONG` liveness holds the connection; `RENEW_NUDGE` triggers a renewal.
 
 ---
 
-## User Story 4 — [ ] Local HTTP/2 + HTTP/1.1 HTTPS server on the non-exportable TLS key
+## User Story 4 — [x] Local HTTP/2 + HTTP/1.1 HTTPS server on the non-exportable TLS key
 
 A **Ktor (Netty engine)** server bound to device-loopback that terminates client TLS with the
 Pebble-issued cert and the non-exportable AndroidKeyStore TLS key — the SAME `sslConnector` stack as the
 `android-remote-control-mcp` app — negotiating `h2`/`http/1.1` via ALPN, serving `/info` and `/wait`.
 
 **Acceptance criteria:**
-- [ ] The server presents the Pebble-issued `<name>.<tunnel-domain>` cert chain and signs handshakes with
+- [x] The server presents the Pebble-issued `<name>.<tunnel-domain>` cert chain and signs handshakes with
   the AndroidKeyStore TLS key (non-exportable); ALPN offers `h2` and `http/1.1`.
-- [ ] `GET /info` → JSON `{nonce, tls_cert_sha256, not_before, not_after, name, san, issuer}` (the
+- [x] `GET /info` → JSON `{nonce, tls_cert_sha256, not_before, not_after, name, san, issuer}` (the
   app-payload nonce; the SHA-256 of the presented leaf cert DER; the cert validity window; the assigned
   name; the SAN; the issuer DN).
-- [ ] `GET /wait?seconds=X` streams `<total_bytes>\n` then an alphanumeric payload at ~1 MiB/s for X
+- [x] `GET /wait?seconds=X` streams `<total_bytes>\n` then an alphanumeric payload at ~1 MiB/s for X
   seconds, then `\n<sha256-hex-of-payload>\n`; identical behavior over h2 and http/1.1.
-- [ ] The cert/key are **swappable on renewal**: the in-memory keystore is rebuilt with the new TLS key +
+- [x] The cert/key are **swappable on renewal**: the in-memory keystore is rebuilt with the new TLS key +
   Pebble chain and the embedded server restarts on the SAME fixed loopback port. Transparent because
   `/data` dial-backs are per-connection (US3), so no persistent listener connection is dropped.
 
-### Task 4.1 — [ ] TLS key material for Ktor `sslConnector` (`ServerTls.kt`)
+### Task 4.1 — [x] TLS key material for Ktor `sslConnector` (`ServerTls.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/ServerTls.kt`. The opaque keystore key stays a reference through `setKeyEntry` +
+- [x] Create `…/tunnelapp/ServerTls.kt`. The opaque keystore key stays a reference through `setKeyEntry` +
   `KeyManagerFactory.init` (Netty's `buildKeyManagerFactory`) and the platform provider signs in the TEE —
   no custom `KeyManagerFactory` SPI, no `netty-tcnative`, no pipeline surgery. Empty password everywhere.
 
@@ -874,13 +874,13 @@ Pebble-issued cert and the non-exportable AndroidKeyStore TLS key — the SAME `
   ```
 
 **Definition of Done:**
-- [ ] A Ktor (Netty) server configured via `sslConnector` with this in-memory keystore completes an `h2`
+- [x] A Ktor (Netty) server configured via `sslConnector` with this in-memory keystore completes an `h2`
   TLS 1.3 handshake using the non-exportable key (proven by the US7 test through the tunnel).
 
-### Task 4.2 — [ ] The server (`Server.kt`) + endpoints
+### Task 4.2 — [x] The server (`Server.kt`) + endpoints
 
 **Actions:**
-- [ ] Create `…/tunnelapp/Server.kt` (fixed loopback port shared with the Tunnel, US3; the Netty engine
+- [x] Create `…/tunnelapp/Server.kt` (fixed loopback port shared with the Tunnel, US3; the Netty engine
   negotiates `h2`/`http/1.1` via ALPN, so both routes serve identically over h2 and h1):
 
   ```kotlin
@@ -990,32 +990,32 @@ Pebble-issued cert and the non-exportable AndroidKeyStore TLS key — the SAME `
   ```
 
 **Definition of Done:**
-- [ ] Through the tunnel, `/info` returns the expected JSON and `/wait` delivers a byte-exact,
+- [x] Through the tunnel, `/info` returns the expected JSON and `/wait` delivers a byte-exact,
   hash-matching stream over both h2 and h1 (proven in US7).
 
 ---
 
-## User Story 5 — [ ] Foreground service, adb command surface, status files, manifest
+## User Story 5 — [x] Foreground service, adb command surface, status files, manifest
 
 The app is orchestrated by a long-running foreground service driven over adb and reporting via
 app-internal files the test reads with `run-as`.
 
 **Acceptance criteria:**
-- [ ] An `enroll` command (adb) carrying `{edgePort, appNonce, pebbleCaPath, enrollHost, controlHost,
+- [x] An `enroll` command (adb) carrying `{edgePort, appNonce, pebbleCaPath, enrollHost, controlHost,
   tunnelDomain}` runs enrollment → starts the local server → opens the control connection, then writes the
   status files — `info.json` (`{name, tls_cert_sha256}`) plus a `ready` marker (the assigned name) — or an
   `error` file on failure.
-- [ ] A `refresh` command (adb) calls `Enroll.renew(id)` — the manual path has no `RENEW_NUDGE` frame to
+- [x] A `refresh` command (adb) calls `Enroll.renew(id)` — the manual path has no `RENEW_NUDGE` frame to
   carry a nonce, so `renew` itself mints a fresh nonce via `GET /enroll/nonce` (server-TLS, mirroring
   `client.FetchIssueNonce`) before issuing — and hot-swaps the server cert, then updates the status file
   (new `tls_cert_sha256`), same app-nonce.
-- [ ] The service survives between commands; a `stop` command tears everything down.
-- [ ] Result/status files are app-internal (`getFilesDir()`), read by the test via `run-as` (debug APK).
+- [x] The service survives between commands; a `stop` command tears everything down.
+- [x] Result/status files are app-internal (`getFilesDir()`), read by the test via `run-as` (debug APK).
 
-### Task 5.1 — [ ] Command receiver (`CommandReceiver.kt`)
+### Task 5.1 — [x] Command receiver (`CommandReceiver.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/CommandReceiver.kt`. The Pebble CA is delivered as an adb-pushed file path (extra
+- [x] Create `…/tunnelapp/CommandReceiver.kt`. The Pebble CA is delivered as an adb-pushed file path (extra
   `pebbleCaPath`); large/binary inputs travel as files, not intent extras.
 
   ```kotlin
@@ -1049,14 +1049,14 @@ app-internal files the test reads with `run-as`.
   ```
 
 **Definition of Done:**
-- [ ] `am broadcast -a com.example.tunnelapp.<cmd> -n <pkg>/.CommandReceiver -e …` reliably reaches the
+- [x] `am broadcast -a com.example.tunnelapp.<cmd> -n <pkg>/.CommandReceiver -e …` reliably reaches the
   service (the `-f 0x00000020` include-stopped-packages flag is used if a cold receiver needs it; record in
   `## Deviations`).
 
-### Task 5.2 — [ ] Orchestration service (`TunnelService.kt`)
+### Task 5.2 — [x] Orchestration service (`TunnelService.kt`)
 
 **Actions:**
-- [ ] Create `…/tunnelapp/TunnelService.kt`. The `ready` marker is written strictly AFTER the tunnel is
+- [x] Create `…/tunnelapp/TunnelService.kt`. The `ready` marker is written strictly AFTER the tunnel is
   serving (so the test never races a half-started app). The local server binds a FIXED loopback port
   (shared with the Tunnel). The FGS type (`dataSync`/`specialUse`) is API-dependent — record the chosen
   type + any start-restriction handling in `## Deviations`.
@@ -1158,12 +1158,12 @@ app-internal files the test reads with `run-as`.
   ```
 
 **Definition of Done:**
-- [ ] The service completes enroll→serve→refresh→stop driven purely over adb, with truthful status files.
+- [x] The service completes enroll→serve→refresh→stop driven purely over adb, with truthful status files.
 
-### Task 5.3 — [ ] Manifest + permissions
+### Task 5.3 — [x] Manifest + permissions
 
 **Actions:**
-- [ ] Create `support/tunnel-app/app/src/main/AndroidManifest.xml`. No `usesCleartextTraffic`: the
+- [x] Create `support/tunnel-app/app/src/main/AndroidManifest.xml`. No `usesCleartextTraffic`: the
   `/data`→local-server splice is a raw `Socket` to `127.0.0.1` carrying opaque TLS bytes (not cleartext
   HTTP, so the policy does not apply). The FGS type mirrors `TunnelService` (Task 5.2).
 
@@ -1191,27 +1191,27 @@ app-internal files the test reads with `run-as`.
   ```
 
 **Definition of Done:**
-- [ ] The app installs and the service starts as a foreground service on the device API level without a
+- [x] The app installs and the service starts as a foreground service on the device API level without a
   permission/type error.
 
 ---
 
-## User Story 6 — [ ] Build tooling + committed fixtures
+## User Story 6 — [x] Build tooling + committed fixtures
 
 `make` builds/sign/publishes the app APK + its signer digest, as committed fixtures, alongside (not
 replacing) the probe's.
 
 **Acceptance criteria:**
-- [ ] `make tunnel-app` builds the debug APK with the local SDK, copies it to
+- [x] `make tunnel-app` builds the debug APK with the local SDK, copies it to
   `fixtures/tunnel-app/tunnel-app.apk`, records `…/tunnel-app.apk.sha256`, and extracts the debug
   signing-cert SHA-256 into `fixtures/tunnel-app/signers.allow`.
-- [ ] The three fixtures are committed; the app's Gradle build outputs + `local.properties` are
+- [x] The three fixtures are committed; the app's Gradle build outputs + `local.properties` are
   gitignored. The existing `attest-probe` target/fixtures are untouched.
 
-### Task 6.1 — [ ] Makefile target + gitignore
+### Task 6.1 — [x] Makefile target + gitignore
 
 **Actions:**
-- [ ] Modify `Makefile`: append `tunnel-app` to the `.PHONY` list, and add the target below (reusing the
+- [x] Modify `Makefile`: append `tunnel-app` to the `.PHONY` list, and add the target below (reusing the
   `ANDROID_SDK`/`APKSIGNER` vars already defined for `attest-probe`):
 
   ```make
@@ -1229,7 +1229,7 @@ replacing) the probe's.
   	} > fixtures/tunnel-app/signers.allow
   ```
 
-- [ ] Modify `.gitignore`: add the block below (ONE entry per line — git has no brace expansion; the three
+- [x] Modify `.gitignore`: add the block below (ONE entry per line — git has no brace expansion; the three
   `fixtures/tunnel-app/` files ARE committed):
 
   ```gitignore
@@ -1243,45 +1243,45 @@ replacing) the probe's.
   ```
 
 **Definition of Done:**
-- [ ] `make tunnel-app` regenerates all three fixtures; `git status` shows them tracked and no Gradle
+- [x] `make tunnel-app` regenerates all three fixtures; `git status` shows them tracked and no Gradle
   build output staged.
 
-### Task 6.2 — [ ] Build + commit the fixtures
+### Task 6.2 — [x] Build + commit the fixtures
 
 **Actions:**
-- [ ] Run `make tunnel-app`; commit `fixtures/tunnel-app/{tunnel-app.apk,tunnel-app.apk.sha256,signers.allow}`.
+- [x] Run `make tunnel-app`; commit `fixtures/tunnel-app/{tunnel-app.apk,tunnel-app.apk.sha256,signers.allow}`.
 
 **Definition of Done:**
-- [ ] The committed APK's SHA-256 matches the committed digest, and `signers.allow` is a `#` comment
+- [x] The committed APK's SHA-256 matches the committed digest, and `signers.allow` is a `#` comment
   header line plus a single lowercase-hex SHA-256 digest (the `attest-probe` format).
 
 ---
 
-## User Story 7 — [ ] Real-device end-to-end tunnel test
+## User Story 7 — [x] Real-device end-to-end tunnel test
 
 A `//go:build e2e` test drives the committed app on a real device through the full flow with attestation
 ON, asserting the tunnel, the certificate, renewal, and throughput/concurrency over h1 and h2.
 
 **Acceptance criteria:**
-- [ ] tunneld is assembled like the existing e2e harness but **attestation ON**: real Google
+- [x] tunneld is assembled like the existing e2e harness but **attestation ON**: real Google
   `--attest-root-url`/`--attest-status-url`, `--attest-signer-digest-file` = committed
   `fixtures/tunnel-app/signers.allow`, a test identity CA (`--ca-*`, existing `writeCA`), Pebble public
   certs, and **generous `--limit-*`** (`--limit-concurrent` ≥ the test's stream count,
   `--limit-bandwidth` high enough for ~1 MiB/s streams, `--limit-conn-rate` high) so caps/pacing do not
   interfere.
-- [ ] The test skips unless exactly one adb device; it `adb reverse`s the edge port, `adb push`es
+- [x] The test skips unless exactly one adb device; it `adb reverse`s the edge port, `adb push`es
   Pebble's issuing CA, installs the committed APK (sha256-checked first, generous Play-Protect-aware
   install timeout), and drives enroll → info → refresh → info → `/wait` load, then uninstalls in cleanup.
   It is never wired to CI-with-device.
-- [ ] Assertions: `/info` returns the supplied app-nonce; the phone's `<name>.<tunnel-domain>` cert
+- [x] Assertions: `/info` returns the supplied app-nonce; the phone's `<name>.<tunnel-domain>` cert
   validates against Pebble's CA with SAN == `<name>.<tunnel-domain>`, issuer == Pebble, and a sane
   validity window; after `refresh` the nonce is unchanged and `tls_cert_sha256` changed; `/wait` delivers
   a byte-exact, hash-matching stream concurrently over **4 HTTP/1.1 connections** and **4 HTTP/2 streams**.
 
-### Task 7.1 — [ ] Harness config + adb plumbing helpers
+### Task 7.1 — [x] Harness config + adb plumbing helpers
 
 **Actions:**
-- [ ] Add a new `e2e/tunnel_app_test.go` (`//go:build e2e`). Reuse `startE2EInfra` for the shared containers +
+- [x] Add a new `e2e/tunnel_app_test.go` (`//go:build e2e`). Reuse `startE2EInfra` for the shared containers +
   CA. Start the replica attestation-ON via the EXISTING `startReplica(t, replicaOpts{…})`: `runReplicaOnce`
   already flips `attestOptional = false` and uses the supplied `attestRootURL`/`attestStatusURL`/`attestSignerFile`
   whenever `attestRootURL != ""`, so pass the real Google `attestRootURL`/`attestStatusURL` (the
@@ -1323,7 +1323,7 @@ ON, asserting the tunnel, the certificate, renewal, and throughput/concurrency o
   Add helpers: single-device serial (reuse `attestDeviceSerial`), `adb reverse` / `adb reverse --remove`,
   `adb push` the Pebble CA, install (sha256-checked, `adbInstallTimeout`), `am broadcast` command driver,
   and `run-as` status-file readers (reuse the patterns from `device_attestation_test.go`).
-- [ ] Modify `internal/tunneltest/containers.go` (shared harness infra — `IssuingRoots *x509.CertPool`
+- [x] Modify `internal/tunneltest/containers.go` (shared harness infra — `IssuingRoots *x509.CertPool`
   cannot be serialized back to PEM, so capture the bytes at fetch time; existing callers unaffected):
 
   ```diff
@@ -1360,24 +1360,24 @@ ON, asserting the tunnel, the certificate, renewal, and throughput/concurrency o
   +	return pool, rootPEM
    }
   ```
-- [ ] The `e2e/tunnel_app_test.go` harness (attestation-ON replica-start path, adb-driving helpers, and the
+- [x] The `e2e/tunnel_app_test.go` harness (attestation-ON replica-start path, adb-driving helpers, and the
   h1/h2 throughput clients) is TEST code — its shape is the compressed table in Task 7.2 (§3: plans carry no
   full test-function code).
-- [ ] Write `inf.pebble.IssuingRootsPEM` to a temp file and `adb push` it to the device as the app's
+- [x] Write `inf.pebble.IssuingRootsPEM` to a temp file and `adb push` it to the device as the app's
   trust anchor for tunneld's enroll/control server certs.
 
 **Definition of Done:**
-- [ ] The harness boots two-in-process replicas (or one, as needed), reverses the edge port, and installs
+- [x] The harness boots two-in-process replicas (or one, as needed), reverses the edge port, and installs
   + drives the app over adb.
 
-### Task 7.2 — [ ] The test + throughput clients
+### Task 7.2 — [x] The test + throughput clients
 
 **Actions:**
-- [ ] Implement the frontend clients that dial `localhost:<edgePort>` with SNI `<name>.<tunnel-domain>`
+- [x] Implement the frontend clients that dial `localhost:<edgePort>` with SNI `<name>.<tunnel-domain>`
   and trust the Pebble issuing CA: an **HTTP/1.1** client (multiple connections) and an **HTTP/2** client
   (`golang.org/x/net/http2` `Transport` over one TLS conn, multiple concurrent streams), both via a
   custom `DialTLSContext` (mirror `dialTunnelTLS`).
-- [ ] `/wait` verifier: read `<total>\n`, read exactly `total` payload bytes while updating SHA-256, read
+- [x] `/wait` verifier: read `<total>\n`, read exactly `total` payload bytes while updating SHA-256, read
   the trailing `\n<hash>\n`, assert the computed hash == the trailer. Run it concurrently (4 conns / 4
   streams, modest `seconds` so total volume stays small) and assert all succeed.
 
@@ -1388,55 +1388,55 @@ ON, asserting the tunnel, the certificate, renewal, and throughput/concurrency o
 | `TestE2E_ReferenceTunnelApp` | A real-device app completes **real Google-attested** two-phase enrollment, serves a Pebble-cert HTTPS endpoint **through the tunnel**, and renews the cert; the tunnel carries byte-exact h1-multi-connection and h2-multi-stream traffic. | Skip unless one adb device. attestation ON (real Google root + committed `signers.allow`), test CA, Pebble, generous limits. `adb reverse` edge port; `adb push` Pebble CA; install committed APK (sha256-checked). Drive `enroll(appNonce,…)` → poll `ready`; frontend `GET /info` (SNI `<name>.example.test`, trust Pebble CA) asserts nonce==appNonce, SAN/issuer/validity, capture F1; drive `refresh` → poll; `GET /info` asserts same nonce, `tls_cert_sha256` != F1; run `/wait` concurrently over 4 h1 conns + 4 h2 streams, assert hash match. `t.Cleanup`: `adb uninstall` + `adb reverse --remove`. Local-only; never CI-with-device. |
 
 **Definition of Done:**
-- [ ] With the device connected the test PASSES end-to-end; with no device it SKIPS; a tampered committed
+- [x] With the device connected the test PASSES end-to-end; with no device it SKIPS; a tampered committed
   APK (sha256 mismatch) FAILS clearly.
 
 ---
 
-## User Story 8 — [ ] Documentation and ground-up verification
+## User Story 8 — [x] Documentation and ground-up verification
 
 **Acceptance criteria:**
-- [ ] `docs/PROJECT.md` + `.claude/rules/project.md` Non-goals note the second on-device app
+- [x] `docs/PROJECT.md` + `.claude/rules/project.md` Non-goals note the second on-device app
   (`support/tunnel-app/`) as a **reference phone-client** used by the adb-gated e2e test (the production
   client still lives with the app).
-- [ ] `support/tunnel-app/README.md` documents what it is (a complete reference phone client), the build
+- [x] `support/tunnel-app/README.md` documents what it is (a complete reference phone client), the build
   (`make tunnel-app`, local SDK + `apksigner`), the driving commands, and the local-only gate — prose only,
   no diagrams.
-- [ ] Everything verified from the ground up.
+- [x] Everything verified from the ground up.
 
-### Task 8.1 — [ ] Documentation
+### Task 8.1 — [x] Documentation
 
 **Actions:**
-- [ ] Update the two Non-goals sections (carve-out for the reference client, distinct from the
+- [x] Update the two Non-goals sections (carve-out for the reference client, distinct from the
   attestation probe) and add `support/tunnel-app/README.md`. Keep `docs/PROTOCOL.md` accurate — if the
   reference client clarifies any wire detail, update the doc, do not duplicate it.
 
 **Definition of Done:**
-- [ ] Docs are truthful about the reference client and the gate.
+- [x] Docs are truthful about the reference client and the gate.
 
-### Task 8.2 — [ ] Final ground-up verification (double-check EVERYTHING)
+### Task 8.2 — [x] Final ground-up verification (double-check EVERYTHING)
 
 **Actions:**
-- [ ] Re-read this plan top to bottom; confirm every task/action + acceptance criterion is implemented.
-- [ ] Confirm the app satisfies EACH point of `internal/attest/verify.go` and the full `docs/PROTOCOL.md`
+- [x] Re-read this plan top to bottom; confirm every task/action + acceptance criterion is implemented.
+- [x] Confirm the app satisfies EACH point of `internal/attest/verify.go` and the full `docs/PROTOCOL.md`
   §2–§4 contract (both CSRs P-256; identity==attested key; TLS CSR == `<name>.<tunnel-domain>`; frames;
   opaque `/data` splice).
-- [ ] Run `make tunnel-app` (regenerates fixtures, no SDK download) and confirm the committed digest +
+- [x] Run `make tunnel-app` (regenerates fixtures, no SDK download) and confirm the committed digest +
   signer allowlist match.
-- [ ] Run the FULL quality gates (`make build vet lint govulncheck test-unit test-integration test-e2e
+- [x] Run the FULL quality gates (`make build vet lint govulncheck test-unit test-integration test-e2e
   test-scripts compose-config` + `make tidy`), capturing logs per the tee rule; `test-e2e` MUST include
   `TestE2E_ReferenceTunnelApp` PASSING with the device connected, AND the existing
   `TestE2E_DeviceAttestation` still passing.
-- [ ] Confirm the no-device path SKIPS and nothing wires either device test into CI-with-device.
-- [ ] Confirm hygiene: placeholder namespace only, no secrets/real domains/real values, no AI
+- [x] Confirm the no-device path SKIPS and nothing wires either device test into CI-with-device.
+- [x] Confirm hygiene: placeholder namespace only, no secrets/real domains/real values, no AI
   attribution, no plan/finding IDs in code or commit messages, Gradle build outputs gitignored, the three
   new fixtures committed, the `attest-probe` app/fixtures untouched, and NO out-of-scope files changed.
-- [ ] Confirm every `.kt` under `support/tunnel-app/app/src/main/java/com/example/tunnelapp/` is a production
+- [x] Confirm every `.kt` under `support/tunnel-app/app/src/main/java/com/example/tunnelapp/` is a production
   class defined by this plan — the four pre-existing files removed in US1 (`MainActivity.kt`,
   `TunnelReference.kt`, `KtorTlsProbe.kt`, `KeystoreProbe.kt`) are gone and nothing else lingers.
 
 **Definition of Done:**
-- [ ] All gates pass on the final code; the device test passes with a device and skips without one; the
+- [x] All gates pass on the final code; the device test passes with a device and skips without one; the
   ground-up re-read finds zero gaps.
 
 ---
