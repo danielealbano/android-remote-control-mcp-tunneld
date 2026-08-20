@@ -3,6 +3,8 @@ package limit
 import (
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
 )
 
 func newLimiter(t *testing.T, bw, day, week int64) *Limiter {
@@ -11,33 +13,128 @@ func newLimiter(t *testing.T, bw, day, week int64) *Limiter {
 	return NewLimiter(rdb, bw, day, week, time.Hour)
 }
 
-func TestClaimBandwidthPartialGrantAndRefill(t *testing.T) {
-	ctx := ctxT(t)
-	base := time.Unix(1_700_000_000, 0)
-	clk := base
-	l := newLimiter(t, 1000, 1<<40, 1<<40) // 1000 B/s → burst 1000
+// newWindowLimiter builds a Limiter for the per-second byte/packet window tests with a SETTABLE clock
+// (advance via the returned *time.Time so a test can roll the second) and an explicit packet cap.
+func newWindowLimiter(t *testing.T, bwRate, pktCap int64) (*Limiter, *miniredis.Miniredis, *time.Time) {
+	t.Helper()
+	rdb, mr := newTestRedis(t)
+	clk := time.Unix(1_700_000_000, 0)
+	l := NewLimiter(rdb, bwRate, 1<<40, 1<<40, time.Hour, WithPacketCap(pktCap))
 	l.SetClock(func() time.Time { return clk })
+	return l, mr, &clk
+}
 
-	// First claim gets the full burst.
-	g, err := l.ClaimBandwidth(ctx, "t", "out", 800)
-	if err != nil || g != 800 {
-		t.Fatalf("first claim = %d err=%v", g, err)
+// TestChargeBandwidth_ByteWindowOver: at the real 1mbit byte cap, legit ~4 KB reads are byte-capped at
+// ~30 reads/sec — read 30 (122880 B) is under, read 31 (126976 B) trips.
+func TestChargeBandwidth_ByteWindowOver(t *testing.T) {
+	ctx := ctxT(t)
+	l, _, _ := newWindowLimiter(t, 125000, 0) // 1mbit; packet cap disabled so the byte window is what trips
+	for i := 1; i <= 30; i++ {
+		over, _, err := l.ChargeBandwidth(ctx, "t", "in", 4096)
+		if err != nil || over {
+			t.Fatalf("read %d: over=%v err=%v, want over=false", i, over, err)
+		}
 	}
-	// Bucket has ~200 left; asking 500 grants 200.
-	g, _ = l.ClaimBandwidth(ctx, "t", "out", 500)
-	if g != 200 {
-		t.Errorf("drained claim = %d, want 200", g)
+	over, retry, err := l.ChargeBandwidth(ctx, "t", "in", 4096)
+	if err != nil || !over || retry <= 0 {
+		t.Fatalf("read 31: over=%v retry=%v err=%v, want over=true retry>0", over, retry, err)
 	}
-	// Zero tokens now.
-	g, _ = l.ClaimBandwidth(ctx, "t", "out", 100)
-	if g != 0 {
-		t.Errorf("empty bucket claim = %d, want 0", g)
+}
+
+// TestChargeBandwidth_PacketWindowOver: at the real default --limit-packets (100), a 1-byte-read flood
+// trips the PACKET window at read 101 (bytes stay far under the cap).
+func TestChargeBandwidth_PacketWindowOver(t *testing.T) {
+	ctx := ctxT(t)
+	l, _, _ := newWindowLimiter(t, 1<<30, 100) // huge byte cap so only the packet window can trip
+	for i := 1; i <= 100; i++ {
+		over, _, err := l.ChargeBandwidth(ctx, "t", "in", 1)
+		if err != nil || over {
+			t.Fatalf("read %d: over=%v err=%v, want over=false", i, over, err)
+		}
 	}
-	// Advance 1s → refills 1000 (capped at burst).
-	clk = base.Add(time.Second)
-	g, _ = l.ClaimBandwidth(ctx, "t", "out", 1000)
-	if g != 1000 {
-		t.Errorf("refilled claim = %d, want 1000", g)
+	over, _, err := l.ChargeBandwidth(ctx, "t", "in", 1)
+	if err != nil || !over {
+		t.Fatalf("read 101: over=%v err=%v, want over=true", over, err)
+	}
+}
+
+// TestChargeBandwidth_PacketCapDisabled: with pktCap==0 a tiny-read burst never trips on packets.
+func TestChargeBandwidth_PacketCapDisabled(t *testing.T) {
+	ctx := ctxT(t)
+	l, _, _ := newWindowLimiter(t, 1<<30, 0) // packet cap disabled, byte cap huge
+	for i := 1; i <= 500; i++ {
+		if over, _, err := l.ChargeBandwidth(ctx, "t", "in", 1); err != nil || over {
+			t.Fatalf("read %d: over=%v err=%v, want over=false (packet cap disabled)", i, over, err)
+		}
+	}
+}
+
+// TestChargeBandwidth_WindowResetsNextSecond: advancing the clock one second moves to a fresh key, so the
+// counts reset and a read that was over is under again.
+func TestChargeBandwidth_WindowResetsNextSecond(t *testing.T) {
+	ctx := ctxT(t)
+	l, _, clk := newWindowLimiter(t, 4096, 0) // byte cap = one read; the 2nd read in a second trips
+	if over, _, _ := l.ChargeBandwidth(ctx, "t", "in", 4096); over {
+		t.Fatal("read 1 must be under the cap")
+	}
+	if over, _, _ := l.ChargeBandwidth(ctx, "t", "in", 4096); !over {
+		t.Fatal("read 2 in the same second must be over the cap")
+	}
+	*clk = clk.Add(time.Second) // next second → fresh window key
+	if over, _, _ := l.ChargeBandwidth(ctx, "t", "in", 4096); over {
+		t.Fatal("first read of the next second must be under the cap (window reset)")
+	}
+}
+
+// TestChargeBandwidth_ExpireNXSetsTTLOnce: the window key's TTL is set on creation and NOT reset by a
+// later same-second write (EXPIRE NX is a no-op once a TTL exists).
+func TestChargeBandwidth_ExpireNXSetsTTLOnce(t *testing.T) {
+	ctx := ctxT(t)
+	l, mr, clk := newWindowLimiter(t, 1<<30, 0)
+	byteKey, _ := bwWindowKeys("t", "in", clk.Unix())
+	if _, _, err := l.ChargeBandwidth(ctx, "t", "in", 1); err != nil { // creates the key, TTL = bwWindowTTL
+		t.Fatal(err)
+	}
+	mr.FastForward(500 * time.Millisecond)                             // TTL now ~1.5s (miniredis clock only; the window key is unchanged)
+	if _, _, err := l.ChargeBandwidth(ctx, "t", "in", 1); err != nil { // same-second write: EXPIRE NX no-op
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL(byteKey); ttl <= 0 || ttl >= bwWindowTTL {
+		t.Fatalf("TTL = %v, want 0 < ttl < %v (NX must not re-stamp it back to full)", ttl, bwWindowTTL)
+	}
+}
+
+// TestChargeBandwidth_ExpireNXHealsMissingTTL: a window key left WITHOUT a TTL (a simulated orphan) gets
+// one from the NEXT same-second ChargeBandwidth — the self-healing the plain-pipeline choice relies on.
+func TestChargeBandwidth_ExpireNXHealsMissingTTL(t *testing.T) {
+	ctx := ctxT(t)
+	l, mr, clk := newWindowLimiter(t, 1<<30, 0)
+	byteKey, _ := bwWindowKeys("t", "in", clk.Unix())
+	if err := l.rdb.Incr(ctx, byteKey).Err(); err != nil { // orphan: key exists with NO TTL (white-box)
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL(byteKey); ttl != 0 {
+		t.Fatalf("precondition: orphan key must have no TTL, got %v", ttl)
+	}
+	if _, _, err := l.ChargeBandwidth(ctx, "t", "in", 1); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL(byteKey); ttl <= 0 {
+		t.Fatalf("EXPIRE NX must heal the missing TTL, got %v", ttl)
+	}
+}
+
+// TestChargeBandwidth_FailOpenOnValkeyError: a closed Valkey fails open (over=false) with the error.
+func TestChargeBandwidth_FailOpenOnValkeyError(t *testing.T) {
+	ctx := ctxT(t)
+	l, mr, _ := newWindowLimiter(t, 125000, 100)
+	mr.Close() // every Valkey call now errors
+	over, retry, err := l.ChargeBandwidth(ctx, "t", "in", 4096)
+	if err == nil {
+		t.Fatal("a closed Valkey must return an error")
+	}
+	if over || retry != 0 {
+		t.Fatalf("fail-open: over=%v retry=%v, want over=false retry=0", over, retry)
 	}
 }
 
@@ -141,35 +238,6 @@ func TestTrafficExhaustedReadOnly(t *testing.T) {
 	day2, _, _ := l.TrafficExhausted(ctx, "t")
 	if day2 != day {
 		t.Fatal("TrafficExhausted must be read-only")
-	}
-}
-
-// TestClaimBandwidth_ClockStepBackNoInflation: a now<last claim must not move the refill anchor
-// backward (which would fabricate tokens on the next forward advance).
-func TestClaimBandwidth_ClockStepBackNoInflation(t *testing.T) {
-	ctx := ctxT(t)
-	base := time.Unix(1_700_000_000, 0)
-	clk := base
-	l := newLimiter(t, 1000, 1<<40, 1<<40) // 1000 B/s → burst 1000
-	l.SetClock(func() time.Time { return clk })
-
-	// Seed + drain the bucket at base: full burst granted, tokens now 0, anchor = base.
-	if g, err := l.ClaimBandwidth(ctx, "t", "out", 1000); err != nil || g != 1000 {
-		t.Fatalf("seed drain = %d err=%v", g, err)
-	}
-	// Clock steps BACKWARD (skew): the empty bucket still grants 0 and the anchor must not regress.
-	clk = base.Add(-time.Second)
-	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 0 {
-		t.Fatalf("step-back claim must grant 0 (empty bucket), got %d", g)
-	}
-	// Back AT base: because the anchor never regressed, elapsed is 0 → no tokens are fabricated.
-	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 0 {
-		t.Fatalf("anchor regressed: a base-time claim fabricated %d tokens", g)
-	}
-	// A genuine forward advance still refills normally.
-	clk = base.Add(time.Second)
-	if g, _ := l.ClaimBandwidth(ctx, "t", "out", 1000); g != 1000 {
-		t.Fatalf("forward refill = %d, want 1000", g)
 	}
 }
 

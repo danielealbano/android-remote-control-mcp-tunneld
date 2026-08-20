@@ -79,7 +79,7 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 	if _, err := l.AcquireStream(ctx, "tunnel-x", 4); err != nil { // conc:
 		t.Fatal(err)
 	}
-	if _, err := l.ClaimBandwidth(ctx, "tunnel-x", "in", 1024); err != nil { // bw:
+	if _, _, err := l.ChargeBandwidth(ctx, "tunnel-x", "in", 1024); err != nil { // bw: + pkt:
 		t.Fatal(err)
 	}
 	if _, _, err := l.ClaimTraffic(ctx, "tunnel-x", 1024); err != nil { // traf:day + traf:week
