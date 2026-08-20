@@ -39,7 +39,7 @@ type StreamLimiter interface {
 	AcquireStream(ctx context.Context, name string, maxN int) (bool, error)
 	ReleaseStream(ctx context.Context, name string) error
 	ClaimTraffic(ctx context.Context, name string, n int64) (dayOK, weekOK bool, err error)
-	ClaimBandwidth(ctx context.Context, name, dir string, want int64) (int64, error)
+	ChargeBandwidth(ctx context.Context, name, dir string, nr int64) (over bool, retryAfter time.Duration, err error)
 	TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error)
 	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)
 }
