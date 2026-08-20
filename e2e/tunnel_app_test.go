@@ -37,8 +37,8 @@ const tunnelAppPkg = "com.example.tunnelapp"
 const tunnelAppDevicePort = 18443
 
 // waitLoadStreams is the per-protocol concurrency of the /wait throughput check (h1 connections AND h2
-// streams). Kept small: the ≤2*N ~1 MiB/s streams share the tunnel's per-direction bw bucket, sized above
-// via replicaOpts.bandwidth so pacing does not engage.
+// streams). Kept small: the ≤2*N ~1 MiB/s streams share the tunnel's per-direction per-second bandwidth
+// window, sized above via replicaOpts.bandwidth so pacing does not engage.
 const waitLoadStreams = 4
 
 // TestE2E_ReferenceTunnelApp drives the committed reference client on a locally-connected Android device

@@ -110,7 +110,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
-		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: 8, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: 8, LimitPackets: 100000, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
 		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 10 * time.Second,
 		LimitConnMinRate: "1kb", LimitConnProtectRate: "10kb", LimitBandwidth: "1mbit",
 		LimitTrafficDay: "1gb", LimitTrafficWeek: "4gb",

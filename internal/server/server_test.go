@@ -115,6 +115,7 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		MaxClients:       100,
 		LimitConnRate:    100,
 		LimitConcurrent:  8,
+		LimitPackets:     100000,
 		HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
 		LimitConnIdle:        120 * time.Second,
 		LimitConnMinGrace:    10 * time.Second,
