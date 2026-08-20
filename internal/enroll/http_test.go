@@ -33,7 +33,7 @@ func TestHandlerBanFirst(t *testing.T) {
 	banned := netip.MustParseAddr("203.0.113.13")
 	h := newTestHandler(t, svc, func(a netip.Addr) bool { return a == banned })
 
-	req := httptest.NewRequest("GET", "/enroll/nonce", nil)
+	req := httptest.NewRequest("GET", "/api/v1/enroll/nonce", nil)
 	req.RemoteAddr = "203.0.113.13:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -63,7 +63,7 @@ func TestHandlerDecodeErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", "/enroll", bytes.NewReader([]byte(tc.body)))
+			req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader([]byte(tc.body)))
 			req.RemoteAddr = "203.0.113.14:5000"
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, req)
@@ -99,7 +99,7 @@ func TestHandlerStructuredError(t *testing.T) {
 	if e := svc.enrollLimit(context.Background(), "203.0.113.15"); e != nil {
 		t.Fatalf("first limit draw must pass: %v", e)
 	}
-	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(body()))
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(body()))
 	req.RemoteAddr = "203.0.113.15:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -113,7 +113,7 @@ func TestHandlerStructuredError(t *testing.T) {
 }
 
 // TestHandlerNonceRouteRateLimited: the plan's "nonce route rate-limited" row — an over-limit IP is
-// refused on GET /enroll/nonce and no Valkey nonce key is created.
+// refused on GET /api/v1/enroll/nonce and no Valkey nonce key is created.
 func TestHandlerNonceRouteRateLimited(t *testing.T) {
 	st := tunneltest.NewStore()
 	_, idPub := newCSR(t)
@@ -122,7 +122,7 @@ func TestHandlerNonceRouteRateLimited(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	get := func() *httptest.ResponseRecorder {
-		req := httptest.NewRequest("GET", "/enroll/nonce", nil)
+		req := httptest.NewRequest("GET", "/api/v1/enroll/nonce", nil)
 		req.RemoteAddr = "203.0.113.16:5000"
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, req)
@@ -140,7 +140,7 @@ func TestHandlerNonceRouteRateLimited(t *testing.T) {
 	}
 }
 
-// TestHandleNonce_BadSourceIPIs400 verifies the GET /enroll/nonce route answers 400 bad_source_ip for an
+// TestHandleNonce_BadSourceIPIs400 verifies the GET /api/v1/enroll/nonce route answers 400 bad_source_ip for an
 // unparseable peer IP (not 429): the ban gate fails closed.
 func TestHandleNonce_BadSourceIPIs400(t *testing.T) {
 	st := tunneltest.NewStore()
@@ -149,7 +149,7 @@ func TestHandleNonce_BadSourceIPIs400(t *testing.T) {
 		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
 	h := newTestHandler(t, svc, nil)
 
-	req := httptest.NewRequest("GET", "/enroll/nonce", nil)
+	req := httptest.NewRequest("GET", "/api/v1/enroll/nonce", nil)
 	req.RemoteAddr = "not-an-ip" // no host:port → unparseable
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -163,7 +163,7 @@ func TestHandleNonce_BadSourceIPIs400(t *testing.T) {
 	}
 }
 
-// TestServeHTTP_UnparseableIPRejected verifies the POST /enroll route also refuses an unparseable peer IP
+// TestServeHTTP_UnparseableIPRejected verifies the POST /api/v1/enroll route also refuses an unparseable peer IP
 // BEFORE dispatch (fail closed), without touching the service.
 func TestServeHTTP_UnparseableIPRejected(t *testing.T) {
 	st := tunneltest.NewStore()
@@ -173,7 +173,7 @@ func TestServeHTTP_UnparseableIPRejected(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(mintNonce(t, svc)), IdentityCSR: csrPEM(t, idCSR)})
-	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "garbage-addr"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -197,7 +197,7 @@ func TestHandlerNonceMintedBeforeClaim(t *testing.T) {
 	nonce := mintNonce(t, svc)
 	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
 	mr.Close() // Valkey down: the issue-nonce mint fails (and so would everything after)
-	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.17:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -219,7 +219,7 @@ func TestHandlerHappyPath(t *testing.T) {
 
 	nonce := mintNonce(t, svc)
 	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
-	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.18:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
@@ -242,7 +242,7 @@ func hexEncode(b []byte) string {
 	return string(out)
 }
 
-// TestHandlerOverLimitDoesNotMintNonce: an over-limit POST /enroll is refused BEFORE the issue-nonce
+// TestHandlerOverLimitDoesNotMintNonce: an over-limit POST /api/v1/enroll is refused BEFORE the issue-nonce
 // mint — flooding the unauthenticated surface must not mint Valkey keys.
 func TestHandlerOverLimitDoesNotMintNonce(t *testing.T) {
 	st := tunneltest.NewStore()
@@ -258,7 +258,7 @@ func TestHandlerOverLimitDoesNotMintNonce(t *testing.T) {
 	keysBefore := len(mr.Keys())
 
 	b, _ := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
-	req := httptest.NewRequest("POST", "/enroll", bytes.NewReader(b))
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.19:5000"
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)

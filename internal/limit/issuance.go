@@ -11,7 +11,7 @@ import (
 
 // The issuance counter iss:{name} is consumed ONLY on a SUCCESSFUL public-cert issuance (via
 // IssuanceRecord), so the per-tunnel/week cap counts successes only. The pre-issuance gate reserves a
-// short-lived INFLIGHT slot (iss_inflight:{name}) so concurrent /issue calls cannot both pass a cap
+// short-lived INFLIGHT slot (iss_inflight:{name}) so concurrent /api/v1/issue calls cannot both pass a cap
 // that they only commit against at the end — a crashed order's slot self-expires, and a failed order
 // never burns the weekly window.
 
@@ -29,7 +29,7 @@ func issuanceKey(name string) string { return "iss:" + name }
 func inflightKey(name string) string { return "iss_inflight:" + name }
 
 // issuanceBeginScript purges expired slots, gates committed+inflight against the cap, and inserts
-// this order's slot — all in ONE script so concurrent /issue calls cannot both pass.
+// this order's slot — all in ONE script so concurrent /api/v1/issue calls cannot both pass.
 // KEYS[1]=iss:{name} KEYS[2]=iss_inflight:{name} ARGV: maxN, nowMs, orderID, slotTTLms, keyTTLms.
 var issuanceBeginScript = redis.NewScript(`
 local now = tonumber(ARGV[2])
@@ -128,7 +128,7 @@ func (l *Limiter) IssuanceRecord(ctx context.Context, name string) error {
 }
 
 // newOrderID mints a per-order identifier (4 crypto/rand bytes, 8 lowercase hex) used as the inflight
-// hash field for one /issue call.
+// hash field for one /api/v1/issue call.
 func newOrderID() (string, error) {
 	var buf [4]byte
 	if _, err := rand.Read(buf[:]); err != nil {

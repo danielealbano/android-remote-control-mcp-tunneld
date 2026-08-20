@@ -14,7 +14,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
 
-// stubController is a mesh.Controller for the /admin/renew local-nudge path (no phoneconn needed).
+// stubController is a mesh.Controller for the /api/v1/admin/renew local-nudge path (no phoneconn needed).
 type stubController struct {
 	called bool
 	tunnel string
@@ -40,16 +40,16 @@ func newTestRegistry(t *testing.T) *router.Registry {
 func TestAdminRenew_NonPost(t *testing.T) {
 	h := adminRenewHandler("nodeA", newTestRegistry(t), &stubController{}, nil, testLogger())
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("GET", "http://internal/admin/renew?tunnel=t", nil))
+	h.ServeHTTP(w, httptest.NewRequest("GET", "http://internal/api/v1/admin/renew?tunnel=t", nil))
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET /admin/renew must be 405, got %d", w.Code)
+		t.Fatalf("GET /api/v1/admin/renew must be 405, got %d", w.Code)
 	}
 }
 
 func TestAdminRenew_MissingTunnel(t *testing.T) {
 	h := adminRenewHandler("nodeA", newTestRegistry(t), &stubController{}, nil, testLogger())
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/admin/renew", nil))
+	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/api/v1/admin/renew", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("missing tunnel must be 400, got %d", w.Code)
 	}
@@ -59,7 +59,7 @@ func TestAdminRenew_NoRoute(t *testing.T) {
 	ctl := &stubController{nudged: true}
 	h := adminRenewHandler("nodeA", newTestRegistry(t), ctl, nil, testLogger())
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/admin/renew?tunnel=nobody", nil))
+	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/api/v1/admin/renew?tunnel=nobody", nil))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("an unbound tunnel must be 404, got %d", w.Code)
 	}
@@ -77,7 +77,7 @@ func TestAdminRenew_Local(t *testing.T) {
 	ctl := &stubController{nudged: true}
 	h := adminRenewHandler("nodeA", reg, ctl, nil, testLogger())
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/admin/renew?tunnel=t", nil))
+	h.ServeHTTP(w, httptest.NewRequest("POST", "http://internal/api/v1/admin/renew?tunnel=t", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("local renew must be 200, got %d", w.Code)
 	}

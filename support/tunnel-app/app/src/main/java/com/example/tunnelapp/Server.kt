@@ -40,7 +40,7 @@ class Server(private val port: Int, private val appNonce: String, private val na
     }
 
     // swapIdentity restarts the embedded server on the SAME fixed port with the new key/chain. Transparent
-    // because /data dial-backs are per-connection (no persistent listener connection to preserve).
+    // because /api/v1/data dial-backs are per-connection (no persistent listener connection to preserve).
     @Synchronized
     fun swapIdentity(tlsKey: PrivateKey, chain: Array<X509Certificate>) {
         if (stopped) return

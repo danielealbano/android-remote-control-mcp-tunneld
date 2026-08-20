@@ -1,5 +1,5 @@
 // Package admin holds per-tunnel live counters (bytes in/out) in Redis with a TTL, feeding
-// the internal /admin/tunnels endpoint. TunnelStat lives here (not in metrics) to break the
+// the internal /api/v1/admin/tunnels endpoint. TunnelStat lives here (not in metrics) to break the
 // metrics↔admin import cycle: metrics imports admin, admin imports nothing from metrics.
 package admin
 
@@ -89,7 +89,7 @@ func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {
 func atoi64(s string) int64 {
 	// The error is intentionally ignored: an absent hash field returns "" here (→ 0, the correct default
 	// for a counter not yet written), and the values are our own INCR-written integers. A corrupt value
-	// likewise degrades to 0 rather than failing the whole /admin/tunnels read.
+	// likewise degrades to 0 rather than failing the whole /api/v1/admin/tunnels read.
 	v, _ := strconv.ParseInt(s, 10, 64)
 	return v
 }

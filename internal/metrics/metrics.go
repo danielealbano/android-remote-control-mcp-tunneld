@@ -1,5 +1,5 @@
 // Package metrics registers the Prometheus metric families into a CUSTOM registry (never the default
-// one), plus the internal listener (/metrics, /healthz, /admin/tunnels) and the PromRecorder that
+// one), plus the internal listener (/metrics, /healthz, /api/v1/admin/tunnels) and the PromRecorder that
 // implements observ.Recorder. NO per-tunnel metric labels (cardinality).
 package metrics
 

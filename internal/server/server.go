@@ -187,7 +187,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute,
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.EnrollHost), MinVersion: tls.VersionTLS12}}
 	// The control server's idle timeout closes mTLS-authenticated HTTP/2 conns holding NO active stream
-	// (a bound phone always keeps its /control stream open, so real connections are never idle).
+	// (a bound phone always keeps its /api/v1/control stream open, so real connections are never idle).
 	controlSrv := &http.Server{Handler: phoneHandler, ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout: 4 * cfg.ControlPingInterval,
 		ConnContext: phoneconn.ConnContext,
@@ -206,9 +206,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 
 	// Internal server (metrics + healthz + admin + force-renew; never proxied). The mux mounts
-	// /admin/renew and delegates everything else to the existing metrics handler (unchanged).
+	// /api/v1/admin/renew and delegates everything else to the existing metrics handler (unchanged).
 	internalMux := http.NewServeMux()
-	internalMux.Handle("/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
+	internalMux.Handle("/api/v1/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
 	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
@@ -287,7 +287,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	<-gctx.Done()
 	// Ordered drain: stop accepting new public connections (close the raw listener) → actively close the
-	// live phone control connections (each /control handler returns, running its teardown: owner-conditional
+	// live phone control connections (each /api/v1/control handler returns, running its teardown: owner-conditional
 	// route unbind + the durable end event — a never-idle control stream would otherwise pin Shutdown for
 	// the full grace and skip both) → drain the HTTP servers → join every in-flight public splice handler
 	// (so their end events are enqueued) → join the errgroup goroutines → flush the async conn-log queue

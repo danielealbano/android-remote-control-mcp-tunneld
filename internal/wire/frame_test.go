@@ -40,7 +40,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 	}
 }
 
-// TestControlTypeValuesFrozen pins the numeric wire values of the v2 frame set — docs/PROTOCOL.md §3
+// TestControlTypeValuesFrozen pins the numeric wire values of the v1 frame set — docs/PROTOCOL.md §3
 // is the canonical contract the Kotlin client conforms to, so these bytes must never drift.
 func TestControlTypeValuesFrozen(t *testing.T) {
 	want := map[ControlType]byte{CtrlOpen: 1, CtrlPing: 2, CtrlPong: 3, CtrlRenewNudge: 4}

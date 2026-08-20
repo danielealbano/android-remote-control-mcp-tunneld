@@ -180,7 +180,7 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
 
 	pr, pw := io.Pipe() // request body: entry→owner (client→phone bytes)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/mesh/data", pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/api/v1/mesh/data", pr)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (
 	if err != nil {
 		return ControlResponse{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/mesh/control", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/api/v1/mesh/control", bytes.NewReader(body))
 	if err != nil {
 		return ControlResponse{}, err
 	}

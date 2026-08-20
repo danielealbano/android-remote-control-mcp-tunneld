@@ -21,7 +21,7 @@ import (
 type Backend func(stream io.ReadWriteCloser)
 
 // Client is the HTTP/2 phone control client. It holds a hot-swappable identity (rotated via the mTLS
-// POST /issue exchange in Renew, not a control frame) and opens dial-back data streams to a
+// POST /api/v1/issue exchange in Renew, not a control frame) and opens dial-back data streams to a
 // caller-supplied backend.
 type Client struct {
 	dialAddr     string
@@ -43,7 +43,7 @@ type Client struct {
 
 // New builds a control client that dials dialAddr, negotiates TLS with SNI/Host controlHost (trusting
 // caPool), presents ident as the mTLS client cert, serves dial-back streams to backend, and renews via
-// the mTLS POST /issue endpoint (needing tunnelDomain to request <name>.<tunnelDomain>).
+// the mTLS POST /api/v1/issue endpoint (needing tunnelDomain to request <name>.<tunnelDomain>).
 func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend) (*Client, error) {
 	c := &Client{
 		dialAddr: dialAddr, controlHost: controlHost, tunnelDomain: tunnelDomain,
@@ -96,7 +96,7 @@ func (c *Client) Identity() *Identity {
 // Run opens the control connection and serves it until ctx is cancelled or the connection drops.
 func (c *Client) Run(ctx context.Context) error {
 	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+c.controlHost+"/control", pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+c.controlHost+"/api/v1/control", pr)
 	if err != nil {
 		return err
 	}
@@ -167,7 +167,7 @@ func (c *Client) sendControl(t wire.ControlType, payload any) {
 	_, _ = c.sendW.Write(frame)
 }
 
-// readControlFrame reads one length-framed v2 control frame ([type:1][len:4 BE][payload]) from r.
+// readControlFrame reads one length-framed v1 control frame ([type:1][len:4 BE][payload]) from r.
 func readControlFrame(r io.Reader) ([]byte, error) {
 	var hdr [5]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

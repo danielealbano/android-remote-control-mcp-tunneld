@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
-// Tunnel maintains the outbound mTLS HTTP/2 control connection and services /data dial-backs. Both streams
+// Tunnel maintains the outbound mTLS HTTP/2 control connection and services /api/v1/data dial-backs. Both streams
 // are OkHttp DUPLEX (isDuplex()=true).
 class Tunnel(
     private val client: OkHttpClient,   // the identity-mTLS client (Identity.mtlsClient())
@@ -21,7 +21,7 @@ class Tunnel(
     private val running = AtomicBoolean(true)
     fun stop() = running.set(false)
 
-    // run opens /control and services it until stopped; a torn stream reconnects with backoff.
+    // run opens /api/v1/control and services it until stopped; a torn stream reconnects with backoff.
     fun run() {
         var backoff = 200L
         while (running.get()) {
@@ -34,7 +34,7 @@ class Tunnel(
     private fun serveControlOnce() {
         var sink: BufferedSink? = null
         val body = duplexBody { sink = it }
-        client.newCall(Request.Builder().url("https://$controlHost:$port/control").post(body).build())
+        client.newCall(Request.Builder().url("https://$controlHost:$port/api/v1/control").post(body).build())
             .execute().use { resp ->
                 if (resp.code != 200) return
                 val s = sink ?: return
@@ -55,7 +55,7 @@ class Tunnel(
             }
     }
 
-    // handleOpen: duplex /data dial-back spliced OPAQUELY to a fresh socket to the local server. Request
+    // handleOpen: duplex /api/v1/data dial-back spliced OPAQUELY to a fresh socket to the local server. Request
     // body = phone→client (local→sink), response body = client→phone (resp→local). No framing.
     private fun handleOpen(streamId: String) {
         val local = try { Socket("127.0.0.1", localServerPort()) } catch (_: Throwable) { return }
@@ -63,7 +63,7 @@ class Tunnel(
             var sink: BufferedSink? = null
             val body = duplexBody { sink = it }
             client.newCall(
-                Request.Builder().url("https://$controlHost:$port/data")
+                Request.Builder().url("https://$controlHost:$port/api/v1/data")
                     .addHeader("X-Stream-Id", streamId).post(body).build(),
             ).execute().use { resp ->
                 if (resp.code != 200) return

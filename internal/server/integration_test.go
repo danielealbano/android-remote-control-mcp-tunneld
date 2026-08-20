@@ -275,14 +275,14 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	}
 
 	// Renewal rotates the certs: inject a server-minted challenge nonce, trigger a renewal via the real
-	// mTLS POST /issue (the Renew path, since a cert already exists), and assert the identity cert changes.
+	// mTLS POST /api/v1/issue (the Renew path, since a cert already exists), and assert the identity cert changes.
 	oldIDCert := string(c.Identity().IdentityCertPEM)
 	nonceHex := randomHex(t)
 	if err := env.rdb.Set(ctx, "enroll-nonce:"+nonceHex, "1", 5*time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Renew(ctx, nonceHex); err != nil {
-		t.Fatalf("renewal via /issue failed: %v", err)
+		t.Fatalf("renewal via /api/v1/issue failed: %v", err)
 	}
 	if string(c.Identity().IdentityCertPEM) == oldIDCert || len(c.Identity().PublicCertPEM) == 0 {
 		t.Error("renewal must rotate the identity + public certs")

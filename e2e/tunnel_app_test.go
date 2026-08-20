@@ -138,7 +138,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 		"tunnelDomain", e2eTunnelDomain,
 	)
 
-	// The app enrolls → issues → starts its local server → opens the duplex /control (binding the route),
+	// The app enrolls → issues → starts its local server → opens the duplex /api/v1/control (binding the route),
 	// then writes info.json + the `ready` marker (the assigned name).
 	name := strings.TrimSpace(string(pollAppFile(t, serial, tunnelAppPkg, "ready", 150*time.Second)))
 	if name == "" {
@@ -179,7 +179,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	}
 	f1 := info1.TLSCertSHA256
 
-	// Refresh: force a fresh /issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
+	// Refresh: force a fresh /api/v1/issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
 	// completion markers first; the app rewrites them after the swap.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error")
 	amBroadcast(t, serial, "refresh")
@@ -205,12 +205,12 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	assertPhoneCert(t, edge, fqdn, inf.pebble.IssuingRoots) // still validating after the swap
 	t.Logf("refresh rotated the cert: %s -> %s", f1, info2.TLSCertSHA256)
 
-	// Server-driven nudge: /admin/renew (single replica → owner == this node → local nudge) forces a
+	// Server-driven nudge: /api/v1/admin/renew (single replica → owner == this node → local nudge) forces a
 	// RENEW_NUDGE frame WITHOUT a refresh broadcast; the app decodes it, re-issues, and hot-swaps the cert.
 	// This exercises the Kotlin RENEW_NUDGE-decode → Enroll.issue → swap path on real hardware.
 	f2 := info2.TLSCertSHA256
 	if status, nudged := postAdminRenew(t, inf.internal[edge], name); status != http.StatusOK || !nudged {
-		t.Fatalf("/admin/renew (local nudge) = (status %d, nudged %v), want (200, true)", status, nudged)
+		t.Fatalf("/api/v1/admin/renew (local nudge) = (status %d, nudged %v), want (200, true)", status, nudged)
 	}
 	var info3 infoResp
 	if !waitBool(90*time.Second, func() bool {

@@ -26,7 +26,7 @@ type NameValidator func(name string) bool
 type BanTunnel func(name, fingerprint string) bool
 
 // Handler is the phone control-plane HTTP handler (mounted behind the reserved --control-host TLS
-// terminator by server.Run). It serves the long-lived /control stream and the dial-back /data streams,
+// terminator by server.Run). It serves the long-lived /api/v1/control stream and the dial-back /api/v1/data streams,
 // both authenticated by the internal-CA identity client cert (mTLS). The name is DERIVED from the cert
 // CN (the phone dials the single shared --control-host).
 type Handler struct {
@@ -46,7 +46,7 @@ type Handler struct {
 // BanIP reports whether the phone's peer IP is banned.
 type BanIP func(addr netip.Addr) bool
 
-// IssueRequest is the POST /issue body: a fresh attestation over the enroll/nudge nonce plus rotated
+// IssueRequest is the POST /api/v1/issue body: a fresh attestation over the enroll/nudge nonce plus rotated
 // identity and TLS CSRs. It is the SINGLE certificate-generation request for BOTH the initial public
 // cert (right after enrollment) and every renewal — it regenerates the identity + public certs together.
 type IssueRequest struct {
@@ -89,7 +89,7 @@ type HandlerConfig struct {
 	PingInterval  time.Duration
 	StreamPending int
 	OnIssue       IssueFunc
-	IssueBody     int64 // max POST /issue body (bytes); defaults to 256 KiB
+	IssueBody     int64 // max POST /api/v1/issue body (bytes); defaults to 256 KiB
 }
 
 // RejectFunc records one rejection (reason ∈ observ.RejectReasons — satisfied by PromRecorder.Reject).
@@ -168,19 +168,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/control":
-		if r.Method != http.MethodPost { // docs/PROTOCOL.md §3: the control stream is a POST /control
+	case "/api/v1/control":
+		if r.Method != http.MethodPost { // docs/PROTOCOL.md §3: the control stream is a POST /api/v1/control
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		h.serveControl(w, r, id)
-	case "/data":
-		if r.Method != http.MethodPost { // docs/PROTOCOL.md §4: the dial-back is a POST /data
+	case "/api/v1/data":
+		if r.Method != http.MethodPost { // docs/PROTOCOL.md §4: the dial-back is a POST /api/v1/data
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		h.serveData(w, r, id.name)
-	case "/issue":
+	case "/api/v1/issue":
 		h.serveIssue(w, r, id.name, id.fingerprint)
 	default:
 		http.NotFound(w, r)
@@ -333,7 +333,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 }
 
 // readPump drains incoming control frames from the phone (length-framed). The phone→server direction
-// carries only PONG liveness (certificate work moved to the mTLS POST /issue endpoint); a read error
+// carries only PONG liveness (certificate work moved to the mTLS POST /api/v1/issue endpoint); a read error
 // or a malformed frame tears the connection down.
 func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {

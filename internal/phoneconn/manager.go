@@ -289,7 +289,7 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	}
 }
 
-// deliverStream hands an arriving dial-back data stream to its waiter (called by the /data handler). The
+// deliverStream hands an arriving dial-back data stream to its waiter (called by the /api/v1/data handler). The
 // check + delete + send happen UNDER the connection lock so they are atomic with OpenStream's cancel
 // (cancelPending): a stream is therefore either delivered to a still-live waiter or reported undeliverable
 // (returns false → the caller closes it) — it can never be sent to an abandoned buffered waiter.
@@ -302,7 +302,7 @@ func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 	defer c.mu.Unlock()
 	if c.closed {
 		// The conn was evicted/closed (e.g. a ban reload) while this dial-back was in flight: refuse
-		// delivery so the /data handler answers 404 and closes the stream, rather than starting a splice
+		// delivery so the /api/v1/data handler answers 404 and closes the stream, rather than starting a splice
 		// on a torn-down connection.
 		return false
 	}
@@ -316,7 +316,7 @@ func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
 }
 
 // CloseAll closes every live phone connection with the given close reason. Called at server drain so
-// each /control handler returns and its deferred teardown runs (owner-conditional route unbind + the
+// each /api/v1/control handler returns and its deferred teardown runs (owner-conditional route unbind + the
 // durable end event) instead of the connections outliving Run and losing both.
 func (m *Manager) CloseAll(reason string) {
 	m.mu.RLock()
@@ -361,7 +361,7 @@ func (m *Manager) ConnectedNames() []string {
 }
 
 // SendRenewNudge enqueues a RENEW_NUDGE control frame carrying a fresh single-use challenge nonce,
-// prompting the phone to renew via the mTLS POST /issue endpoint. Returns false if no live connection
+// prompting the phone to renew via the mTLS POST /api/v1/issue endpoint. Returns false if no live connection
 // exists or the send buffer is full (the next watcher tick retries).
 func (m *Manager) SendRenewNudge(name, nonceHex, ariWindow string) bool {
 	c, ok := m.lookup(name)
@@ -410,7 +410,7 @@ func (c *conn) isClosed() bool {
 
 // cancelPending abandons a pending dial-back waiter (the dial-back deadline fired or the send failed): it
 // removes the registration under the lock, then drains + closes any stream deliverStream raced in and
-// delivered to the buffered waiter, so an orphaned /data handler cannot leak. Because deliverStream
+// delivered to the buffered waiter, so an orphaned /api/v1/data handler cannot leak. Because deliverStream
 // sends under the same lock, once the delete returns either a stream is already in `waiter` (drained
 // here) or deliverStream will observe the registration gone and report the stream undeliverable.
 func (c *conn) cancelPending(streamID string, waiter chan DataStream) {

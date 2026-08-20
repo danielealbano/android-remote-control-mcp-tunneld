@@ -57,7 +57,7 @@ class Identity(
     // publicLeaf: the issued leaf cert, for the status file's tls_cert_sha256.
     fun publicLeaf(): X509Certificate = synchronized(lock) { publicChain[0] }
 
-    // issueBase: the stable inputs to the next /issue (name, CA hint, current generation), read before the call.
+    // issueBase: the stable inputs to the next /api/v1/issue (name, CA hint, current generation), read before the call.
     fun issueBase(): Triple<String, String, Int> = synchronized(lock) { Triple(name, caId, generation) }
 
     // install atomically swaps in the rotated certs/aliases and returns the two-generations-back
@@ -92,14 +92,14 @@ object Enroll {
     // enroll: two-phase attested enrollment → a fully-issued Identity.
     fun enroll(port: Int, enrollHost: String, controlHost: String, tunnelDomain: String, trust: X509TrustManager): Identity {
         val server = Tls.serverClient(trust)
-        val nonce = getJson(server, "https://$enrollHost:$port/enroll/nonce").getString("nonce")
+        val nonce = getJson(server, "https://$enrollHost:$port/api/v1/enroll/nonce").getString("nonce")
         val idAlias = "tunnel-identity-0"
         Keys.generateEcKey(idAlias, Keys.hexToBytes(nonce)) // attested over the enroll nonce
         val body = JSONObject()
             .put("nonce", nonce)
             .put("attestation_chain", Keys.attestationChainPem(idAlias))
             .put("identity_csr", Csr.identityCsr(Keys.privateKey(idAlias), Keys.publicKey(idAlias)))
-        val (status, resp) = postJson(server, "https://$enrollHost:$port/enroll", body.toString())
+        val (status, resp) = postJson(server, "https://$enrollHost:$port/api/v1/enroll", body.toString())
         if (status != 200) fail(status, resp)
         val r = JSONObject(resp)
         val id = Identity(
@@ -112,7 +112,7 @@ object Enroll {
 
     // issue: Phase 2 / every renewal, serialized by id.issueLock so two overlapping renewals cannot collide
     // on the next generation's alias. On a RETRYABLE server error it follows the documented retry path
-    // (docs/PROTOCOL.md §3): fetch a FRESH nonce from GET /enroll/nonce, wait retry_after, then re-issue (bounded).
+    // (docs/PROTOCOL.md §3): fetch a FRESH nonce from GET /api/v1/enroll/nonce, wait retry_after, then re-issue (bounded).
     fun issue(id: Identity, nonce: String) {
         synchronized(id.issueLock) {
             var attempt = 0
@@ -120,14 +120,14 @@ object Enroll {
             while (true) {
                 try { issueOnce(id, n); return } catch (e: EnrollError) {
                     if (!e.retryable || attempt++ >= MAX_ISSUE_RETRIES) throw e
-                    n = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/enroll/nonce").getString("nonce")
+                    n = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/api/v1/enroll/nonce").getString("nonce")
                     Thread.sleep(e.retryAfterSec.coerceAtLeast(1) * 1000)
                 }
             }
         }
     }
 
-    // issueOnce: one /issue attempt (holds id.issueLock via issue). Fresh attested identity key (over nonce) +
+    // issueOnce: one /api/v1/issue attempt (holds id.issueLock via issue). Fresh attested identity key (over nonce) +
     // fresh TLS key, mTLS-auth'd with the current live identity; on 200 install the rotated certs/aliases
     // ATOMICALLY, then drop the superseded keys — BOTH the identity and TLS keys one generation late so
     // neither a concurrent mTLS handshake nor the still-live old local server loses its key.
@@ -147,7 +147,7 @@ object Enroll {
                 .put("attestation_chain", Keys.attestationChainPem(nextId))
                 .put("identity_csr", Csr.identityCsr(Keys.privateKey(nextId), Keys.publicKey(nextId)))
                 .put("tls_csr", Csr.tlsCsr(Keys.privateKey(nextTls), Keys.publicKey(nextTls), fqdn))
-            val (status, resp) = postJson(id.mtlsClient(), "https://${id.controlHost}:${id.port}/issue", body.toString())
+            val (status, resp) = postJson(id.mtlsClient(), "https://${id.controlHost}:${id.port}/api/v1/issue", body.toString())
             if (status != 200) fail(status, resp)
             val r = JSONObject(resp)
             Triple(parseChain(r.getString("identity_cert")), parseChain(r.getString("public_cert")), r.optString("ca", base.second))
@@ -162,7 +162,7 @@ object Enroll {
     // renew: the MANUAL refresh path (no RENEW_NUDGE frame to carry a nonce) mints a fresh nonce, then
     // issues. A RENEW_NUDGE passes its frame's nonce straight to issue().
     fun renew(id: Identity) {
-        val nonce = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/enroll/nonce").getString("nonce")
+        val nonce = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/api/v1/enroll/nonce").getString("nonce")
         issue(id, nonce)
     }
 

@@ -270,8 +270,8 @@ func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 }
 
 // TestE2E_CrossNodeRenewNudge proves the cross-node force-renew path: the phone's control connection is
-// owned by replica B, but /admin/renew is POSTed to the NON-owner replica A. A routes to the owner over
-// /mesh/control, B mints a nonce and nudges the phone, and the Go client answers by rotating its public
+// owned by replica B, but /api/v1/admin/renew is POSTed to the NON-owner replica A. A routes to the owner over
+// /api/v1/mesh/control, B mints a nonce and nudges the phone, and the Go client answers by rotating its public
 // cert. An unknown tunnel (no bound route) is 404.
 func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 	inf := startE2EInfra(t)
@@ -294,7 +294,7 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 	// Force a renew via the NON-owner replica A; A meshes to the owner B, which nudges the phone.
 	status, nudged := postAdminRenew(t, inf.internal[edgeA], ident.Name)
 	if status != http.StatusOK || !nudged {
-		t.Fatalf("/admin/renew on the non-owner replica = (status %d, nudged %v), want (200, true)", status, nudged)
+		t.Fatalf("/api/v1/admin/renew on the non-owner replica = (status %d, nudged %v), want (200, true)", status, nudged)
 	}
 
 	// The Go client answers the RENEW_NUDGE by rotating its public cert.
@@ -306,7 +306,7 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 
 	// An unknown tunnel has no bound route → 404.
 	if s, _ := postAdminRenew(t, inf.internal[edgeA], "nosuchtunnel"); s != http.StatusNotFound {
-		t.Fatalf("/admin/renew for an unknown tunnel = %d, want 404", s)
+		t.Fatalf("/api/v1/admin/renew for an unknown tunnel = %d, want 404", s)
 	}
 }
 
@@ -534,16 +534,16 @@ func metricCounterPositive(internalAddr, family string) bool {
 	return false
 }
 
-// postAdminRenew POSTs /admin/renew?tunnel=<name> to a replica's internal listener. It returns the HTTP
+// postAdminRenew POSTs /api/v1/admin/renew?tunnel=<name> to a replica's internal listener. It returns the HTTP
 // status and, on a 200, the decoded {nudged} value (false for any non-200, so callers can assert both the
 // 200/nudged path and the 404 no-route path).
 func postAdminRenew(t *testing.T, internalAddr, name string) (int, bool) {
 	t.Helper()
 	c := &http.Client{Timeout: 5 * time.Second}
-	u := "http://" + internalAddr + "/admin/renew?tunnel=" + url.QueryEscape(name)
+	u := "http://" + internalAddr + "/api/v1/admin/renew?tunnel=" + url.QueryEscape(name)
 	resp, err := c.Post(u, "application/json", nil)
 	if err != nil {
-		t.Fatalf("POST /admin/renew: %v", err)
+		t.Fatalf("POST /api/v1/admin/renew: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -553,7 +553,7 @@ func postAdminRenew(t *testing.T, internalAddr, name string) (int, bool) {
 		Nudged bool `json:"nudged"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode /admin/renew response: %v", err)
+		t.Fatalf("decode /api/v1/admin/renew response: %v", err)
 	}
 	return resp.StatusCode, out.Nudged
 }

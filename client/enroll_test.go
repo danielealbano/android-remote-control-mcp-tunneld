@@ -58,8 +58,8 @@ func (c *countingConn) Close() error {
 	return c.Conn.Close()
 }
 
-// startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /enroll/nonce, POST /enroll
-// server-TLS, POST /issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
+// startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /api/v1/enroll/nonce, POST /api/v1/enroll
+// server-TLS, POST /api/v1/issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
 // (Phase-2 mTLS) via ALPN and returns the dial address plus the connection-counting listener.
 func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (string, *countingListener) {
 	t.Helper()
@@ -73,10 +73,10 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/enroll/nonce", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/v1/enroll/nonce", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, nonceResponse{Nonce: "aa"})
 	})
-	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var body enrollRequestBody
 		if !readJSON(r, &body) {
 			http.Error(w, "bad body", http.StatusBadRequest)
@@ -89,7 +89,7 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 		}
 		writeJSON(w, enrollResponse{Name: testName, IdentityCert: idCert, IssueNonce: "bb"})
 	})
-	mux.HandleFunc("/issue", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/issue", func(w http.ResponseWriter, r *http.Request) {
 		if len(issueFail) > 0 && issueFail[0]() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			writeJSON(w, errorResponse{Reason: "acme_rate_limited", Retryable: true, RetryAfter: 1})
@@ -129,7 +129,7 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 	}
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{srvCert},
-		ClientAuth:   tls.VerifyClientCertIfGiven, // /enroll presents no cert; /issue does (checked in-handler)
+		ClientAuth:   tls.VerifyClientCertIfGiven, // /api/v1/enroll presents no cert; /api/v1/issue does (checked in-handler)
 		ClientCAs:    ca.pool,
 		MinVersion:   tls.VersionTLS12,
 		NextProtos:   []string{"h2", "http/1.1"},
@@ -184,17 +184,17 @@ func TestFetchNonce_BadHostReturnsError(t *testing.T) {
 	}
 }
 
-// TestEnroll_Phase2FailureReturnsBootstrapIdentity verifies a retryable /issue failure returns the
+// TestEnroll_Phase2FailureReturnsBootstrapIdentity verifies a retryable /api/v1/issue failure returns the
 // Phase-1 bootstrap identity (name + identity cert, no public cert) alongside the error, so the caller
 // can retry without re-enrolling (which would orphan the name).
 func TestEnroll_Phase2FailureReturnsBootstrapIdentity(t *testing.T) {
 	ca := newTestCA(t)
-	dialAddr, _ := startEnrollServer(t, ca, func() bool { return true }) // /issue always 503
+	dialAddr, _ := startEnrollServer(t, ca, func() bool { return true }) // /api/v1/issue always 503
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	id, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
 	if err == nil {
-		t.Fatal("a Phase-2 /issue failure must return an error")
+		t.Fatal("a Phase-2 /api/v1/issue failure must return an error")
 	}
 	if id == nil || id.Name != testName || len(id.IdentityCertPEM) == 0 {
 		t.Fatalf("the bootstrap identity must be returned on Phase-2 failure, got %+v", id)
@@ -213,13 +213,13 @@ func TestEnroll_Phase2FailureReturnsBootstrapIdentity(t *testing.T) {
 func TestFetchIssueNonce_RetryPathCompletes(t *testing.T) {
 	ca := newTestCA(t)
 	var issueCalls atomic.Int32
-	dialAddr, _ := startEnrollServer(t, ca, func() bool { return issueCalls.Add(1) == 1 }) // fail the first /issue only
+	dialAddr, _ := startEnrollServer(t, ca, func() bool { return issueCalls.Add(1) == 1 }) // fail the first /api/v1/issue only
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	boot, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
 	if err == nil {
-		t.Fatal("the first /issue must fail")
+		t.Fatal("the first /api/v1/issue must fail")
 	}
 	if boot == nil || boot.Name == "" || len(boot.PublicCertPEM) != 0 {
 		t.Fatalf("Enroll must return the bootstrap identity (no public cert), got %+v", boot)
