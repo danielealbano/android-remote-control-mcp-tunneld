@@ -136,7 +136,7 @@ func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 		t.Error("/metrics must export go_goroutines")
 	}
 	// The per-conn memory estimate gauge is exported with a non-zero static estimate.
-	if !strings.Contains(body, "tunneld_per_conn_mem_bytes 65536") {
+	if !strings.Contains(body, "tunneld_per_conn_mem_bytes 32768") {
 		t.Errorf("/metrics must export the per-conn memory estimate (2*ChunkSize):\n%s", body)
 	}
 	// The mesh pool size is exported per peer once reported.

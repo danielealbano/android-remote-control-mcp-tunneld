@@ -78,6 +78,7 @@ func validCfg(t *testing.T) ServeCmd {
 		RouteTTL:            30 * time.Second,
 		BanPoll:             10 * time.Second,
 		LimitBandwidth:      "1mbit",
+		LimitPackets:        100,
 		LimitConcurrent:     4,
 		LimitEnrollHour:     20,
 		LimitEnrollMinute:   2,
@@ -254,14 +255,16 @@ func TestValidateAttestationOptionalFailClosed(t *testing.T) {
 }
 
 func TestValidateRequiresBandwidthFloor(t *testing.T) {
-	for _, bw := range []string{"128kbit", "256kbit"} {
+	// Floor is 16384 B/s (= wire.ChunkSize). 128kbit = 16000 B/s is just below and rejected.
+	for _, bw := range []string{"128kbit"} {
 		c := validCfg(t)
 		c.LimitBandwidth = bw
 		if err := c.Validate(); err == nil {
 			t.Errorf("--limit-bandwidth %s expected error (below floor)", bw)
 		}
 	}
-	for _, bw := range []string{"300kbit", "1mbit"} {
+	// 256kbit = 32000 B/s and 1mbit = 125000 B/s clear the 16384 floor.
+	for _, bw := range []string{"256kbit", "1mbit"} {
 		c := validCfg(t)
 		c.LimitBandwidth = bw
 		if err := c.Validate(); err != nil {
@@ -274,6 +277,7 @@ func TestValidateRejectsZeroIntegerLimits(t *testing.T) {
 	mut := []func(*ServeCmd){
 		func(c *ServeCmd) { c.MaxClients = 0 },
 		func(c *ServeCmd) { c.LimitConcurrent = 0 },
+		func(c *ServeCmd) { c.LimitPackets = 0 },
 		func(c *ServeCmd) { c.LimitConnRate = 0 },
 		func(c *ServeCmd) { c.IssuePerWeek = 0 },
 		func(c *ServeCmd) { c.LimitStreamPending = 0 },

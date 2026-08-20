@@ -10,12 +10,15 @@ import (
 )
 
 // Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
-// per-tunnel/per-direction bandwidth rate, and the day/week traffic caps, with an injectable clock for
-// tests. Every key's TTL is set in the SAME Lua script as its mutation (or SET EX for the cooldown
-// windows).
+// per-tunnel/per-direction per-second byte cap (bwRate) and packet cap (pktCap), and the day/week
+// traffic caps, with an injectable clock for tests. Each key gets a TTL alongside its mutation — set
+// atomically in the same Lua script (or SET EX for the cooldown windows), or via a pipelined EXPIRE NX
+// immediately after the INCR for the bw:/pkt: per-second bandwidth windows (self-healing on the next
+// same-second write; see ChargeBandwidth).
 type Limiter struct {
 	rdb       redis.UniversalClient
-	bwRate    int64 // bytes/sec per tunnel per direction
+	bwRate    int64 // per-second byte cap per tunnel per direction
+	pktCap    int64 // per-second read (packet) cap per tunnel per direction; 0 = disabled
 	dayCap    int64
 	weekCap   int64
 	streamTTL time.Duration // conc:{name} safety TTL (= 3 × --limit-conn-idle), refreshed per chunk
@@ -28,6 +31,9 @@ type Option func(*Limiter)
 
 // WithLogger sets the Limiter's logger (used for the issuance-slot heartbeat failure surface).
 func WithLogger(l *slog.Logger) Option { return func(lm *Limiter) { lm.logger = l } }
+
+// WithPacketCap sets the per-tunnel/per-direction reads-per-second cap (0 = disabled, the default).
+func WithPacketCap(n int64) Option { return func(l *Limiter) { l.pktCap = n } }
 
 // NewLimiter builds the Limiter. bwRate is --limit-bandwidth in bytes/sec; dayCap/weekCap are the
 // combined-direction traffic caps in bytes; streamTTL is the global stream-counter safety TTL,
@@ -44,50 +50,42 @@ func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, stream
 // SetClock overrides the clock (tests only).
 func (l *Limiter) SetClock(f func() time.Time) { l.now = f }
 
-// claimBandwidthScript is a token bucket keyed bw:{name}:{dir} holding {tokens, last_ns}. It refills at
-// `rate` bytes/sec up to a one-second burst, grants min(want, tokens), and TTLs the key. now_ns is
-// passed from Go (Lua clocks are non-deterministic).
-var claimBandwidthScript = redis.NewScript(`
-local rate = tonumber(ARGV[1])
-local want = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local ttl = tonumber(ARGV[4])
-local burst = rate
-local vals = redis.call('HMGET', KEYS[1], 'tokens', 'last')
-local tokens = tonumber(vals[1])
-local last = tonumber(vals[2])
-if tokens == nil then
-  tokens = burst
-  last = now
-end
-local elapsed = (now - last) / 1e9
-if elapsed > 0 then
-  tokens = math.min(burst, tokens + elapsed * rate)
-else
-  now = last -- clock skew / step-back: never move the refill anchor backward
-end
-local granted = math.min(want, tokens)
-if granted < 0 then granted = 0 end
-tokens = tokens - granted
-redis.call('HSET', KEYS[1], 'tokens', tokens, 'last', now)
-redis.call('PEXPIRE', KEYS[1], ttl)
-return math.floor(granted)
-`)
+// bwWindowTTL outlives a 1-second window (set once via EXPIRE NX on the window's first write) so a write
+// late in the window never expires the counter mid-window; the next second uses a fresh key.
+const bwWindowTTL = 2 * time.Second
 
-// ClaimBandwidth claims up to want bytes from the per-tunnel, per-direction global token bucket,
-// returning how many bytes were granted (the pacer draws ~1 MB at a time, so this is ~one Valkey op
-// per megabyte, never per chunk).
-func (l *Limiter) ClaimBandwidth(ctx context.Context, name, dir string, want int64) (int64, error) {
-	key := "bw:" + name + ":" + dir
-	// TTL: two seconds of idle refill is enough to discard a stale bucket; keep it generous so an
-	// active but slow tunnel never loses its bucket.
-	ttl := (10 * time.Second).Milliseconds()
-	granted, err := claimBandwidthScript.Run(ctx, l.rdb, []string{key},
-		l.bwRate, want, l.now().UnixNano(), ttl).Int64()
-	if err != nil {
-		return 0, err
+func bwWindowKeys(name, dir string, sec int64) (byteKey, pktKey string) {
+	s := strconv.FormatInt(sec, 10)
+	return "bw:" + name + ":" + dir + ":" + s, "pkt:" + name + ":" + dir + ":" + s
+}
+
+// ChargeBandwidth records nr bytes and one read against the current 1-second byte + packet windows for
+// (name, dir) in a single pipelined round-trip (INCRBY + INCR + EXPIRE…NX ×2 — no Lua), and reports
+// whether either per-second cap is now exceeded plus the time remaining in the current second (the caller
+// waits that out before the next read). A plain Pipeline (not TxPipeline) is deliberate: these are
+// per-second transient counters and EXPIRE NX self-heals a skipped TTL on the next same-second read, so
+// strict atomicity is unwarranted here. The packet cap is skipped when pktCap == 0. A Valkey error returns
+// over=false (fail-open: pacing never hard-depends on the control plane).
+func (l *Limiter) ChargeBandwidth(ctx context.Context, name, dir string, nr int64) (over bool, retryAfter time.Duration, err error) {
+	now := l.now()
+	sec := now.Unix()
+	byteKey, pktKey := bwWindowKeys(name, dir, sec)
+	pipe := l.rdb.Pipeline() // one round-trip; EXPIRE NX sets the TTL, self-healing on the next same-second read
+	bCmd := pipe.IncrBy(ctx, byteKey, nr)
+	pCmd := pipe.Incr(ctx, pktKey)
+	pipe.ExpireNX(ctx, byteKey, bwWindowTTL)
+	pipe.ExpireNX(ctx, pktKey, bwWindowTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return false, 0, err
 	}
-	return granted, nil
+	over = bCmd.Val() > l.bwRate || (l.pktCap > 0 && pCmd.Val() > l.pktCap)
+	if over {
+		retryAfter = time.Unix(sec+1, 0).Sub(now)
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+	}
+	return over, retryAfter, nil
 }
 
 // claimTrafficScript INCRBYs both the day and week counters and reports per-window exhaustion against

@@ -56,7 +56,7 @@ flowchart TD
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
-| `internal/limit` | rate windows, enroll quota, global stream counter, batch-credit bandwidth bucket, ACME cooldown |
+| `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME cooldown |
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
@@ -87,8 +87,8 @@ sequenceDiagram
     P-->>C: TLS response (opaque, spliced back)
 ```
 
-The entry node accounts bytes (day/week traffic), paces bandwidth from the shared batch-credit bucket,
-and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
+The entry node accounts bytes (day/week traffic), paces bandwidth against the per-second byte + packet
+windows, and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
 WebPKI cert (a hermetic Pebble CA stands in for the test tiers) — tunneld never sees plaintext.
 
 ## 3. Enrollment, issuance, renewal
@@ -103,15 +103,18 @@ certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on
 
 ## 4. Bandwidth model
 
-Per-tunnel, per-direction pacing draws from ONE **global Valkey token bucket** (`bw:{name}:{dir}`,
-refilled in-script) in **~1 MB batches** into a per-stream local credit — the data plane hits the
-control plane about once per megabyte moved, never per 32 KiB slice (a synchronous per-slice Valkey
-call was rejected). An empty bucket blocks the copy in short refill waits (that wait IS the pacing); a
-Valkey ERROR fails open so pacing never hard-depends on the control plane. Byte ACCOUNTING (day/week
-traffic) is recorded per chunk via a TTL'd Lua INCR; an exhausted window refuses NEW streams at
-admission and closes in-flight streams. `wire.ChunkSize` = 32768 is the paced-copy slice size.
+Per-tunnel, per-direction pacing uses two **per-second fixed windows** — a byte window
+`bw:{name}:{dir}:{unix_second}` and a packet (read) window `pkt:{name}:{dir}:{unix_second}`. Each read
+does ONE plain pipelined round-trip (`INCRBY` bytes + `INCR` packet + `EXPIRE 2s NX` on both — NO Lua);
+if the returned byte count exceeds `--limit-bandwidth` OR the read count exceeds `--limit-packets`, the
+copy waits out the rest of the second (that wait IS the pacing) before forwarding. `EXPIRE NX` self-heals
+a skipped TTL on the next same-second write, so strict atomicity is unwarranted for these transient
+windows; a Valkey ERROR fails open so pacing never hard-depends on the control plane. Byte ACCOUNTING
+(day/week traffic) is still recorded per chunk via a TTL'd Lua INCR; an exhausted window refuses NEW
+streams at admission and closes in-flight streams. `wire.ChunkSize` = 16384 is the paced-copy read slice,
+so the per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
 
-## 5. Valkey state (all transient — TTL atomic with the write, single Lua)
+## 5. Valkey state (all transient — every key TTL'd alongside its write: single Lua, or a pipelined EXPIRE NX for the bw:/pkt: windows)
 
 Routing (`route:{name}` → owner/fp/connID, owner-conditional teardown on `connID`), node registry
 (`node:{id}` → advertise), rate-limit windows, the global concurrency counter (`conc:{name}`, TTL = 3 ×

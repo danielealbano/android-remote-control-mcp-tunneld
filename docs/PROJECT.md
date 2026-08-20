@@ -90,7 +90,8 @@ own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
 
 | Cap | Flag | Default |
 |---|---|---|
-| Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` (≥ 32768 B/s) |
+| Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` (≥ 16384 B/s) |
+| Reads/packets per second (per tunnel, per direction) | `--limit-packets` | `100` |
 | Traffic / tunnel / 24h window (both directions) | `--limit-traffic-day` | `1gb` |
 | Traffic / tunnel / 7d window | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
@@ -116,8 +117,10 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 ## 5. State + retention
 
 - **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
-  counters, per-tunnel counters, single-use enrollment nonces, ACME cooldown/backoff. Every key carries a
-  TTL set atomically with its write. No permanent Valkey state.
+  counters, per-tunnel counters, the per-second bandwidth (`bw:`) + packet (`pkt:`) windows, single-use
+  enrollment nonces, ACME cooldown/backoff. Every key gets a TTL alongside its write — set atomically in
+  the same Lua script / `SET EX`, or via a pipelined `EXPIRE NX` right after the `INCR` for the
+  self-healing transient `bw:`/`pkt:` per-second windows. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
@@ -155,7 +158,7 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 
 No database / persistent server-side identity store (the phone holds its cert). No authentication of
 relayed traffic (it is opaque TLS; the app authenticates). No per-path cap exceptions or bulk transfers.
-No CRL (bans are the only revocation). No per-slice-exact bandwidth accounting (batch-credit draws).
+No CRL (bans are the only revocation). No cross-replica exact bandwidth accounting (per-second fixed windows; bounded overshoot).
 No server-side content storage or caching. No TLS mutual auth on the public side. The Android (Kotlin)
 client lives with the app, not here. (Two on-device test apps under `support/` are the only exceptions,
 neither the client: a minimal **attestation test probe** (`support/attest-probe/`) driving the adb-gated

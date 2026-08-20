@@ -145,43 +145,75 @@ func TestEdge_PacedCopy_TrafficErrorFailsOpen(t *testing.T) {
 	}
 }
 
-// TestEdge_Pace_BatchCredit covers the batch-credit draw: one chunk draws a full bwBatch of credit, so
-// subsequent chunks consume locally (the data plane hits Valkey ~once per MB).
-func TestEdge_Pace_BatchCredit(t *testing.T) {
-	cfg := baseConfig()
-	te := newTestEdge(t, cfg, nil, nil) // harness limiter: bwRate 1<<30 (≥ bwBatch burst)
-
-	remaining := te.e.pace(context.Background(), "t1", "in", 0, 1000)
-	if remaining != bwBatch-1000 {
-		t.Fatalf("one draw must batch bwBatch credit (remaining %d, want %d)", remaining, bwBatch-1000)
-	}
-	// The next chunk consumes the LOCAL credit (no draw needed to satisfy it).
-	remaining2 := te.e.pace(context.Background(), "t1", "in", remaining, 1000)
-	if remaining2 != remaining-1000 {
-		t.Fatalf("local credit must be consumed without a fresh batch, got %d", remaining2)
-	}
-}
-
-// TestEdge_Pace_EmptyBucketBlocks covers the pacing wait: an exhausted bucket blocks the copy in
-// refill waits (the wait IS the pacing) until the ctx ends.
-func TestEdge_Pace_EmptyBucketBlocks(t *testing.T) {
+// chargeStubEdge builds a test edge whose limiter is a countingLimiter with a controllable
+// ChargeBandwidth (over/wait/err) and a real embedded limiter (generous caps) so ClaimTraffic passes.
+func chargeStubEdge(t *testing.T, over bool, wait time.Duration, chargeErr error) *testEdge {
+	t.Helper()
 	cfg := baseConfig()
 	te := newTestEdge(t, cfg, nil, nil)
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	te.e.lim = limit.NewLimiter(rdb, 1, 1<<40, 1<<40, time.Hour) // 1 B/s: the bucket is empty immediately
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	te.e.pace(ctx, "t1", "in", 0, 32*1024)
-	elapsed := time.Since(start)
-	if elapsed < 40*time.Millisecond {
-		t.Fatalf("an empty bucket must block in refill waits, returned after %s", elapsed)
+	te.e.lim = &countingLimiter{
+		Limiter:    limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour),
+		chargeOver: over, chargeWait: wait, chargeErr: chargeErr,
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("ctx cancel must unblock the pacer, took %s", elapsed)
+	return te
+}
+
+// TestEdge_PacedCopy_WaitsWhenOverCap: an over-cap read waits ~retryAfter before forwarding, then still
+// delivers all bytes (the wait IS the pacing).
+func TestEdge_PacedCopy_WaitsWhenOverCap(t *testing.T) {
+	te := chargeStubEdge(t, true, 40*time.Millisecond, nil)
+	src := &pipeStream{r: bytes.NewReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
+	as := &activeStream{tunnel: "t1"}
+	var counter int64
+	var sink bytes.Buffer
+	start := time.Now()
+	te.e.pacedCopy(context.Background(), "t1", "in", &sink, src, as, &counter)
+	if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+		t.Fatalf("an over-cap read must wait ~retryAfter, returned after %s", elapsed)
+	}
+	if counter != 1024 || sink.Len() != 1024 {
+		t.Fatalf("all bytes must still be delivered after the wait, copied=%d", counter)
+	}
+}
+
+// TestEdge_PacedCopy_CtxCancelAbandonsWait: ctx cancellation during a pacing wait unblocks pacedCopy
+// promptly (teardown/eviction must not wait out the full second).
+func TestEdge_PacedCopy_CtxCancelAbandonsWait(t *testing.T) {
+	te := chargeStubEdge(t, true, 5*time.Second, nil)
+	src := &pipeStream{r: bytes.NewReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
+	as := &activeStream{tunnel: "t1"}
+	var counter int64
+	var sink bytes.Buffer
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	start := time.Now()
+	te.e.pacedCopy(ctx, "t1", "in", &sink, src, as, &counter)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("ctx cancel must abandon the 5s wait promptly, took %s", elapsed)
+	}
+}
+
+// TestEdge_PacedCopy_ChargeErrorFailsOpen: a ChargeBandwidth error forwards the chunk unpaced (no wait,
+// bytes flow), never killing the stream.
+func TestEdge_PacedCopy_ChargeErrorFailsOpen(t *testing.T) {
+	te := chargeStubEdge(t, true, 5*time.Second, errors.New("charge boom")) // over+huge wait, but err → no wait
+	src := &pipeStream{r: bytes.NewReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
+	as := &activeStream{tunnel: "t1"}
+	var counter int64
+	var sink bytes.Buffer
+	start := time.Now()
+	got := te.e.pacedCopy(context.Background(), "t1", "in", &sink, src, as, &counter)
+	if got == quotaHit {
+		t.Fatal("a ChargeBandwidth error must fail open, not kill the stream")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("a charge error must NOT wait, took %s", elapsed)
+	}
+	if counter != 1024 || sink.Len() != 1024 {
+		t.Fatalf("bytes must flow unpaced on a charge error, copied=%d", counter)
 	}
 }
 
@@ -538,11 +570,18 @@ func TestEdge_HandleTunnel_MeshDuplicateRetries(t *testing.T) {
 // --- edge accept-loop, SNI case-insensitivity, slot accounting, ban eviction ---
 
 // countingLimiter wraps a real limiter to (a) force AcquireStream to fail-open and (b) count
-// ReleaseStream calls, so a fail-open admission's release-once behaviour is observable.
+// ReleaseStream calls, so a fail-open admission's release-once behaviour is observable, and (c) return a
+// CONTROLLABLE ChargeBandwidth (chargeOver/chargeWait/chargeErr; default zero → (false,0,nil), i.e. never
+// paces) so the pacedCopy wait / ctx-cancel / fail-open paths are testable. ClaimTraffic and the other
+// methods fall through to the embedded real limiter.
 type countingLimiter struct {
 	*limit.Limiter
 	acquireErr error
 	releases   atomic.Int64
+
+	chargeOver bool
+	chargeWait time.Duration
+	chargeErr  error
 }
 
 func (c *countingLimiter) AcquireStream(ctx context.Context, name string, maxN int) (bool, error) {
@@ -550,6 +589,10 @@ func (c *countingLimiter) AcquireStream(ctx context.Context, name string, maxN i
 		return false, c.acquireErr
 	}
 	return c.Limiter.AcquireStream(ctx, name, maxN)
+}
+
+func (c *countingLimiter) ChargeBandwidth(_ context.Context, _, _ string, _ int64) (bool, time.Duration, error) {
+	return c.chargeOver, c.chargeWait, c.chargeErr
 }
 
 func (c *countingLimiter) ReleaseStream(ctx context.Context, name string) error {

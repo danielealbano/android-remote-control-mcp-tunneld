@@ -417,24 +417,29 @@ const (
 	copyWriteErr = -2
 )
 
-// bwBatch is the batch-credit draw size: the pacer pulls up to this much bandwidth credit from the
-// shared Valkey bucket at a time, so the data plane hits the control plane ~once per megabyte moved,
-// never once per 32 KiB chunk.
-const bwBatch = 1 << 20
-
-// pacedCopy copies src→dst in ≤ChunkSize slices, consuming batch-drawn bandwidth credit and accounting
-// day/week traffic; on quota exhaustion it stops and returns quotaHit.
+// pacedCopy copies src→dst in ≤ChunkSize (16 KiB) slices, charging each read against the per-second
+// bandwidth (byte + packet) windows and accounting day/week traffic; on quota exhaustion it stops and
+// returns quotaHit. When a per-second cap is exceeded the copy waits out the rest of the second (that
+// wait IS the pacing); a control-plane error on either call fails open so a live stream is never killed
+// on a Valkey blip.
 func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, src io.Reader, as *activeStream, counter *int64) int64 {
 	buf := make([]byte, wire.ChunkSize)
-	var credit int64 // local batch credit (bytes already granted by the shared bucket)
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			credit = e.pace(ctx, name, dir, credit, int64(nr))
+			// Bandwidth pacing: charge this read against the per-second byte + packet windows; if either
+			// cap is now exceeded, wait out the rest of the second (that wait IS the pacing) before
+			// forwarding. A Valkey error fails open (forward unpaced) — never kill a live stream on a blip.
+			if over, wait, berr := e.lim.ChargeBandwidth(ctx, name, dir, int64(nr)); berr == nil && over {
+				select {
+				case <-ctx.Done(): // teardown — abandon the wait, don't hold the copy hostage
+				case <-time.After(wait):
+				}
+			}
 			dayOK, weekOK, terr := e.lim.ClaimTraffic(ctx, name, int64(nr))
 			if terr != nil {
-				// Control-plane blip: fail open like pace/connRate — never kill a live stream on a
-				// Valkey error (the next successful claim re-applies the caps).
+				// Control-plane blip: fail open — never kill a live stream on a Valkey error (the next
+				// successful claim re-applies the caps).
 				dayOK, weekOK = true, true
 			}
 			if !dayOK || !weekOK {
@@ -457,29 +462,6 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			return copySrcEOF
 		}
 	}
-}
-
-// pace consumes `need` bytes of bandwidth credit, drawing from the shared per-tunnel, per-direction
-// Valkey bucket in bwBatch batches, and returns the remaining local credit. A control-plane ERROR
-// fails open (pacing must never hard-depend on Valkey); an EMPTY bucket blocks in short refill waits —
-// that wait IS the pacing.
-func (e *Edge) pace(ctx context.Context, name, dir string, credit, need int64) int64 {
-	for credit < need {
-		granted, err := e.lim.ClaimBandwidth(ctx, name, dir, bwBatch)
-		if err != nil {
-			return credit // fail-open: this chunk proceeds unpaced
-		}
-		credit += granted
-		if credit >= need {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return credit // teardown — do not hold the copy hostage
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	return credit - need
 }
 
 func (e *Edge) idlePoll() time.Duration {

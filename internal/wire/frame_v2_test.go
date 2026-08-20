@@ -52,8 +52,8 @@ func TestControlTypeValuesFrozen(t *testing.T) {
 }
 
 func TestChunkSizeConstant(t *testing.T) {
-	if ChunkSize != 32768 {
-		t.Errorf("ChunkSize = %d, want 32768 (pacing slice size)", ChunkSize)
+	if ChunkSize != 16384 {
+		t.Errorf("ChunkSize = %d, want 16384 (pacing slice size)", ChunkSize)
 	}
 }
 

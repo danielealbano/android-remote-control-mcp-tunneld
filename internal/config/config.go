@@ -15,11 +15,11 @@ import (
 )
 
 // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
-// wire.ChunkSize (32*1024): the bandwidth bucket's burst is one second of rate and every caller
-// acquires tokens in ≤ChunkSize slices, so a rate below one chunk would make every chunk acquisition
-// error and silently break the whole data plane. The literal is duplicated here with this note
-// rather than importing wire (avoids an import cycle).
-const bandwidthFloorBytesPerSec int64 = 32 * 1024
+// wire.ChunkSize (16*1024): each read charges up to one slice against the per-second byte window, so a
+// rate below one slice would make a single read exceed the whole second's budget and throttle every
+// read (the tunnel could never forward more than one slice per second). The literal is duplicated here
+// with this note rather than importing wire (avoids an import cycle).
+const bandwidthFloorBytesPerSec int64 = 16 * 1024
 
 // shortlivedLifetime is Let's Encrypt's fixed `shortlived` profile validity (160h). --acme-renew-margin
 // must fit strictly inside it so a renewal is attempted before expiry.
@@ -118,7 +118,8 @@ type ServeCmd struct {
 	BanFile            []string      `name:"ban-file" help:"Ban file(s); repeatable."`
 	BanPoll            time.Duration `name:"ban-poll" default:"10s" help:"Ban/CSV mtime poll interval; also the signer-digest allowlist poll cadence."`
 
-	LimitBandwidth    string `name:"limit-bandwidth" default:"1mbit" help:"Per-tunnel, per-direction rate; minimum 32768 B/s (~263kbit — DECIMAL bits, so 256kbit=32000 B/s is REJECTED)."`
+	LimitBandwidth    string `name:"limit-bandwidth" default:"1mbit" help:"Per-tunnel, per-direction rate; minimum 16384 B/s (~131kbit — DECIMAL bits, so 128kbit=16000 B/s is REJECTED)."`
+	LimitPackets      int    `name:"limit-packets" default:"100" help:"Max reads (packets) per second per tunnel per direction — a loose backstop against tiny-packet floods; the byte rate is the primary limit."`
 	LimitConcurrent   int    `name:"limit-concurrent" default:"4" help:"Concurrent data streams per tunnel (global Valkey counter)."`
 	LimitEnrollHour   int    `name:"limit-enroll-hour" default:"20" help:"Enrollments/hour per source IP."`
 	LimitEnrollMinute int    `name:"limit-enroll-minute" default:"2" help:"Enrollments/minute per source IP."`
@@ -224,6 +225,7 @@ func (c ServeCmd) Validate() error {
 	}{
 		{"--max-clients", c.MaxClients},
 		{"--limit-concurrent", c.LimitConcurrent},
+		{"--limit-packets", c.LimitPackets},
 		{"--limit-conn-rate", c.LimitConnRate},
 		{"--limit-stream-pending", c.LimitStreamPending},
 		{"--issue-per-week", c.IssuePerWeek},
@@ -283,7 +285,7 @@ func (c ServeCmd) Validate() error {
 		return fmt.Errorf("--limit-bandwidth: %w", err)
 	}
 	if bw < bandwidthFloorBytesPerSec {
-		return fmt.Errorf("--limit-bandwidth must be ≥ %d B/s (= wire.ChunkSize; note DECIMAL bits, 256kbit=32000 B/s fails), got %d B/s", bandwidthFloorBytesPerSec, bw)
+		return fmt.Errorf("--limit-bandwidth must be ≥ %d B/s (= wire.ChunkSize; note DECIMAL bits, 128kbit=16000 B/s fails), got %d B/s", bandwidthFloorBytesPerSec, bw)
 	}
 	var day, week int64
 	for _, sz := range []struct {

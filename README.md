@@ -97,6 +97,7 @@ app is the sole authenticator, so a tunnelled deployment MUST keep the app's bea
 | Cap | Flag | Default |
 |---|---|---|
 | Bandwidth (per tunnel, per direction) | `--limit-bandwidth` | `1mbit` |
+| Reads/packets per second (per tunnel, per direction) | `--limit-packets` | `100` |
 | Traffic / tunnel / day | `--limit-traffic-day` | `1gb` |
 | Traffic / tunnel / rolling 7d | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
