@@ -73,19 +73,19 @@ Ground-truth sources this plan mirrors: `internal/limit/limiter.go`, `internal/e
 
 ---
 
-## User Story 1 — [ ] Read-slice constant (16 KiB) + config surface
+## User Story 1 — [x] Read-slice constant (16 KiB) + config surface
 
 Move the paced-copy read slice to 16 KiB and add the packet-cap config surface (flag + floor).
 
 **Acceptance criteria:**
-- [ ] `wire.ChunkSize == 16384`; every `ChunkSize`-derived value/assertion/comment updated in lockstep.
-- [ ] `--limit-packets` (int, default 100) exists with a `TUNNELD_*` env twin and a positive-int `Validate()`.
-- [ ] The `--limit-bandwidth` floor is `16384` B/s (= `wire.ChunkSize`), with the help/error/comment updated.
+- [x] `wire.ChunkSize == 16384`; every `ChunkSize`-derived value/assertion/comment updated in lockstep.
+- [x] `--limit-packets` (int, default 100) exists with a `TUNNELD_*` env twin and a positive-int `Validate()`.
+- [x] The `--limit-bandwidth` floor is `16384` B/s (= `wire.ChunkSize`), with the help/error/comment updated.
 
-### Task 1.1 — [ ] `wire.ChunkSize` → 16 KiB (`internal/wire/frame_v2.go`)
+### Task 1.1 — [x] `wire.ChunkSize` → 16 KiB (`internal/wire/frame_v2.go`)
 
 **Actions:**
-- [ ] Change the constant and its comment:
+- [x] Change the constant and its comment:
 
   ```go
   // ChunkSize is the paced-copy read/slice size — the max body bytes read and charged per bandwidth
@@ -93,25 +93,25 @@ Move the paced-copy read slice to 16 KiB and add the packet-cap config surface (
   // of the phone-client wire contract. See docs/PROTOCOL.md.
   const ChunkSize = 16 * 1024
   ```
-- [ ] `internal/wire/frame_v2_test.go`: `TestChunkSizeConstant` — assert `ChunkSize == 16384` (update the
+- [x] `internal/wire/frame_v2_test.go`: `TestChunkSizeConstant` — assert `ChunkSize == 16384` (update the
   literal and the message).
-- [ ] `internal/metrics/metrics_test.go:139`: the exported per-conn estimate is `2*ChunkSize`, so the
+- [x] `internal/metrics/metrics_test.go:139`: the exported per-conn estimate is `2*ChunkSize`, so the
   asserted line becomes `tunneld_per_conn_mem_bytes 32768` (was `65536`).
 
 **Definition of Done:**
-- [ ] `ChunkSize == 16384`; the two ChunkSize-derived test assertions match.
+- [x] `ChunkSize == 16384`; the two ChunkSize-derived test assertions match.
 
-### Task 1.2 — [ ] `--limit-packets` flag + bandwidth floor (`internal/config/config.go`)
+### Task 1.2 — [x] `--limit-packets` flag + bandwidth floor (`internal/config/config.go`)
 
 **Actions:**
-- [ ] Add the flag field (place it beside `LimitBandwidth`):
+- [x] Add the flag field (place it beside `LimitBandwidth`):
 
   ```go
   LimitPackets int `name:"limit-packets" default:"100" help:"Max reads (packets) per second per tunnel per direction — a loose backstop against tiny-packet floods; the byte rate is the primary limit."`
   ```
-- [ ] Add it to the positive-int validation list (beside `{"--limit-concurrent", c.LimitConcurrent}`):
+- [x] Add it to the positive-int validation list (beside `{"--limit-concurrent", c.LimitConcurrent}`):
   `{"--limit-packets", c.LimitPackets}`.
-- [ ] Lower the bandwidth floor to one read slice and fix its note (the token-bucket rationale is gone):
+- [x] Lower the bandwidth floor to one read slice and fix its note (the token-bucket rationale is gone):
 
   ```go
   // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
@@ -121,18 +121,18 @@ Move the paced-copy read slice to 16 KiB and add the packet-cap config surface (
   // with this note rather than importing wire (avoids an import cycle).
   const bandwidthFloorBytesPerSec int64 = 16 * 1024
   ```
-- [ ] Update the `--limit-bandwidth` flag help (`minimum 32768 B/s (~263kbit … 256kbit=32000 B/s is REJECTED)`
+- [x] Update the `--limit-bandwidth` flag help (`minimum 32768 B/s (~263kbit … 256kbit=32000 B/s is REJECTED)`
   → `minimum 16384 B/s (~131kbit … 128kbit=16000 B/s is REJECTED)`) and the `Validate()` error string
   (`= wire.ChunkSize; … 256kbit=32000 B/s fails` → `= wire.ChunkSize; … 128kbit=16000 B/s fails`).
 
 **Definition of Done:**
-- [ ] `--limit-packets` is a validated positive-int flag; the floor is 16384 with consistent help/error/comment.
+- [x] `--limit-packets` is a validated positive-int flag; the floor is 16384 with consistent help/error/comment.
 
-### Task 1.3 — [ ] Config tests (`internal/config/config_test.go`)
+### Task 1.3 — [x] Config tests (`internal/config/config_test.go`)
 
 **Actions:**
-- [ ] Set `LimitPackets: 100` in the valid-config helper so `Validate()` passes.
-- [ ] `TestValidateRequiresBandwidthFloor`: move the below/above-floor cases to straddle 16384 B/s (fail:
+- [x] Set `LimitPackets: 100` in the valid-config helper so `Validate()` passes.
+- [x] `TestValidateRequiresBandwidthFloor`: move the below/above-floor cases to straddle 16384 B/s (fail:
   `128kbit` = 16000 B/s; pass: `256kbit` = 32000 B/s and `1mbit`).
 
 **Test (compressed):**
@@ -143,7 +143,7 @@ Move the paced-copy read slice to 16 KiB and add the packet-cap config surface (
 | `TestValidateRejectsNonPositivePackets` | `--limit-packets ≤ 0` rejected | mirror the existing `--limit-concurrent` positive-int case |
 
 **Definition of Done:**
-- [ ] The floor test straddles 16384; a non-positive `--limit-packets` is rejected; the valid config passes.
+- [x] The floor test straddles 16384; a non-positive `--limit-packets` is rejected; the valid config passes.
 
 ---
 
@@ -514,3 +514,11 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
 ## Deviations
 
 _(recorded during implementation per agent.md §2)_
+
+- **Task 1.3 — the non-positive `--limit-packets` check was added to the existing `TestValidateRejectsZeroIntegerLimits`
+  table instead of a new `TestValidateRejectsNonPositivePackets` test.** That table (`internal/config/config_test.go`)
+  is the idiomatic home for every positive-int limit check (it already carries `MaxClients`, `LimitConcurrent`,
+  `LimitConnRate`, `IssuePerWeek`, `LimitStreamPending` = 0 cases). Adding `func(c *ServeCmd) { c.LimitPackets = 0 }`
+  there mirrors the existing `--limit-concurrent` case exactly (as the plan intended) with the same coverage,
+  and keeps the checks DRY. **Why:** reconcile with the existing test structure rather than duplicate a
+  parallel one-off test.
