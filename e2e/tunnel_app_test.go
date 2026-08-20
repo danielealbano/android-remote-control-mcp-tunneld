@@ -205,6 +205,30 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	assertPhoneCert(t, edge, fqdn, inf.pebble.IssuingRoots) // still validating after the swap
 	t.Logf("refresh rotated the cert: %s -> %s", f1, info2.TLSCertSHA256)
 
+	// Server-driven nudge: /admin/renew (single replica → owner == this node → local nudge) forces a
+	// RENEW_NUDGE frame WITHOUT a refresh broadcast; the app decodes it, re-issues, and hot-swaps the cert.
+	// This exercises the Kotlin RENEW_NUDGE-decode → Enroll.issue → swap path on real hardware.
+	f2 := info2.TLSCertSHA256
+	if status, nudged := postAdminRenew(t, inf.internal[edge], name); status != http.StatusOK || !nudged {
+		t.Fatalf("/admin/renew (local nudge) = (status %d, nudged %v), want (200, true)", status, nudged)
+	}
+	var info3 infoResp
+	if !waitBool(90*time.Second, func() bool {
+		r, gerr := fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
+		if gerr != nil || r.TLSCertSHA256 == f2 {
+			return false
+		}
+		info3 = r
+		return true
+	}) {
+		t.Fatalf("/info tls_cert_sha256 never changed after the nudge (still %s)", f2)
+	}
+	if info3.Nonce != appNonce {
+		t.Fatalf("after the nudge /info nonce = %q, want %q", info3.Nonce, appNonce)
+	}
+	assertPhoneCert(t, edge, fqdn, inf.pebble.IssuingRoots) // still validating after the nudge-driven swap
+	t.Logf("nudge rotated the cert: %s -> %s", f2, info3.TLSCertSHA256)
+
 	// /wait throughput: byte-exact, hash-matching streams concurrently over N h1 connections and N h2
 	// streams (the h2 streams multiplex over ONE tunnel connection).
 	runWaitLoad(t, edge, fqdn, inf.pebble.IssuingRoots)
