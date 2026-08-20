@@ -79,7 +79,7 @@ func TestServeControlReleasesPendingSlotAfterBind(t *testing.T) {
 	start := func(name string) (*blockedReader, context.CancelFunc, chan struct{}) {
 		body := newBlockedReader()
 		ctx, cancel := context.WithCancel(context.Background())
-		req := httptest.NewRequest("GET", "/control", body).WithContext(ctx)
+		req := httptest.NewRequest("GET", "/api/v1/control", body).WithContext(ctx)
 		done := make(chan struct{})
 		go func() {
 			h.serveControl(newFlushRecorder(), req, phoneIdentity{name: name, fingerprint: "sha256:fp-" + name})
@@ -110,7 +110,7 @@ func TestServeControlPendingCapRefuses(t *testing.T) {
 	h.sem <- struct{}{} // saturate the pre-bind slot
 
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("GET", "/control", newBlockedReader())
+	req := httptest.NewRequest("GET", "/api/v1/control", newBlockedReader())
 	h.serveControl(rec, req, phoneIdentity{name: "phonec", fingerprint: "sha256:fp"})
 	if rec.code() != 503 {
 		t.Fatalf("saturated pre-bind semaphore must answer 503, got %d", rec.code())
@@ -126,7 +126,7 @@ func TestLivenessTimeoutCloses(t *testing.T) {
 	h, m := newTestHandler(t, 4, 5*time.Millisecond)
 	body := newBlockedReader()
 	defer body.close()
-	req := httptest.NewRequest("GET", "/control", body)
+	req := httptest.NewRequest("GET", "/api/v1/control", body)
 	done := make(chan struct{})
 	go func() {
 		h.serveControl(newFlushRecorder(), req, phoneIdentity{name: "phoned", fingerprint: "sha256:fp"})
@@ -179,7 +179,7 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		BanIP: func(a netip.Addr) bool { return a == banned }})
 
-	req := httptest.NewRequest("GET", "/control", nil)
+	req := httptest.NewRequest("GET", "/api/v1/control", nil)
 	req.RemoteAddr = "198.51.100.99:40000"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -187,7 +187,7 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 		t.Fatalf("banned peer IP must get 403, got %d", rec.Code)
 	}
 
-	req2 := httptest.NewRequest("GET", "/control", nil)
+	req2 := httptest.NewRequest("GET", "/api/v1/control", nil)
 	req2.RemoteAddr = "198.51.100.98:40000"
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, req2)
@@ -208,7 +208,7 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 func TestServeDataNoWaiterIs404(t *testing.T) {
 	h, _ := newTestHandler(t, 4, time.Hour)
 	rec := newFlushRecorder()
-	req := httptest.NewRequest("POST", "/data", newBlockedReader())
+	req := httptest.NewRequest("POST", "/api/v1/data", newBlockedReader())
 	req.Header.Set("X-Stream-Id", "nosuch")
 	h.serveData(rec, req, "phoneg")
 	if rec.code() != 404 {
@@ -244,7 +244,7 @@ func TestBanGatesRecordRejection(t *testing.T) {
 		BanIP:  func(a netip.Addr) bool { return a == banned },
 		Reject: rej})
 
-	req := httptest.NewRequest("GET", "/control", nil)
+	req := httptest.NewRequest("GET", "/api/v1/control", nil)
 	req.RemoteAddr = "198.51.100.97:40000"
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	if len(got) != 1 || got[0] != [2]string{"ban", ""} {
@@ -293,7 +293,7 @@ func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
 		ValidName: func(string) bool { return true }})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, tlsRequest(t, "/control", selfSignedCert(t, "abcdef234567", true)))
+	h.ServeHTTP(rec, tlsRequest(t, "/api/v1/control", selfSignedCert(t, "abcdef234567", true)))
 	if rec.Code != 403 {
 		t.Fatalf("a mesh-role cert must be refused on the phone listener, got %d", rec.Code)
 	}
@@ -302,13 +302,13 @@ func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
 	}
 }
 
-// TestControlData_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §3–§4): /control and
-// /data are POST; a GET that passes the cert + CN gates is refused 405.
+// TestControlData_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §3–§4): /api/v1/control and
+// /api/v1/data are POST; a GET that passes the cert + CN gates is refused 405.
 func TestControlData_NonPostIs405(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		ValidName: func(string) bool { return true }})
-	for _, path := range []string{"/control", "/data"} {
+	for _, path := range []string{"/api/v1/control", "/api/v1/data"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, tlsRequest(t, path, selfSignedCert(t, "abcdef234567", false)))
 		if rec.Code != http.StatusMethodNotAllowed {
@@ -325,7 +325,7 @@ func TestServeHTTPRejectsInvalidCN(t *testing.T) {
 		ValidName: func(name string) bool { return name == "goodname234567" }})
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, tlsRequest(t, "/control", selfSignedCert(t, "Not A Valid Name!", false)))
+	h.ServeHTTP(rec, tlsRequest(t, "/api/v1/control", selfSignedCert(t, "Not A Valid Name!", false)))
 	if rec.Code != 403 {
 		t.Fatalf("a malformed CN must be refused, got %d", rec.Code)
 	}
@@ -380,7 +380,7 @@ func TestServeControl_BindFailureStatuses(t *testing.T) {
 			fr.bindErr = tc.bindErr
 			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
 			rec := newFlushRecorder()
-			req := httptest.NewRequest("GET", "/control", newBlockedReader())
+			req := httptest.NewRequest("GET", "/api/v1/control", newBlockedReader())
 			h.serveControl(rec, req, phoneIdentity{name: "phonex", fingerprint: "sha256:fp"})
 			if rec.code() != tc.wantCode {
 				t.Fatalf("code = %d, want %d", rec.code(), tc.wantCode)
@@ -399,7 +399,7 @@ func TestServeControl_CertExpiryCloses(t *testing.T) {
 	h := NewHandler(HandlerConfig{Manager: m, PingInterval: 5 * time.Millisecond, StreamPending: 4})
 	body := newBlockedReader()
 	defer body.close()
-	req := httptest.NewRequest("GET", "/control", body)
+	req := httptest.NewRequest("GET", "/api/v1/control", body)
 	done := make(chan struct{})
 	go func() {
 		h.serveControl(newFlushRecorder(), req,

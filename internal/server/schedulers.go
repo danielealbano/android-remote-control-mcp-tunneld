@@ -216,7 +216,7 @@ func ensureLifecyclesRetry(ctx context.Context, st *store.S3Store, logger *slog.
 
 // renewalWatcher periodically scans this node's connected tunnels and nudges the phone to renew any cert
 // the chain says is due (NotAfter−margin floor for LE, fixed cadence otherwise). The nudge carries a fresh single-use
-// challenge nonce and is best-effort: the phone drives the actual renewal by calling the mTLS POST /issue
+// challenge nonce and is best-effort: the phone drives the actual renewal by calling the mTLS POST /api/v1/issue
 // endpoint with a fresh attestation over that nonce.
 type renewalWatcher struct {
 	mgr    *phoneconn.Manager

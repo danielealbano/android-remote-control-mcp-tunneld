@@ -24,8 +24,8 @@ You MUST ALWAYS read these documents before ANY work, in this order:
 2. **`docs/ARCHITECTURE.md`** — system map: package layout, the raw `:443` SNI edge, the public
    connection lifecycle (fast path + mesh), enrollment/issuance/renewal, bandwidth model, Valkey +
    S3 state, shutdown. **Entry-level read.**
-3. **`docs/PROTOCOL.md`** — the wire protocol: two-phase enrollment, the mTLS `/issue` endpoint, the
-   v2 control frames, the opaque data splice, the mesh stream header, and the security invariants.
+3. **`docs/PROTOCOL.md`** — the wire protocol: two-phase enrollment, the mTLS `/api/v1/issue` endpoint, the
+   v1 control frames, the opaque data splice, the mesh stream header, and the security invariants.
    **CANONICAL wire contract** — the Go client in `client/` and the future Kotlin client MUST both
    conform. **ESSENTIAL.**
 4. **`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`** — the decision record (every design
@@ -48,7 +48,7 @@ does NOT duplicate them.
 |---|---|---|
 | Language | **Go (see `go.mod` for the pinned version)**, `CGO_ENABLED=0` for released artifacts | Static binary; distroless `nonroot` runtime image. |
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`, `--s3-*` → `TUNNELD_S_3_*`); `Validate()` enforces every cross-field invariant at startup. |
-| Phone control + replica mesh | `golang.org/x/net/http2` (mTLS) | Phone control plane (`/control`, `/data`, `/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
+| Phone control + replica mesh | `golang.org/x/net/http2` (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `route:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
 | Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
 | ACME issuance | `github.com/go-acme/lego/v4` | LE→GTS→ZeroSSL chain, DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal. |
@@ -76,11 +76,11 @@ MUST NOT be relaxed without explicit user direction.
   splice; `wire.ChunkSize` = 16384 is the paced-copy read-slice size, NOT a framed protocol.
 
 ### Identity & authentication — SACRED
-- **Two-phase attested enrollment.** Phase 1 (`/enroll`, server-TLS): attestation (seven-point
+- **Two-phase attested enrollment.** Phase 1 (`/api/v1/enroll`, server-TLS): attestation (seven-point
   predicate) + key binding → the server assigns a random name and signs a bootstrap identity (mTLS)
-  cert. Phase 2 (mTLS `/issue` on `--control-host`): the phone submits a TLS CSR for
+  cert. Phase 2 (mTLS `/api/v1/issue` on `--control-host`): the phone submits a TLS CSR for
   `<name>.<tunnel-domain>`; the server re-verifies attestation and issues the public WebPKI cert via
-  ACME (regenerating identity + public certs together). Renewal is the SAME `/issue` endpoint.
+  ACME (regenerating identity + public certs together). Renewal is the SAME `/api/v1/issue` endpoint.
 - **The server assigns the name (random, base32) and writes it into the identity-cert CN** (the CSR
   subject is ignored); the public cert is issued for the server-dictated `<name>.<tunnel-domain>` — at
   issuance the name is read from the **mTLS client-cert CN** and the TLS CSR MUST request exactly that.
@@ -97,8 +97,8 @@ MUST NOT be relaxed without explicit user direction.
 ### Source-IP + ingress — SACRED
 - The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
   edge is the internet edge — there is no proxy and no `--client-ip-header`).
-- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, `/enroll`,
-  `/control`), keyed on that IP. **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
+- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, `/api/v1/enroll`,
+  `/api/v1/control`), keyed on that IP. **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
   only the raw edge `:443` is public.
 - The public edge dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
   `--control-host` → local termination; anything else → close (`no-route`). Caps are UNIFORM — NO
@@ -127,7 +127,7 @@ MUST NOT be relaxed without explicit user direction.
   rejected-enroll 30d) is applied programmatically at startup.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
-- v2 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
+- v1 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
   values are frozen); the data stream is an OPAQUE unframed splice (`wire.ChunkSize` = 16384 is the
   pacing slice). A mesh stream identifies itself via the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` request
   headers (replica↔replica only — not part of the phone contract). ANY wire change MUST update
@@ -158,7 +158,7 @@ MUST NOT be relaxed without explicit user direction.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
-  per-tunnel labels (cardinality); the per-tunnel view is `/admin/tunnels` from the TTL'd Valkey
+  per-tunnel labels (cardinality); the per-tunnel view is `/api/v1/admin/tunnels` from the TTL'd Valkey
   counters, written ASYNCHRONOUSLY by the recorder's background flusher — never synchronously on
   the data plane.
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
@@ -212,13 +212,13 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01, per-CA cooldown/backoff retry-after) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
-| `wire` | `internal/wire`: v2 control-frame codec + mesh stream header |
+| `wire` | `internal/wire`: v1 control-frame codec + mesh stream header |
 | `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back, renewal, eviction) |
 | `edge` | `internal/edge`: raw :443 SNI edge (ClientHello peek + JA4), bridge, connection policy |
 | `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 mesh (per-pair pools, connID-checked delivery) |
 | `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
-| `admin` | `internal/admin`: per-tunnel counters + `/admin/tunnels` |
+| `admin` | `internal/admin`: per-tunnel counters + `/api/v1/admin/tunnels` |
 | `caplog` | `internal/caplog`: deduped cap-hit logger |
 | `observ` | `internal/observ`: the Recorder interface |
 | `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |

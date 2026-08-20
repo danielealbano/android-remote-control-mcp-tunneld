@@ -268,7 +268,7 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 }
 
 // openFar opens the phone data stream locally (fast path) or over the mesh. The local dial-back wait is
-// bounded by --limit-dialback-timeout so a connected phone that never opens the /data stream fails fast
+// bounded by --limit-dialback-timeout so a connected phone that never opens the /api/v1/data stream fails fast
 // and releases the stream slot rather than pinning it. On the mesh path the owner node bounds its own
 // dial-back the same way (see server.bridgeAdapter.OpenMesh); the entry node's mesh dial returns once
 // the owner has accepted, so this local timeout governs only the fast path.

@@ -3,7 +3,7 @@ package com.example.tunnelapp
 import okio.BufferedSource
 import java.io.IOException
 
-// Frames is the v2 control-frame codec: [type:1][payloadLen:4 BE][payload JSON], 1 MiB cap. The data
+// Frames is the v1 control-frame codec: [type:1][payloadLen:4 BE][payload JSON], 1 MiB cap. The data
 // stream is opaque (no framing). Payloads: OPEN {stream_id}, RENEW_NUDGE {nonce, ari_window}.
 object Frames {
     const val OPEN = 1

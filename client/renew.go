@@ -17,7 +17,7 @@ func (c *Client) renew(ctx context.Context, payload []byte) {
 	_ = c.Renew(ctx, nudge.Nonce)
 }
 
-// Renew regenerates the identity + public certs via the mTLS POST /issue endpoint (a fresh attestation
+// Renew regenerates the identity + public certs via the mTLS POST /api/v1/issue endpoint (a fresh attestation
 // over nonceHex + rotated CSRs) and atomically swaps in the new identity, so subsequent reconnects and
 // dial-back data streams present the rotated certs. It is the programmatic form of answering a
 // RENEW_NUDGE and is used directly by the integration/e2e tiers.

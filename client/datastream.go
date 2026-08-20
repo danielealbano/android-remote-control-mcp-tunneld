@@ -19,7 +19,7 @@ func (c *Client) handleOpen(ctx context.Context, payload []byte) {
 		return
 	}
 	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+c.controlHost+"/data", pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+c.controlHost+"/api/v1/data", pr)
 	if err != nil {
 		_ = pw.Close()
 		return

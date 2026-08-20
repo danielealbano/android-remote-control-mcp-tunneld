@@ -12,13 +12,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// AdminSource is the read side of the per-tunnel counters for /admin/tunnels.
+// AdminSource is the read side of the per-tunnel counters for /api/v1/admin/tunnels.
 type AdminSource interface {
 	TopN(ctx context.Context, n int) ([]admin.TunnelStat, error)
 }
 
 // Handler builds the internal listener mux: /metrics (custom registry), /healthz (Redis PING), and
-// /admin/tunnels (top-N JSON). This listener is NEVER proxied.
+// /api/v1/admin/tunnels (top-N JSON). This listener is NEVER proxied.
 func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, adminSrc AdminSource, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
@@ -30,7 +30,7 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, adminSrc Admin
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/admin/tunnels", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/admin/tunnels", func(w http.ResponseWriter, r *http.Request) {
 		stats, err := adminSrc.TopN(r.Context(), 100)
 		if err != nil {
 			log.Warn("admin topN failed", "err", err)

@@ -1,4 +1,4 @@
-# tunneld Wire Protocol (v2 — End-to-End Encrypted)
+# tunneld Wire Protocol (v1 — End-to-End Encrypted)
 
 This is the CANONICAL wire contract for the E2E-encrypted tunnel. The Go client in `client/` and the
 Android (Kotlin) client both conform to THIS document, not to the Go source. `internal/wire` holds the
@@ -31,9 +31,9 @@ SNI, and splices the encrypted byte stream to the phone over an internal HTTP/2 
 
 ## 2. Enrollment (two-phase)
 
-Enrollment is TWO phases. **Phase 1** (server-TLS `POST /enroll` on `--enroll-host`, no client cert —
+Enrollment is TWO phases. **Phase 1** (server-TLS `POST /api/v1/enroll` on `--enroll-host`, no client cert —
 the phone has no identity yet) verifies attestation, assigns + write-verify-claims the name, and signs a
-**bootstrap identity cert** (CN = the assigned name). **Phase 2** (mTLS `POST /issue` on `--control-host`)
+**bootstrap identity cert** (CN = the assigned name). **Phase 2** (mTLS `POST /api/v1/issue` on `--control-host`)
 generates the certificates: because the server assigned the name in Phase 1, the phone learns it BEFORE
 building the TLS CSR, so the public cert is issued for the server-dictated `<name>.<tunnel-domain>` while
 the TLS private key never leaves the phone. Phase 2 regenerates the identity cert and the public cert
@@ -93,10 +93,10 @@ registry writes disable SDK auto-retries (a retried claim PUT would be a self-in
 
 **Phase-1 HTTP surface** (server-TLS on `--enroll-host`, JSON, all binary blobs hex/PEM as noted):
 
-- `GET /enroll/nonce` → `{"nonce": "<hex>"}` — a single-use challenge nonce (per-IP rate-limited).
-- `POST /enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>"}`
+- `GET /api/v1/enroll/nonce` → `{"nonce": "<hex>"}` — a single-use challenge nonce (per-IP rate-limited).
+- `POST /api/v1/enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>"}`
   → `{"name": "<assigned>", "identity_cert": "<PEM>", "issue_nonce": "<hex>"}`. `issue_nonce` is the
-  single-use nonce the phone echoes in its follow-up `POST /issue`. Errors are
+  single-use nonce the phone echoes in its follow-up `POST /api/v1/issue`. Errors are
   `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping (both enroll routes): `403`
   banned, `429` nonce-route rate limit, `401` unauthorized, `503` retryable (the body's `retryable`
   field is authoritative), `400` otherwise.
@@ -106,7 +106,7 @@ registry writes disable SDK auto-retries (a retried claim PUT would be a self-in
 The phone opens ONE outbound HTTP/2 connection to `--control-host` (mTLS, identity client cert). It
 carries:
 
-- a long-lived **control stream** — a `POST /control` request whose **request body** is the phone→server
+- a long-lived **control stream** — a `POST /api/v1/control` request whose **request body** is the phone→server
   frame stream (only `PONG`) and whose **response body** is the server→phone frame stream (`OPEN`,
   `PING`, `RENEW_NUDGE`). Both bodies are the length-framed control messages below; the server flushes
   each frame. The stream stays open for the connection's lifetime.
@@ -119,16 +119,16 @@ Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values
 | `OPEN` | `0x01` | server→phone | `{stream_id}` — dial back for one public connection |
 | `PING` | `0x02` | server→phone | (none) — application liveness |
 | `PONG` | `0x03` | phone→server | (none) — liveness answer |
-| `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window}` — "renew now"; the phone answers by calling `POST /issue` |
+| `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window}` — "renew now"; the phone answers by calling `POST /api/v1/issue` |
 
 The control stream carries only small frames. All certificate material (attestation chains, CSRs, issued
-certs) — and every issuance/renewal ERROR — travels over the mTLS `POST /issue` endpoint below, NEVER the
+certs) — and every issuance/renewal ERROR — travels over the mTLS `POST /api/v1/issue` endpoint below, NEVER the
 stream. The only phone→server frame is `PONG` (liveness); a stream tears down via HTTP/2 `END_STREAM`,
 never a control frame.
 
-### `POST /issue` (mTLS certificate-generation endpoint)
+### `POST /api/v1/issue` (mTLS certificate-generation endpoint)
 
-`/issue` is the single cert-generation endpoint for BOTH the initial public cert (Phase 2) and every
+`/api/v1/issue` is the single cert-generation endpoint for BOTH the initial public cert (Phase 2) and every
 renewal, authenticated by the phone's mTLS identity cert (name = its CN). Request/response are JSON:
 
 - Request: `{nonce, attestation_chain, identity_csr, tls_csr}` — `nonce` is the Phase-1 `issue_nonce`
@@ -138,14 +138,14 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   banned/forbidden identity, `405` non-POST method, `401` unauthorized, `503` retryable (the body's
   `retryable` field is authoritative; `retry_after_seconds` carries the pacing hint when known, e.g.
   an ACME rate-limit cooldown), `400` otherwise.
-- **Retrying a retryable failure**: every `/issue` attempt CONSUMES its single-use nonce, including a
+- **Retrying a retryable failure**: every `/api/v1/issue` attempt CONSUMES its single-use nonce, including a
   failed one. The enroll and issue nonces share ONE namespace, so the retry path is: fetch a fresh
-  challenge from `GET /enroll/nonce` (server-TLS, per-IP rate-limited), wait `retry_after_seconds`,
-  and repeat `POST /issue` with a fresh attestation over the new nonce (fresh keys/CSRs, as always).
+  challenge from `GET /api/v1/enroll/nonce` (server-TLS, per-IP rate-limited), wait `retry_after_seconds`,
+  and repeat `POST /api/v1/issue` with a fresh attestation over the new nonce (fresh keys/CSRs, as always).
   A phone that is already BOUND on the control stream is also re-nudged: the renewal watcher sees a
   cert-less or renewal-due tunnel and sends a fresh `RENEW_NUDGE{nonce}` on its next scan.
 
-**Renewal rotates the identity key**: on a `RENEW_NUDGE{nonce}` the phone calls `POST /issue` with a
+**Renewal rotates the identity key**: on a `RENEW_NUDGE{nonce}` the phone calls `POST /api/v1/issue` with a
 FRESH identity key + fresh TLS key + fresh attestation over the nonce; the server re-runs the full
 seven-point predicate + key binding, rotates the identity cert (CN = the mTLS CN), renews the public cert,
 and returns both in the response. The connection stays up on the old certs until the response installs
@@ -153,7 +153,7 @@ the new ones.
 
 ## 4. Data stream (opaque splice)
 
-On `OPEN{stream_id}` the phone dials back with a `POST /data` request carrying the **`X-Stream-Id`**
+On `OPEN{stream_id}` the phone dials back with a `POST /api/v1/data` request carrying the **`X-Stream-Id`**
 header set to that `stream_id` (this is how the server correlates the dial-back to the waiting public
 connection). The **request body** is the phone→client byte direction; the **response body** is the
 client→phone direction. Both are a **raw, bidirectional, opaque byte splice** carrying the client↔phone
@@ -164,16 +164,16 @@ TLS session — NO framing (HTTP/2 provides framing; `END_STREAM` is the teardow
 ## 5. Replica mesh
 
 When the accepting edge node is not the node holding the phone, it bridges to the owner over an internal
-HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh data stream is a `POST /mesh/data` whose
+HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh data stream is a `POST /api/v1/mesh/data` whose
 identity travels in the request headers `X-Tunnel`, `X-Conn-Id`, and `X-Stream-Id`; the request/response
 bodies are the opaque splice. The owner verifies `X-Conn-Id` against its live phone connection before
 bridging (the entry node takes one fresh route lookup + retry on a mismatch/stale route, then closes).
 The mesh is replica↔replica only — it is NOT part of the phone-client contract.
 
-The mesh also carries a control RPC, `POST /mesh/control`: a JSON request `{op, tunnel}` → response
+The mesh also carries a control RPC, `POST /api/v1/mesh/control`: a JSON request `{op, tunnel}` → response
 `{nudged}` (mesh-role mTLS, replica↔replica only). The first op is `renew`, which forces the owner node
 to mint a fresh renewal nonce and enqueue a `RENEW_NUDGE` to the named tunnel's live phone connection —
-the mechanism behind the internal `POST /admin/renew` endpoint. Unknown op → `400`, missing tunnel →
+the mechanism behind the internal `POST /api/v1/admin/renew` endpoint. Unknown op → `400`, missing tunnel →
 `400`, non-POST → `405`.
 
 ## 6. Security invariants

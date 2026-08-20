@@ -35,7 +35,7 @@ type Controller interface {
 	Renew(ctx context.Context, tunnel string) (bool, error)
 }
 
-// ControlRequest / ControlResponse are the /mesh/control JSON envelope (replica↔replica only).
+// ControlRequest / ControlResponse are the /api/v1/mesh/control JSON envelope (replica↔replica only).
 type ControlRequest struct {
 	Op     string `json:"op"`     // "renew"
 	Tunnel string `json:"tunnel"` // the tunnel name whose phone to nudge
@@ -70,9 +70,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
-	case "/mesh/data":
+	case "/api/v1/mesh/data":
 		h.serveData(w, r)
-	case "/mesh/control":
+	case "/api/v1/mesh/control":
 		h.serveControl(w, r)
 	default:
 		http.NotFound(w, r)
@@ -113,7 +113,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 // serveData is the opaque bidirectional splice (docs/PROTOCOL.md §5): the request/response bodies ARE the
 // client stream from the owner's perspective. Mesh-role mTLS is already enforced by ServeHTTP.
 func (h *Handler) serveData(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { // docs/PROTOCOL.md §5: a mesh stream is a POST /mesh/data
+	if r.Method != http.MethodPost { // docs/PROTOCOL.md §5: a mesh stream is a POST /api/v1/mesh/data
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -157,8 +157,8 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request) {
 	<-cs.done
 }
 
-// ownerStream is the owner-side view of a mesh stream: Read pulls client→phone bytes from the /mesh/data
-// request body; Write pushes phone→client bytes to the /mesh/data response body. Write and Close share a mutex
+// ownerStream is the owner-side view of a mesh stream: Read pulls client→phone bytes from the /api/v1/mesh/data
+// request body; Write pushes phone→client bytes to the /api/v1/mesh/data response body. Write and Close share a mutex
 // + closed flag so that once Close releases the handler, NO further Write touches the HTTP/2 response
 // writer (which the http2 library finalizes as the handler returns).
 type ownerStream struct {

@@ -50,10 +50,10 @@ of the raw TCP connection.
 
 ## 2. Identity and authentication
 
-- **Two-phase attested enrollment.** Phase 1 (server-TLS `POST /enroll` on `--enroll-host`): the phone
+- **Two-phase attested enrollment.** Phase 1 (server-TLS `POST /api/v1/enroll` on `--enroll-host`): the phone
   submits an Android hardware key-attestation chain + an identity CSR; tunneld verifies the seven-point
   attestation predicate + key binding, assigns a random tunnel name (base32), and signs a bootstrap
-  **identity (mTLS) cert** with its internal CA (CN = the assigned name). Phase 2 (mTLS `POST /issue` on
+  **identity (mTLS) cert** with its internal CA (CN = the assigned name). Phase 2 (mTLS `POST /api/v1/issue` on
   `--control-host`): the phone — now knowing its name — submits a TLS CSR for `<name>.<tunnel-domain>`;
   tunneld re-verifies attestation, and issues the **public WebPKI cert** via server-run ACME. See
   [`PROTOCOL.md`](PROTOCOL.md) §2.
@@ -78,7 +78,7 @@ The public edge is raw TCP `:443`. It peeks the ClientHello and dispatches by SN
 |---|---|
 | `<name>.<tunnel-domain>` | resolve the route → splice opaque TLS to the phone (local fast path or mesh) |
 | `--enroll-host` | terminate locally: server-TLS enrollment endpoint (Phase 1) |
-| `--control-host` | terminate locally: mTLS phone control plane (`/control`, `/data`, `/issue`) |
+| `--control-host` | terminate locally: mTLS phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) |
 | anything else / no route | connection closed (`no-route`) |
 
 There is no HTTP method/path allowlist on relayed traffic — the phone terminates TLS and enforces its
@@ -110,7 +110,7 @@ Caps are uniform by design — no per-path exceptions, no bulk-transfer carve-ou
 One or more `--ban-file` (hot-reloaded on mtime, entries UNIONed): `ip`, `cidr`, `country XX`,
 `tunnel-name`, `tunnel-fingerprint`. `country` entries expand at reload from a DB-IP Country Lite CSV
 into a longest-prefix-match table (one lookup per connection). The ban check is the FIRST handler-level
-check on every ingress edge (public, `/enroll`, `/control`), keyed on the trusted client IP. Country
+check on every ingress edge (public, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP. Country
 codes in repo artifacts are placeholders (`XX`/`YY`). The `fetcher` compose service keeps a Spamhaus
 DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
@@ -136,9 +136,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
 The internal listener (`--internal-listen`, never published) serves `GET /metrics` (Prometheus,
 aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable),
-`GET /admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
-the data plane), and `POST /admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
-over the mesh `/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
+`GET /api/v1/admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
+the data plane), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
+over the mesh `/api/v1/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on

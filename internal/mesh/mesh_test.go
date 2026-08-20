@@ -66,7 +66,7 @@ func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
 func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
 func (nopRWC) Close() error                { return nil }
 
-// fakeController is a func-backed mesh.Controller for the /mesh/control tests: it records the call and
+// fakeController is a func-backed mesh.Controller for the /api/v1/mesh/control tests: it records the call and
 // returns the configured (nudged, err).
 type fakeController struct {
 	called bool
@@ -88,7 +88,7 @@ func meshRoleReq(t *testing.T, method, path string, body []byte) *http.Request {
 	if body != nil {
 		b = bytes.NewReader(body)
 	}
-	r := httptest.NewRequest(method, "https://node/"+path, b)
+	r := httptest.NewRequest(method, "https://node"+path, b)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	return r
 }
@@ -96,7 +96,7 @@ func meshRoleReq(t *testing.T, method, path string, body []byte) *http.Request {
 func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
-	r := httptest.NewRequest("POST", "https://node/"+path, nil)
+	r := httptest.NewRequest("POST", "https://node"+path, nil)
 	if cert != nil {
 		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
 	}
@@ -109,42 +109,42 @@ func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[
 }
 
 func TestMeshRejectsIdentityRoleCert(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, false), "mesh", nil)
+	w := reqWithCert(t, meshCert(t, false), "/mesh", nil)
 	if w.Code != 403 {
 		t.Errorf("identity-role cert should be forbidden, got %d", w.Code)
 	}
 }
 
 func TestMeshRejectsNoCert(t *testing.T) {
-	w := reqWithCert(t, nil, "mesh", nil)
+	w := reqWithCert(t, nil, "/mesh", nil)
 	if w.Code != 403 {
 		t.Errorf("no cert should be forbidden, got %d", w.Code)
 	}
 }
 
 func TestMeshRejectsMissingHeaders(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, true), "mesh/data", nil)
+	w := reqWithCert(t, meshCert(t, true), "/api/v1/mesh/data", nil)
 	if w.Code != 400 {
 		t.Errorf("missing headers should be 400, got %d", w.Code)
 	}
 }
 
 // TestMesh_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §5): a mesh data stream is a
-// POST /mesh/data; a GET with a valid mesh-role cert is refused 405.
+// POST /api/v1/mesh/data; a GET with a valid mesh-role cert is refused 405.
 func TestMesh_NonPostIs405(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
-	r := httptest.NewRequest("GET", "https://node/mesh/data", nil)
+	r := httptest.NewRequest("GET", "https://node/api/v1/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != 405 {
-		t.Fatalf("GET /mesh/data must be 405, got %d", w.Code)
+		t.Fatalf("GET /api/v1/mesh/data must be 405, got %d", w.Code)
 	}
 }
 
 func TestMeshNotOwner(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return false }, &fakeBridge{}, &fakeController{})
-	r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
+	r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	r.Header.Set("X-Tunnel", "t")
 	r.Header.Set("X-Conn-Id", "c")
@@ -159,7 +159,7 @@ func TestMeshNotOwner(t *testing.T) {
 func TestMeshBridgesValidStream(t *testing.T) {
 	fb := &fakeBridge{closeNow: true}
 	h := NewHandler(func(_, _ string) bool { return true }, fb, &fakeController{})
-	r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
+	r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	r.Header.Set("X-Tunnel", "t")
 	r.Header.Set("X-Conn-Id", "c")
@@ -188,7 +188,7 @@ func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fb := &fakeBridge{openErr: tc.openErr, closeNow: true}
 			h := NewHandler(func(_, _ string) bool { return true }, fb, &fakeController{})
-			r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
+			r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
 			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 			r.Header.Set("X-Tunnel", "t")
 			r.Header.Set("X-Conn-Id", "c")
@@ -202,22 +202,22 @@ func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
 	}
 }
 
-// TestDataPathRenamed covers the mesh split: the opaque splice serves at POST /mesh/data, and the old
+// TestDataPathRenamed covers the mesh split: the opaque splice serves at POST /api/v1/mesh/data, and the old
 // POST /mesh path no longer exists (404).
 func TestDataPathRenamed(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
 
-	r := meshRoleReq(t, "POST", "mesh/data", nil)
+	r := meshRoleReq(t, "POST", "/api/v1/mesh/data", nil)
 	r.Header.Set("X-Tunnel", "t")
 	r.Header.Set("X-Conn-Id", "c")
 	r.Header.Set("X-Stream-Id", "s")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != 200 {
-		t.Fatalf("POST /mesh/data must still splice (200), got %d", w.Code)
+		t.Fatalf("POST /api/v1/mesh/data must still splice (200), got %d", w.Code)
 	}
 
-	old := meshRoleReq(t, "POST", "mesh", nil)
+	old := meshRoleReq(t, "POST", "/mesh", nil)
 	wOld := httptest.NewRecorder()
 	h.ServeHTTP(wOld, old)
 	if wOld.Code != 404 {
@@ -225,7 +225,7 @@ func TestDataPathRenamed(t *testing.T) {
 	}
 }
 
-// TestControlRenewDispatches covers the /mesh/control renew op: a mesh-role POST {op:"renew",tunnel:"t"}
+// TestControlRenewDispatches covers the /api/v1/mesh/control renew op: a mesh-role POST {op:"renew",tunnel:"t"}
 // invokes the controller and returns {nudged:true}.
 func TestControlRenewDispatches(t *testing.T) {
 	fc := &fakeController{nudged: true}
@@ -235,7 +235,7 @@ func TestControlRenewDispatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
 	if w.Code != 200 {
 		t.Fatalf("renew must be 200, got %d", w.Code)
 	}
@@ -257,7 +257,7 @@ func TestControlUnknownOp(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
 	body, _ := json.Marshal(ControlRequest{Op: "bogus", Tunnel: "t"})
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
 	if w.Code != 400 {
 		t.Fatalf("unknown op must be 400, got %d", w.Code)
 	}
@@ -272,7 +272,7 @@ func TestControlMissingTunnel(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
 	body, _ := json.Marshal(ControlRequest{Op: "renew", Tunnel: ""})
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
 	if w.Code != 400 {
 		t.Fatalf("missing tunnel must be 400, got %d", w.Code)
 	}
@@ -281,22 +281,22 @@ func TestControlMissingTunnel(t *testing.T) {
 	}
 }
 
-// TestControlNonPostIs405 covers a non-POST to /mesh/control with a mesh-role cert → 405.
+// TestControlNonPostIs405 covers a non-POST to /api/v1/mesh/control with a mesh-role cert → 405.
 func TestControlNonPostIs405(t *testing.T) {
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, &fakeController{})
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "GET", "mesh/control", nil))
+	h.ServeHTTP(w, meshRoleReq(t, "GET", "/api/v1/mesh/control", nil))
 	if w.Code != 405 {
-		t.Fatalf("GET /mesh/control must be 405, got %d", w.Code)
+		t.Fatalf("GET /api/v1/mesh/control must be 405, got %d", w.Code)
 	}
 }
 
 // TestControlRejectsNonMeshRole covers the mesh-role gate on the control path: a non-mesh-role cert → 403
 // (the role check precedes the path switch).
 func TestControlRejectsNonMeshRole(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, false), "mesh/control", nil)
+	w := reqWithCert(t, meshCert(t, false), "/api/v1/mesh/control", nil)
 	if w.Code != 403 {
-		t.Errorf("non-mesh-role cert on /mesh/control should be 403, got %d", w.Code)
+		t.Errorf("non-mesh-role cert on /api/v1/mesh/control should be 403, got %d", w.Code)
 	}
 }
 

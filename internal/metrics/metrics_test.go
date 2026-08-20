@@ -36,9 +36,9 @@ func TestAdminTunnelsHandler(t *testing.T) {
 	h := Handler(m.Registry(), rdb, store, discardLog())
 
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/admin/tunnels", nil))
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "t1") {
-		t.Errorf("admin/tunnels = %d body=%q", rr.Code, rr.Body.String())
+		t.Errorf("/api/v1/admin/tunnels = %d body=%q", rr.Code, rr.Body.String())
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Errorf("content-type = %q, want json", ct)
@@ -46,9 +46,9 @@ func TestAdminTunnelsHandler(t *testing.T) {
 
 	mr.Close() // TopN now errors → 500
 	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/admin/tunnels", nil))
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
 	if rr2.Code != http.StatusInternalServerError {
-		t.Errorf("admin/tunnels with Redis down = %d, want 500", rr2.Code)
+		t.Errorf("/api/v1/admin/tunnels with Redis down = %d, want 500", rr2.Code)
 	}
 }
 

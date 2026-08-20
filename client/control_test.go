@@ -23,7 +23,7 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 		t.Fatal("control connect must bind the route")
 	}
 
-	// Dial-back: OpenStream sends OPEN, the client opens the /data stream, deliverStream returns it.
+	// Dial-back: OpenStream sends OPEN, the client opens the /api/v1/data stream, deliverStream returns it.
 	openCtx, openCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer openCancel()
 	ds, err := ts.mgr.OpenStream(openCtx, testName, "stream-1")
@@ -47,7 +47,7 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 }
 
 // TestRenewViaNudgeAndIssue covers the renewal flow: RENEW_NUDGE{nonce} on the control stream → the client
-// calls the mTLS POST /issue endpoint → the server regenerates the identity + public certs → the client
+// calls the mTLS POST /api/v1/issue endpoint → the server regenerates the identity + public certs → the client
 // swaps in the rotated identity (both certs change).
 func TestRenewViaNudgeAndIssue(t *testing.T) {
 	ts := startTestServer(t)
@@ -69,6 +69,6 @@ func TestRenewViaNudgeAndIssue(t *testing.T) {
 		id := c.Identity()
 		return string(id.IdentityCertPEM) != originalID && len(id.PublicCertPEM) > 0
 	}) {
-		t.Fatal("renewal must call /issue and swap in the regenerated identity + public certs")
+		t.Fatal("renewal must call /api/v1/issue and swap in the regenerated identity + public certs")
 	}
 }

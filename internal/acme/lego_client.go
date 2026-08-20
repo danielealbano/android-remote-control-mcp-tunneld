@@ -138,7 +138,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _
 	}
 	// lego's ObtainForCSR takes no context (DNS-01 propagation polling can run for minutes, bounded only
 	// by lego's internal per-request HTTP timeout). Run it off-goroutine and honor the caller's ctx so a
-	// shutdown / aborted /issue stops waiting; the abandoned call completes and is discarded.
+	// shutdown / aborted /api/v1/issue stops waiting; the abandoned call completes and is discarded.
 	type result struct {
 		res *certificate.Resource
 		err error

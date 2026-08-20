@@ -339,7 +339,7 @@ func TestDeliverStream_RefusesClosedConn(t *testing.T) {
 }
 
 // TestOpenStreamTimesOut covers the bounded dial-back wait both the local (edge.openFar) and the mesh
-// (bridgeAdapter.OpenMesh) paths rely on: a connected phone that never opens /data must make OpenStream
+// (bridgeAdapter.OpenMesh) paths rely on: a connected phone that never opens /api/v1/data must make OpenStream
 // return within the caller's deadline and drop the pending waiter (releasing the caller's stream slot).
 func TestOpenStreamTimesOut(t *testing.T) {
 	m, _, _, _ := newMgr(t)
@@ -425,7 +425,7 @@ func (fakeDataStream) Close() error                { return nil }
 
 // TestCancelPendingClosesRacedDelivery covers the dial-back cancel/deliver race: when
 // deliverStream delivers a stream to the buffered waiter at the same moment the dial-back deadline fires,
-// cancelPending MUST close the orphaned stream (so its /data handler cannot leak) and drop the pending
+// cancelPending MUST close the orphaned stream (so its /api/v1/data handler cannot leak) and drop the pending
 // registration.
 func TestCancelPendingClosesRacedDelivery(t *testing.T) {
 	c := newConn("abc")

@@ -104,7 +104,7 @@ type bridgeAdapter struct {
 
 func (b *bridgeAdapter) OpenMesh(ctx context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
 	// Bound the owner-side dial-back wait (mirrors the local fast path in edge.openFar): a phone that never
-	// opens the /data stream fails fast so the entry node's held stream slot is released, rather than
+	// opens the /api/v1/data stream fails fast so the entry node's held stream slot is released, rather than
 	// pinning it until the idle timeout.
 	timeout := b.dialBackTimeout
 	if timeout <= 0 {
@@ -150,7 +150,7 @@ func bridgeCopy(ds, client io.ReadWriteCloser) {
 	<-respDone // the response-writer copy has fully stopped — safe to return
 }
 
-// issueFunc adapts the enroll service's Issue path to the phone control handler's mTLS POST /issue
+// issueFunc adapts the enroll service's Issue path to the phone control handler's mTLS POST /api/v1/issue
 // endpoint: it parses the phone's fresh attestation chain + rotated CSRs and runs the attested issuance
 // (name from the mTLS client-cert CN, validated by the handler), returning the regenerated identity +
 // public certs. It serves BOTH the initial public cert and every renewal.
@@ -191,7 +191,7 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 
 // renewController is this node's mesh.Controller: it mints a fresh renewal nonce (the same challenge the
 // renewal watcher uses) and enqueues a RENEW_NUDGE to the tunnel's LOCAL phone connection. Used both
-// directly by the /admin/renew local path and by the mesh /mesh/control handler on the owner node.
+// directly by the /api/v1/admin/renew local path and by the mesh /api/v1/mesh/control handler on the owner node.
 type renewController struct {
 	mgr   *phoneconn.Manager
 	nonce func(ctx context.Context) (string, error)
@@ -206,7 +206,7 @@ func (rc *renewController) Renew(ctx context.Context, tunnel string) (bool, erro
 }
 
 // challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the
-// renewal nudge, so the phone's follow-up POST /issue validates through the same attestation path as an
+// renewal nudge, so the phone's follow-up POST /api/v1/issue validates through the same attestation path as an
 // initial issuance.
 func challengeFunc(svc *enroll.Service) func(ctx context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {

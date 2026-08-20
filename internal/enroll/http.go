@@ -17,12 +17,12 @@ import (
 // decoupled from internal/ban).
 type BanFunc func(netip.Addr) bool
 
-// nonceResponse is the GET /enroll/nonce reply.
+// nonceResponse is the GET /api/v1/enroll/nonce reply.
 type nonceResponse struct {
 	Nonce string `json:"nonce"` // hex
 }
 
-// enrollRequestBody is the POST /enroll body (Phase 1: identity only — NO TLS CSR).
+// enrollRequestBody is the POST /api/v1/enroll body (Phase 1: identity only — NO TLS CSR).
 type enrollRequestBody struct {
 	Nonce          string `json:"nonce"`             // hex
 	AttestChainPEM string `json:"attestation_chain"` // PEM bundle
@@ -30,7 +30,7 @@ type enrollRequestBody struct {
 }
 
 // enrollResponse returns the assigned name, the bootstrap identity cert, and a fresh single-use
-// issue_nonce the phone echoes in the fresh attestation of its follow-up POST /issue (Phase 2).
+// issue_nonce the phone echoes in the fresh attestation of its follow-up POST /api/v1/issue (Phase 2).
 type enrollResponse struct {
 	Name         string `json:"name"`
 	IdentityCert string `json:"identity_cert"` // PEM
@@ -74,9 +74,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/enroll/nonce":
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/enroll/nonce":
 		h.handleNonce(w, r, ip)
-	case r.Method == http.MethodPost && r.URL.Path == "/enroll":
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/enroll":
 		h.handleEnroll(w, r, ip)
 	default:
 		http.NotFound(w, r)
@@ -131,7 +131,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	}
 
 	// READ-ONLY per-IP limit pre-gate BEFORE any side effect: an over-limit caller must not be able to
-	// mint Valkey nonce keys by flooding POST /enroll (the unauthenticated surface must not mint
+	// mint Valkey nonce keys by flooding POST /api/v1/enroll (the unauthenticated surface must not mint
 	// unbounded keys). Enroll below still runs the authoritative consuming check.
 	if e := h.svc.enrollLimitCheck(r.Context(), ip); e != nil {
 		h.rec.EnrollmentResult(e.Reason)
@@ -139,7 +139,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		return
 	}
 
-	// Mint the single-use nonce for the follow-up mTLS POST /issue (Phase 2) BEFORE enrolling: a mint
+	// Mint the single-use nonce for the follow-up mTLS POST /api/v1/issue (Phase 2) BEFORE enrolling: a mint
 	// failure must fail the request before any name is claimed (an unused nonce simply expires by TTL,
 	// while a name claimed without a deliverable response would be orphaned).
 	issueNonce, nerr := h.svc.Nonce(r.Context())

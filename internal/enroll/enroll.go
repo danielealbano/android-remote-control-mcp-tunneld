@@ -140,7 +140,7 @@ var errClaimLost = errors.New("enroll: claim lost")
 
 // Enroll runs PHASE 1: attestation + key binding → generate + write-verify-claim a fresh name → sign the
 // bootstrap identity (mTLS) cert. It issues NO public cert and takes NO TLS CSR; the phone then reaches
-// the mTLS POST /issue endpoint (see Issue) to regenerate its identity and obtain the public WebPKI cert
+// the mTLS POST /api/v1/issue endpoint (see Issue) to regenerate its identity and obtain the public WebPKI cert
 // for <name>.<tunnel-domain>. Any post-claim failure rolls the freshly claimed name back (plain
 // DeleteName, safe only because the claim was verified).
 func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *Error) {
@@ -229,7 +229,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 
-	// Issuance cap (keyed on the name): reserve an in-flight slot atomically so concurrent /issue calls
+	// Issuance cap (keyed on the name): reserve an in-flight slot atomically so concurrent /api/v1/issue calls
 	// for one name cannot both pass the cap they only commit against on success. The slot is freed on
 	// BOTH success and failure (failed orders never burn the weekly window), refreshed by a heartbeat so
 	// a long ACME order does not self-expire, and self-expires if this node crashes mid-order.

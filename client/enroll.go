@@ -1,8 +1,8 @@
 // Package client is the Go HTTP/2 tunnel client: the reference (non-attesting) phone implementation used
-// by the integration/e2e tiers. It speaks wire v2 over HTTP/2 — the identity-mTLS control connection,
+// by the integration/e2e tiers. It speaks wire v1 over HTTP/2 — the identity-mTLS control connection,
 // dial-back data streams (full-duplex opaque splice), PING/PONG liveness, and the RENEW_NUDGE → mTLS
-// POST /issue renewal — plus a two-phase attestation-optional enrollment path (Phase 1 /enroll → Phase 2
-// /issue) so tests enroll without a real device.
+// POST /api/v1/issue renewal — plus a two-phase attestation-optional enrollment path (Phase 1 /api/v1/enroll → Phase 2
+// /api/v1/issue) so tests enroll without a real device.
 package client
 
 import (
@@ -49,7 +49,7 @@ type nonceResponse struct {
 	Nonce string `json:"nonce"`
 }
 
-// enrollRequestBody is the Phase-1 POST /enroll body (identity only — no TLS CSR).
+// enrollRequestBody is the Phase-1 POST /api/v1/enroll body (identity only — no TLS CSR).
 type enrollRequestBody struct {
 	Nonce          string `json:"nonce"`
 	AttestChainPEM string `json:"attestation_chain"`
@@ -63,7 +63,7 @@ type enrollResponse struct {
 	IssueNonce   string `json:"issue_nonce"`
 }
 
-// issueRequestBody is the Phase-2 (and renewal) POST /issue body (mTLS).
+// issueRequestBody is the Phase-2 (and renewal) POST /api/v1/issue body (mTLS).
 type issueRequestBody struct {
 	Nonce          string `json:"nonce"`
 	AttestChainPEM string `json:"attestation_chain"`
@@ -71,7 +71,7 @@ type issueRequestBody struct {
 	TLSCSR         string `json:"tls_csr"`
 }
 
-// issueResponseBody is the POST /issue reply: the regenerated identity + public certs.
+// issueResponseBody is the POST /api/v1/issue reply: the regenerated identity + public certs.
 type issueResponseBody struct {
 	IdentityCert string `json:"identity_cert"`
 	PublicCert   string `json:"public_cert"`
@@ -96,9 +96,9 @@ func (e *EnrollError) Error() string {
 	return fmt.Sprintf("enroll: %s (status %d)", e.Reason, e.Status)
 }
 
-// Enroll performs the two-phase attestation-optional enrollment: Phase 1 (server-TLS POST /enroll on
+// Enroll performs the two-phase attestation-optional enrollment: Phase 1 (server-TLS POST /api/v1/enroll on
 // enrollHost) attests the identity key and returns the assigned name + bootstrap identity cert + a
-// follow-up issue nonce; Phase 2 (mTLS POST /issue on controlHost) regenerates the identity cert and
+// follow-up issue nonce; Phase 2 (mTLS POST /api/v1/issue on controlHost) regenerates the identity cert and
 // obtains the public WebPKI cert for <name>.<tunnelDomain> together. It uses a throwaway self-signed
 // "attestation" chain (accepted because the server runs --attestation-optional). dialAddr is the shared
 // raw :443 edge (SNI routes enrollHost/controlHost to their listeners).
@@ -124,7 +124,7 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 		return nil, err
 	}
 	body, _ := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)}) // string-only fields cannot fail
-	resp, err := post(ctx, hc, "https://"+enrollHost+"/enroll", body)
+	resp, err := post(ctx, hc, "https://"+enrollHost+"/api/v1/enroll", body)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 		return nil, fmt.Errorf("enroll: decode response: %w", err)
 	}
 
-	// --- Phase 2: cert generation (mTLS POST /issue) ---
+	// --- Phase 2: cert generation (mTLS POST /api/v1/issue) ---
 	bootIdent := &Identity{Name: er.Name, IdentityCertPEM: []byte(er.IdentityCert), IdentityKey: bootKey}
 	bootCert, err := bootIdent.tlsCertificate()
 	if err != nil {
@@ -164,7 +164,7 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	return id, nil
 }
 
-// issueCerts performs the mTLS POST /issue exchange over hc: it generates a FRESH identity + TLS keypair,
+// issueCerts performs the mTLS POST /api/v1/issue exchange over hc: it generates a FRESH identity + TLS keypair,
 // builds the CSRs (TLS SAN = <name>.<tunnelDomain>) and a throwaway attestation over nonceHex, and
 // returns a new Identity carrying the regenerated identity + public certs and their fresh keys. It backs
 // both Phase 2 of enrollment and every renewal. caFallback is used when the server omits the CA field.
@@ -192,7 +192,7 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 	body, _ := json.Marshal(issueRequestBody{ // string-only fields cannot fail
 		Nonce: nonceHex, AttestChainPEM: string(attest), IdentityCSR: string(idCSR), TLSCSR: string(tlsCSR),
 	})
-	resp, err := post(ctx, hc, "https://"+controlHost+"/issue", body)
+	resp, err := post(ctx, hc, "https://"+controlHost+"/api/v1/issue", body)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +235,7 @@ func tlsCSRForTunnel(key *ecdsa.PrivateKey, name, tunnelDomain string) ([]byte, 
 }
 
 func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+enrollHost+"/enroll/nonce", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+enrollHost+"/api/v1/enroll/nonce", nil)
 	if err != nil {
 		return "", err
 	}
@@ -303,9 +303,9 @@ func serverTLSTransport(dialAddr, host string, caPool *x509.CertPool) *http.Tran
 	}
 }
 
-// FetchIssueNonce mints a fresh single-use challenge nonce from GET /enroll/nonce (per-IP
+// FetchIssueNonce mints a fresh single-use challenge nonce from GET /api/v1/enroll/nonce (per-IP
 // rate-limited). The enroll and issue nonces share one namespace, so this is the documented retry
-// path after a RETRYABLE POST /issue failure (which consumed the previous nonce): fetch a fresh
+// path after a RETRYABLE POST /api/v1/issue failure (which consumed the previous nonce): fetch a fresh
 // nonce, wait retry_after_seconds, then call Client.Renew with it. See docs/PROTOCOL.md §3.
 func FetchIssueNonce(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertPool) (string, error) {
 	tr := serverTLSTransport(dialAddr, enrollHost, caPool)
