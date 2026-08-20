@@ -151,8 +151,10 @@ silently allowing every signer.
 ## 8. Observability wiring
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
-The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`, and
-`/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher).
+The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
+`/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher), and
+`POST /admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
+`/mesh/control` RPC — see PROTOCOL.md §5).
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
