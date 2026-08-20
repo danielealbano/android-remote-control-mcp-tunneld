@@ -6,8 +6,10 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -178,7 +180,7 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
 
 	pr, pw := io.Pipe() // request body: entry→owner (client→phone bytes)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/mesh", pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/mesh/data", pr)
 	if err != nil {
 		return nil, err
 	}
@@ -219,4 +221,36 @@ func (s *clientStream) Close() error {
 		s.p.active.Add(-1)
 	})
 	return nil
+}
+
+// Control posts a mesh control RPC to peer over the per-peer mTLS H2 pool and returns the decoded
+// response. Short request/response (not a splice); the pool's active-count guards it against reaping
+// for the request's duration.
+func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (ControlResponse, error) {
+	p := c.pool(peer) // active++
+	defer p.active.Add(-1)
+	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return ControlResponse{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/mesh/control", bytes.NewReader(body))
+	if err != nil {
+		return ControlResponse{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(httpReq)
+	if err != nil {
+		return ControlResponse{}, fmt.Errorf("mesh control %s: %w", peer, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ControlResponse{}, fmt.Errorf("mesh control %s: status %d", peer, resp.StatusCode)
+	}
+	var out ControlResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out); err != nil {
+		return ControlResponse{}, err
+	}
+	return out, nil
 }

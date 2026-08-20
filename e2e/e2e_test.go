@@ -11,9 +11,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -201,8 +204,9 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 }
 
 // echoPhone enrolls a tunnel via enrollAddr, connects the phone control to controlAddr, and serves an
-// echoing TLS-terminating backend. It returns the identity (for the frontend to derive the SNI + trust).
-func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) *client.Identity {
+// echoing TLS-terminating backend. It returns the live client (whose identity rotates on a renewal) and
+// the initial identity (for the frontend to derive the SNI + trust; its Name is stable across renewals).
+func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*client.Client, *client.Identity) {
 	t.Helper()
 	ctx := context.Background()
 	ident, err := client.Enroll(ctx, enrollAddr, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots)
@@ -232,7 +236,7 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) *cli
 		<-runDone
 		c.Close()
 	})
-	return ident
+	return c, ident
 }
 
 // TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves both the cross-node
@@ -244,7 +248,7 @@ func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 	edgeB := inf.startReplica(t, replicaOpts{})
 
 	// Enroll via A, but run the phone's control connection on B → B owns the route.
-	ident := echoPhone(t, inf, edgeA, edgeB)
+	_, ident := echoPhone(t, inf, edgeA, edgeB)
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
 	// Cross-node: the frontend hits A; A meshes to the owner B.
@@ -262,6 +266,47 @@ func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 		return lastErr == nil
 	}) {
 		t.Fatalf("same-node fast-path roundtrip never succeeded: %v", lastErr)
+	}
+}
+
+// TestE2E_CrossNodeRenewNudge proves the cross-node force-renew path: the phone's control connection is
+// owned by replica B, but /admin/renew is POSTed to the NON-owner replica A. A routes to the owner over
+// /mesh/control, B mints a nonce and nudges the phone, and the Go client answers by rotating its public
+// cert. An unknown tunnel (no bound route) is 404.
+func TestE2E_CrossNodeRenewNudge(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+
+	// Enroll via A, run the phone's control connection on B → B owns the route.
+	c, ident := echoPhone(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	if !waitBool(30*time.Second, func() bool {
+		return frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots) == nil
+	}) {
+		t.Fatal("route never bound on the owner replica")
+	}
+
+	before := sha256.Sum256(c.Identity().PublicCertPEM)
+
+	// Force a renew via the NON-owner replica A; A meshes to the owner B, which nudges the phone.
+	status, nudged := postAdminRenew(t, inf.internal[edgeA], ident.Name)
+	if status != http.StatusOK || !nudged {
+		t.Fatalf("/admin/renew on the non-owner replica = (status %d, nudged %v), want (200, true)", status, nudged)
+	}
+
+	// The Go client answers the RENEW_NUDGE by rotating its public cert.
+	if !waitBool(30*time.Second, func() bool {
+		return sha256.Sum256(c.Identity().PublicCertPEM) != before
+	}) {
+		t.Fatal("the client's public cert never rotated after the cross-node nudge")
+	}
+
+	// An unknown tunnel has no bound route → 404.
+	if s, _ := postAdminRenew(t, inf.internal[edgeA], "nosuchtunnel"); s != http.StatusNotFound {
+		t.Fatalf("/admin/renew for an unknown tunnel = %d, want 404", s)
 	}
 }
 
@@ -285,7 +330,7 @@ func TestE2E_Spillover(t *testing.T) {
 func TestE2E_Quota(t *testing.T) {
 	inf := startE2EInfra(t)
 	edge := inf.startReplica(t, replicaOpts{trafficDay: "48kb"})
-	ident := echoPhone(t, inf, edge, edge)
+	_, ident := echoPhone(t, inf, edge, edge)
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
 	// Wait for bind (a small roundtrip succeeds), then exceed the cap.
@@ -307,7 +352,7 @@ func TestE2E_Quota(t *testing.T) {
 func TestE2E_Eviction(t *testing.T) {
 	inf := startE2EInfra(t)
 	edge := inf.startReplica(t, replicaOpts{concurrent: 2})
-	ident := echoPhone(t, inf, edge, edge)
+	_, ident := echoPhone(t, inf, edge, edge)
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
 	if !waitBool(30*time.Second, func() bool { return frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots) == nil }) {
@@ -487,6 +532,30 @@ func metricCounterPositive(internalAddr, family string) bool {
 		}
 	}
 	return false
+}
+
+// postAdminRenew POSTs /admin/renew?tunnel=<name> to a replica's internal listener. It returns the HTTP
+// status and, on a 200, the decoded {nudged} value (false for any non-200, so callers can assert both the
+// 200/nudged path and the 404 no-route path).
+func postAdminRenew(t *testing.T, internalAddr, name string) (int, bool) {
+	t.Helper()
+	c := &http.Client{Timeout: 5 * time.Second}
+	u := "http://" + internalAddr + "/admin/renew?tunnel=" + url.QueryEscape(name)
+	resp, err := c.Post(u, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /admin/renew: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, false
+	}
+	var out struct {
+		Nudged bool `json:"nudged"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode /admin/renew response: %v", err)
+	}
+	return resp.StatusCode, out.Nudged
 }
 
 func healthOK(internalAddr string) bool {

@@ -189,6 +189,22 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 	}
 }
 
+// renewController is this node's mesh.Controller: it mints a fresh renewal nonce (the same challenge the
+// renewal watcher uses) and enqueues a RENEW_NUDGE to the tunnel's LOCAL phone connection. Used both
+// directly by the /admin/renew local path and by the mesh /mesh/control handler on the owner node.
+type renewController struct {
+	mgr   *phoneconn.Manager
+	nonce func(ctx context.Context) (string, error)
+}
+
+func (rc *renewController) Renew(ctx context.Context, tunnel string) (bool, error) {
+	nonceHex, err := rc.nonce(ctx)
+	if err != nil {
+		return false, err
+	}
+	return rc.mgr.SendRenewNudge(tunnel, nonceHex, ""), nil
+}
+
 // challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the
 // renewal nudge, so the phone's follow-up POST /issue validates through the same attestation path as an
 // initial issuance.

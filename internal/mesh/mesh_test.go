@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"io"
 	"math/big"
@@ -64,9 +66,36 @@ func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
 func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
 func (nopRWC) Close() error                { return nil }
 
+// fakeController is a func-backed mesh.Controller for the /mesh/control tests: it records the call and
+// returns the configured (nudged, err).
+type fakeController struct {
+	called bool
+	tunnel string
+	nudged bool
+	err    error
+}
+
+func (f *fakeController) Renew(_ context.Context, tunnel string) (bool, error) {
+	f.called = true
+	f.tunnel = tunnel
+	return f.nudged, f.err
+}
+
+// meshRoleReq builds a mesh-role-authenticated request to https://node/<path> with an optional JSON body.
+func meshRoleReq(t *testing.T, method, path string, body []byte) *http.Request {
+	t.Helper()
+	var b io.Reader
+	if body != nil {
+		b = bytes.NewReader(body)
+	}
+	r := httptest.NewRequest(method, "https://node/"+path, b)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
+	return r
+}
+
 func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true})
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
 	r := httptest.NewRequest("POST", "https://node/"+path, nil)
 	if cert != nil {
 		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
@@ -94,28 +123,28 @@ func TestMeshRejectsNoCert(t *testing.T) {
 }
 
 func TestMeshRejectsMissingHeaders(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, true), "mesh", nil)
+	w := reqWithCert(t, meshCert(t, true), "mesh/data", nil)
 	if w.Code != 400 {
 		t.Errorf("missing headers should be 400, got %d", w.Code)
 	}
 }
 
-// TestMesh_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §5): a mesh stream is a
-// POST /mesh; a GET with a valid mesh-role cert is refused 405.
+// TestMesh_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §5): a mesh data stream is a
+// POST /mesh/data; a GET with a valid mesh-role cert is refused 405.
 func TestMesh_NonPostIs405(t *testing.T) {
-	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true})
-	r := httptest.NewRequest("GET", "https://node/mesh", nil)
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
+	r := httptest.NewRequest("GET", "https://node/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != 405 {
-		t.Fatalf("GET /mesh must be 405, got %d", w.Code)
+		t.Fatalf("GET /mesh/data must be 405, got %d", w.Code)
 	}
 }
 
 func TestMeshNotOwner(t *testing.T) {
-	h := NewHandler(func(_, _ string) bool { return false }, &fakeBridge{})
-	r := httptest.NewRequest("POST", "https://node/mesh", nil)
+	h := NewHandler(func(_, _ string) bool { return false }, &fakeBridge{}, &fakeController{})
+	r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	r.Header.Set("X-Tunnel", "t")
 	r.Header.Set("X-Conn-Id", "c")
@@ -129,8 +158,8 @@ func TestMeshNotOwner(t *testing.T) {
 
 func TestMeshBridgesValidStream(t *testing.T) {
 	fb := &fakeBridge{closeNow: true}
-	h := NewHandler(func(_, _ string) bool { return true }, fb)
-	r := httptest.NewRequest("POST", "https://node/mesh", nil)
+	h := NewHandler(func(_, _ string) bool { return true }, fb, &fakeController{})
+	r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
 	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 	r.Header.Set("X-Tunnel", "t")
 	r.Header.Set("X-Conn-Id", "c")
@@ -158,8 +187,8 @@ func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fb := &fakeBridge{openErr: tc.openErr, closeNow: true}
-			h := NewHandler(func(_, _ string) bool { return true }, fb)
-			r := httptest.NewRequest("POST", "https://node/mesh", nil)
+			h := NewHandler(func(_, _ string) bool { return true }, fb, &fakeController{})
+			r := httptest.NewRequest("POST", "https://node/mesh/data", nil)
 			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
 			r.Header.Set("X-Tunnel", "t")
 			r.Header.Set("X-Conn-Id", "c")
@@ -168,6 +197,150 @@ func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
 			h.ServeHTTP(w, r)
 			if w.Code != tc.wantCode {
 				t.Fatalf("code = %d, want %d", w.Code, tc.wantCode)
+			}
+		})
+	}
+}
+
+// TestDataPathRenamed covers the mesh split: the opaque splice serves at POST /mesh/data, and the old
+// POST /mesh path no longer exists (404).
+func TestDataPathRenamed(t *testing.T) {
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
+
+	r := meshRoleReq(t, "POST", "mesh/data", nil)
+	r.Header.Set("X-Tunnel", "t")
+	r.Header.Set("X-Conn-Id", "c")
+	r.Header.Set("X-Stream-Id", "s")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("POST /mesh/data must still splice (200), got %d", w.Code)
+	}
+
+	old := meshRoleReq(t, "POST", "mesh", nil)
+	wOld := httptest.NewRecorder()
+	h.ServeHTTP(wOld, old)
+	if wOld.Code != 404 {
+		t.Fatalf("the old POST /mesh path must be gone (404), got %d", wOld.Code)
+	}
+}
+
+// TestControlRenewDispatches covers the /mesh/control renew op: a mesh-role POST {op:"renew",tunnel:"t"}
+// invokes the controller and returns {nudged:true}.
+func TestControlRenewDispatches(t *testing.T) {
+	fc := &fakeController{nudged: true}
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	body, err := json.Marshal(ControlRequest{Op: "renew", Tunnel: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	if w.Code != 200 {
+		t.Fatalf("renew must be 200, got %d", w.Code)
+	}
+	var resp ControlResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Nudged {
+		t.Errorf("response nudged = false, want true")
+	}
+	if !fc.called || fc.tunnel != "t" {
+		t.Errorf("controller called=%v tunnel=%q, want called=true tunnel=%q", fc.called, fc.tunnel, "t")
+	}
+}
+
+// TestControlUnknownOp covers an unrecognized op → 400 without touching the controller.
+func TestControlUnknownOp(t *testing.T) {
+	fc := &fakeController{}
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	body, _ := json.Marshal(ControlRequest{Op: "bogus", Tunnel: "t"})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	if w.Code != 400 {
+		t.Fatalf("unknown op must be 400, got %d", w.Code)
+	}
+	if fc.called {
+		t.Error("controller must not be called for an unknown op")
+	}
+}
+
+// TestControlMissingTunnel covers renew with an empty tunnel → 400 without touching the controller.
+func TestControlMissingTunnel(t *testing.T) {
+	fc := &fakeController{}
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	body, _ := json.Marshal(ControlRequest{Op: "renew", Tunnel: ""})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "mesh/control", body))
+	if w.Code != 400 {
+		t.Fatalf("missing tunnel must be 400, got %d", w.Code)
+	}
+	if fc.called {
+		t.Error("controller must not be called when the tunnel is missing")
+	}
+}
+
+// TestControlNonPostIs405 covers a non-POST to /mesh/control with a mesh-role cert → 405.
+func TestControlNonPostIs405(t *testing.T) {
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, &fakeController{})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "GET", "mesh/control", nil))
+	if w.Code != 405 {
+		t.Fatalf("GET /mesh/control must be 405, got %d", w.Code)
+	}
+}
+
+// TestControlRejectsNonMeshRole covers the mesh-role gate on the control path: a non-mesh-role cert → 403
+// (the role check precedes the path switch).
+func TestControlRejectsNonMeshRole(t *testing.T) {
+	w := reqWithCert(t, meshCert(t, false), "mesh/control", nil)
+	if w.Code != 403 {
+		t.Errorf("non-mesh-role cert on /mesh/control should be 403, got %d", w.Code)
+	}
+}
+
+// TestControlClient_Errors covers Client.Control: it decodes {nudged} on a 200 and returns an error on a
+// non-200 mesh response.
+func TestControlClient_Errors(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		wantErr    bool
+		wantNudged bool
+	}{
+		{name: "200 decodes nudged", status: http.StatusOK, wantErr: false, wantNudged: true},
+		{name: "502 errors", status: http.StatusBadGateway, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.status == http.StatusOK {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(ControlResponse{Nudged: true})
+					return
+				}
+				w.WriteHeader(tc.status)
+			}))
+			ts.EnableHTTP2 = true
+			ts.StartTLS()
+			defer ts.Close()
+			peer := strings.TrimPrefix(ts.URL, "https://")
+			c := NewClient(func() *tls.Config {
+				return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+			}, 1)
+			resp, err := c.Control(context.Background(), peer, ControlRequest{Op: "renew", Tunnel: "t"})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("status %d: want an error, got nil", tc.status)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("status %d: unexpected error: %v", tc.status, err)
+			}
+			if resp.Nudged != tc.wantNudged {
+				t.Errorf("nudged = %v, want %v", resp.Nudged, tc.wantNudged)
 			}
 		})
 	}

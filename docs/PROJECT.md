@@ -130,9 +130,10 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 ## 6. Observability
 
 The internal listener (`--internal-listen`, never published) serves `GET /metrics` (Prometheus,
-aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable), and
+aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable),
 `GET /admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
-the data plane). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
+the data plane), and `POST /admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
+over the mesh `/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on

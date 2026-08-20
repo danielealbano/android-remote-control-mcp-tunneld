@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -155,7 +156,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
-	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn, &bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout})
+	renewCtl := &renewController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc)}
+	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,
+		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, renewCtl)
 
 	// Public edge (constructed from the resolved static address — the raw listener is bound LAST, below,
 	// so the edge never depends on a live socket at construction time).
@@ -201,9 +204,13 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return fmt.Errorf("configure mesh http2: %w", err)
 	}
 
-	// Internal server (metrics + healthz + admin; never proxied).
+	// Internal server (metrics + healthz + admin + force-renew; never proxied). The mux mounts
+	// /admin/renew and delegates everything else to the existing metrics handler (unchanged).
+	internalMux := http.NewServeMux()
+	internalMux.Handle("/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
+	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
-		Handler: metrics.Handler(m.Registry(), rdb, adminStore, logger)}
+		Handler: internalMux}
 
 	// Bind the public + mesh listeners LAST: every fallible construction step above (reserved-cert
 	// issuance and both http2.ConfigureServer calls) has now succeeded, so no socket is ever left bound
@@ -305,6 +312,55 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return werr
 	}
 	return nil
+}
+
+// adminRenewHandler forces a RENEW_NUDGE for ?tunnel=<name>, routing to the owner node. Internal-listener
+// only (never published). 404 when no route is bound; the owner mints the nonce and enqueues the nudge.
+// ctl is the mesh.Controller INTERFACE (renewController satisfies it) so the local-nudge path is unit
+// testable with a stub — consistent with the OwnerCheck/Bridge/Controller consumer-site seams.
+func adminRenewHandler(nodeID string, reg *router.Registry, ctl mesh.Controller, mc *mesh.Client, log *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		name := r.URL.Query().Get("tunnel")
+		if name == "" {
+			http.Error(w, "missing tunnel", http.StatusBadRequest)
+			return
+		}
+		owner, _, _, ok, err := reg.LookupRoute(r.Context(), name)
+		if err != nil {
+			log.Warn("admin renew: route lookup failed", "tunnel", name, "err", err)
+			http.Error(w, "route lookup failed", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "no route bound for tunnel", http.StatusNotFound)
+			return
+		}
+		var nudged bool
+		if owner == nodeID {
+			nudged, err = ctl.Renew(r.Context(), name)
+		} else {
+			addr, addrOK, lerr := reg.LookupNode(r.Context(), owner)
+			if lerr != nil || !addrOK {
+				log.Warn("admin renew: owner node unresolved", "tunnel", name, "owner", owner, "err", lerr)
+				http.Error(w, "owner node unavailable", http.StatusBadGateway)
+				return
+			}
+			var res mesh.ControlResponse
+			res, err = mc.Control(r.Context(), addr, mesh.ControlRequest{Op: "renew", Tunnel: name})
+			nudged = res.Nudged
+		}
+		if err != nil {
+			log.Warn("admin renew: nudge failed", "tunnel", name, "owner", owner, "err", err)
+			http.Error(w, "renew failed", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, "nudged": nudged})
+	}
 }
 
 // mustBytes parses a byte-size flag ALREADY validated by cfg.Validate() — a parse error is impossible.
