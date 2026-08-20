@@ -147,25 +147,25 @@ Move the paced-copy read slice to 16 KiB and add the packet-cap config surface (
 
 ---
 
-## User Story 2 — [ ] Per-second byte + packet window limiter (`internal/limit`)
+## User Story 2 — [x] Per-second byte + packet window limiter (`internal/limit`)
 
 Replace the token bucket with a pipelined, Lua-free per-second window charge; keep the day/week quota.
 
 **Acceptance criteria:**
-- [ ] `ClaimBandwidth` + `claimBandwidthScript` are GONE.
-- [ ] `ChargeBandwidth(ctx, name, dir, nr)` records `nr` bytes + one read into `bw:{name}:{dir}:{sec}` /
+- [x] `ClaimBandwidth` + `claimBandwidthScript` are GONE.
+- [x] `ChargeBandwidth(ctx, name, dir, nr)` records `nr` bytes + one read into `bw:{name}:{dir}:{sec}` /
   `pkt:{name}:{dir}:{sec}` in ONE plain pipelined round-trip (`Pipeline`: `INCRBY`/`INCR` + `EXPIRE 2s NX`
   ×2, no Lua; `EXPIRE NX` self-heals a skipped TTL on the next same-second read — see the use-case rationale
   in Context) and returns
   `(over bool, retryAfter time.Duration, err error)`: `over` iff bytes > byteCap OR (pktCap>0 AND reads >
   pktCap); `retryAfter` = time to the next 1-second boundary; a Valkey error → `over=false` (fail-open).
-- [ ] The packet cap is set via `WithPacketCap(n)` (functional option, go.md); default 0 = disabled.
-- [ ] `ClaimTraffic` / `TrafficExhausted` and the `conc:{name}` TTL piggyback are UNCHANGED.
+- [x] The packet cap is set via `WithPacketCap(n)` (functional option, go.md); default 0 = disabled.
+- [x] `ClaimTraffic` / `TrafficExhausted` and the `conc:{name}` TTL piggyback are UNCHANGED.
 
-### Task 2.1 — [ ] `ChargeBandwidth` + `WithPacketCap` (`internal/limit/limiter.go`)
+### Task 2.1 — [x] `ChargeBandwidth` + `WithPacketCap` (`internal/limit/limiter.go`)
 
 **Actions:**
-- [ ] Add a `pktCap int64` field to `Limiter` (default 0), and the option:
+- [x] Add a `pktCap int64` field to `Limiter` (default 0), and the option:
 
   ```go
   // WithPacketCap sets the per-tunnel/per-direction reads-per-second cap (0 = disabled, the default).
@@ -177,11 +177,11 @@ Replace the token bucket with a pipelined, Lua-free per-second window charge; ke
   non-Lua windows (e.g. "…each key gets a TTL alongside its mutation — the same Lua script, `SET EX` for
   the cooldown windows, or a pipelined `EXPIRE NX` immediately after the INCR for the `bw:`/`pkt:` per-second
   windows"), matching the ARCHITECTURE §5 / project.md reconciliations.
-- [ ] Update the `internal/limit/acme_cooldown.go:2` package doc comment: `… the global stream counter, the
+- [x] Update the `internal/limit/acme_cooldown.go:2` package doc comment: `… the global stream counter, the
   batch-credit bandwidth bucket, and the per-CA ACME cooldown/backoff.` → replace `batch-credit bandwidth
   bucket` with `per-second bandwidth + packet windows` (else the Task 5.2 `batch-credit` grep would flag it).
-- [ ] Delete `claimBandwidthScript` and `ClaimBandwidth` entirely.
-- [ ] Add the window TTL const + `ChargeBandwidth`:
+- [x] Delete `claimBandwidthScript` and `ClaimBandwidth` entirely.
+- [x] Add the window TTL const + `ChargeBandwidth`:
 
   ```go
   // bwWindowTTL outlives a 1-second window (set once via EXPIRE NX on the window's first write) so a write
@@ -226,20 +226,20 @@ Replace the token bucket with a pipelined, Lua-free per-second window charge; ke
     `ClaimTraffic`, `trafficKeys`, `TrafficExhausted` untouched.
 
 **Definition of Done:**
-- [ ] The token bucket is gone; `ChargeBandwidth` + `WithPacketCap` exist; the day/week quota is untouched;
+- [x] The token bucket is gone; `ChargeBandwidth` + `WithPacketCap` exist; the day/week quota is untouched;
   `internal/limit` compiles.
 
-### Task 2.2 — [ ] Limiter tests (`internal/limit/limiter_test.go`)
+### Task 2.2 — [x] Limiter tests (`internal/limit/limiter_test.go`)
 
 **Actions:**
-- [ ] Remove `TestClaimBandwidthPartialGrantAndRefill` and `TestClaimBandwidth_ClockStepBackNoInflation`
+- [x] Remove `TestClaimBandwidthPartialGrantAndRefill` and `TestClaimBandwidth_ClockStepBackNoInflation`
   (token-bucket-specific). Keep all day/week/conc/issuance/CA-cooldown tests unchanged.
-- [ ] Update `internal/limit/window_test.go` `TestEveryKeyHasTTLAfterFirstOp` (line ~82): the SACRED
+- [x] Update `internal/limit/window_test.go` `TestEveryKeyHasTTLAfterFirstOp` (line ~82): the SACRED
   no-permanent-state invariant test calls the deleted `l.ClaimBandwidth(ctx, "tunnel-x", "in", 1024)` —
   change it to `l.ChargeBandwidth(ctx, "tunnel-x", "in", 1024)`. This now creates BOTH the `bw:` and `pkt:`
   window keys (the `INCRBY`/`INCR` + `EXPIRE NX` run unconditionally), so the test must assert BOTH carry a
   TTL — strengthening the invariant coverage for the new key families.
-- [ ] Add the per-second-window tests below (use `miniredis` + `SetClock` for the window second and, where
+- [x] Add the per-second-window tests below (use `miniredis` + `SetClock` for the window second and, where
   needed, `WithPacketCap`).
 
 **Test (compressed):**
@@ -255,26 +255,26 @@ Replace the token bucket with a pipelined, Lua-free per-second window charge; ke
 | `TestChargeBandwidth_FailOpenOnValkeyError` | a closed Valkey → `over=false, err!=nil` | `mr.Close()` before the call |
 
 **Definition of Done:**
-- [ ] The bandwidth tests exercise both windows, the reset, the NX-once TTL, and fail-open; the quota tests
+- [x] The bandwidth tests exercise both windows, the reset, the NX-once TTL, and fail-open; the quota tests
   still pass.
 
 ---
 
-## User Story 3 — [ ] Edge pacer: charge-per-read + wait-to-next-second (`internal/edge`)
+## User Story 3 — [x] Edge pacer: charge-per-read + wait-to-next-second (`internal/edge`)
 
 Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware wait.
 
 **Acceptance criteria:**
-- [ ] `bwBatch` and `pace` are GONE; `pacedCopy` reads ≤ `wire.ChunkSize` (16 KiB), charges each read via
+- [x] `bwBatch` and `pace` are GONE; `pacedCopy` reads ≤ `wire.ChunkSize` (16 KiB), charges each read via
   `ChargeBandwidth`, waits `retryAfter` (ctx-aware) when over, then forwards; `ClaimTraffic` + fail-open +
   `rec.Bytes` are unchanged.
-- [ ] The `StreamLimiter` interface exposes `ChargeBandwidth` (not `ClaimBandwidth`).
+- [x] The `StreamLimiter` interface exposes `ChargeBandwidth` (not `ClaimBandwidth`).
 
-### Task 3.1 — [ ] Rewrite the bandwidth step in `pacedCopy` (`internal/edge/bridge.go`)
+### Task 3.1 — [x] Rewrite the bandwidth step in `pacedCopy` (`internal/edge/bridge.go`)
 
 **Actions:**
-- [ ] Delete the `bwBatch` const and the whole `pace` method.
-- [ ] In `pacedCopy`, replace the `credit`/`e.pace(...)` bandwidth step (buffer stays `wire.ChunkSize`, now
+- [x] Delete the `bwBatch` const and the whole `pace` method.
+- [x] In `pacedCopy`, replace the `credit`/`e.pace(...)` bandwidth step (buffer stays `wire.ChunkSize`, now
   16 KiB) so each read is charged and the wait IS the pacing:
 
   ```go
@@ -323,12 +323,12 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
     `splice`/the policy watcher/outcome codes.
 
 **Definition of Done:**
-- [ ] `bwBatch`/`pace` removed; `pacedCopy` charges per read and paces via the wait; quota + fail-open intact.
+- [x] `bwBatch`/`pace` removed; `pacedCopy` charges per read and paces via the wait; quota + fail-open intact.
 
-### Task 3.2 — [ ] `StreamLimiter` interface (`internal/edge/edge.go`)
+### Task 3.2 — [x] `StreamLimiter` interface (`internal/edge/edge.go`)
 
 **Actions:**
-- [ ] Replace the bandwidth method on the consumer-site interface:
+- [x] Replace the bandwidth method on the consumer-site interface:
 
   ```go
   ChargeBandwidth(ctx context.Context, name, dir string, nr int64) (over bool, retryAfter time.Duration, err error)
@@ -337,21 +337,21 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
   now checks the new method). `time` is already imported by `edge.go`.
 
 **Definition of Done:**
-- [ ] `StreamLimiter` exposes `ChargeBandwidth`; `*limit.Limiter` satisfies it.
+- [x] `StreamLimiter` exposes `ChargeBandwidth`; `*limit.Limiter` satisfies it.
 
-### Task 3.3 — [ ] Edge tests (`internal/edge/*_test.go`)
+### Task 3.3 — [x] Edge tests (`internal/edge/*_test.go`)
 
 **Actions:**
-- [ ] `countingLimiter` (`fixes_test.go:542`) embeds `*limit.Limiter` and defines only `AcquireStream`/
+- [x] `countingLimiter` (`fixes_test.go:542`) embeds `*limit.Limiter` and defines only `AcquireStream`/
   `ReleaseStream`, so it inherits the real `ChargeBandwidth` automatically (no `ClaimBandwidth` method exists
   to replace). Add a CONTROLLABLE `ChargeBandwidth` override on it — configurable `chargeOver bool`,
   `chargeWait time.Duration`, `chargeErr error` fields (default zero → `(false, 0, nil)`, i.e. never paces)
   — and use that override as the stub for the three new tests below.
-- [ ] Remove `TestEdge_Pace_BatchCredit` and `TestEdge_Pace_EmptyBucketBlocks` (the `pace` method is gone).
-- [ ] Update `TestEdge_PacedCopy_TrafficErrorFailsOpen`: with the real limiter and `mr.Close()`, BOTH
+- [x] Remove `TestEdge_Pace_BatchCredit` and `TestEdge_Pace_EmptyBucketBlocks` (the `pace` method is gone).
+- [x] Update `TestEdge_PacedCopy_TrafficErrorFailsOpen`: with the real limiter and `mr.Close()`, BOTH
   `ChargeBandwidth` and `ClaimTraffic` error → the copy must still forward all bytes and fire no
   `QuotaExhausted` (it already asserts this; confirm it holds with the new charge call in front).
-- [ ] The existing `NewLimiter(...)` calls in the edge tests need NO change (packet cap defaults to 0 via
+- [x] The existing `NewLimiter(...)` calls in the edge tests need NO change (packet cap defaults to 0 via
   the option). Add the two new tests below.
 
 **Test (compressed):**
@@ -363,21 +363,21 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
 | `TestEdge_PacedCopy_ChargeErrorFailsOpen` | a `ChargeBandwidth` error forwards the chunk unpaced (no wait, bytes flow) | `countingLimiter` override `chargeErr!=nil`; assert no wait, full copy |
 
 **Definition of Done:**
-- [ ] The fake + tests use `ChargeBandwidth`; the wait and fail-open paths are covered; the pace tests are gone.
+- [x] The fake + tests use `ChargeBandwidth`; the wait and fail-open paths are covered; the pace tests are gone.
 
 ---
 
-## User Story 4 — [ ] Wire the packet cap into the server + test configs (`internal/server`, `e2e`)
+## User Story 4 — [x] Wire the packet cap into the server + test configs (`internal/server`, `e2e`)
 
 **Acceptance criteria:**
-- [ ] `server.Run` builds the limiter with `WithPacketCap(int64(cfg.LimitPackets))`.
-- [ ] Every `config.ServeCmd` test literal sets `LimitPackets` so the data plane / `Validate()` are exercised
+- [x] `server.Run` builds the limiter with `WithPacketCap(int64(cfg.LimitPackets))`.
+- [x] Every `config.ServeCmd` test literal sets `LimitPackets` so the data plane / `Validate()` are exercised
   with a real (non-throttling) packet cap.
 
-### Task 4.1 — [ ] Server assembly (`internal/server/server.go`)
+### Task 4.1 — [x] Server assembly (`internal/server/server.go`)
 
 **Actions:**
-- [ ] Pass the packet cap as an option (the positional `NewLimiter` signature is unchanged):
+- [x] Pass the packet cap as an option (the positional `NewLimiter` signature is unchanged):
 
   ```go
   lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle,
@@ -385,12 +385,12 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
   ```
 
 **Definition of Done:**
-- [ ] The production limiter carries the configured packet cap.
+- [x] The production limiter carries the configured packet cap.
 
-### Task 4.2 — [ ] Set `LimitPackets` in every `ServeCmd` test literal
+### Task 4.2 — [x] Set `LimitPackets` in every `ServeCmd` test literal
 
 **Actions:**
-- [ ] Add `LimitPackets: <value>` to each `config.ServeCmd` literal (a value well above what the test
+- [x] Add `LimitPackets: <value>` to each `config.ServeCmd` literal (a value well above what the test
   generates, so the packet cap never throttles legit test traffic):
   - `e2e/e2e_test.go` `runReplicaOnce` — `LimitPackets: 100000` (the device `/wait` throughput + high
     bandwidth/concurrency must not be packet-throttled). `cfg.Validate()` there requires it > 0.
@@ -399,57 +399,57 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
   - `internal/server/acmewire_test.go`, `internal/server/schedulers_test.go` — any `ServeCmd` literal →
     `LimitPackets: 100000` (harmless where the field is unused; keeps them realistic).
   - (`internal/config/config_test.go` is handled in Task 1.3.)
-- [ ] Reword the stale token-bucket comment in `e2e/tunnel_app_test.go` (line ~40): `… share the tunnel's
+- [x] Reword the stale token-bucket comment in `e2e/tunnel_app_test.go` (line ~40): `… share the tunnel's
   per-direction bw bucket, sized above via replicaOpts.bandwidth …` → `… share the tunnel's per-direction
   per-second bandwidth window, sized above via replicaOpts.bandwidth …` (there is no longer a bandwidth
   "bucket").
 
 **Definition of Done:**
-- [ ] Every `ServeCmd` literal sets `LimitPackets`; no e2e/integration test is packet-throttled; the
+- [x] Every `ServeCmd` literal sets `LimitPackets`; no e2e/integration test is packet-throttled; the
   `e2e/tunnel_app_test.go` bandwidth comment uses the per-second-window terminology.
 
 ---
 
-## User Story 5 — [ ] Documentation + ground-up verification
+## User Story 5 — [x] Documentation + ground-up verification
 
 **Acceptance criteria:**
-- [ ] `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md`, and `.claude/rules/project.md`
+- [x] `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md`, and `.claude/rules/project.md`
   describe the per-second byte + packet window model (no token bucket / batch credit), `ChunkSize == 16384`,
   and `--limit-packets`; no stale batch-credit/token-bucket/single-Lua residue remains on any live surface.
-- [ ] Everything verified from the ground up; all quality gates green.
+- [x] Everything verified from the ground up; all quality gates green.
 
-### Task 5.1 — [ ] Docs
+### Task 5.1 — [x] Docs
 
 **Actions:**
-- [ ] `docs/ARCHITECTURE.md` §4 "Bandwidth model" — rewrite: per-tunnel/per-direction **per-second fixed
+- [x] `docs/ARCHITECTURE.md` §4 "Bandwidth model" — rewrite: per-tunnel/per-direction **per-second fixed
   windows** (`bw:{name}:{dir}:{sec}` bytes + `pkt:{name}:{dir}:{sec}` reads), one plain **pipelined**
   `INCRBY`/`INCR` + `EXPIRE 2s NX` per read (NO Lua; `EXPIRE NX` self-heals a skipped TTL on the next
   same-second read, so strict atomicity is unwarranted for these transient windows); over either cap → wait
   to the next second (the wait IS the pacing); Valkey error fails open; read slice `wire.ChunkSize` =
   **16384**; day/week quota unchanged; overshoot bound `byteCap + N_conn × 16 KiB` / `pktCap + N_conn`.
-- [ ] `docs/ARCHITECTURE.md` — the two OTHER batch-credit mentions outside §4: line ~59 (the `internal/limit`
+- [x] `docs/ARCHITECTURE.md` — the two OTHER batch-credit mentions outside §4: line ~59 (the `internal/limit`
   package table row `… batch-credit bandwidth bucket …`) and line ~90 (the lifecycle text `paces bandwidth
   from the shared batch-credit bucket`) → reword to the per-second byte + packet windows.
-- [ ] `docs/ARCHITECTURE.md` §5 heading (line ~114): `## 5. Valkey state (all transient — TTL atomic with the
+- [x] `docs/ARCHITECTURE.md` §5 heading (line ~114): `## 5. Valkey state (all transient — TTL atomic with the
   write, single Lua)` → reconcile the "single Lua" claim with the new non-Lua windows (e.g. `… every key
   TTL'd alongside its write — single Lua, or a pipelined EXPIRE NX for the bw:/pkt: windows`), matching the
   `.claude/rules/project.md` state-invariant reconciliation above so the two canonical docs stay consistent.
-- [ ] `docs/PROJECT.md` — the caps table (`--limit-bandwidth` floor `≥ 32768` → `≥ 16384`; add a
+- [x] `docs/PROJECT.md` — the caps table (`--limit-bandwidth` floor `≥ 32768` → `≥ 16384`; add a
   `--limit-packets` row); the non-goals line `No per-slice-exact bandwidth accounting (batch-credit draws).`
   → reword for the fixed-window model (e.g. `No cross-replica exact bandwidth accounting (per-second
   fixed windows; bounded overshoot).`).
-- [ ] `README.md` — the "Caps" table (lines ~97-105) enumerates every `--limit-*` knob; add a
+- [x] `README.md` — the "Caps" table (lines ~97-105) enumerates every `--limit-*` knob; add a
   `--limit-packets` row (default `100`, per tunnel per direction), consistent with the PROJECT.md caps table.
-- [ ] `docs/PROJECT.md` §5 "State + retention" (lines ~118-120): the Valkey bullet lists the key families and
+- [x] `docs/PROJECT.md` §5 "State + retention" (lines ~118-120): the Valkey bullet lists the key families and
   states "Every key carries a TTL set **atomically with its write**. No permanent Valkey state." — the new
   `bw:`/`pkt:` windows TTL via a pipelined `EXPIRE NX` (not atomic with the `INCR`), so reconcile it the same
   way as the other three surfaces (§5 heading, `.claude/rules/project.md`, `limiter.go` struct doc): reword to
   "Every key gets a TTL alongside its write — set atomically in the same Lua script / `SET EX`, or via a
   pipelined `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second windows.
   No permanent Valkey state." Add the `bw:`/`pkt:` bandwidth windows to the key enumeration on line 118.
-- [ ] `docs/PROTOCOL.md` — the two `wire.ChunkSize`/`ChunkSize == 32768` references (≈ lines 160, 184) →
+- [x] `docs/PROTOCOL.md` — the two `wire.ChunkSize`/`ChunkSize == 32768` references (≈ lines 160, 184) →
   `16384`, keeping the "paced-copy slice size only, not wire framing" wording.
-- [ ] `.claude/rules/project.md` — rewrite the **Bandwidth model** invariant (lines ~127-136: token bucket /
+- [x] `.claude/rules/project.md` — rewrite the **Bandwidth model** invariant (lines ~127-136: token bucket /
   1 MB batch / `bw:{name}:{dir}` → the per-second byte + packet windows, plain pipelined `INCRBY`/`INCR` +
   `EXPIRE 2s NX`, no Lua, fail-open, 16 KiB read slice, `--limit-packets`); update the two other
   `wire.ChunkSize = 32768` mentions (the E2E and Wire-protocol invariant blocks) → 16384; update the Rule Map
@@ -458,7 +458,7 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
   wording intact, AND preserve the still-valid safety invariant "The blocking [refill] wait MUST NEVER be
   held under a connection write mutex" (adapt "refill wait" → the per-second wait; it is still a blocking
   wait that must never be held under a connection write mutex).
-- [ ] `.claude/rules/project.md` — the SACRED "Valkey (transient) + S3 (durable) state" invariant (lines
+- [x] `.claude/rules/project.md` — the SACRED "Valkey (transient) + S3 (durable) state" invariant (lines
   ~108-110) says every key "carries a TTL set **atomically in the SAME Lua script** as its INCR/HINCRBY/SET."
   Reconcile it — WITHOUT weakening the no-permanent-state guarantee, and making clear the required rigor is
   use-case-dependent: reword to "…each key gets a TTL alongside its mutation — set atomically in the same Lua
@@ -468,17 +468,17 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
   counters — strict single-script atomicity is required only where an orphaned key would actually matter."
 
 **Definition of Done:**
-- [ ] All four docs reflect the fixed-window model, `ChunkSize == 16384`, and `--limit-packets`; no stale
+- [x] All four docs reflect the fixed-window model, `ChunkSize == 16384`, and `--limit-packets`; no stale
   token-bucket / batch-credit / 32768 language remains for the bandwidth path.
 
-### Task 5.2 — [ ] Final ground-up verification (double-check EVERYTHING)
+### Task 5.2 — [x] Final ground-up verification (double-check EVERYTHING)
 
 **Actions:**
-- [ ] Re-read this plan top to bottom; confirm every task/action + acceptance criterion is implemented.
-- [ ] Confirm the token bucket is fully removed: `grep -rn 'ClaimBandwidth\|claimBandwidthScript\|bwBatch\|func (e \*Edge) pace' internal/` returns nothing.
-- [ ] Confirm NO Lua in the bandwidth path: `ChargeBandwidth` uses a pipeline (no `redis.NewScript`); the
+- [x] Re-read this plan top to bottom; confirm every task/action + acceptance criterion is implemented.
+- [x] Confirm the token bucket is fully removed: `grep -rn 'ClaimBandwidth\|claimBandwidthScript\|bwBatch\|func (e \*Edge) pace' internal/` returns nothing.
+- [x] Confirm NO Lua in the bandwidth path: `ChargeBandwidth` uses a pipeline (no `redis.NewScript`); the
   only remaining `redis.NewScript` in `internal/limit` are the UNCHANGED quota/bind/self-heal scripts.
-- [ ] Confirm `wire.ChunkSize == 16384` and every reference (config floor, metrics estimate + its test, the
+- [x] Confirm `wire.ChunkSize == 16384` and every reference (config floor, metrics estimate + its test, the
   `ChunkSize` assertion test, the four docs) matches. Verify over the LIVE surfaces ONLY — NEVER edit the
   sacred `docs/plans/` artifacts (agent.md §2):
   - `grep -rn '32 \* 1024' internal/ .claude/ docs/PROJECT.md docs/ARCHITECTURE.md docs/PROTOCOL.md README.md`
@@ -490,23 +490,23 @@ Replace the batch-credit `pace` with a per-read `ChargeBandwidth` + a ctx-aware 
     .claude/ docs/PROJECT.md docs/ARCHITECTURE.md docs/PROTOCOL.md README.md` returns nothing. (These are
     the token-bucket-specific terms; the generic word `bucket` is intentionally NOT grepped — it legitimately
     names S3 buckets and the rate-limit `window.go` window.)
-- [ ] Confirm the atomic-TTL invariant is RECONCILED (not left contradictory) on ALL FOUR live surfaces —
+- [x] Confirm the atomic-TTL invariant is RECONCILED (not left contradictory) on ALL FOUR live surfaces —
   `.claude/rules/project.md` state-invariant, `docs/ARCHITECTURE.md` §5 heading, `docs/PROJECT.md` §5, and
   `internal/limit/limiter.go` struct doc: `grep -rniE 'atomically with its write|TTL atomic with the write|
   atomically in the SAME Lua' .claude/ docs/PROJECT.md docs/ARCHITECTURE.md` returns no UNQUALIFIED claim
   (each must now name the pipelined `EXPIRE NX` path for the `bw:`/`pkt:` windows); `grep -rniE 'TxPipeline'
   internal/ .claude/ docs/` returns nothing.
-- [ ] Confirm `--limit-packets` is wired end-to-end (flag → `Validate` → `WithPacketCap` → `ChargeBandwidth`)
+- [x] Confirm `--limit-packets` is wired end-to-end (flag → `Validate` → `WithPacketCap` → `ChargeBandwidth`)
   and per-direction; the byte rate stays the primary limit; fail-open preserved.
-- [ ] Run the FULL quality gates (`make build vet lint govulncheck test-unit test-integration test-e2e
+- [x] Run the FULL quality gates (`make build vet lint govulncheck test-unit test-integration test-e2e
   test-scripts compose-config` + `make tidy`), capturing logs per the tee rule. `test-e2e` MUST pass,
   including the throughput-sensitive `TestE2E_ReferenceTunnelApp` `/wait` load (with a device) and
   `TestE2E_Quota` (quota still cuts via the unchanged day/week counter).
-- [ ] Confirm hygiene: no AI attribution, no plan/finding IDs in code or commit messages, placeholders only,
+- [x] Confirm hygiene: no AI attribution, no plan/finding IDs in code or commit messages, placeholders only,
   and NO out-of-scope files changed.
 
 **Definition of Done:**
-- [ ] All gates pass on the final code; the token bucket is gone; the fixed-window pacer + packet cap work
+- [x] All gates pass on the final code; the token bucket is gone; the fixed-window pacer + packet cap work
   end-to-end; the ground-up re-read finds zero gaps.
 
 ---
@@ -522,3 +522,15 @@ _(recorded during implementation per agent.md §2)_
   there mirrors the existing `--limit-concurrent` case exactly (as the plan intended) with the same coverage,
   and keeps the checks DRY. **Why:** reconcile with the existing test structure rather than duplicate a
   parallel one-off test.
+- **Task 4.2 — `LimitPackets` was NOT added to the `acmewire_test.go` (`ServeCmd{ACMEAccountDir}`) and
+  `schedulers_test.go` (`ServeCmd{EnrollHost, ControlHost, NameLength}`) literals.** Those are minimal
+  single-purpose fixtures for `buildACMEChain` / `validNameFunc` respectively — they never build a limiter
+  and never call `Validate()`, so `LimitPackets` is meaningless there and adding it would be misleading
+  noise (implying the field matters to those functions). The three literals that DO reach `Validate()` /
+  the data plane — `e2e/e2e_test.go` `runReplicaOnce`, `internal/server/server_test.go` `lifecycleConfig`,
+  and `internal/server/integration_test.go` `itServeConfig` (also used by `drain_startup_integration_test.go`)
+  — all set `LimitPackets: 100000`, plus `config_test.go`'s `validCfg` (=100). **Why:** the DoD's intent
+  (no `Validate`/data-plane literal packet-throttled or failing) is met without polluting narrow fixtures.
+- **Task 3.3 — a small `chargeStubEdge(t, over, wait, err)` helper was added** (`internal/edge/fixes_test.go`)
+  to build the countingLimiter-backed edge for the three new pacedCopy tests, rather than repeating the
+  miniredis+limiter wiring in each. **Why:** DRY test setup; no behavioral change.
