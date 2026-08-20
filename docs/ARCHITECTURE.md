@@ -17,7 +17,7 @@ flowchart TD
   run["server.Run (assembly + errgroup)"]
   edge["edge: raw :443 SNI edge (ClientHello peek + JA4)"]
   enroll["enroll: attested enrollment (Phase 1)"]
-  phone["phoneconn: mTLS control plane (/control, /data, /issue)"]
+  phone["phoneconn: mTLS control plane (/api/v1/control, /api/v1/data, /api/v1/issue)"]
   mesh["mesh: replica mTLS HTTP/2 mesh"]
   acme["acme: LE to GTS to ZeroSSL chain"]
   attest["attest: Android key-attestation verifier"]
@@ -49,7 +49,7 @@ flowchart TD
 |---|---|
 | `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
 | `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, bridge (fast path + mesh), connection policy (idle/min-rate/eviction) |
-| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/data` dial-back, `/issue` cert generation |
+| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back, `/api/v1/issue` cert generation |
 | `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal) |
@@ -60,8 +60,8 @@ flowchart TD
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
-| `internal/wire` | v2 control-frame codec + the ChunkSize pacing constant |
-| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/admin/tunnels` + deduped cap logger + the Recorder interface |
+| `internal/wire` | v1 control-frame codec + the ChunkSize pacing constant |
+| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels` + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |
 
@@ -77,11 +77,11 @@ sequenceDiagram
     A->>A: ban check, peek SNI/JA4, resolve route (Valkey)
     alt owner is A (fast path)
         A->>P: OPEN (dial-back)
-        P-->>A: /data stream
+        P-->>A: /api/v1/data stream
     else owner is B (mesh)
         A->>B: connID-checked mesh stream
         B->>P: OPEN (dial-back)
-        P-->>B: /data stream
+        P-->>B: /api/v1/data stream
     end
     C->>P: TLS handshake + app bytes (opaque, spliced through)
     P-->>C: TLS response (opaque, spliced back)
@@ -93,10 +93,10 @@ WebPKI cert (a hermetic Pebble CA stands in for the test tiers) — tunneld neve
 
 ## 3. Enrollment, issuance, renewal
 
-Enrollment is two-phase (see [`PROTOCOL.md`](PROTOCOL.md) §2): Phase 1 (`/enroll`, server-TLS) verifies
+Enrollment is two-phase (see [`PROTOCOL.md`](PROTOCOL.md) §2): Phase 1 (`/api/v1/enroll`, server-TLS) verifies
 attestation + key binding, write-verify-claims a name in S3, and signs a bootstrap identity cert; Phase
-2 (`/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
-`<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/issue` endpoint, triggered by a
+2 (`/api/v1/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
+`<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
 The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
 certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on schedule.
@@ -165,9 +165,9 @@ silently allowing every signer.
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
 The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
-`/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher), and
-`POST /admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
-`/mesh/control` RPC — see PROTOCOL.md §5).
+`/api/v1/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher), and
+`POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
+`/api/v1/mesh/control` RPC — see PROTOCOL.md §5).
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 

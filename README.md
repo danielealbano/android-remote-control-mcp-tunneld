@@ -82,9 +82,9 @@ Swap the `build:` for `image: ghcr.io/danielealbano/tunneld:1.0.0` to pull inste
 
 ## Identity + authentication
 
-Enrollment is **two-phase** and gated by Android hardware key attestation: Phase 1 (`/enroll`,
+Enrollment is **two-phase** and gated by Android hardware key attestation: Phase 1 (`/api/v1/enroll`,
 server-TLS) verifies attestation + key binding, assigns a random tunnel name, and signs a bootstrap
-identity (mTLS) cert; Phase 2 (`/issue`, mTLS) issues the public WebPKI cert for `<name>.<tunnel-domain>`
+identity (mTLS) cert; Phase 2 (`/api/v1/issue`, mTLS) issues the public WebPKI cert for `<name>.<tunnel-domain>`
 via server-run ACME (Let's Encrypt → GTS → ZeroSSL). The phone authenticates with its identity cert over
 its outbound HTTP/2 control connection; the replica mesh uses distinct mesh-role certs. There is **no
 TLS mutual auth on the public side** (the edge relays opaque TLS). Revocation is the ban engine only.
@@ -123,7 +123,7 @@ tunnel-fingerprint sha256:<hex>
 `country XX` entries are expanded at reload from a DB-IP Country Lite CSV (`--dbip-country-lite-csv`)
 into a longest-prefix-match table (one lookup per connection); a missing CSV skips only the country
 entries. **Country codes in this repo are placeholders (`XX`, `YY`) only.** The ban check is the FIRST
-check on every ingress edge (public, `/enroll`, `/control`), keyed on the trusted client IP.
+check on every ingress edge (public, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP.
 
 **Revocation** (there is no CRL — bans are the only revocation): revoke a tunnel or a source by editing
 `deploy/banfiles/bans.txt` on the host (bind-mounted read-only at `/banfiles-manual/bans.txt`); the change
@@ -132,8 +132,8 @@ is hot-reloaded within `--ban-poll` and evicts any live matching connection.
 ## Observability
 
 The internal listener (never published) serves `GET /metrics` (Prometheus; no per-tunnel labels),
-`GET /healthz` (200 if Valkey reachable else 503), `GET /admin/tunnels` (top-N per-tunnel counters), and
-`POST /admin/renew?tunnel=<name>` (force a renewal, routed to the owner node over the mesh).
+`GET /healthz` (200 if Valkey reachable else 503), `GET /api/v1/admin/tunnels` (top-N per-tunnel counters), and
+`POST /api/v1/admin/renew?tunnel=<name>` (force a renewal, routed to the owner node over the mesh).
 Grafana/Prometheus/Alertmanager/ntfy publish on `127.0.0.1`-only ports (SSH-forward to reach them).
 
 ## Attribution
