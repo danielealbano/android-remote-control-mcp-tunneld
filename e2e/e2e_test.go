@@ -73,6 +73,12 @@ type replicaOpts struct {
 	acmeDirLE  string // override the LE directory (for spillover); empty = Pebble
 	trafficDay string // override --limit-traffic-day; empty = 1gb
 	concurrent int    // override --limit-concurrent; 0 = 8
+	bandwidth  string // override --limit-bandwidth; empty = 10mbit
+	// Real attestation (NOT optional): when attestRootURL is set, the replica runs the full seven-point
+	// attestation gate against these live root/status URLs + signer allowlist (empty = dummy + optional).
+	attestRootURL    string
+	attestStatusURL  string
+	attestSignerFile string
 }
 
 // startReplica runs a real server.Run on loopback against the shared infra and returns its public edge
@@ -112,6 +118,24 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		concurrent = opts.concurrent
 	}
 
+	bandwidth := "10mbit"
+	if opts.bandwidth != "" {
+		bandwidth = opts.bandwidth
+	}
+
+	// Attestation: default is the dummy unreachable URLs + optional mode. When a real root URL is given,
+	// run the full attestation gate against it (the reference-client test uses this).
+	attestOptional := true
+	attestRoot := "http://127.0.0.1:1/root"
+	attestStatus := "http://127.0.0.1:1/status"
+	attestSigner := emptyFile(t)
+	if opts.attestRootURL != "" {
+		attestOptional = false
+		attestRoot = opts.attestRootURL
+		attestStatus = opts.attestStatusURL
+		attestSigner = opts.attestSignerFile
+	}
+
 	cfg := config.ServeCmd{
 		RedisURL: inf.redisURL, Listen: edgeAddr, MeshListen: meshAddr, InternalListen: internalAddr,
 		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
@@ -120,9 +144,9 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		S3Endpoint: inf.s3URL, S3Region: "us-east-1", S3Bucket: e2eBucket,
 		S3AccessKey: inf.access, S3SecretKey: inf.secret, S3ForcePathStyle: true,
 		RegistryClaimTimeout: 3 * time.Second, RegistryClaimSettle: 5 * time.Second,
-		AttestSignerDigestFile: emptyFile(t),
-		AttestRootURL:          "http://127.0.0.1:1/root", AttestStatusURL: "http://127.0.0.1:1/status",
-		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: true,
+		AttestSignerDigestFile: attestSigner,
+		AttestRootURL:          attestRoot, AttestStatusURL: attestStatus,
+		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: attestOptional,
 		ACMEDirLE: leDir, ACMEDirGTS: inf.pebble.DirectoryURL, ACMEDirZeroSSL: inf.pebble.DirectoryURL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
 		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
@@ -133,7 +157,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
 		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
 		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 1 * time.Second,
-		LimitConnMinRate: "1kb", LimitConnProtectRate: "1mb", LimitBandwidth: "10mbit",
+		LimitConnMinRate: "1kb", LimitConnProtectRate: "1mb", LimitBandwidth: bandwidth,
 		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",
 		BanPoll: time.Second, ShutdownGrace: 3 * time.Second, Log: []string{"output=std;level=error"},
 	}

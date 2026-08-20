@@ -202,6 +202,9 @@ type PebbleEnv struct {
 	// IssuingRoots trusts the (per-run) CA Pebble signs issued leaf certificates with. A public/frontend
 	// client verifying a phone's Pebble-issued cert uses this pool.
 	IssuingRoots *x509.CertPool
+	// IssuingRootsPEM is the raw PEM of IssuingRoots, adb-pushed to the device so the reference client
+	// trusts tunneld's enroll/control server certs.
+	IssuingRootsPEM []byte
 	// DNSResolver is challtestsrv's DNS listener (host:port) — pass it as --acme-dns-resolver so lego's
 	// DNS-01 propagation pre-check queries challtestsrv instead of the system/authoritative resolvers.
 	DNSResolver string
@@ -245,21 +248,22 @@ func StartPebble(t *testing.T) *PebbleEnv {
 	minicaFile := writeTempFile(t, "pebble-minica-*.pem", minica)
 
 	mgmtEndpoint := endpoint(t, pebble, "15000/tcp")
-	issuingRoots := fetchIssuingRoots(t, minica, mgmtEndpoint)
+	issuingRoots, issuingRootsPEM := fetchIssuingRoots(t, minica, mgmtEndpoint)
 
 	return &PebbleEnv{
-		DirectoryURL: "https://" + endpoint(t, pebble, "14000/tcp") + "/dir",
-		MinicaPEM:    minica,
-		MinicaFile:   minicaFile,
-		IssuingRoots: issuingRoots,
-		DNSResolver:  endpoint(t, chal, "8053/udp"),
-		ChallMgmtURL: "http://" + endpoint(t, chal, "8055/tcp"),
+		DirectoryURL:    "https://" + endpoint(t, pebble, "14000/tcp") + "/dir",
+		MinicaPEM:       minica,
+		MinicaFile:      minicaFile,
+		IssuingRoots:    issuingRoots,
+		IssuingRootsPEM: issuingRootsPEM,
+		DNSResolver:     endpoint(t, chal, "8053/udp"),
+		ChallMgmtURL:    "http://" + endpoint(t, chal, "8055/tcp"),
 	}
 }
 
 // fetchIssuingRoots downloads Pebble's per-run issuing CA (management /roots/0), trusting the minica for
 // the management endpoint's TLS, and returns a pool a frontend client uses to verify issued leaf certs.
-func fetchIssuingRoots(t *testing.T, minica []byte, mgmtEndpoint string) *x509.CertPool {
+func fetchIssuingRoots(t *testing.T, minica []byte, mgmtEndpoint string) (*x509.CertPool, []byte) {
 	t.Helper()
 	minicaPool := x509.NewCertPool()
 	if !minicaPool.AppendCertsFromPEM(minica) {
@@ -274,7 +278,7 @@ func fetchIssuingRoots(t *testing.T, minica []byte, mgmtEndpoint string) *x509.C
 	if !pool.AppendCertsFromPEM(rootPEM) {
 		t.Fatal("pebble: issuing root PEM did not parse")
 	}
-	return pool
+	return pool, rootPEM
 }
 
 // PublishTXT sets a DNS-01 TXT record on challtestsrv (host MUST be the trailing-dotted
