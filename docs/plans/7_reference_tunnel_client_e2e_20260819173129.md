@@ -1443,4 +1443,34 @@ ON, asserting the tunnel, the certificate, renewal, and throughput/concurrency o
 
 ## Deviations
 
-_(recorded during implementation per agent.md §2)_
+- **Task 1.1 versions:** the locally-cached toolchain matched the plan exactly — AGP `8.13.2`, Kotlin
+  `2.3.10`, Gradle `8.14.4` (wrapper), `compileSdk`/`targetSdk` `36`, `minSdk 33`. No version substitution
+  was needed.
+- **Task 6.1 (Makefile):** the `tunnel-app` target carries a descriptive comment header (mirroring the
+  existing `attest-probe` target's) — a doc-only addition not shown in the plan's recipe block.
+- **Task 7.1 (`e2e/e2e_test.go`):** `replicaOpts`'s attestation fields (`attestRootURL`/`attestStatusURL`/
+  `attestSignerFile`) and `runReplicaOnce`'s conditional real-attestation wiring already existed in the
+  working tree (uncommitted from earlier exploration); this work committed them and added the planned
+  `bandwidth` override on top.
+- **Task 7.1 (spike test removed):** a pre-existing untracked `e2e/tunnel_mtls_spike_test.go` (the
+  exploration harness) was removed — it is superseded by `e2e/tunnel_app_test.go` and would otherwise
+  collide on shared package symbols. The plan assumed a clean tree, so this removal was not a listed action.
+- **Task 7.2 (Pebble CA delivery):** the CA is written into the app's OWN internal storage via
+  `run-as … base64 -d > files/pebble-ca.pem` (then the enroll broadcast passes that absolute path), rather
+  than a bare `adb push`: SELinux blocks an `untrusted_app` from reading `/data/local/tmp`, so a pushed
+  file there is unreadable by the app. The `am broadcast` uses `-f 0x00000020`
+  (`FLAG_INCLUDE_STOPPED_PACKAGES`) so the freshly-installed (stopped) app's receiver is reached.
+- **Task 7.2 (refresh detection):** the test clears `files/ready`+`files/error` before the `refresh`
+  broadcast and re-polls `ready`, then asserts the through-tunnel `/info` `tls_cert_sha256` changed — a
+  harness detail consistent with US5's status-file design (the plan left test code to the compressed table).
+- **Task 5.2 (FGS type):** the foreground service uses `FOREGROUND_SERVICE_TYPE_DATA_SYNC` (`dataSync`) with
+  the matching `FOREGROUND_SERVICE_DATA_SYNC` permission, exactly as the plan's code specified.
+- **Task 7.2 (FGS background-start):** on Android 12+ a background broadcast receiver may not call
+  `startForegroundService()` (`ForegroundServiceStartNotAllowedException`), so the test puts the app on the
+  power allowlist (`cmd deviceidle whitelist +<pkg>`, removed in cleanup) before broadcasting — a
+  user-installed tunnel app would hold the same battery-optimization exemption. The app code is unchanged;
+  the validated exploration used an Activity (implicit foreground grant), which does not hit this.
+- **Task 7.2 (client ALPN):** the phone's Ktor/Netty `sslConnector` server closes a just-handshaked
+  connection whose client negotiated NO ALPN protocol, so the public Go test clients offer ALPN
+  (`http/1.1` for the h1 client, `h2` for the h2 client) — as every real client (browser, OkHttp, curl)
+  does. The app/server code is unchanged.

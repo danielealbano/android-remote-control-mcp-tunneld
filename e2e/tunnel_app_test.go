@@ -100,6 +100,15 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 		defer cancel()
 		_ = exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", tunnelAppPkg).Run()
 	})
+	// Android 12+ blocks a background broadcast receiver from calling startForegroundService(); put the app
+	// on the power allowlist (as a real user-installed tunnel app would be exempted from battery
+	// optimization) so its CommandReceiver may start the foreground TunnelService.
+	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+tunnelAppPkg)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "adb", "-s", serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg).Run()
+	})
 	// install -r keeps app data, so clear any stale status files from a prior interrupted run.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
 
@@ -144,15 +153,17 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 
 	// Public roundtrip #1: /info through the tunnel — echoes the app nonce and the current TLS cert digest.
 	var info1 infoResp
+	var infoErr error
 	if !waitBool(90*time.Second, func() bool {
 		r, gerr := fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
 		if gerr != nil {
+			infoErr = gerr
 			return false
 		}
 		info1 = r
 		return true
 	}) {
-		t.Fatal("public /info never succeeded through the tunnel")
+		t.Fatalf("public /info never succeeded through the tunnel: %v", infoErr)
 	}
 	if info1.Nonce != appNonce {
 		t.Fatalf("/info nonce = %q, want app nonce %q", info1.Nonce, appNonce)
@@ -287,11 +298,15 @@ func assertPhoneCert(t *testing.T, edge, fqdn string, roots *x509.CertPool) {
 }
 
 // h1Client builds an HTTP/1.1 client over a single fresh tunnel connection (SNI fqdn, trusting roots,
-// dialing the edge). TLSNextProto is emptied so no h2 upgrade occurs.
+// dialing the edge). It offers the "http/1.1" ALPN protocol (as a real client does): the phone's
+// Ktor/Netty server negotiates ALPN and closes a connection that selects no protocol. TLSNextProto is
+// emptied so the http.Transport itself performs no h2 upgrade.
 func h1Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
 	tr := &http.Transport{
 		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			d := &tls.Dialer{Config: &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12}}
+			d := &tls.Dialer{Config: &tls.Config{
+				ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"},
+			}}
 			return d.DialContext(ctx, "tcp", edge)
 		},
 		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
