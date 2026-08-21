@@ -102,13 +102,20 @@ func TestSignerAllowlistReloadFailureLogged(t *testing.T) {
 	done := make(chan struct{})
 	go func() { a.Watch(ctx, 10*time.Millisecond); close(done) }()
 
-	// Replace with invalid-hex content and bump mtime: the reload must fail and be logged.
+	// Atomically replace with invalid-hex content (temp file + rename) so the watcher never observes a
+	// transient EMPTY file mid-write: a non-atomic truncate-write exposes a 0-byte window that reloads as a
+	// valid empty set, dropping the last-known-good (a CI-only flake). The reload of the complete invalid
+	// file must then fail and be logged while the last-known-good set is KEPT.
 	time.Sleep(20 * time.Millisecond)
-	if err := os.WriteFile(f, []byte("nothex!!\n"), 0o600); err != nil {
+	tmp := f + ".tmp"
+	if err := os.WriteFile(tmp, []byte("nothex!!\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Second)
-	_ = os.Chtimes(f, future, future)
+	_ = os.Chtimes(tmp, future, future)
+	if err := os.Rename(tmp, f); err != nil {
+		t.Fatal(err)
+	}
 
 	waitFor(t, 2*time.Second, func() bool { return ch.count(slog.LevelWarn) > 0 })
 	if !a.Allowed("aabbcc") {
