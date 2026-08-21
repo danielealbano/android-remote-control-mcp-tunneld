@@ -229,10 +229,10 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 
-	// Issuance cap (keyed on the name): reserve an in-flight slot atomically so concurrent /api/v1/issue calls
-	// for one name cannot both pass the cap they only commit against on success. The slot is freed on
-	// BOTH success and failure (failed orders never burn the weekly window), refreshed by a heartbeat so
-	// a long ACME order does not self-expire, and self-expires if this node crashes mid-order.
+	// Issuance cap (keyed on the name): acquire the per-tunnel issuance lock so concurrent /api/v1/issue calls
+	// for one name are serialized and cannot both pass the weekly cap they only commit against on success.
+	// The lock is released on BOTH success and failure (failed orders never burn the window), refreshed by a
+	// heartbeat so a long ACME order keeps it, and self-expires (via its TTL) if this node crashes mid-order.
 	ok, orderID, err := s.cfg.Limiter.IssuanceBegin(ctx, name, s.cfg.IssuePerWeek)
 	if err != nil {
 		return Result{}, &Error{Reason: "internal", Retryable: true}
@@ -245,7 +245,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.cfg.Limiter.IssuanceEnd(ectx, name, orderID); err != nil {
-			s.logger.Warn("issuance slot release failed (slot self-expires)", "tunnel", name, "err", err)
+			s.logger.Warn("issuance lock release failed (lock self-expires)", "tunnel", name, "err", err)
 		}
 	}()
 	hbCtx, hbStop := context.WithCancel(ctx)

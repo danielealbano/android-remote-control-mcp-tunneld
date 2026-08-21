@@ -146,11 +146,11 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
-	acq, aerr := e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
+	acq, aerr := e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
 	if aerr != nil {
 		acq = true
 	} else if !acq && e.evictLeastActive(name) {
-		acq, aerr = e.lim.AcquireStream(ctx, name, e.cfg.Concurrent)
+		acq, aerr = e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
 		if aerr != nil {
 			acq = true
 		}
@@ -169,7 +169,9 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	var slotOnce sync.Once
 	releaseSlot := func() {
 		if slotHeld {
-			slotOnce.Do(func() { _ = e.lim.ReleaseStream(context.Background(), name) })
+			// Release against the connID the slot was acquired with: if the tunnel re-bound meanwhile, the
+			// counter's owner changed and this release is a no-op (the old session's slots were reset).
+			slotOnce.Do(func() { _ = e.lim.ReleaseStream(context.Background(), name, connID) })
 		}
 	}
 	defer releaseSlot()

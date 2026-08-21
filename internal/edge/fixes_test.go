@@ -600,20 +600,20 @@ type countingLimiter struct {
 	chargeErr    error
 }
 
-func (c *countingLimiter) AcquireStream(ctx context.Context, name string, maxN int) (bool, error) {
+func (c *countingLimiter) AcquireStream(ctx context.Context, name, connID string, maxN int) (bool, error) {
 	if c.acquireErr != nil {
 		return false, c.acquireErr
 	}
-	return c.Limiter.AcquireStream(ctx, name, maxN)
+	return c.Limiter.AcquireStream(ctx, name, connID, maxN)
 }
 
 func (c *countingLimiter) Charge(_ context.Context, _, _ string, _ int64) (limit.ChargeAction, time.Duration, string, error) {
 	return c.chargeAction, c.chargeWait, c.chargeWindow, c.chargeErr
 }
 
-func (c *countingLimiter) ReleaseStream(ctx context.Context, name string) error {
+func (c *countingLimiter) ReleaseStream(ctx context.Context, name, connID string) error {
 	c.releases.Add(1)
-	return c.Limiter.ReleaseStream(ctx, name)
+	return c.Limiter.ReleaseStream(ctx, name, connID)
 }
 
 // scriptedListener returns a scripted sequence of Accept results, recording each call's timestamp so a

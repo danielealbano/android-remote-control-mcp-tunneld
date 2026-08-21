@@ -141,7 +141,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
 		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
-		RouteTTL: cfg.RouteTTL, Streams: lim,
+		RouteTTL: cfg.RouteTTL,
 	})
 	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
 		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,

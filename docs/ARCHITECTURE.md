@@ -126,9 +126,10 @@ per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap 
 Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
 (`node:{id}` → advertise), rate-limit windows, the per-direction day/week traffic windows
 (`traf:{name}:{dir}:day/week:{n}`, written via the same pipelined `EXPIRE NX` as the `bw:`/`pkt:` windows),
-the global concurrency counter (`conc:{name}`, TTL = 3 × `--limit-conn-idle`, refreshed by every traffic
-chunk via the `Charge` pipeline's `PEXPIRE` that no-ops on a missing key, and RESET — `DEL` — when the
-phone (re)binds), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, and per-CA ACME
+the global concurrency counter (`conc:{name}`, a lock-guarded `{connID, count}` hash: a fresh connection's
+first acquire STRUCTURALLY resets it and a straggler release from a superseded connection is a no-op; TTL =
+3 × `--limit-conn-idle`, refreshed by every traffic chunk via the `Charge` pipeline's `PEXPIRE` that no-ops
+on a missing key), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, and per-CA ACME
 cooldown/backoff. No permanent Valkey state; a stale connection never clobbers a re-bound route.
 Connection/stream ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id

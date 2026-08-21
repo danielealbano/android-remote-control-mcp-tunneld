@@ -124,7 +124,7 @@ func TestEdge_HandleTunnel_ReleasesStreamSlotOnce(t *testing.T) {
 	// up to the cap still succeeds --limit-concurrent times.
 	acquired := 0
 	for i := 0; i < cfg.Concurrent; i++ {
-		ok, err := te.e.lim.AcquireStream(context.Background(), name, cfg.Concurrent)
+		ok, err := te.e.lim.AcquireStream(context.Background(), name, "conn1", cfg.Concurrent)
 		if err != nil {
 			t.Fatalf("AcquireStream: %v", err)
 		}

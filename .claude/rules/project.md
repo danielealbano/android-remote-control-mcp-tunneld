@@ -128,11 +128,12 @@ MUST NOT be relaxed without explicit user direction.
   `connID`, so a stale connection can NEVER clobber a re-bound route. The heartbeat only refreshes the TTL
   (`PEXPIRE`) and never rewrites the value; the byte counters co-located in `tunnel:{name}` are written
   existence-guarded (`HINCRBY` + `EXPIRE NX`) so a post-disconnect flush never resurrects a dead route.
-- **Live-vs-identity reset invariant.** Live-tunnel-scoped counters (`conc:{name}` concurrent streams)
-  are RESET (`DEL`) when the phone (re)binds — a fresh phone connection means all prior streams are dead,
-  so the count is implicitly zero. Identity-scoped cumulative quotas (`traf:` day/week traffic,
-  issuance/`--issue-per-week`) MUST PERSIST across reconnects — a tunnel MUST NOT reset its quota just by
-  reconnecting. The bind-time reset hits `conc:{name}` ONLY and MUST NEVER touch the `traf:` counters.
+- **Live-vs-identity reset invariant.** `conc:{name}` (concurrent streams) is a lock-guarded `{connID, count}`
+  hash whose reset is STRUCTURAL: a fresh connection resets it at its first acquire because the stored connID
+  differs (a straggler release from the superseded connection is a no-op) — there is NO bind-time `DEL`.
+  Identity-scoped cumulative quotas (`traf:` day/week traffic, issuance/`--issue-per-week`) MUST PERSIST across
+  reconnects — a tunnel MUST NOT reset its quota just by reconnecting. The `conc:` reset MUST NEVER touch the
+  `traf:` counters.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
   Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
@@ -164,10 +165,11 @@ MUST NOT be relaxed without explicit user direction.
   bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`. `--limit-packets` (default 100)
   is a loose tiny-packet-flood backstop; the byte rate is the primary limit. An exhausted day/week window
   also refuses NEW streams at admission (`TrafficExhausted`, read-only). The blocking wait MUST NEVER be
-  held under a connection write mutex. The global stream-counter key `conc:{name}` carries
-  TTL = 3 × `--limit-conn-idle`, refreshed by a `PEXPIRE` piggybacked on the `Charge` pipeline (a no-op on
-  a missing key, so a torn-down counter is never resurrected), and is RESET (`DEL`) on phone (re)bind
-  (see the live-vs-identity reset invariant above).
+  held under a connection write mutex. The global stream-counter key `conc:{name}` is a lock-guarded
+  (`SETNX conclock:{name}`) `{connID, count}` hash — every acquire/release checks ownership, so a fresh
+  connection resets it at its first acquire and a straggler release is a no-op. Its TTL = 3 × `--limit-conn-idle`,
+  refreshed by a `PEXPIRE` piggybacked on the `Charge` pipeline (a no-op on a missing key, so a torn-down
+  counter is never resurrected). See the live-vs-identity reset invariant above.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry

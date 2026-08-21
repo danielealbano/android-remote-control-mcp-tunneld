@@ -76,13 +76,13 @@ func TestEveryKeyHasTTLAfterFirstOp(t *testing.T) {
 	if _, _, err := l.Allow(ctx, "rps", testIP, 10, time.Second); err != nil { // rl:
 		t.Fatal(err)
 	}
-	if _, err := l.AcquireStream(ctx, "tunnel-x", 4); err != nil { // conc:
+	if _, err := l.AcquireStream(ctx, "tunnel-x", "conn1", 4); err != nil { // conc:
 		t.Fatal(err)
 	}
 	if _, _, _, err := l.Charge(ctx, "tunnel-x", "in", 1024); err != nil { // bw: + pkt: + traf:day + traf:week
 		t.Fatal(err)
 	}
-	if _, _, err := l.IssuanceBegin(ctx, "tunnel-x", 3); err != nil { // iss_inflight:
+	if _, _, err := l.IssuanceBegin(ctx, "tunnel-x", 3); err != nil { // iss_lock:
 		t.Fatal(err)
 	}
 	if err := l.IssuanceRecord(ctx, "tunnel-x"); err != nil { // iss:

@@ -36,8 +36,8 @@ type MeshDialer interface {
 // StreamLimiter is the data-plane limiting surface the edge depends on. It is defined at the consumer
 // (Go convention) so tests can substitute a fake; *limit.Limiter is the production implementation.
 type StreamLimiter interface {
-	AcquireStream(ctx context.Context, name string, maxN int) (bool, error)
-	ReleaseStream(ctx context.Context, name string) error
+	AcquireStream(ctx context.Context, name, connID string, maxN int) (bool, error)
+	ReleaseStream(ctx context.Context, name, connID string) error
 	Charge(ctx context.Context, name, dir string, nr int64) (action limit.ChargeAction, wait time.Duration, window string, err error)
 	TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error)
 	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)

@@ -11,10 +11,10 @@ import (
 
 // Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
 // per-tunnel/per-direction per-second byte cap (bwRate) and packet cap (pktCap), and the day/week
-// traffic caps, with an injectable clock for tests. Each key gets a TTL alongside its mutation — set
-// atomically in the same Lua script (or SET EX for the cooldown windows), or via a pipelined EXPIRE NX
+// traffic caps, with an injectable clock for tests. Each key gets a TTL in the same round-trip as its
+// mutation — via SET EX (cooldown windows), a SETNX lock (concurrency counter), or a pipelined EXPIRE NX
 // immediately after the INCR for the bw:/pkt: per-second and traf: day/week windows (self-healing on the
-// next same-window write; see Charge).
+// next same-window write; see Charge). NO Lua.
 type Limiter struct {
 	rdb       redis.UniversalClient
 	bwRate    int64 // per-second byte cap per tunnel per direction
@@ -29,7 +29,7 @@ type Limiter struct {
 // Option configures a Limiter (functional-options pattern).
 type Option func(*Limiter)
 
-// WithLogger sets the Limiter's logger (used for the issuance-slot heartbeat failure surface).
+// WithLogger sets the Limiter's logger (used for the issuance-lock refresh failure surface).
 func WithLogger(l *slog.Logger) Option { return func(lm *Limiter) { lm.logger = l } }
 
 // WithPacketCap sets the per-tunnel/per-direction reads-per-second cap (0 = disabled, the default).
@@ -168,9 +168,3 @@ func (l *Limiter) TrafficExhausted(ctx context.Context, name string) (dayOver, w
 	return dayOver, weekOver, nil
 }
 
-// ResetStreams clears the live concurrent-stream counter for name (conc:{name}) — called when the phone
-// (re)binds, because a fresh phone connection means all prior streams are dead. It NEVER touches the
-// identity-scoped traf: day/week quotas (those must persist across reconnects).
-func (l *Limiter) ResetStreams(ctx context.Context, name string) error {
-	return l.rdb.Del(ctx, "conc:"+name).Err()
-}

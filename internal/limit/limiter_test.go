@@ -151,7 +151,7 @@ func TestIssuanceRecordCountsSuccesses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Three committed successes fill cap 3: a fresh Begin (no in-flight slots) is refused.
+	// Three committed successes fill cap 3: a fresh Begin (no in-flight order) is refused.
 	if ok, _, _ := l.IssuanceBegin(ctx, "t", 3); ok {
 		t.Error("after 3 committed successes, cap 3 must deny a new begin")
 	}
@@ -189,18 +189,18 @@ func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
 	for range 4 {
-		ok, err := l.AcquireStream(ctx, "t", 4)
+		ok, err := l.AcquireStream(ctx, "t", "conn1", 4)
 		if err != nil || !ok {
 			t.Fatalf("acquire: ok=%v err=%v", ok, err)
 		}
 	}
-	if ok, _ := l.AcquireStream(ctx, "t", 4); ok {
+	if ok, _ := l.AcquireStream(ctx, "t", "conn1", 4); ok {
 		t.Error("5th acquire past cap 4 should fail")
 	}
-	if err := l.ReleaseStream(ctx, "t"); err != nil {
+	if err := l.ReleaseStream(ctx, "t", "conn1"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := l.AcquireStream(ctx, "t", 4); !ok {
+	if ok, _ := l.AcquireStream(ctx, "t", "conn1", 4); !ok {
 		t.Error("after release, a slot should be free")
 	}
 }
@@ -238,30 +238,6 @@ func TestTrafficExhausted_PerDirection(t *testing.T) {
 	}
 }
 
-// TestResetStreams_DeletesConcOnly: ResetStreams DELs conc:{name} but leaves the identity-scoped traf:
-// day/week quotas intact (they persist across reconnects).
-func TestResetStreams_DeletesConcOnly(t *testing.T) {
-	ctx := ctxT(t)
-	l, mr, clk := newChargeLimiter(t, 1<<30, 0, 1<<40, 1<<40)
-	const name = "t"
-	if ok, err := l.AcquireStream(ctx, name, 4); err != nil || !ok { // create conc:t
-		t.Fatalf("acquire: ok=%v err=%v", ok, err)
-	}
-	if _, _, _, err := l.Charge(ctx, name, "in", 100); err != nil { // create traf:t:in:day/week
-		t.Fatal(err)
-	}
-	_, _, dayKey, _ := chargeKeys(name, "in", clk.Unix())
-	if err := l.ResetStreams(ctx, name); err != nil {
-		t.Fatal(err)
-	}
-	if mr.Exists("conc:" + name) {
-		t.Fatal("ResetStreams must delete conc:{name}")
-	}
-	if !mr.Exists(dayKey) {
-		t.Fatal("ResetStreams must NOT delete the identity-scoped traf: day counter")
-	}
-}
-
 // TestCharge_RefreshesConcTTLOnlyIfExists: the Charge pipeline's PEXPIRE conc:{name} refreshes an
 // EXISTING conc TTL to streamTTL but is a NO-OP on a missing key (a torn-down counter is never
 // resurrected).
@@ -280,7 +256,7 @@ func TestCharge_RefreshesConcTTLOnlyIfExists(t *testing.T) {
 	}
 
 	// With an existing conc key whose TTL has been shrunk, Charge refreshes it to streamTTL.
-	if ok, err := l.AcquireStream(ctx, name, 4); err != nil || !ok {
+	if ok, err := l.AcquireStream(ctx, name, "conn1", 4); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
 	mr.SetTTL("conc:"+name, time.Minute)
@@ -298,7 +274,7 @@ func TestAcquireStream_UsesDerivedTTL(t *testing.T) {
 	ctx := ctxT(t)
 	const ttl = 45 * time.Minute
 	l := NewLimiter(rdb, 0, 0, 0, ttl)
-	if ok, err := l.AcquireStream(ctx, "t", 4); err != nil || !ok {
+	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
 	if got := mr.TTL("conc:t"); got != ttl {

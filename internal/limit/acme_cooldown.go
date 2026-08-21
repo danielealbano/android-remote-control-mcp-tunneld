@@ -5,8 +5,6 @@ package limit
 import (
 	"context"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // The ACME rate-limit protection is REACTIVE (no proactive order counter, no budget): a CA answering
@@ -33,22 +31,17 @@ func (l *Limiter) CACooldown(ctx context.Context, ca string) (time.Duration, err
 	return d, nil
 }
 
-// bumpFailuresScript INCRs the per-CA failure counter and (re)sets its TTL to `window` so a streak
-// older than the largest backoff expires.
-var bumpFailuresScript = redis.NewScript(`
-local c = redis.call('INCR', KEYS[1])
-redis.call('PEXPIRE', KEYS[1], ARGV[1])
-return c
-`)
-
 // BumpCAFailures increments the consecutive-failure counter for ca (window is always
 // --acme-backoff-max) and returns the new streak length; the caller derives the exponential backoff.
+// INCR + PEXPIRE(window) are ONE plain pipeline so a streak older than the largest backoff expires — NO Lua.
 func (l *Limiter) BumpCAFailures(ctx context.Context, ca string, window time.Duration) (int, error) {
-	c, err := bumpFailuresScript.Run(ctx, l.rdb, []string{failuresKey(ca)}, window.Milliseconds()).Int()
-	if err != nil {
+	pipe := l.rdb.Pipeline()
+	c := pipe.Incr(ctx, failuresKey(ca))
+	pipe.PExpire(ctx, failuresKey(ca), window)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return 0, err
 	}
-	return c, nil
+	return int(c.Val()), nil
 }
 
 // ResetCAFailures clears the failure streak on a successful order.

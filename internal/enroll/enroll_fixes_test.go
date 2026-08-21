@@ -512,7 +512,7 @@ func TestIssueRejectsExtraIdentifiers(t *testing.T) {
 }
 
 // blockingIssuer blocks in Obtain until proceed is closed, so a test can hold one Issue in-flight (its
-// issuance slot reserved) while a second concurrent Issue runs against the same name.
+// issuance lock held) while a second concurrent Issue runs against the same name.
 type blockingIssuer struct {
 	entered chan struct{}
 	proceed chan struct{}
@@ -528,7 +528,7 @@ func (b *blockingIssuer) Renew(_ context.Context, _ *x509.CertificateRequest, _ 
 	return nil, store.CertInfo{}, errors.New("renew not expected")
 }
 
-// TestIssue_ConcurrentCallsRespectCap: with cap 1, a first Issue holds its in-flight issuance slot while
+// TestIssue_ConcurrentCallsRespectCap: with cap 1, a first Issue holds its issuance lock while
 // a concurrent second Issue for the same name is refused with issuance_cap.
 func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
 	st := tunneltest.NewStore()
@@ -552,7 +552,7 @@ func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
 		})
 		done <- outcome{r, e}
 	}()
-	<-iss.entered // the first Issue holds its in-flight slot and is now inside Obtain
+	<-iss.entered // the first Issue holds its issuance lock and is now inside Obtain
 
 	// A concurrent second Issue for the same name must be refused by the in-flight cap.
 	_, e2 := svc.Issue(context.Background(), name, "1.2.3.4", Request{

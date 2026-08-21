@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // nonceTTL bounds how long an unused enrollment nonce lives in Valkey.
@@ -34,18 +32,14 @@ func (s *Service) Nonce(ctx context.Context) ([]byte, error) {
 	return nonce, nil
 }
 
-// consumeNonce atomically validates and deletes the nonce (single use). Returns false if absent.
-var consumeNonceScript = redis.NewScript(`
-if redis.call('DEL', KEYS[1]) == 1 then return 1 end
-return 0
-`)
-
+// consumeNonce atomically validates and deletes the nonce (single use): DEL is itself atomic and returns
+// the number of keys removed, so ok=(count==1) needs no Lua. Returns false if the nonce was absent.
 func (s *Service) consumeNonce(ctx context.Context, nonce []byte) (bool, error) {
-	ok, err := consumeNonceScript.Run(ctx, s.rdb, []string{nonceKey(hex.EncodeToString(nonce))}).Int()
+	n, err := s.rdb.Del(ctx, nonceKey(hex.EncodeToString(nonce))).Result()
 	if err != nil {
 		return false, err
 	}
-	return ok == 1, nil
+	return n == 1, nil
 }
 
 // firstLabel returns the first DNS label of a host (stripping any port), lower-cased, so a generated
