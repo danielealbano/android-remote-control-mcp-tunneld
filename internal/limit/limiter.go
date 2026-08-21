@@ -60,7 +60,7 @@ const (
 )
 
 const (
-	bwWindowTTL   = 2 * time.Second            // per-second byte/packet windows (2× the 1s window)
+	bwWindowTTL   = 3 * time.Second            // per-second byte/packet windows (3× the 1s window, so the last complete second stays readable by the admin bandwidth view)
 	trafDayTTL    = 25 * time.Hour             // 24h window + 1h margin so a write never expires the counter mid-window
 	trafWeekTTL   = 7*24*time.Hour + time.Hour // 7d window + 1h margin (a small fixed margin, NOT 2× — the key is dead weight after its window)
 	maxPacingWait = 5 * time.Second            // over a cap resetting within this → wait; else kill

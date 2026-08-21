@@ -100,7 +100,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Metrics + admin + recorder.
 	m := metrics.NewMetrics()
-	adminStore := admin.NewStore(rdb, time.Hour)
+	adminTunnels := admin.NewTunnels(reg, lim) // composes routing meta (router) + live windows (limiter)
 	capLogger := caplog.New(logger)
 	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
 
@@ -209,7 +209,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// /api/v1/admin/renew and delegates everything else to the existing metrics handler (unchanged).
 	internalMux := http.NewServeMux()
 	internalMux.Handle("/api/v1/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
-	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, reg, logger))
+	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
 

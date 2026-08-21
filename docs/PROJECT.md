@@ -137,8 +137,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
 The internal listener (`--internal-listen`, never published) serves `GET /metrics` (Prometheus,
 aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable),
-`GET /api/v1/admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
-the data plane), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
+`GET /api/v1/admin/tunnels?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, client-driven, no
+ranking) + `POST /api/v1/admin/tunnels/stats` (names → per-tunnel node/bytes/conc/bw/day/week, live tunnels
+only), `GET /api/v1/admin/nodes` (the node registry), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
 over the mesh `/api/v1/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack

@@ -30,6 +30,22 @@ type fakeNodeSrc struct {
 
 func (f *fakeNodeSrc) Nodes(context.Context) (map[string]router.NodeInfo, error) { return f.nodes, f.err }
 
+// fakeTunnelSrc is a TunnelSource test double for the /api/v1/admin/tunnels[/stats] handlers.
+type fakeTunnelSrc struct {
+	names             []string
+	next              uint64
+	stats             map[string]admin.TunnelStats
+	listErr, statsErr error
+}
+
+func (f *fakeTunnelSrc) List(context.Context, uint64, int64) ([]string, uint64, error) {
+	return f.names, f.next, f.listErr
+}
+
+func (f *fakeTunnelSrc) Stats(context.Context, []string) (map[string]admin.TunnelStats, error) {
+	return f.stats, f.statsErr
+}
+
 // fakeSink is a TrafficSink test double recording per-tunnel byte deltas (the recorder writes here instead
 // of router.AddTraffic in unit tests). Setting err makes AddTraffic fail (for the re-queue test).
 type fakeSink struct {
@@ -69,40 +85,63 @@ func (f *fakeSink) setErr(err error) {
 	f.err = err
 }
 
-// setup builds the recorder over a fakeSink (its traffic sink); the returned *admin.Store still backs the
-// admin.Handler (retired in a later change). Access the sink for flush assertions via rec.traffic.(*fakeSink).
-func setup(t *testing.T) (*Metrics, *PromRecorder, *admin.Store, *miniredis.Miniredis, *redis.Client) {
+// setup builds the recorder over a fakeSink (its traffic sink); the returned *fakeTunnelSrc backs the
+// admin.Handler's tunnels endpoints. Access the sink for flush assertions via rec.traffic.(*fakeSink).
+func setup(t *testing.T) (*Metrics, *PromRecorder, *fakeTunnelSrc, *miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	m := NewMetrics()
-	store := admin.NewStore(rdb, time.Hour)
 	rec := NewPromRecorder(m, caplog.New(discardLog()), newFakeSink(), discardLog())
-	return m, rec, store, mr, rdb
+	return m, rec, &fakeTunnelSrc{}, mr, rdb
 }
 
 func TestAdminTunnelsHandler(t *testing.T) {
-	m, _, store, mr, rdb := setup(t)
-	if err := rdb.HSet(context.Background(), "tcnt:t1", "bytes_in", 100).Err(); err != nil {
-		t.Fatal(err)
-	}
+	m, _, store, _, rdb := setup(t)
+	store.names = []string{"t1", "t2"}
+	store.next = 7
 	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "t1") {
-		t.Errorf("/api/v1/admin/tunnels = %d body=%q", rr.Code, rr.Body.String())
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels?cursor=0&count=100", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "t1") || !strings.Contains(rr.Body.String(), `"cursor":"7"`) {
+		t.Errorf("/api/v1/admin/tunnels list = %d body=%q", rr.Code, rr.Body.String())
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Errorf("content-type = %q, want json", ct)
 	}
 
-	mr.Close() // TopN now errors → 500
+	store.listErr = errors.New("valkey down") // List now errors → 500
 	rr2 := httptest.NewRecorder()
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
 	if rr2.Code != http.StatusInternalServerError {
-		t.Errorf("/api/v1/admin/tunnels with Redis down = %d, want 500", rr2.Code)
+		t.Errorf("/api/v1/admin/tunnels with a list error = %d, want 500", rr2.Code)
+	}
+}
+
+func TestAdminTunnelsStatsHandler(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	store.stats = map[string]admin.TunnelStats{"t1": {Node: "n1", BytesIn: 100, Conc: 2, BwIn: 10}}
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+
+	// POST {names} → merged stats.
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("POST", "/api/v1/admin/tunnels/stats", strings.NewReader(`{"names":["t1"]}`)))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "n1") {
+		t.Errorf("/stats POST = %d body=%q", rr.Code, rr.Body.String())
+	}
+	// A non-POST is rejected.
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/tunnels/stats", nil))
+	if rr2.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /stats = %d, want 405", rr2.Code)
+	}
+	// A malformed body is a 400.
+	rr3 := httptest.NewRecorder()
+	h.ServeHTTP(rr3, httptest.NewRequest("POST", "/api/v1/admin/tunnels/stats", strings.NewReader(`not json`)))
+	if rr3.Code != http.StatusBadRequest {
+		t.Errorf("bad-body /stats = %d, want 400", rr3.Code)
 	}
 }
 

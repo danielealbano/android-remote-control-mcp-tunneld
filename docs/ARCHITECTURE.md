@@ -61,7 +61,7 @@ flowchart TD
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | v1 control-frame codec + the ChunkSize pacing constant |
-| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels` + deduped cap logger + the Recorder interface |
+| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels` list & `/stats` composer + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |
 
@@ -117,7 +117,7 @@ hours/days away) except in the last ≤ 5 s of a window. `Kill` takes precedence
 window can't be waited out). `EXPIRE NX` self-heals a skipped TTL on the next same-window write, so strict
 atomicity is unwarranted for these transient windows; a Valkey ERROR yields `Proceed` (fail-open — pacing
 never hard-depends on the control plane). Each key's TTL is its window plus a small fixed 1 h margin
-(per-second = 2 s, day = 25 h, week = 7 d + 1 h). An exhausted day/week window also refuses NEW streams at
+(per-second = 3 s, day = 25 h, week = 7 d + 1 h). An exhausted day/week window also refuses NEW streams at
 admission (`TrafficExhausted`, read-only). `wire.ChunkSize` = 16384 is the paced-copy read slice, so the
 per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
 
@@ -166,7 +166,8 @@ silently allowing every signer.
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
 The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
-`/api/v1/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher),
+`/api/v1/admin/tunnels?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
+`/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
 `/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
 `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
 `/api/v1/mesh/control` RPC — see PROTOCOL.md §5).

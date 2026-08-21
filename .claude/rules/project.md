@@ -160,7 +160,7 @@ MUST NOT be relaxed without explicit user direction.
   **Kill** (over a cap whose window resets beyond 5 s → end the stream, with the window label for the
   metric). `Kill` takes precedence over `Wait`. `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write (so strict atomicity is unwarranted for these transient windows); a Valkey ERROR
-  yields `Proceed` (fail-open). Each key's TTL is its window plus a fixed **1 h** margin (per-second = 2 s,
+  yields `Proceed` (fail-open). Each key's TTL is its window plus a fixed **1 h** margin (per-second = 3 s,
   day = 25 h, week = 7 d + 1 h). The read slice is `wire.ChunkSize` = 16384, so the per-second overshoot is
   bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`. `--limit-packets` (default 100)
   is a loose tiny-packet-flood backstop; the byte rate is the primary limit. An exhausted day/week window
@@ -173,9 +173,10 @@ MUST NOT be relaxed without explicit user direction.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
-  per-tunnel labels (cardinality); the per-tunnel view is `/api/v1/admin/tunnels` from the TTL'd Valkey
-  counters, written ASYNCHRONOUSLY by the recorder's background flusher — never synchronously on
-  the data plane.
+  per-tunnel labels (cardinality); the per-tunnel view is the paginated `GET /api/v1/admin/tunnels` name
+  list + `POST /api/v1/admin/tunnels/stats` (per-tunnel node/bytes/conc/bw/day/week, composed from the
+  routing key + the TTL'd Valkey windows; the byte counters are written ASYNCHRONOUSLY by the recorder's
+  background flusher — never synchronously on the data plane).
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
   summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
   value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map.
@@ -233,7 +234,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 mesh (per-pair pools, connID-checked delivery) |
 | `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
-| `admin` | `internal/admin`: per-tunnel counters + `/api/v1/admin/tunnels` |
+| `admin` | `internal/admin`: tunnels list + batch-stats composer (over router + limit) |
 | `caplog` | `internal/caplog`: deduped cap-hit logger |
 | `observ` | `internal/observ`: the Recorder interface |
 | `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
