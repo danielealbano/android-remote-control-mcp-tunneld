@@ -16,10 +16,19 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/caplog"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/redis/go-redis/v9"
 )
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// fakeNodeSrc is a NodeSource test double for the /api/v1/admin/nodes handler.
+type fakeNodeSrc struct {
+	nodes map[string]router.NodeInfo
+	err   error
+}
+
+func (f *fakeNodeSrc) Nodes(context.Context) (map[string]router.NodeInfo, error) { return f.nodes, f.err }
 
 // fakeSink is a TrafficSink test double recording per-tunnel byte deltas (the recorder writes here instead
 // of router.AddTraffic in unit tests). Setting err makes AddTraffic fail (for the re-queue test).
@@ -78,7 +87,7 @@ func TestAdminTunnelsHandler(t *testing.T) {
 	if err := rdb.HSet(context.Background(), "tcnt:t1", "bytes_in", 100).Err(); err != nil {
 		t.Fatal(err)
 	}
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
@@ -116,7 +125,7 @@ func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
 
 func TestHealthz200WhenRedisUp(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != http.StatusOK {
@@ -127,7 +136,7 @@ func TestHealthz200WhenRedisUp(t *testing.T) {
 func TestHealthz503WhenRedisDown(t *testing.T) {
 	m, _, store, mr, rdb := setup(t)
 	mr.Close()
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != http.StatusServiceUnavailable {
@@ -142,7 +151,7 @@ func TestMetricsEndpointExposesFamilies(t *testing.T) {
 	rec.Bytes("t", "in", 10)
 	rec.AttestVerify("ok")
 	rec.QuotaExhausted("t", "day")
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -159,7 +168,7 @@ func TestMetricsEndpointExposesFamilies(t *testing.T) {
 func TestNoPerTunnelMetricLabels(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Bytes("secret-tunnel-name", "in", 100)
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -174,7 +183,7 @@ func TestNoPerTunnelMetricLabels(t *testing.T) {
 func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.MeshPool("10.0.0.2:9443", 4) // populate the mesh-pool gauge
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -194,7 +203,7 @@ func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("stream-cap", "t", "1.1.1.1")
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="stream-cap"} 1`) {
@@ -205,7 +214,7 @@ func TestRejectionIncrementsReasonCounter(t *testing.T) {
 func TestRejectRefusesUnregisteredReason(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("made-up-reason", "t", "1.1.1.1")
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if strings.Contains(rr.Body.String(), "made-up-reason") {
@@ -217,7 +226,7 @@ func TestEnrollmentResultLabelled(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.EnrollmentResult("ok")
 	rec.EnrollmentResult("unauthorized")
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -280,7 +289,7 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 	rec.Reject("no-route", "ATTACKER-CONTROLLED-sni", "203.0.113.7")
 
 	// The reason counter is still incremented (observed via the /metrics endpoint).
-	h := Handler(m.Registry(), rdb, store, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="no-route"} 1`) {
@@ -360,5 +369,27 @@ func TestPromRecorder_FlushCapLogEmitsPending(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "cap hit summary") {
 		t.Fatalf("FlushCapLog must emit the pending cap-hit summary, got %q", buf.String())
+	}
+}
+
+// TestHandler_AdminNodes: the endpoint returns the node registry JSON; a source error → 500.
+func TestHandler_AdminNodes(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	nodes := &fakeNodeSrc{nodes: map[string]router.NodeInfo{
+		"n1": {Advertise: "10.0.0.1:9443", Hostname: "host-1", Version: "v1"},
+	}}
+	h := Handler(m.Registry(), rdb, store, nodes, discardLog())
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/nodes", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "10.0.0.1:9443") || !strings.Contains(rr.Body.String(), "host-1") {
+		t.Errorf("/api/v1/admin/nodes = %d body=%q", rr.Code, rr.Body.String())
+	}
+
+	nodes.err = errors.New("valkey down")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/nodes", nil))
+	if rr2.Code != http.StatusInternalServerError {
+		t.Errorf("/api/v1/admin/nodes with source error = %d, want 500", rr2.Code)
 	}
 }

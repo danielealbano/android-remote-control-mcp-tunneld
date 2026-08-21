@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
@@ -17,9 +18,15 @@ type AdminSource interface {
 	TopN(ctx context.Context, n int) ([]admin.TunnelStat, error)
 }
 
-// Handler builds the internal listener mux: /metrics (custom registry), /healthz (Redis PING), and
-// /api/v1/admin/tunnels (top-N JSON). This listener is NEVER proxied.
-func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, adminSrc AdminSource, log *slog.Logger) http.Handler {
+// NodeSource is the node-registry read surface (implemented by *router.Registry).
+type NodeSource interface {
+	Nodes(ctx context.Context) (map[string]router.NodeInfo, error)
+}
+
+// Handler builds the internal listener mux: /metrics (custom registry), /healthz (Redis PING),
+// /api/v1/admin/tunnels (top-N JSON), and /api/v1/admin/nodes (node registry JSON). This listener is
+// NEVER proxied.
+func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, adminSrc AdminSource, nodeSrc NodeSource, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +46,16 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, adminSrc Admin
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(stats)
+	})
+	mux.HandleFunc("/api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Request) {
+		nodes, err := nodeSrc.Nodes(r.Context())
+		if err != nil {
+			log.Warn("admin nodes failed", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(nodes)
 	})
 	return mux
 }

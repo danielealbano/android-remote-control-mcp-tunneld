@@ -209,7 +209,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// /api/v1/admin/renew and delegates everything else to the existing metrics handler (unchanged).
 	internalMux := http.NewServeMux()
 	internalMux.Handle("/api/v1/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
-	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, logger))
+	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
 
@@ -268,7 +268,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error { attSigners.Watch(gctx, cfg.BanPoll); return nil })
 
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
-	g.Go(func() error { return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, cfg.RouteTTL, logger) })
+	g.Go(func() error {
+		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
+	})
 	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
 	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
 	g.Go(func() error {

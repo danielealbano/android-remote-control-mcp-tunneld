@@ -124,7 +124,7 @@ per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap 
 ## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX; NO Lua/WATCH/MULTI-EXEC)
 
 Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
-(`node:{id}` → advertise), rate-limit windows, the per-direction day/week traffic windows
+(`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`), rate-limit windows, the per-direction day/week traffic windows
 (`traf:{name}:{dir}:day/week:{n}`, written via the same pipelined `EXPIRE NX` as the `bw:`/`pkt:` windows),
 the global concurrency counter (`conc:{name}`, a lock-guarded `{connID, count}` hash: a fresh connection's
 first acquire STRUCTURALLY resets it and a straggler release from a superseded connection is a no-op; TTL =
@@ -166,7 +166,8 @@ silently allowing every signer.
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
 The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
-`/api/v1/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher), and
+`/api/v1/admin/tunnels` (top-N from TTL'd Valkey counters, flushed asynchronously by a background flusher),
+`/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
 `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
 `/api/v1/mesh/control` RPC — see PROTOCOL.md §5).
 

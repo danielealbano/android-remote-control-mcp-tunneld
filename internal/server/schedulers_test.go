@@ -88,7 +88,7 @@ func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		_ = heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", 30*time.Millisecond, logger)
+		_ = heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", "host-t", "v-test", "2026-08-21T00:00:00Z", 30*time.Millisecond, logger)
 		close(done)
 	}()
 
