@@ -38,7 +38,7 @@ func (s *syncBuf) String() string {
 }
 
 // TestHeartbeatLoop_LogsPersistentError verifies a persistent route-heartbeat error is logged at Warn
-// with identifiers (a silent failure would let route:{name} TTL-expire with no operator signal).
+// with identifiers (a silent failure would let tunnel:{name} TTL-expire with no operator signal).
 func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	fr := newFakeRouter()
 	fr.hbErr = errors.New("valkey unreachable")

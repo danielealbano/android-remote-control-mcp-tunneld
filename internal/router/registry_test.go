@@ -72,7 +72,7 @@ func TestHeartbeatRefreshesTTL(t *testing.T) {
 	if err != nil || res != HeartbeatRefreshed {
 		t.Fatalf("heartbeat: res=%v err=%v", res, err)
 	}
-	if ttl := mr.TTL("route:abc"); ttl < 25*time.Second {
+	if ttl := mr.TTL("tunnel:abc"); ttl < 25*time.Second {
 		t.Errorf("TTL after refresh = %s, want ~30s", ttl)
 	}
 }
@@ -113,7 +113,7 @@ func TestHeartbeatIsConnConditional(t *testing.T) {
 	ctx := context.Background()
 	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
 	_ = reg.BindRoute(ctx, "abc", "nodeB", "fp", "conn2") // rebind to conn2
-	ttlBefore := mr.TTL("route:abc")
+	ttlBefore := mr.TTL("tunnel:abc")
 	res, err := reg.Heartbeat(ctx, "abc", "conn1") // stale conn heartbeat
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,7 @@ func TestHeartbeatIsConnConditional(t *testing.T) {
 	if node != "nodeB" {
 		t.Errorf("owner changed by stale heartbeat: %q", node)
 	}
-	if ttl := mr.TTL("route:abc"); ttl > ttlBefore {
+	if ttl := mr.TTL("tunnel:abc"); ttl > ttlBefore {
 		t.Error("stale heartbeat must not refresh TTL")
 	}
 }

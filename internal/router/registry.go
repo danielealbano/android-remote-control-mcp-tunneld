@@ -1,6 +1,7 @@
 // Package router implements the cross-replica routing table (name→node, heartbeat TTL) over Redis.
-// route:{name} stores {node, fingerprint, connID}; teardown/refresh are owner-conditional on the
-// per-connection connID so same-node reconnects and cross-node re-binds are both safe.
+// tunnel:{name} stores {node, fingerprint, connID}; teardown/refresh are owner-conditional on the
+// per-connection connID (serialized by the per-name lock) so same-node reconnects and cross-node re-binds
+// are both safe.
 package router
 
 import (
@@ -15,6 +16,9 @@ import (
 // one already stored (a name held by a different certificate).
 var ErrNameHeldByOther = errors.New("router: name held by a different fingerprint")
 
+// ErrLockContended is returned when the per-name route lock cannot be taken within the retry bound.
+var ErrLockContended = errors.New("router: route lock contended")
+
 // HeartbeatResult is the three-state outcome of Heartbeat.
 type HeartbeatResult int
 
@@ -23,7 +27,7 @@ const (
 	HeartbeatRefreshed HeartbeatResult = iota
 	// HeartbeatNotOwner: route now points at a DIFFERENT connID (superseded).
 	HeartbeatNotOwner
-	// HeartbeatMissing: no route:{name} at all (TTL lapsed) — the caller self-heals by re-Binding.
+	// HeartbeatMissing: no tunnel:{name} at all (TTL lapsed) — the caller self-heals by re-Binding.
 	HeartbeatMissing
 )
 
@@ -50,47 +54,51 @@ func NewRegistry(rdb redis.UniversalClient, ttl time.Duration) *Registry {
 	return &Registry{rdb: rdb, ttl: ttl}
 }
 
-// heartbeatScript is owner-conditional on connID and reports refreshed | not-owner | missing.
-var heartbeatScript = redis.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 0 then
-  return 'missing'
-end
-if redis.call('HGET', KEYS[1], 'connID') ~= ARGV[1] then
-  return 'not-owner'
-end
-redis.call('PEXPIRE', KEYS[1], ARGV[2])
-return 'refreshed'
-`)
+func key(name string) string { return "tunnel:" + name }
 
-// unbindScript deletes route:{name} ONLY if its stored connID still matches (never clobbers a route
-// re-bound by a newer connection).
-var unbindScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'connID') == ARGV[1] then
-  redis.call('DEL', KEYS[1])
-end
-return 'ok'
-`)
-
-func key(name string) string { return "route:" + name }
-
-// Heartbeat refreshes route:{name} ONLY while it still belongs to connID, returning the three-state
-// result.
+// Heartbeat refreshes tunnel:{name}'s TTL ONLY (PEXPIRE — never rewrites the value), and ONLY while this
+// connID still owns the route: it reads connID first, and issues the PEXPIRE only on an ownership match, so
+// a stale/superseded connection can NEVER extend the current owner's route lifetime (owner-conditional
+// TTL). Three-state result: absent key → Missing (caller self-heals); a different connID → NotOwner (no
+// refresh); our connID → PEXPIRE → Refreshed (or Missing if it vanished between the read and the refresh).
+// No lock is needed — a spurious PEXPIRE can at worst extend the CORRECT (already re-bound) owner's TTL,
+// which is harmless (it never changes the value/owner).
 func (r *Registry) Heartbeat(ctx context.Context, name, connID string) (HeartbeatResult, error) {
-	res, err := heartbeatScript.Run(ctx, r.rdb, []string{key(name)}, connID, r.ttl.Milliseconds()).Text()
+	owner, err := r.rdb.HGet(ctx, key(name), "connID").Result()
+	if errors.Is(err, redis.Nil) {
+		return HeartbeatMissing, nil // key gone (or a byte-only orphan with no connID) → self-heal
+	}
 	if err != nil {
 		return HeartbeatMissing, err
 	}
-	switch res {
-	case "refreshed":
-		return HeartbeatRefreshed, nil
-	case "not-owner":
-		return HeartbeatNotOwner, nil
-	default:
-		return HeartbeatMissing, nil
+	if owner != connID {
+		return HeartbeatNotOwner, nil // superseded — do NOT refresh the new owner's TTL
 	}
+	ok, err := r.rdb.PExpire(ctx, key(name), r.ttl).Result()
+	if err != nil {
+		return HeartbeatMissing, err
+	}
+	if !ok {
+		return HeartbeatMissing, nil // key expired between the read and the refresh → self-heal
+	}
+	return HeartbeatRefreshed, nil
 }
 
-// Unbind removes route:{name} ONLY while it still belongs to connID.
+// Unbind deletes tunnel:{name} ONLY while it still belongs to connID, serialized by the per-name lock so no
+// concurrent bind can interleave between the connID read and the DEL (deterministic — replaces the CAS
+// Lua). A stale connection reads a different connID and declines to delete.
 func (r *Registry) Unbind(ctx context.Context, name, connID string) error {
-	return unbindScript.Run(ctx, r.rdb, []string{key(name)}, connID).Err()
+	return r.withLock(ctx, name, func() error {
+		owner, err := r.rdb.HGet(ctx, key(name), "connID").Result()
+		if errors.Is(err, redis.Nil) {
+			return nil // already gone
+		}
+		if err != nil {
+			return err
+		}
+		if owner != connID {
+			return nil // superseded by a newer bind — never clobber it
+		}
+		return r.rdb.Del(ctx, key(name)).Err()
+	})
 }
