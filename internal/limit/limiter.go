@@ -167,4 +167,3 @@ func (l *Limiter) TrafficExhausted(ctx context.Context, name string) (dayOver, w
 	weekOver = atoiCap(vals[2]) >= l.weekCap || atoiCap(vals[3]) >= l.weekCap
 	return dayOver, weekOver, nil
 }
-

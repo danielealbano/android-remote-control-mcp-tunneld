@@ -20,9 +20,15 @@ func TestLimiter_TunnelWindows_ComputedKeys(t *testing.T) {
 	prev := strconv.FormatInt(sec-1, 10)
 	d := strconv.FormatInt(sec/86400, 10)
 	w := strconv.FormatInt(sec/86400/7, 10)
-	mr.Set("bw:"+name+":in:"+prev, "2048")
-	mr.Set("traf:"+name+":in:day:"+d, "1000")
-	mr.Set("traf:"+name+":out:week:"+w, "9000")
+	for _, kv := range []struct{ k, v string }{
+		{"bw:" + name + ":in:" + prev, "2048"},
+		{"traf:" + name + ":in:day:" + d, "1000"},
+		{"traf:" + name + ":out:week:" + w, "9000"},
+	} {
+		if err := mr.Set(kv.k, kv.v); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	stats, err := l.TunnelWindows(ctx, []string{name})
 	if err != nil {

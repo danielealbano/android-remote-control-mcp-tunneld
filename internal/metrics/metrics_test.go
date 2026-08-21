@@ -28,7 +28,9 @@ type fakeNodeSrc struct {
 	err   error
 }
 
-func (f *fakeNodeSrc) Nodes(context.Context) (map[string]router.NodeInfo, error) { return f.nodes, f.err }
+func (f *fakeNodeSrc) Nodes(context.Context) (map[string]router.NodeInfo, error) {
+	return f.nodes, f.err
+}
 
 // fakeTunnelSrc is a TunnelSource test double for the /api/v1/admin/tunnels[/stats] handlers.
 type fakeTunnelSrc struct {

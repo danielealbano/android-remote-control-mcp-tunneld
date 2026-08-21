@@ -545,7 +545,6 @@ func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 	}
 }
 
-
 // TestHeartbeatLoop_TinyRouteTTLNoPanic proves a pathological --route-ttl (routeTTL/3 == 0) must
 // not panic time.NewTicker; the floor guard substitutes a 1s interval.
 func TestHeartbeatLoop_TinyRouteTTLNoPanic(t *testing.T) {
