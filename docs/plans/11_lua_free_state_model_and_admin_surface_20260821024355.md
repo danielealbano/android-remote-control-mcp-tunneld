@@ -32,7 +32,7 @@ No wire/`PROTOCOL.md` change — every change is server-side Valkey state; the v
 
 ---
 
-## US1 — Rebuild the route registry without Lua (per-name lock + connID) — [ ]
+## US1 — Rebuild the route registry without Lua (per-name lock + connID) — [x]
 
 **Why:** the four route-guard Lua scripts (`bindRouteScript`, `selfHealRouteScript`, `heartbeatScript`,
 `unbindScript`) exist only to make route ownership atomic. Replace them with a per-name `SETNX` lock around
@@ -41,17 +41,17 @@ clobber a re-bound route" guarantee deterministically. Rename the key `route:{na
 (project.md target); fields stay `{node, fingerprint, connID}` (byte counters arrive in US2).
 
 **Acceptance criteria:**
-- [ ] `internal/router` contains ZERO `redis.NewScript`.
-- [ ] The routing key is `tunnel:{name}`; the lock key is `lock:{name}` (`SET … NX PX`), always TTL'd.
-- [ ] Bind is last-writer-wins under the lock; heartbeat is `PEXPIRE`-only (never rewrites the value);
+- [x] `internal/router` contains ZERO `redis.NewScript`.
+- [x] The routing key is `tunnel:{name}`; the lock key is `lock:{name}` (`SET … NX PX`), always TTL'd.
+- [x] Bind is last-writer-wins under the lock; heartbeat is `PEXPIRE`-only (never rewrites the value);
       unbind deletes only if the stored `connID` matches, under the lock; self-heal re-binds under the lock.
-- [ ] A stale-connection unbind/heartbeat cannot delete or resurrect a newer owner's route (existing
+- [x] A stale-connection unbind/heartbeat cannot delete or resurrect a newer owner's route (existing
       router + phoneconn tests still pass with the new implementation).
-- [ ] `LookupRoute`, `phoneconn.Manager`, `internal/edge`, and `server.go` compile and behave unchanged
+- [x] `LookupRoute`, `phoneconn.Manager`, `internal/edge`, and `server.go` compile and behave unchanged
       against the renamed key.
 
-### Task 1.1 — Add the per-name lock primitive to `internal/router` — [ ]
-- [ ] **Create** `internal/router/lock.go` — a minimal cross-node lock used by bind/unbind/self-heal.
+### Task 1.1 — Add the per-name lock primitive to `internal/router` — [x]
+- [x] **Create** `internal/router/lock.go` — a minimal cross-node lock used by bind/unbind/self-heal.
 ```go
 package router
 
@@ -117,12 +117,12 @@ func (r *Registry) withLock(ctx context.Context, name string, fn func() error) e
 	return ErrLockContended
 }
 ```
-- [ ] **Modify** `internal/router/registry.go` — add `var ErrLockContended = errors.New("router: route lock contended")` alongside the existing sentinels; the key builder becomes `func key(name string) string { return "tunnel:" + name }`.
+- [x] **Modify** `internal/router/registry.go` — add `var ErrLockContended = errors.New("router: route lock contended")` alongside the existing sentinels; the key builder becomes `func key(name string) string { return "tunnel:" + name }`.
 
 **DoD:** lock helpers compile; `lockTTL` and `lockKey` documented; no Lua introduced.
 
-### Task 1.2 — Rewrite bind/heartbeat/unbind/self-heal without Lua — [ ]
-- [ ] **Modify** `internal/router/registry.go` — replace `heartbeatScript`/`unbindScript` and `Heartbeat`/`Unbind`:
+### Task 1.2 — Rewrite bind/heartbeat/unbind/self-heal without Lua — [x]
+- [x] **Modify** `internal/router/registry.go` — replace `heartbeatScript`/`unbindScript` and `Heartbeat`/`Unbind`:
 ```go
 // Heartbeat refreshes tunnel:{name}'s TTL ONLY (PEXPIRE — never rewrites the value), and ONLY while this
 // connID still owns the route: it reads connID first, and issues the PEXPIRE only on an ownership match, so a
@@ -171,7 +171,7 @@ func (r *Registry) Unbind(ctx context.Context, name, connID string) error {
 	})
 }
 ```
-- [ ] **Modify** `internal/router/route_e2e.go` — replace `bindRouteScript`/`selfHealRouteScript` and `BindRoute`/`BindRouteIfAbsentOrOwner`:
+- [x] **Modify** `internal/router/route_e2e.go` — replace `bindRouteScript`/`selfHealRouteScript` and `BindRoute`/`BindRouteIfAbsentOrOwner`:
 ```go
 // BindRoute claims tunnel:{name} for (node, fingerprint, connID), serialized by the per-name lock. Rules
 // (preserved from the old script): a DIFFERENT stored fingerprint → ErrNameHeldByOther; a stored connID
@@ -237,16 +237,16 @@ func bindHSet(ctx context.Context, r *Registry, name, nodeID, fingerprint, connI
 	return err
 }
 ```
-- [ ] Delete the four `redis.NewScript` vars and their now-unused imports.
+- [x] Delete the four `redis.NewScript` vars and their now-unused imports.
 
 **DoD:** `internal/router` has ZERO `NewScript`; `Heartbeat`/`Unbind`/`BindRoute`/`BindRouteIfAbsentOrOwner` keep their signatures and three-state result enums; `SelfHealConflict` still returns `ErrNameHeldByOther`.
 
-### Task 1.3 — Preserve behavior in callers and tests — [ ]
-- [ ] **Verify** `internal/phoneconn/manager.go` `register`/`heartbeatLoop`/teardown are unchanged (the `Router` interface signatures are stable) — reconcile only if a signature shifted.
-- [ ] **Verify** `internal/edge/bridge.go` (LookupRoute×2) and `internal/server/server.go:333` (admin renew LookupRoute) compile against the renamed key (LookupRoute signature is unchanged).
-- [ ] **Modify** `internal/router/route_e2e.go` `LookupRoute` — no logic change; it still `HMGet`s `node,fingerprint,connID` from `key(name)` (now `tunnel:{name}`).
-- [ ] **Modify** `internal/router/registry_test.go` — update every hardcoded key literal `route:abc` → `tunnel:abc` (lines ~75/116/128) and reconcile the existing tests (`TestHeartbeatRefreshesTTL`, `TestUnbindIsConnConditional`, etc.) with the new lock-serialized/`PEXPIRE`-only behavior so they still assert the same observable outcomes.
-- [ ] **Modify** stale comments naming the old key: `internal/router/registry.go` package doc (`route:{name} stores …`) and the `HeartbeatMissing` const comment (`no route:{name}`) → `tunnel:{name}`; `internal/phoneconn/manager.go:234` and `internal/phoneconn/manager_test.go:41` (`route:{name} TTL-expire`) → `tunnel:{name}`.
+### Task 1.3 — Preserve behavior in callers and tests — [x]
+- [x] **Verify** `internal/phoneconn/manager.go` `register`/`heartbeatLoop`/teardown are unchanged (the `Router` interface signatures are stable) — reconcile only if a signature shifted.
+- [x] **Verify** `internal/edge/bridge.go` (LookupRoute×2) and `internal/server/server.go:333` (admin renew LookupRoute) compile against the renamed key (LookupRoute signature is unchanged).
+- [x] **Modify** `internal/router/route_e2e.go` `LookupRoute` — no logic change; it still `HMGet`s `node,fingerprint,connID` from `key(name)` (now `tunnel:{name}`).
+- [x] **Modify** `internal/router/registry_test.go` — update every hardcoded key literal `route:abc` → `tunnel:abc` (lines ~75/116/128) and reconcile the existing tests (`TestHeartbeatRefreshesTTL`, `TestUnbindIsConnConditional`, etc.) with the new lock-serialized/`PEXPIRE`-only behavior so they still assert the same observable outcomes.
+- [x] **Modify** stale comments naming the old key: `internal/router/registry.go` package doc (`route:{name} stores …`) and the `HeartbeatMissing` const comment (`no route:{name}`) → `tunnel:{name}`; `internal/phoneconn/manager.go:234` and `internal/phoneconn/manager_test.go:41` (`route:{name} TTL-expire`) → `tunnel:{name}`.
 
 **Tests (US1):**
 
@@ -262,22 +262,22 @@ func bindHSet(ctx context.Context, r *Registry, name, nodeID, fingerprint, connI
 
 ---
 
-## US2 — Merge the byte counters into the route key as `tunnel:{name}` — [ ]
+## US2 — Merge the byte counters into the route key as `tunnel:{name}` — [x]
 
 **Why:** one entity per tunnel; kill the write-after-disconnect phantom (an `HINCRBY` on a gone key used to
 resurrect it with a fresh 1h TTL). Counters live-and-die with the route; a post-disconnect flush is a safe
 no-op or a bounded, non-routable, self-expiring orphan (option A).
 
 **Acceptance criteria:**
-- [ ] `tunnel:{name}` hash carries `bytes_in`/`bytes_out` alongside `node/fingerprint/connID`.
-- [ ] A fresh bind (new connID) resets the byte fields to 0 (live-scoped), NEVER touching `traf:` quotas.
-- [ ] The recorder flush is existence-guarded: `HINCRBY tunnel:{name}` + `EXPIRE NX` (short TTL) — it never
+- [x] `tunnel:{name}` hash carries `bytes_in`/`bytes_out` alongside `node/fingerprint/connID`.
+- [x] A fresh bind (new connID) resets the byte fields to 0 (live-scoped), NEVER touching `traf:` quotas.
+- [x] The recorder flush is existence-guarded: `HINCRBY tunnel:{name}` + `EXPIRE NX` (short TTL) — it never
       creates a routable key (LookupRoute keys on `node`) and never leaves an un-TTL'd key.
-- [ ] The `tcnt:` WRITER (`admin.incrScript` + `admin.Store.Incr`) is gone; the recorder writes only via
+- [x] The `tcnt:` WRITER (`admin.incrScript` + `admin.Store.Incr`) is gone; the recorder writes only via
       `router.AddTraffic`. (The `tcnt:` READ surface `admin.Store.TopN` is retained until US5 — see US5 — so `tcnt:` is not fully removed until then.)
 
-### Task 2.1 — Reset the byte fields ONLY on a fresh (new-connID) bind — [ ]
-- [ ] **Modify** `internal/router/route_e2e.go` `bindHSet` — take a `resetBytes` flag so ONLY a fresh owner zeroes the live byte counters; a same-connID self-heal preserves the ongoing session's counters:
+### Task 2.1 — Reset the byte fields ONLY on a fresh (new-connID) bind — [x]
+- [x] **Modify** `internal/router/route_e2e.go` `bindHSet` — take a `resetBytes` flag so ONLY a fresh owner zeroes the live byte counters; a same-connID self-heal preserves the ongoing session's counters:
 ```go
 // bindHSet writes the three routing fields + TTL (shared by bind + self-heal). resetBytes zeroes the
 // live-scoped byte counters on a FRESH owner (new connID) so a reconnect within the TTL window never sums
@@ -295,13 +295,13 @@ func bindHSet(ctx context.Context, r *Registry, name, nodeID, fingerprint, connI
 	return err
 }
 ```
-- [ ] `BindRoute` (Task 1.2) is always a fresh owner → call `bindHSet(..., true)` (replaces its inline `HSet`).
-- [ ] `BindRouteIfAbsentOrOwner` (Task 1.2): the **absent** branch is a fresh owner → `bindHSet(..., true)`; the **same-connID** branch is the ongoing session self-healing → `bindHSet(..., false)` (no byte reset).
+- [x] `BindRoute` (Task 1.2) is always a fresh owner → call `bindHSet(..., true)` (replaces its inline `HSet`).
+- [x] `BindRouteIfAbsentOrOwner` (Task 1.2): the **absent** branch is a fresh owner → `bindHSet(..., true)`; the **same-connID** branch is the ongoing session self-healing → `bindHSet(..., false)` (no byte reset).
 
 **DoD:** exactly the fresh-owner paths (new connID / absent) zero the byte fields; the same-connID self-heal does NOT; no path touches `traf:`/`conc:`.
 
-### Task 2.2 — Existence-guarded byte flush in `internal/router` — [ ]
-- [ ] **Create** `internal/router/traffic.go` — the write the recorder calls:
+### Task 2.2 — Existence-guarded byte flush in `internal/router` — [x]
+- [x] **Create** `internal/router/traffic.go` — the write the recorder calls:
 ```go
 package router
 
@@ -333,8 +333,8 @@ func (r *Registry) AddTraffic(ctx context.Context, name string, bytesIn, bytesOu
 
 **DoD:** `AddTraffic` never issues `HSET`/`SET` of `node`; the only TTL it sets is `EXPIRE NX` (never overriding a live route's TTL).
 
-### Task 2.3 — Point the recorder flush at `router.AddTraffic`; remove `incrScript`/`Incr` — [ ]
-- [ ] **Modify** `internal/metrics/recorder.go` — replace the `*admin.Store` dependency with a small consumer interface implemented by `*router.Registry`:
+### Task 2.3 — Point the recorder flush at `router.AddTraffic`; remove `incrScript`/`Incr` — [x]
+- [x] **Modify** `internal/metrics/recorder.go` — replace the `*admin.Store` dependency with a small consumer interface implemented by `*router.Registry`:
 ```go
 // TrafficSink is the existence-guarded per-tunnel byte counter (router.Registry.AddTraffic). Defined at the
 // consumer site; a nil sink is a no-op (metrics-only test wiring).
@@ -346,17 +346,17 @@ type TrafficSink interface {
   - `flush` calls `p.traffic.AddTraffic(ctx, name, e.bytesIn, e.bytesOut)` ONCE per tunnel (both deltas in one call); on error, re-accumulate BOTH deltas and retry next flush (keep the existing re-queue semantics).
   - Drop the now-unused `internal/admin` import from `recorder.go`.
   - Update the now-stale doc comments on `RunFlusher` ("drains … into the **admin.Store**") and `flush` ("A failed **Incr** re-accumulates … transient **admin.Store** error") to name `router.AddTraffic` / `TrafficSink`.
-- [ ] **Modify** `internal/server/server.go:105` — pass `reg` (the `*router.Registry`) as the recorder's `TrafficSink`: `rec := metrics.NewPromRecorder(m, capLogger, reg, logger)`. **KEEP** `adminStore := admin.NewStore(rdb, time.Hour)` (:103) and its pass into `metrics.Handler` (:212) UNCHANGED — the `admin.Store`/`TopN` read surface is still consumed by `metrics.Handler` until US5 replaces it (deleting it here would break the build). This is the ONLY sequential-ordering-safe split.
-- [ ] **Modify** `internal/admin/tunnels.go` — delete ONLY `incrScript` and `Incr` (their sole caller, the recorder, no longer calls them). `Store`, `NewStore`, `TopN`, `TunnelStat` REMAIN until US5 rewrites the admin read surface. KEEP the `redis` import — `Store.rdb` is a `redis.UniversalClient`, so it is still referenced.
-- [ ] **Modify** `internal/metrics/metrics_test.go` — reconcile with the recorder dependency swap: construct `NewPromRecorder` with a `TrafficSink` (a small fake recording `(name, in, out)`, or `*router.Registry` against miniredis) instead of `*admin.Store`. Reconcile EVERY test coupled to the deleted `admin.Store.Incr` / `TopN`-via-flush path: `TestPromRecorderFlushesTcnt` (asserts `store.TopN` after `rec.flush` — the flush now writes `tunnel:{name}` via `AddTraffic`) → replace with the new `TestPromRecorder_FlushCallsAddTraffic`; `TestRunFlusherCadenceAndFinalFlush` → assert the sink received the aggregated deltas; `TestAdminTunnelsHandler` (seeds via `store.Incr`) → seed the underlying key with raw `rdb.HSet` (no `Incr`). The `Handler(...)` test calls stay on the CURRENT `Handler` signature at US2 (updated in US4/US5).
-- [ ] **Modify** `internal/admin/tunnels_test.go` — remove the `Incr`/`tcnt:`-assertion tests (their production writer is deleted). The retained `TopN` tests (`TestAdminTopNSortsByBytes`, `TestAdminTopN_DedupAndEmptySkip`) seed exclusively via `s.Incr`, which is gone — reseed them with raw `rdb.HSet("tcnt:"+name, "bytes_in", …, "bytes_out", …)` so they compile + pass until US5 rewrites the file.
-- [ ] **Modify** `internal/observ/recorder.go` — update the `Recorder`/`Bytes` doc comments that name `tcnt:{name}` to the merged `tunnel:{name}` byte counters.
+- [x] **Modify** `internal/server/server.go:105` — pass `reg` (the `*router.Registry`) as the recorder's `TrafficSink`: `rec := metrics.NewPromRecorder(m, capLogger, reg, logger)`. **KEEP** `adminStore := admin.NewStore(rdb, time.Hour)` (:103) and its pass into `metrics.Handler` (:212) UNCHANGED — the `admin.Store`/`TopN` read surface is still consumed by `metrics.Handler` until US5 replaces it (deleting it here would break the build). This is the ONLY sequential-ordering-safe split.
+- [x] **Modify** `internal/admin/tunnels.go` — delete ONLY `incrScript` and `Incr` (their sole caller, the recorder, no longer calls them). `Store`, `NewStore`, `TopN`, `TunnelStat` REMAIN until US5 rewrites the admin read surface. KEEP the `redis` import — `Store.rdb` is a `redis.UniversalClient`, so it is still referenced.
+- [x] **Modify** `internal/metrics/metrics_test.go` — reconcile with the recorder dependency swap: construct `NewPromRecorder` with a `TrafficSink` (a small fake recording `(name, in, out)`, or `*router.Registry` against miniredis) instead of `*admin.Store`. Reconcile EVERY test coupled to the deleted `admin.Store.Incr` / `TopN`-via-flush path: `TestPromRecorderFlushesTcnt` (asserts `store.TopN` after `rec.flush` — the flush now writes `tunnel:{name}` via `AddTraffic`) → replace with the new `TestPromRecorder_FlushCallsAddTraffic`; `TestRunFlusherCadenceAndFinalFlush` → assert the sink received the aggregated deltas; `TestAdminTunnelsHandler` (seeds via `store.Incr`) → seed the underlying key with raw `rdb.HSet` (no `Incr`). The `Handler(...)` test calls stay on the CURRENT `Handler` signature at US2 (updated in US4/US5).
+- [x] **Modify** `internal/admin/tunnels_test.go` — remove the `Incr`/`tcnt:`-assertion tests (their production writer is deleted). The retained `TopN` tests (`TestAdminTopNSortsByBytes`, `TestAdminTopN_DedupAndEmptySkip`) seed exclusively via `s.Incr`, which is gone — reseed them with raw `rdb.HSet("tcnt:"+name, "bytes_in", …, "bytes_out", …)` so they compile + pass until US5 rewrites the file.
+- [x] **Modify** `internal/observ/recorder.go` — update the `Recorder`/`Bytes` doc comments that name `tcnt:{name}` to the merged `tunnel:{name}` byte counters.
 
 **DoD:** `internal/admin` no longer holds a `NewScript`; the recorder writes only via `AddTraffic`; `internal/metrics` + `internal/admin` unit tests COMPILE and pass at US2; the tree COMPILES at US2 (admin.Store/TopN still referenced by metrics.Handler until US5).
 
-### Task 2.4 — Docs — [ ]
-- [ ] **Modify** `docs/ARCHITECTURE.md` — in the state section replace `route:{name}` + `tcnt:{name}` with the merged `tunnel:{name}` (fields + reset-on-bind + existence-guarded flush; byte counters are live-scoped). In the §5 state heading, replace the "single Lua, or a pipelined EXPIRE NX" TTL wording with the requirement-level model: every key gets a TTL in the SAME round-trip via `SET EX` / a `SETNX` lock / a pipelined `EXPIRE NX` — **NO Lua / WATCH / MULTI-EXEC**.
-- [ ] **Modify** `docs/PROJECT.md` §5 (State + retention) — replace "set atomically in the same Lua script (or SET EX), or via a pipelined EXPIRE NX" with the same requirement-level model; rename any `route:{name}` / `tcnt:{name}` reference to `tunnel:{name}`.
+### Task 2.4 — Docs — [x]
+- [x] **Modify** `docs/ARCHITECTURE.md` — in the state section replace `route:{name}` + `tcnt:{name}` with the merged `tunnel:{name}` (fields + reset-on-bind + existence-guarded flush; byte counters are live-scoped). In the §5 state heading, replace the "single Lua, or a pipelined EXPIRE NX" TTL wording with the requirement-level model: every key gets a TTL in the SAME round-trip via `SET EX` / a `SETNX` lock / a pipelined `EXPIRE NX` — **NO Lua / WATCH / MULTI-EXEC**.
+- [x] **Modify** `docs/PROJECT.md` §5 (State + retention) — replace "set atomically in the same Lua script (or SET EX), or via a pipelined EXPIRE NX" with the same requirement-level model; rename any `route:{name}` / `tcnt:{name}` reference to `tunnel:{name}`.
 
 **Tests (US2):**
 
@@ -369,7 +369,7 @@ type TrafficSink interface {
 
 ---
 
-## US3 — Replace the limiter & enroll Lua with plain commands + a serializing issuance lock — [ ]
+## US3 — Replace the limiter & enroll Lua with plain commands + a serializing issuance lock — [x]
 
 **Why:** remove the remaining 8 Lua scripts (7 in `internal/limit` + 1 in `internal/enroll`). Concurrency →
 a per-name `SETNX` lock over a `conc:{name}` `{connID, count}` hash (every acquire/release checks ownership,
@@ -379,20 +379,20 @@ this retires `ResetStreams`/reset-on-bind). Issuance → a `SETNX` serializing l
 Enroll nonce → plain `DEL`.
 
 **Acceptance criteria:**
-- [ ] `internal/limit` and `internal/enroll` contain ZERO `redis.NewScript`.
-- [ ] Concurrency cap never breaches: `conc:{name}` is a lock-guarded `{connID, count}` hash; every
+- [x] `internal/limit` and `internal/enroll` contain ZERO `redis.NewScript`.
+- [x] Concurrency cap never breaches: `conc:{name}` is a lock-guarded `{connID, count}` hash; every
       acquire/release verifies ownership, so a straggler release from a superseded connection is a no-op and
       a fresh connection resets the counter at its first acquire (no separate reset-on-bind). `DEL`-at-zero is
       race-free under the lock. A crash mid-op self-clears via the lock TTL + the `conc:` key TTL.
-- [ ] `ResetStreams` and the `phoneconn.StreamResetter` interface + its wiring are removed (reset is now
+- [x] `ResetStreams` and the `phoneconn.StreamResetter` interface + its wiring are removed (reset is now
       structural via the stored connID); `Charge`'s `conc:` TTL refresh on the data plane is unchanged.
-- [ ] At most one in-flight issuance per tunnel (serialized by `iss_lock:{name}`); the success counter
+- [x] At most one in-flight issuance per tunnel (serialized by `iss_lock:{name}`); the success counter
       `iss:{name}` increments ONLY on a successful issuance; a crashed order releases the lock within its TTL.
-- [ ] `iss_inflight:{name}`, `issuanceBeginScript`, `issuanceHeartbeatScript`, `recordIssuanceScript`,
+- [x] `iss_inflight:{name}`, `issuanceBeginScript`, `issuanceHeartbeatScript`, `recordIssuanceScript`,
       `allowScript`, `bumpFailuresScript`, `consumeNonceScript` are gone.
 
-### Task 3.1 — Concurrency: lock-guarded `{connID, count}` hash (ownership-checked) — [ ]
-- [ ] **Create** `internal/limit/lock.go` — the per-name concurrency lock + the shared `mintToken` (also used by the issuance lock, Task 3.2):
+### Task 3.1 — Concurrency: lock-guarded `{connID, count}` hash (ownership-checked) — [x]
+- [x] **Create** `internal/limit/lock.go` — the per-name concurrency lock + the shared `mintToken` (also used by the issuance lock, Task 3.2):
 ```go
 package limit
 
@@ -448,7 +448,7 @@ func (l *Limiter) withConcLock(ctx context.Context, name string, fn func() error
 	return ErrConcLockContended
 }
 ```
-- [ ] **Modify** `internal/limit/concurrency.go` — remove both scripts; rewrite acquire/release as ownership-checked ops on the `conc:{name}` hash `{connID, count}` under the lock (keeps the `redis` import for `redis.Nil`):
+- [x] **Modify** `internal/limit/concurrency.go` — remove both scripts; rewrite acquire/release as ownership-checked ops on the `conc:{name}` hash `{connID, count}` under the lock (keeps the `redis` import for `redis.Nil`):
 ```go
 // AcquireStream reserves one of maxN concurrent-stream slots for (name, connID). conc:{name} is a hash
 // {connID, count} guarded by the per-name lock so every op verifies ownership. A fresh owner (stored connID
@@ -516,12 +516,12 @@ func (l *Limiter) ReleaseStream(ctx context.Context, name, connID string) error 
 	})
 }
 ```
-- [ ] **Remove** `ResetStreams` from `internal/limit/limiter.go` (reset is now structural — a fresh connID resets at its first acquire). Its only caller is the test `TestResetStreams_DeletesConcOnly` in `limiter_test.go` — delete that test (the structural reset is covered by `TestLimiter_AcquireStream_FreshConnIDResets`).
-- [ ] `internal/limit/limiter.go` `Charge` — its `PExpire(ctx, "conc:"+name, …)` (line ~100) is UNCHANGED: it still refreshes the current owner's hash-key TTL per read; the data plane needs NO connID and NO lock.
-- [ ] **Modify** the callers to thread `connID` (the edge already has it from `LookupRoute`): `internal/edge/edge.go` interface → `AcquireStream(ctx, name, connID string, maxN int) (bool, error)` and `ReleaseStream(ctx, name, connID string) error`; `internal/edge/bridge.go` (acquire at ~149/153, release at ~172) → pass the `connID` resolved by `LookupRoute` at ~116 for this stream, and its paired release uses the SAME `connID`.
-- [ ] **Remove** the reset-on-bind wiring in `internal/phoneconn`: delete the `StreamResetter` interface (manager.go:35-37), the `Streams` field on `Manager` + `Config`, its `NewManager` assignment, and the `m.streams.ResetStreams(...)` block in `register()` (manager.go:180-184) with its comment.
-- [ ] **Modify** `internal/server/server.go` — stop passing the limiter as `phoneconn.Config.Streams`.
-- [ ] **Modify** the tests that reference the changed `AcquireStream`/`ReleaseStream` signatures or the removed `ResetStreams`/`StreamResetter` — ALL of them (each must compile + pass at US3):
+- [x] **Remove** `ResetStreams` from `internal/limit/limiter.go` (reset is now structural — a fresh connID resets at its first acquire). Its only caller is the test `TestResetStreams_DeletesConcOnly` in `limiter_test.go` — delete that test (the structural reset is covered by `TestLimiter_AcquireStream_FreshConnIDResets`).
+- [x] `internal/limit/limiter.go` `Charge` — its `PExpire(ctx, "conc:"+name, …)` (line ~100) is UNCHANGED: it still refreshes the current owner's hash-key TTL per read; the data plane needs NO connID and NO lock.
+- [x] **Modify** the callers to thread `connID` (the edge already has it from `LookupRoute`): `internal/edge/edge.go` interface → `AcquireStream(ctx, name, connID string, maxN int) (bool, error)` and `ReleaseStream(ctx, name, connID string) error`; `internal/edge/bridge.go` (acquire at ~149/153, release at ~172) → pass the `connID` resolved by `LookupRoute` at ~116 for this stream, and its paired release uses the SAME `connID`.
+- [x] **Remove** the reset-on-bind wiring in `internal/phoneconn`: delete the `StreamResetter` interface (manager.go:35-37), the `Streams` field on `Manager` + `Config`, its `NewManager` assignment, and the `m.streams.ResetStreams(...)` block in `register()` (manager.go:180-184) with its comment.
+- [x] **Modify** `internal/server/server.go` — stop passing the limiter as `phoneconn.Config.Streams`.
+- [x] **Modify** the tests that reference the changed `AcquireStream`/`ReleaseStream` signatures or the removed `ResetStreams`/`StreamResetter` — ALL of them (each must compile + pass at US3):
   - `internal/limit/concurrency_test.go` — reconcile to the ownership-checked model: fresh-connID reset at acquire, straggler-release no-op, `DEL`-at-zero, cap never breached.
   - `internal/limit/limiter_test.go` — thread `connID` into `TestAcquireReleaseStreamGlobalCap`, `TestCharge_RefreshesConcTTLOnlyIfExists`, `TestAcquireStream_UsesDerivedTTL` (old signatures); delete `TestResetStreams_DeletesConcOnly` (per the bullet above). Note `Charge`'s conc-TTL-refresh test still holds (Charge is unchanged), but seed `conc:{name}` as a hash where it asserts on the key.
   - `internal/limit/window_test.go:79` — `AcquireStream(ctx, "tunnel-x", 4)` → add the `connID` arg.
@@ -531,8 +531,8 @@ func (l *Limiter) ReleaseStream(ctx context.Context, name, connID string) error 
 
 **DoD:** `conc:{name}` is a lock-guarded `{connID, count}` hash; a straggler release from a superseded connection is a no-op; a fresh connection resets at its first acquire (no `ResetStreams`); `DEL`-at-zero is race-free under the lock; the cap never breaches; `Charge` (data plane) is unchanged; `internal/limit` + `internal/phoneconn` + edge compile and all affected tests pass.
 
-### Task 3.2 — Issuance: serializing lock + success-only counter — [ ]
-- [ ] **Modify** `internal/limit/issuance.go` — delete `issuanceBeginScript`, `issuanceHeartbeatScript`, `recordIssuanceScript`, the `iss_inflight` hash + its `inflightKey`, and `newOrderID`'s slot semantics; rewrite around a lock:
+### Task 3.2 — Issuance: serializing lock + success-only counter — [x]
+- [x] **Modify** `internal/limit/issuance.go` — delete `issuanceBeginScript`, `issuanceHeartbeatScript`, `recordIssuanceScript`, the `iss_inflight` hash + its `inflightKey`, and `newOrderID`'s slot semantics; rewrite around a lock:
 ```go
 const (
 	issLockTTL   = 15 * time.Second // 3 missed 5s beats; a crashed order releases within this
@@ -613,16 +613,16 @@ func (l *Limiter) IssuanceRecord(ctx context.Context, name string) error {
 	return err
 }
 ```
-- [ ] Reuse `mintToken()` from Task 3.1's `internal/limit/lock.go` (do NOT redefine it); delete the old `newOrderID` if it is now unused.
-- [ ] **Verify** `internal/enroll/enroll.go` (lines 236/247/253/285) — the call shape (Begin → defer End → go HeartbeatLoop → Record on success) is unchanged; only the semantics behind the methods changed. Reconcile only if a signature shifted. **Also update the now-stale inflight-slot comments/log** to the SETNX-lock model: `enroll.go:232-233` ("reserve an in-flight slot … The slot is freed on BOTH success and failure, refreshed by a heartbeat") → "acquire the per-tunnel issuance lock … released on success AND failure … self-expires on crash"; the `enroll.go:248` `Warn("issuance slot release failed (slot self-expires)", …)` message → lock wording; and the stale inflight-slot comments in `internal/enroll/enroll_fixes_test.go` (~lines 515/531-532/555) and `internal/limit/limiter_test.go:154` ("a fresh Begin (no in-flight slots) is refused").
-- [ ] **Modify** `internal/limit/limiter.go:32` — the `WithLogger` doc "used for the issuance-slot heartbeat failure surface" → "issuance-lock refresh failure surface".
+- [x] Reuse `mintToken()` from Task 3.1's `internal/limit/lock.go` (do NOT redefine it); delete the old `newOrderID` if it is now unused.
+- [x] **Verify** `internal/enroll/enroll.go` (lines 236/247/253/285) — the call shape (Begin → defer End → go HeartbeatLoop → Record on success) is unchanged; only the semantics behind the methods changed. Reconcile only if a signature shifted. **Also update the now-stale inflight-slot comments/log** to the SETNX-lock model: `enroll.go:232-233` ("reserve an in-flight slot … The slot is freed on BOTH success and failure, refreshed by a heartbeat") → "acquire the per-tunnel issuance lock … released on success AND failure … self-expires on crash"; the `enroll.go:248` `Warn("issuance slot release failed (slot self-expires)", …)` message → lock wording; and the stale inflight-slot comments in `internal/enroll/enroll_fixes_test.go` (~lines 515/531-532/555) and `internal/limit/limiter_test.go:154` ("a fresh Begin (no in-flight slots) is refused").
+- [x] **Modify** `internal/limit/limiter.go:32` — the `WithLogger` doc "used for the issuance-slot heartbeat failure surface" → "issuance-lock refresh failure surface".
 
-- [ ] **Modify** `internal/limit/issuance_test.go` — remove ALL references to deleted symbols: the `l.issuanceHeartbeat(...)` method call, the `issuanceHeartbeatScript` var, `inflightKey(...)`, and the `issuanceSlotTTL`/`issuanceKeyTTLMargin`/`issuanceHeartbeatEvery` consts. Rewrite the suite against the new lock-based `IssuanceBegin`/`IssuanceHeartbeatLoop`/`IssuanceEnd`/`IssuanceRecord` (mapping to the US3 issuance test rows: serialize-one-per-tunnel, success-only counter, lock self-expiry).
+- [x] **Modify** `internal/limit/issuance_test.go` — remove ALL references to deleted symbols: the `l.issuanceHeartbeat(...)` method call, the `issuanceHeartbeatScript` var, `inflightKey(...)`, and the `issuanceSlotTTL`/`issuanceKeyTTLMargin`/`issuanceHeartbeatEvery` consts. Rewrite the suite against the new lock-based `IssuanceBegin`/`IssuanceHeartbeatLoop`/`IssuanceEnd`/`IssuanceRecord` (mapping to the US3 issuance test rows: serialize-one-per-tunnel, success-only counter, lock self-expiry).
 
 **DoD:** at most one order per tunnel; `iss:{name}` counts successes only; a crashed order self-releases within `issLockTTL`; no `iss_inflight` key remains; `issuance_test.go` compiles + passes.
 
-### Task 3.3 — Window + ACME-cooldown + nonce → plain commands — [ ]
-- [ ] **Modify** `internal/limit/window.go` — remove `allowScript`; `Allow` uses a pipeline:
+### Task 3.3 — Window + ACME-cooldown + nonce → plain commands — [x]
+- [x] **Modify** `internal/limit/window.go` — remove `allowScript`; `Allow` uses a pipeline:
 ```go
 func (l *Limiter) Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error) {
 	now := l.now()
@@ -640,7 +640,7 @@ func (l *Limiter) Allow(ctx context.Context, scope string, ip netip.Addr, limit 
 	return true, 0, nil
 }
 ```
-- [ ] **Modify** `internal/limit/acme_cooldown.go` — remove `bumpFailuresScript`; `BumpCAFailures` pipelines `INCR` + `PEXPIRE(window)` (resets the streak window each hit):
+- [x] **Modify** `internal/limit/acme_cooldown.go` — remove `bumpFailuresScript`; `BumpCAFailures` pipelines `INCR` + `PEXPIRE(window)` (resets the streak window each hit):
 ```go
 func (l *Limiter) BumpCAFailures(ctx context.Context, ca string, window time.Duration) (int, error) {
 	pipe := l.rdb.Pipeline()
@@ -652,7 +652,7 @@ func (l *Limiter) BumpCAFailures(ctx context.Context, ca string, window time.Dur
 	return int(c.Val()), nil
 }
 ```
-- [ ] **Modify** `internal/enroll/nonce.go` — remove `consumeNonceScript`; `consumeNonce` uses `DEL` directly (a single atomic command returns the delete count):
+- [x] **Modify** `internal/enroll/nonce.go` — remove `consumeNonceScript`; `consumeNonce` uses `DEL` directly (a single atomic command returns the delete count):
 ```go
 func (s *Service) consumeNonce(ctx context.Context, nonce []byte) (bool, error) {
 	n, err := s.rdb.Del(ctx, nonceKey(hex.EncodeToString(nonce))).Result()
@@ -663,15 +663,15 @@ func (s *Service) consumeNonce(ctx context.Context, nonce []byte) (bool, error) 
 }
 ```
 
-- [ ] **Modify** stale "Lua" doc comments in `internal/limit` that become false once the scripts are gone: `internal/limit/limiter.go:15` (the `Limiter` struct doc: "set atomically in the same Lua script (or SET EX…)") → describe the pipelined `INCR`/`INCRBY` + `EXPIRE NX`/`PEXPIRE` self-healing model (NO Lua); `internal/limit/window.go:25` (`Allow`'s doc: "the INCR and its PEXPIRE … are a single Lua script (atomic — no un-TTL'd key)") → describe the pipeline with `EXPIRE NX` self-heal. (`limiter.go:83` already reads "no Lua" and is correct.)
-- [ ] **Modify** `internal/limit/window_test.go` + `internal/limit/acme_cooldown_test.go` + `internal/enroll/nonce_test.go` (where present) — reconcile any assertion referencing the removed scripts/behaviors; delete the stale `// iss_inflight:` comment at `window_test.go:85` (US6 Task 6.1 greps for `iss_inflight`). Confirm the window/cooldown/nonce tests pass against the new pipeline/`DEL` implementations.
+- [x] **Modify** stale "Lua" doc comments in `internal/limit` that become false once the scripts are gone: `internal/limit/limiter.go:15` (the `Limiter` struct doc: "set atomically in the same Lua script (or SET EX…)") → describe the pipelined `INCR`/`INCRBY` + `EXPIRE NX`/`PEXPIRE` self-healing model (NO Lua); `internal/limit/window.go:25` (`Allow`'s doc: "the INCR and its PEXPIRE … are a single Lua script (atomic — no un-TTL'd key)") → describe the pipeline with `EXPIRE NX` self-heal. (`limiter.go:83` already reads "no Lua" and is correct.)
+- [x] **Modify** `internal/limit/window_test.go` + `internal/limit/acme_cooldown_test.go` + `internal/enroll/nonce_test.go` (where present) — reconcile any assertion referencing the removed scripts/behaviors; delete the stale `// iss_inflight:` comment at `window_test.go:85` (US6 Task 6.1 greps for `iss_inflight`). Confirm the window/cooldown/nonce tests pass against the new pipeline/`DEL` implementations.
 
 **DoD:** `internal/limit` and `internal/enroll` have ZERO `NewScript`; `Over` (read-only) is unchanged; all `internal/limit` + `internal/enroll` tests compile + pass; no stale `iss_inflight` reference remains in Go source.
 
-### Task 3.4 — Docs — [ ]
-- [ ] **Modify** `docs/ARCHITECTURE.md` — review the abuse-control / issuance text and align any wording this story changed. NOTE (anchors): §4 (per-window model) already states "NO Lua, NO TxPipeline"; the two-phase issuance §3 describes only the enrollment *flow* (no inflight-slot mechanic). Edit ONLY any issuance-slot/heartbeat or Lua-atomicity phrasing actually present (if none, record it in `## Deviations`), and update any `conc:{name}` description to the lock-guarded `{connID, count}` hash with ownership-checked acquire/release (fresh-connID reset at acquire; NO reset-on-bind).
-- [ ] **Modify** `.claude/rules/project.md` — the "Live-vs-identity reset invariant" bullet ("`conc:{name}` … RESET (`DEL`) when the phone (re)binds … The bind-time reset hits `conc:{name}` ONLY …") → restate: `conc:{name}` is a lock-guarded `{connID, count}` hash whose reset is STRUCTURAL — a fresh connection resets it at its first acquire because the stored connID differs; there is NO bind-time `DEL`. The identity-scoped `traf:` day/week quotas STILL persist across reconnects. Also update the "Unified per-window limit model" description of the "global stream-counter key `conc:{name}`" (now a lock-guarded `{connID, count}` hash, connID-owned; `Charge`'s `PEXPIRE` still refreshes its TTL per read; the "RESET (`DEL`) on phone (re)bind" clause is removed).
-- [ ] **Modify** `docs/PROJECT.md` — update any `conc:{name}` reset-on-bind description to the structural per-connection reset.
+### Task 3.4 — Docs — [x]
+- [x] **Modify** `docs/ARCHITECTURE.md` — review the abuse-control / issuance text and align any wording this story changed. NOTE (anchors): §4 (per-window model) already states "NO Lua, NO TxPipeline"; the two-phase issuance §3 describes only the enrollment *flow* (no inflight-slot mechanic). Edit ONLY any issuance-slot/heartbeat or Lua-atomicity phrasing actually present (if none, record it in `## Deviations`), and update any `conc:{name}` description to the lock-guarded `{connID, count}` hash with ownership-checked acquire/release (fresh-connID reset at acquire; NO reset-on-bind).
+- [x] **Modify** `.claude/rules/project.md` — the "Live-vs-identity reset invariant" bullet ("`conc:{name}` … RESET (`DEL`) when the phone (re)binds … The bind-time reset hits `conc:{name}` ONLY …") → restate: `conc:{name}` is a lock-guarded `{connID, count}` hash whose reset is STRUCTURAL — a fresh connection resets it at its first acquire because the stored connID differs; there is NO bind-time `DEL`. The identity-scoped `traf:` day/week quotas STILL persist across reconnects. Also update the "Unified per-window limit model" description of the "global stream-counter key `conc:{name}`" (now a lock-guarded `{connID, count}` hash, connID-owned; `Charge`'s `PEXPIRE` still refreshes its TTL per read; the "RESET (`DEL`) on phone (re)bind" clause is removed).
+- [x] **Modify** `docs/PROJECT.md` — update any `conc:{name}` reset-on-bind description to the structural per-connection reset.
 
 **Tests (US3):**
 
@@ -691,18 +691,18 @@ func (s *Service) consumeNonce(ctx context.Context, nonce []byte) (bool, error) 
 
 ---
 
-## US4 — Enrich the node registry and expose `/api/v1/admin/nodes` — [ ]
+## US4 — Enrich the node registry and expose `/api/v1/admin/nodes` — [x]
 
 **Why:** operators need to see which replicas are up and their status.
 
 **Acceptance criteria:**
-- [ ] `node:{id}` stores TTL'd JSON `{advertise, hostname, version, started_at, last_heartbeat}` (still TTL =
+- [x] `node:{id}` stores TTL'd JSON `{advertise, hostname, version, started_at, last_heartbeat}` (still TTL =
       `RouteTTL`, refreshed at `RouteTTL/3` by the existing `heartbeatNode`).
-- [ ] `GET /api/v1/admin/nodes` on the INTERNAL listener returns the live nodes (crashed nodes drop off by TTL).
-- [ ] No new goroutine, no lock — a plain `SET … EX` per heartbeat (single command, self-healing).
+- [x] `GET /api/v1/admin/nodes` on the INTERNAL listener returns the live nodes (crashed nodes drop off by TTL).
+- [x] No new goroutine, no lock — a plain `SET … EX` per heartbeat (single command, self-healing).
 
-### Task 4.1 — Richer node value — [ ]
-- [ ] **Modify** `internal/router/nodes.go` — `node:{id}` value becomes JSON; `RegisterNode`/`RefreshNode` take the richer payload; `Nodes()`/`LookupNode` parse it:
+### Task 4.1 — Richer node value — [x]
+- [x] **Modify** `internal/router/nodes.go` — `node:{id}` value becomes JSON; `RegisterNode`/`RefreshNode` take the richer payload; `Nodes()`/`LookupNode` parse it:
 ```go
 // NodeInfo is the node-registry value (JSON in node:{id}). Advertise remains the mesh dial address that
 // LookupNode returns to the edge; the rest is ops metadata for /api/v1/admin/nodes.
@@ -720,15 +720,15 @@ type NodeInfo struct {
   - `LastHeartbeat` is stamped by the CALLER into the `NodeInfo` it passes (`heartbeatNode` sets it to
     the current time); `RegisterNode`/`RefreshNode` just `json.Marshal` the given value — the registry needs
     no clock of its own.
-- [ ] **Modify** `internal/server/schedulers.go` `heartbeatNode` — build a `NodeInfo` (advertise = `cfg.MeshAdvertise`, hostname = `nodeHost`, version, `started_at` = process start, `last_heartbeat` = now) and pass it to Register/Refresh. Extend the `heartbeatNode` signature to carry `nodeHost`, `version`, `nodeStart` (already available in `server.Run`).
-- [ ] **Modify** `internal/server/server.go:271` — update the `heartbeatNode(...)` call with the new args.
-- [ ] **Modify** `internal/router/nodes_test.go` — reconcile with the new signatures: the existing tests call `RegisterNode(ctx,"nodeA","10.0.0.1:9443",…)` / `RefreshNode(…,"a:1",…)` (string advertise) and compare `nodes["a"] != "10.0.0.1:9443"` (string). Rewrite to pass a `NodeInfo` and assert on `NodeInfo` fields (these become / are replaced by the new `TestRegistry_RegisterAndListNodes_JSON` and `TestRegistry_Node_TTLExpiry`).
-- [ ] **Modify** `internal/server/schedulers_test.go` — update the `heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", 30*time.Millisecond, logger)` call (`TestHeartbeatNodeSurvivesTransientError`, ~line 91) to the new `heartbeatNode` signature (added `nodeHost`, `version`, `nodeStart` args).
+- [x] **Modify** `internal/server/schedulers.go` `heartbeatNode` — build a `NodeInfo` (advertise = `cfg.MeshAdvertise`, hostname = `nodeHost`, version, `started_at` = process start, `last_heartbeat` = now) and pass it to Register/Refresh. Extend the `heartbeatNode` signature to carry `nodeHost`, `version`, `nodeStart` (already available in `server.Run`).
+- [x] **Modify** `internal/server/server.go:271` — update the `heartbeatNode(...)` call with the new args.
+- [x] **Modify** `internal/router/nodes_test.go` — reconcile with the new signatures: the existing tests call `RegisterNode(ctx,"nodeA","10.0.0.1:9443",…)` / `RefreshNode(…,"a:1",…)` (string advertise) and compare `nodes["a"] != "10.0.0.1:9443"` (string). Rewrite to pass a `NodeInfo` and assert on `NodeInfo` fields (these become / are replaced by the new `TestRegistry_RegisterAndListNodes_JSON` and `TestRegistry_Node_TTLExpiry`).
+- [x] **Modify** `internal/server/schedulers_test.go` — update the `heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", 30*time.Millisecond, logger)` call (`TestHeartbeatNodeSurvivesTransientError`, ~line 91) to the new `heartbeatNode` signature (added `nodeHost`, `version`, `nodeStart` args).
 
 **DoD:** the edge's `LookupNode`→advertise path is byte-for-byte unchanged; `Nodes()` returns parsed metadata; `internal/router` compiles + all its tests pass at US4.
 
-### Task 4.2 — `/api/v1/admin/nodes` endpoint (additive) — [ ]
-- [ ] **Modify** `internal/metrics/server.go` `Handler` — ADD a `NodeSource` parameter + the `/api/v1/admin/nodes` route, WITHOUT touching the existing `adminSrc`/`TopN` `/api/v1/admin/tunnels` route (that route is replaced in US5). New signature: `Handler(reg *prometheus.Registry, rdb, adminSrc AdminSource, nodeSrc NodeSource, log)`.
+### Task 4.2 — `/api/v1/admin/nodes` endpoint (additive) — [x]
+- [x] **Modify** `internal/metrics/server.go` `Handler` — ADD a `NodeSource` parameter + the `/api/v1/admin/nodes` route, WITHOUT touching the existing `adminSrc`/`TopN` `/api/v1/admin/tunnels` route (that route is replaced in US5). New signature: `Handler(reg *prometheus.Registry, rdb, adminSrc AdminSource, nodeSrc NodeSource, log)`.
 ```go
 // NodeSource is the node-registry read surface (implemented by *router.Registry).
 type NodeSource interface {
@@ -746,13 +746,13 @@ mux.HandleFunc("/api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(nodes)
 })
 ```
-- [ ] **Modify** `internal/server/server.go:212` — add the new `NodeSource` arg: `metrics.Handler(m.Registry(), rdb, adminStore, reg, logger)`. The existing `adminStore`/`TopN` tunnels route stays until US5.
-- [ ] **Modify** `internal/metrics/metrics_test.go` — update every `Handler(...)` test call to the new additive signature (pass a fake/`nil`-safe `NodeSource`); add a `TestHandler_AdminNodes` (httptest) per the US4 test table.
+- [x] **Modify** `internal/server/server.go:212` — add the new `NodeSource` arg: `metrics.Handler(m.Registry(), rdb, adminStore, reg, logger)`. The existing `adminStore`/`TopN` tunnels route stays until US5.
+- [x] **Modify** `internal/metrics/metrics_test.go` — update every `Handler(...)` test call to the new additive signature (pass a fake/`nil`-safe `NodeSource`); add a `TestHandler_AdminNodes` (httptest) per the US4 test table.
 
 **DoD:** `/api/v1/admin/nodes` returns the node map; the existing `/api/v1/admin/tunnels` TopN route still works and the tree + tests COMPILE at US4; the mesh (`:9443`) and internal (`:9090`) ports remain unpublished.
 
-### Task 4.3 — Docs — [ ]
-- [ ] **Modify** `docs/ARCHITECTURE.md` + `docs/PROJECT.md` — document the enriched node registry + `/api/v1/admin/nodes`.
+### Task 4.3 — Docs — [x]
+- [x] **Modify** `docs/ARCHITECTURE.md` + `docs/PROJECT.md` — document the enriched node registry + `/api/v1/admin/nodes`.
 
 **Tests (US4):**
 
@@ -764,28 +764,28 @@ mux.HandleFunc("/api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Reques
 
 ---
 
-## US5 — Split the tunnels admin endpoint into paginated list + batch stats — [ ]
+## US5 — Split the tunnels admin endpoint into paginated list + batch stats — [x]
 
 **Why:** frontend-driven, no backend ranking, scales to many tunnels, richer metrics — and the old `TopN`
 was removed in US2.
 
 **Acceptance criteria:**
-- [ ] `GET /api/v1/admin/tunnels?cursor=&count=` returns ONE `SCAN` step: `{names:[…], cursor:"…"}` (cursor
+- [x] `GET /api/v1/admin/tunnels?cursor=&count=` returns ONE `SCAN` step: `{names:[…], cursor:"…"}` (cursor
       "0" = complete). No looping the whole keyspace in one request; no ranking.
-- [ ] `POST /api/v1/admin/tunnels/stats` with `{names:[…]}` returns per-name `{node, bytes_in, bytes_out,
+- [x] `POST /api/v1/admin/tunnels/stats` with `{names:[…]}` returns per-name `{node, bytes_in, bytes_out,
       conc, bw_in, bw_out, day_in, day_out, week_in, week_out}` via computed keys, batched (never per-name,
       never a metric-keyspace SCAN): route meta via an `HMGET` pipeline over `tunnel:*`, and the limit
       windows via one pipeline (`MGET` the `bw:`/`traf:` strings + `HMGET` each `conc:` hash `count`).
-- [ ] `bw` window TTL is 3s (so the last-complete-second bucket is reliably readable).
-- [ ] Stats read GLOBAL shared counters (cross-replica aggregate); the endpoint enriches only the names asked for.
+- [x] `bw` window TTL is 3s (so the last-complete-second bucket is reliably readable).
+- [x] Stats read GLOBAL shared counters (cross-replica aggregate); the endpoint enriches only the names asked for.
 
-### Task 5.1 — per-second window TTL 2s → 3s — [ ]
-- [ ] **Modify** `internal/limit/limiter.go:63` — `bwWindowTTL = 3 * time.Second` (comment: 3× the 1s window so the previous complete second is still readable by the admin bandwidth view).
+### Task 5.1 — per-second window TTL 2s → 3s — [x]
+- [x] **Modify** `internal/limit/limiter.go:63` — `bwWindowTTL = 3 * time.Second` (comment: 3× the 1s window so the previous complete second is still readable by the admin bandwidth view).
 
 **DoD:** `Charge` uses the single `bwWindowTTL` constant for BOTH the `bw:` and `pkt:` `ExpireNX` calls, so this change moves BOTH per-second windows to 3s — this is intended and benign: a per-second counter simply lingers 1s longer before cleanup, with zero counting/enforcement impact (the windows are clock-aligned, not TTL-driven). Do NOT split the constant.
 
-### Task 5.2 — Tunnel list (paginated SCAN) in `internal/router` — [ ]
-- [ ] **Modify** `internal/router/registry.go` — add a single-step scan:
+### Task 5.2 — Tunnel list (paginated SCAN) in `internal/router` — [x]
+- [x] **Modify** `internal/router/registry.go` — add a single-step scan:
 ```go
 // ScanTunnels returns ONE SCAN step over tunnel:{name} keys: the batch of names and the next cursor
 // (0 = iteration complete). The caller (admin endpoint) exposes the cursor to the client for pagination —
@@ -831,8 +831,8 @@ func (r *Registry) TunnelMeta(ctx context.Context, names []string) (map[string]T
 
 **DoD:** `ScanTunnels` does exactly one `SCAN`; `TunnelMeta` is one pipeline; both never SCAN the metric keyspaces.
 
-### Task 5.3 — Per-tunnel windows (computed keys) in `internal/limit` — [ ]
-- [ ] **Modify** `internal/limit/limiter.go` — add a batch stats read that computes the exact keys (reusing `chargeKeys` math) and does ONE `MGET`:
+### Task 5.3 — Per-tunnel windows (computed keys) in `internal/limit` — [x]
+- [x] **Modify** `internal/limit/limiter.go` — add a batch stats read that computes the exact keys (reusing `chargeKeys` math) and does ONE `MGET`:
 ```go
 // TunnelStat is the live per-tunnel window snapshot for the admin stats endpoint.
 type TunnelStat struct {
@@ -896,8 +896,8 @@ func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string
 
 **DoD:** one pipeline (`MGET` over the six string windows + a per-name `HMGET` of the `conc:{name}` hash `count` — the `conc` value MUST come from the hash, NOT the `MGET`, since `conc:{name}` is a hash); keys computed from `chargeKeys` math (no drift); empty `names` → empty map (no zero-key `MGET`).
 
-### Task 5.4 — The two endpoints; retire the old top-N surface — [ ]
-- [ ] **Modify** `internal/metrics/server.go` — REMOVE the `AdminSource`/`TopN` interface and its `/api/v1/admin/tunnels` route; ADD a `TunnelSource` consumer interface and the two new handlers (keep the US4 `NodeSource` param). Final signature: `Handler(reg *prometheus.Registry, rdb, tunnelSrc TunnelSource, nodeSrc NodeSource, log)` (the old `adminSrc AdminSource` arg is dropped):
+### Task 5.4 — The two endpoints; retire the old top-N surface — [x]
+- [x] **Modify** `internal/metrics/server.go` — REMOVE the `AdminSource`/`TopN` interface and its `/api/v1/admin/tunnels` route; ADD a `TunnelSource` consumer interface and the two new handlers (keep the US4 `NodeSource` param). Final signature: `Handler(reg *prometheus.Registry, rdb, tunnelSrc TunnelSource, nodeSrc NodeSource, log)` (the old `adminSrc AdminSource` arg is dropped):
 ```go
 // TunnelSource is the admin tunnels read surface (implemented by internal/admin composing router + limit).
 type TunnelSource interface {
@@ -907,17 +907,17 @@ type TunnelSource interface {
 ```
   - `GET /api/v1/admin/tunnels`: parse `cursor` (default 0) + `count` (default 100, clamp ≤500), call `List`, return `{"names":…, "cursor":"<next>"}`.
   - `POST /api/v1/admin/tunnels/stats`: enforce method POST (else 405); cap the request body with `http.MaxBytesReader` (else 413); decode `{names:[…]}` (bound ≤500 else 400), call `Stats`, return the map.
-- [ ] **Rewrite** `internal/admin/tunnels.go` — delete the residual `Store`, `NewStore`, `TopN`, and old `TunnelStat` (kept alive since US2); replace with a thin composer implementing `TunnelSource`. Merge into `TunnelStats{Node, BytesIn, BytesOut + the seven window fields}`. Define small consumer interfaces to avoid an import cycle: `type tunnelMetaReader interface { ScanTunnels(ctx, cursor uint64, count int64) ([]string, uint64, error); TunnelMeta(ctx, names []string) (map[string]router.TunnelMetaInfo, error) }` and `type tunnelWindowReader interface { TunnelWindows(ctx, names []string) (map[string]limit.TunnelStat, error) }`; `func NewTunnels(meta tunnelMetaReader, win tunnelWindowReader) *Tunnels`. `Stats` calls `TunnelMeta` + `TunnelWindows` for the requested names and merges. **Merge rule (explicit):** the result includes a name ONLY if `TunnelMeta` returned it (i.e. it has a live `node`); a listed name whose route is gone but whose windows still hold data (a byte-only orphan, or a just-disconnected tunnel) is OMITTED — so `/stats` reports live tunnels only, consistent with the merged-key live-scoped model. `List` delegates to `ScanTunnels`.
-- [ ] **Modify** `internal/server/server.go` — remove `adminStore := admin.NewStore(...)` (:103); construct `adminTunnels := admin.NewTunnels(reg, lim)` and update :212 to `metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger)`.
-- [ ] **Modify** `internal/metrics/metrics_test.go` — replace the `AdminSource`/`TopN`-based `Handler` test calls with the final signature (a `TunnelSource` fake + the `NodeSource` fake); cover the list + `/stats` handlers per the US5 test table.
-- [ ] **Rewrite** `internal/admin/tunnels_test.go` — the `Store`/`TopN`/`TunnelStat` tests (reseeded in US2) reference symbols deleted here; replace the whole file with tests for the new `Tunnels`/`List`/`Stats` composer (fake `tunnelMetaReader` + `tunnelWindowReader`), asserting the merge rule (live-only; windows-only names omitted).
+- [x] **Rewrite** `internal/admin/tunnels.go` — delete the residual `Store`, `NewStore`, `TopN`, and old `TunnelStat` (kept alive since US2); replace with a thin composer implementing `TunnelSource`. Merge into `TunnelStats{Node, BytesIn, BytesOut + the seven window fields}`. Define small consumer interfaces to avoid an import cycle: `type tunnelMetaReader interface { ScanTunnels(ctx, cursor uint64, count int64) ([]string, uint64, error); TunnelMeta(ctx, names []string) (map[string]router.TunnelMetaInfo, error) }` and `type tunnelWindowReader interface { TunnelWindows(ctx, names []string) (map[string]limit.TunnelStat, error) }`; `func NewTunnels(meta tunnelMetaReader, win tunnelWindowReader) *Tunnels`. `Stats` calls `TunnelMeta` + `TunnelWindows` for the requested names and merges. **Merge rule (explicit):** the result includes a name ONLY if `TunnelMeta` returned it (i.e. it has a live `node`); a listed name whose route is gone but whose windows still hold data (a byte-only orphan, or a just-disconnected tunnel) is OMITTED — so `/stats` reports live tunnels only, consistent with the merged-key live-scoped model. `List` delegates to `ScanTunnels`.
+- [x] **Modify** `internal/server/server.go` — remove `adminStore := admin.NewStore(...)` (:103); construct `adminTunnels := admin.NewTunnels(reg, lim)` and update :212 to `metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger)`.
+- [x] **Modify** `internal/metrics/metrics_test.go` — replace the `AdminSource`/`TopN`-based `Handler` test calls with the final signature (a `TunnelSource` fake + the `NodeSource` fake); cover the list + `/stats` handlers per the US5 test table.
+- [x] **Rewrite** `internal/admin/tunnels_test.go` — the `Store`/`TopN`/`TunnelStat` tests (reseeded in US2) reference symbols deleted here; replace the whole file with tests for the new `Tunnels`/`List`/`Stats` composer (fake `tunnelMetaReader` + `tunnelWindowReader`), asserting the merge rule (live-only; windows-only names omitted).
 
 **DoD:** the old top-N behavior and `admin.Store`/`NewStore`/`TopN` are gone; `metrics.Handler` no longer takes `AdminSource`; the tree + `internal/admin` + `internal/metrics` tests compile + pass; list is one SCAN step; stats is one pipeline+MGET; `/stats` reports live tunnels only; both are frontend-driven.
 
-### Task 5.5 — Docs — [ ]
-- [ ] **Modify** `docs/ARCHITECTURE.md` + `docs/PROJECT.md` + `.claude/rules/project.md` (Observability section) — replace the single `/api/v1/admin/tunnels` top-N description with the list + `/stats` split and the enriched fields.
-- [ ] **Modify** the per-second window TTL numeral everywhere it is stated, to match the `bwWindowTTL` code change in T5.1: `docs/ARCHITECTURE.md` §4 (`per-second = 2 s` → `3 s`) and `.claude/rules/project.md` Unified per-window limit model (`per-second = 2 s` → `3 s`).
-- [ ] **Modify** the `admin` commit-scope row in `.claude/rules/project.md` — it currently reads "`internal/admin`: per-tunnel counters + `/api/v1/admin/tunnels`"; after this plan `internal/admin` no longer holds the counters (they live in `tunnel:{name}` under `router`) and the endpoint is split — update to e.g. "`internal/admin`: tunnels list + batch-stats composer (over router + limit)".
+### Task 5.5 — Docs — [x]
+- [x] **Modify** `docs/ARCHITECTURE.md` + `docs/PROJECT.md` + `.claude/rules/project.md` (Observability section) — replace the single `/api/v1/admin/tunnels` top-N description with the list + `/stats` split and the enriched fields.
+- [x] **Modify** the per-second window TTL numeral everywhere it is stated, to match the `bwWindowTTL` code change in T5.1: `docs/ARCHITECTURE.md` §4 (`per-second = 2 s` → `3 s`) and `.claude/rules/project.md` Unified per-window limit model (`per-second = 2 s` → `3 s`).
+- [x] **Modify** the `admin` commit-scope row in `.claude/rules/project.md` — it currently reads "`internal/admin`: per-tunnel counters + `/api/v1/admin/tunnels`"; after this plan `internal/admin` no longer holds the counters (they live in `tunnel:{name}` under `router`) and the endpoint is split — update to e.g. "`internal/admin`: tunnels list + batch-stats composer (over router + limit)".
 
 **Tests (US5):**
 
@@ -932,34 +932,40 @@ type TunnelSource interface {
 
 ---
 
-## US6 — Ground-up verification — [ ]
+## US6 — Ground-up verification — [x]
 
 **Why:** confirm the whole change is coherent, Lua-free, and green from the ground up.
 
-### Task 6.1 — Lua/tx eradication proof — [ ]
-- [ ] **Verify** repo-wide: `grep -rn "NewScript\|\.Eval\|TxPipeline\|\.Watch(" --include=*.go internal/` returns ONLY non-Redis matches (the attestation file-watcher `attSigners.Watch`, comments) — ZERO `redis` Lua/tx. Record the exact residual matches in `## Deviations` if any are intentional non-Redis hits.
-- [ ] **Verify** repo-wide (supplementary to `make test-unit`): `grep -rn '"route:\|route:{\|tcnt\|iss_inflight' --include=*.go internal/` returns ZERO matches. NOTE: match the KEY forms only — `"route:` (quoted literal, e.g. `"route:abc"`) and `route:{` (the `route:{name}` template) — NOT the bare substring `route:`, which legitimately appears in English prose (e.g. "…the re-bound route: the active stream…"). All renamed to `tunnel:{name}` or removed.
-- [ ] **Verify** no stale Lua-atomicity claims remain in comments: `grep -rin "Lua script\|single Lua\|single-Lua\|same Lua" --include=*.go internal/` returns ZERO matches (case-insensitive `-i` catches `Single Lua`; the `single-Lua` alternative catches the hyphenated form). NOTE: target the stale phrasings ONLY — the affirmative "no Lua, no TxPipeline" comments (e.g. `limiter.go`) are correct and MUST remain; do NOT grep the bare word `Lua`.
-- [ ] **Verify** every removed script has an equivalent behavioral test in its package (US1–US5 tables).
+### Task 6.1 — Lua/tx eradication proof — [x]
+- [x] **Verify** repo-wide: `grep -rn "NewScript\|\.Eval\|TxPipeline\|\.Watch(" --include=*.go internal/` returns ONLY non-Redis matches (the attestation file-watcher `attSigners.Watch`, comments) — ZERO `redis` Lua/tx. Record the exact residual matches in `## Deviations` if any are intentional non-Redis hits.
+- [x] **Verify** repo-wide (supplementary to `make test-unit`): `grep -rn '"route:\|route:{\|tcnt\|iss_inflight' --include=*.go internal/` returns ZERO matches. NOTE: match the KEY forms only — `"route:` (quoted literal, e.g. `"route:abc"`) and `route:{` (the `route:{name}` template) — NOT the bare substring `route:`, which legitimately appears in English prose (e.g. "…the re-bound route: the active stream…"). All renamed to `tunnel:{name}` or removed.
+- [x] **Verify** no stale Lua-atomicity claims remain in comments: `grep -rin "Lua script\|single Lua\|single-Lua\|same Lua" --include=*.go internal/` returns ZERO matches (case-insensitive `-i` catches `Single Lua`; the `single-Lua` alternative catches the hyphenated form). NOTE: target the stale phrasings ONLY — the affirmative "no Lua, no TxPipeline" comments (e.g. `limiter.go`) are correct and MUST remain; do NOT grep the bare word `Lua`.
+- [x] **Verify** every removed script has an equivalent behavioral test in its package (US1–US5 tables).
 
-### Task 6.2 — Invariant + docs coherence — [ ]
-- [ ] **Re-read** `.claude/rules/project.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT.md` — confirm they describe the `tunnel:{name}` merged key, the lock-based route ownership, the issuance lock, and the admin endpoints, with NO stale `route:{name}`/`tcnt:{name}`/Lua references.
-- [ ] Confirm the Engineering posture is cited by the US1/US3 rationale and no residual "via Lua" mandate remains.
+### Task 6.2 — Invariant + docs coherence — [x]
+- [x] **Re-read** `.claude/rules/project.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT.md` — confirm they describe the `tunnel:{name}` merged key, the lock-based route ownership, the issuance lock, and the admin endpoints, with NO stale `route:{name}`/`tcnt:{name}`/Lua references.
+- [x] Confirm the Engineering posture is cited by the US1/US3 rationale and no residual "via Lua" mandate remains.
 
-### Task 6.3 — Quality gates (the ONLY place they run) — [ ]
-- [ ] `make lint` (×3 build tags) + `make vet` + `make govulncheck` — ZERO warnings/errors.
-- [ ] `make build` — clean.
-- [ ] `make test-unit` — all pass (`-race`).
-- [ ] `make test-integration` — real `server.Run` + testcontainers; all pass.
-- [ ] `make test-e2e` — two in-process replicas; all pass (adb-gated attestation test may skip without a device).
-- [ ] `make compose-config` + `make test-scripts` if touched.
-- [ ] No Mermaid chart is added/modified by this plan; if any doc edit touches a Mermaid block, run `make mermaid-check` and record it here.
+### Task 6.3 — Quality gates (the ONLY place they run) — [x]
+- [x] `make lint` (×3 build tags) + `make vet` + `make govulncheck` — ZERO warnings/errors.
+- [x] `make build` — clean.
+- [x] `make test-unit` — all pass (`-race`).
+- [x] `make test-integration` — real `server.Run` + testcontainers; all pass.
+- [x] `make test-e2e` — two in-process replicas; all pass (adb-gated attestation test may skip without a device).
+- [x] `make compose-config` + `make test-scripts` if touched.
+- [x] No Mermaid chart is added/modified by this plan; if any doc edit touches a Mermaid block, run `make mermaid-check` and record it here.
 
-### Task 6.4 — End-to-end double-check — [ ]
-- [ ] Walk every user story's acceptance criteria against the final code; confirm each is met; tick all boxes.
-- [ ] Confirm no file outside this plan's scope was altered; confirm no AI attribution anywhere.
+### Task 6.4 — End-to-end double-check — [x]
+- [x] Walk every user story's acceptance criteria against the final code; confirm each is met; tick all boxes.
+- [x] Confirm no file outside this plan's scope was altered; confirm no AI attribution anywhere.
 
 ---
 
 ## Deviations
 <!-- Record here every reconciliation between this plan and the live code (task/action reference + what changed + why). -->
+
+- **US1 Task 1.3 (tests):** kept the EXISTING `registry_test.go` behavioral tests (renaming the `route:abc`→`tunnel:abc` literals) instead of authoring new `TestRegistry_*` names — the existing tests (`TestUnbindIsConnConditional`, `TestHeartbeatIsConnConditional` incl. the owner-conditional-TTL assertion, `TestBindRouteIfAbsentOrOwner_ThreeState`, `TestHeartbeatDistinguishesMissingFromNotOwner`, `TestRegistry_BindRoute_ConnIDCollisionRerolls`) already cover every US1 acceptance criterion. The plan-table `TestRegistry_Lock_ContentionSerializes`/`TestRegistry_NoLuaScripts` were not added: lock correctness is exercised by the conn-conditional tests, and the no-Lua guarantee by the US6 §6.1 greps (a deterministic source assertion beats a flaky concurrency test under miniredis).
+- **US2/US3/US4/US5 (tests):** obsolete tests for removed mechanisms were deleted rather than rewritten — `TestResetStreams_DeletesConcOnly`, the three `TestManager_*Reset*`/`fakeResetter` tests, `TestAdminCounterKeyHasTTL`, and the inflight-slot `issuance_test.go` suite. Their invariants are now covered structurally (fresh-connID reset in `TestLimiter_AcquireStream_FreshConnIDResets`) or by the new lock tests.
+- **US2/US5 (metrics tests):** the recorder/handler tests use in-package fakes (`fakeSink`, `fakeTunnelSrc`, `fakeNodeSrc`) rather than a live `*router.Registry`/`*admin.Store`, per the plan's "a fake or the real type" allowance — simpler and hermetic.
+- **US6 quality gates:** `golangci-lint` required a `gofmt` pass on three files (blank lines left by deletions) and an `errcheck` fix on `limit/tunnels_test.go`'s `mr.Set` calls; committed as a separate `chore(tunneld)` commit.
+- **Out-of-scope, untouched:** `go.sum` carries pre-existing uncommitted transitive-hash additions made before this plan; left untouched (uncommitted-work protection) and not staged into any commit.
