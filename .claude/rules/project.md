@@ -173,8 +173,8 @@ MUST NOT be relaxed without explicit user direction.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
-  per-tunnel labels (cardinality); the per-tunnel view is the paginated `GET /api/v1/admin/tunnels` name
-  list + `POST /api/v1/admin/tunnels/stats` (per-tunnel node/bytes/conc/bw/day/week, composed from the
+  per-tunnel labels (cardinality); the per-tunnel view is the paginated `GET /api/v1/admin/tunnels/list`
+  name list + `POST /api/v1/admin/tunnels/stats` (per-tunnel node/bytes/conc/bw/day/week, composed from the
   routing key + the TTL'd Valkey windows; the byte counters are written ASYNCHRONOUSLY by the recorder's
   background flusher — never synchronously on the data plane).
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1

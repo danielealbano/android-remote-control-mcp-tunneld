@@ -32,7 +32,7 @@ func (f *fakeNodeSrc) Nodes(context.Context) (map[string]router.NodeInfo, error)
 	return f.nodes, f.err
 }
 
-// fakeTunnelSrc is a TunnelSource test double for the /api/v1/admin/tunnels[/stats] handlers.
+// fakeTunnelSrc is a TunnelSource test double for the /api/v1/admin/tunnels/list + /stats handlers.
 type fakeTunnelSrc struct {
 	names             []string
 	next              uint64
@@ -106,9 +106,9 @@ func TestAdminTunnelsHandler(t *testing.T) {
 	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
 
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels?cursor=0&count=100", nil))
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels/list?cursor=0&count=100", nil))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "t1") || !strings.Contains(rr.Body.String(), `"cursor":"7"`) {
-		t.Errorf("/api/v1/admin/tunnels list = %d body=%q", rr.Code, rr.Body.String())
+		t.Errorf("/api/v1/admin/tunnels/list = %d body=%q", rr.Code, rr.Body.String())
 	}
 	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Errorf("content-type = %q, want json", ct)
@@ -116,9 +116,9 @@ func TestAdminTunnelsHandler(t *testing.T) {
 
 	store.listErr = errors.New("valkey down") // List now errors → 500
 	rr2 := httptest.NewRecorder()
-	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/tunnels", nil))
+	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/tunnels/list", nil))
 	if rr2.Code != http.StatusInternalServerError {
-		t.Errorf("/api/v1/admin/tunnels with a list error = %d, want 500", rr2.Code)
+		t.Errorf("/api/v1/admin/tunnels/list with a list error = %d, want 500", rr2.Code)
 	}
 }
 

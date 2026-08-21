@@ -15,7 +15,7 @@ var RejectReasons = []string{
 
 // Recorder captures metric + cap-hit events. The concrete PromRecorder updates the
 // (per-tunnel-label-free) Prometheus families AND writes the per-tunnel byte counters in tunnel:{name}
-// that back /api/v1/admin/tunnels.
+// that back /api/v1/admin/tunnels/stats.
 type Recorder interface {
 	// --- Core rejection/byte events ---
 	// Reject bumps tunneld_rejections_total{reason} (reason ∈ RejectReasons) and emits a deduped

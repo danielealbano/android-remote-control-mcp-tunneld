@@ -33,7 +33,7 @@ const (
 )
 
 // Handler builds the internal listener mux: /metrics (custom registry), /healthz (Redis PING),
-// /api/v1/admin/tunnels (paginated names) + /api/v1/admin/tunnels/stats (batch stats), and
+// /api/v1/admin/tunnels/list (paginated names) + /api/v1/admin/tunnels/stats (batch stats), and
 // /api/v1/admin/nodes (node registry JSON). This listener is NEVER proxied.
 func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc TunnelSource, nodeSrc NodeSource, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
@@ -46,9 +46,9 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	// GET /api/v1/admin/tunnels?cursor=&count= → ONE SCAN step: {names, cursor}. No backend ranking; the
-	// client drives pagination by feeding the returned cursor back (cursor "0" = iteration complete).
-	mux.HandleFunc("/api/v1/admin/tunnels", func(w http.ResponseWriter, r *http.Request) {
+	// GET /api/v1/admin/tunnels/list?cursor=&count= → ONE SCAN step: {names, cursor}. No backend ranking;
+	// the client drives pagination by feeding the returned cursor back (cursor "0" = iteration complete).
+	mux.HandleFunc("/api/v1/admin/tunnels/list", func(w http.ResponseWriter, r *http.Request) {
 		cursor, _ := strconv.ParseUint(r.URL.Query().Get("cursor"), 10, 64)
 		count := int64(defaultTunnelCount)
 		if c, err := strconv.Atoi(r.URL.Query().Get("count")); err == nil && c > 0 {

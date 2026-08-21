@@ -61,7 +61,7 @@ flowchart TD
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | v1 control-frame codec + the ChunkSize pacing constant |
-| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels` list & `/stats` composer + deduped cap logger + the Recorder interface |
+| `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels/list` & `/stats` composer + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |
 
@@ -166,7 +166,7 @@ silently allowing every signer.
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
 The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
-`/api/v1/admin/tunnels?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
+`/api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
 `/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
 `/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
 `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh

@@ -1,5 +1,5 @@
 // Package admin composes the per-tunnel admin read surface over the router (routing meta) and the limiter
-// (live windows), backing the internal /api/v1/admin/tunnels list + /stats endpoints. Consumer-site
+// (live windows), backing the internal /api/v1/admin/tunnels/list + /stats endpoints. Consumer-site
 // interfaces keep it decoupled and avoid an import cycle.
 package admin
 
