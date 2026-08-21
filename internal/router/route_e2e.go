@@ -25,11 +25,7 @@ func (r *Registry) BindRoute(ctx context.Context, name, nodeID, fingerprint, con
 		if cid, _ := vals[1].(string); cid == connID {
 			return ErrConnIDCollision
 		}
-		pipe := r.rdb.Pipeline()
-		pipe.HSet(ctx, key(name), "node", nodeID, "fingerprint", fingerprint, "connID", connID)
-		pipe.PExpire(ctx, key(name), r.ttl)
-		_, err = pipe.Exec(ctx)
-		return err
+		return bindHSet(ctx, r, name, nodeID, fingerprint, connID, true) // fresh owner → zero the byte fields
 	})
 }
 
@@ -45,9 +41,9 @@ func (r *Registry) BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, f
 		node, _ := vals[0].(string)
 		fp, _ := vals[1].(string)
 		cid, _ := vals[2].(string)
-		if node == "" { // absent → bind
+		if node == "" { // absent → fresh bind (zero the byte fields)
 			res = SelfHealBound
-			return bindHSet(ctx, r, name, nodeID, fingerprint, connID)
+			return bindHSet(ctx, r, name, nodeID, fingerprint, connID, true)
 		}
 		if fp != fingerprint {
 			res = SelfHealConflict
@@ -58,15 +54,22 @@ func (r *Registry) BindRouteIfAbsentOrOwner(ctx context.Context, name, nodeID, f
 			return nil
 		}
 		res = SelfHealBound
-		return bindHSet(ctx, r, name, nodeID, fingerprint, connID)
+		return bindHSet(ctx, r, name, nodeID, fingerprint, connID, false) // same connID → keep the live byte counters
 	})
 	return res, err
 }
 
-// bindHSet writes the three routing fields + TTL in one pipeline (shared by bind + self-heal).
-func bindHSet(ctx context.Context, r *Registry, name, nodeID, fingerprint, connID string) error {
+// bindHSet writes the three routing fields + TTL (shared by bind + self-heal). resetBytes zeroes the
+// live-scoped byte counters on a FRESH owner (new connID / absent) so a reconnect within the TTL window
+// never sums onto the old session; a same-connID self-heal passes resetBytes=false to keep the ongoing
+// counters. The identity-scoped traf: day/week quotas are separate keys and are NEVER touched here.
+func bindHSet(ctx context.Context, r *Registry, name, nodeID, fingerprint, connID string, resetBytes bool) error {
+	fields := []any{"node", nodeID, "fingerprint", fingerprint, "connID", connID}
+	if resetBytes {
+		fields = append(fields, "bytes_in", 0, "bytes_out", 0)
+	}
 	pipe := r.rdb.Pipeline()
-	pipe.HSet(ctx, key(name), "node", nodeID, "fingerprint", fingerprint, "connID", connID)
+	pipe.HSet(ctx, key(name), fields...)
 	pipe.PExpire(ctx, key(name), r.ttl)
 	_, err := pipe.Exec(ctx)
 	return err

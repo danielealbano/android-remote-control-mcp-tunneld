@@ -102,7 +102,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	m := metrics.NewMetrics()
 	adminStore := admin.NewStore(rdb, time.Hour)
 	capLogger := caplog.New(logger)
-	rec := metrics.NewPromRecorder(m, capLogger, adminStore, logger)
+	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
 	// S3 write; a fixed worker pool drains with per-item retry, a full queue drops-newest and bumps the

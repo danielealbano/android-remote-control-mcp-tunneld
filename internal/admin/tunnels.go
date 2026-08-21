@@ -30,19 +30,6 @@ func NewStore(rdb redis.UniversalClient, ttl time.Duration) *Store {
 	return &Store{rdb: rdb, ttl: ttl}
 }
 
-// incrScript does HINCRBY + PEXPIRE in ONE Lua script so the key is always TTL'd (same invariant as
-// the rate/concurrency limiters).
-var incrScript = redis.NewScript(`
-redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[2])
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
-return 1
-`)
-
-// Incr adds n to a tunnel counter field (bytes_in|bytes_out) — the WRITE path, called only
-// by the PromRecorder background flusher (never synchronously on the data plane).
-func (s *Store) Incr(ctx context.Context, name, field string, n int64) error {
-	return incrScript.Run(ctx, s.rdb, []string{"tcnt:" + name}, field, n, s.ttl.Milliseconds()).Err()
-}
 
 // TopN returns the top-n tunnels by total bytes (in+out), descending.
 func (s *Store) TopN(ctx context.Context, n int) ([]TunnelStat, error) {

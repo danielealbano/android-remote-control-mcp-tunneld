@@ -6,10 +6,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/caplog"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 )
+
+// TrafficSink is the existence-guarded per-tunnel byte counter (router.Registry.AddTraffic). Defined at the
+// consumer site; a nil sink is a no-op (metrics-only test wiring).
+type TrafficSink interface {
+	AddTraffic(ctx context.Context, name string, bytesIn, bytesOut int64) error
+}
 
 // flushShutdownTimeout bounds the final counter flush on shutdown so it cannot block the drain.
 const flushShutdownTimeout = 5 * time.Second
@@ -18,10 +23,10 @@ const flushShutdownTimeout = 5 * time.Second
 // logger, and the async per-tunnel counter flusher. It is the single recorder injected into the
 // enroll, edge, and phone-control handlers (docs/ARCHITECTURE.md §8).
 type PromRecorder struct {
-	m      *Metrics
-	caplog *caplog.Logger
-	admin  *admin.Store
-	log    *slog.Logger
+	m       *Metrics
+	caplog  *caplog.Logger
+	traffic TrafficSink
+	log     *slog.Logger
 
 	mu  sync.Mutex
 	agg map[string]*aggEntry
@@ -44,17 +49,17 @@ var knownRejectReasons = func() map[string]struct{} {
 	return set
 }()
 
-// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink; a nil admin
-// store is accepted and treated as a no-op admin sink (flush becomes a no-op) — used by metrics-only
-// test wiring that never records per-tunnel counters.
-func NewPromRecorder(m *Metrics, cl *caplog.Logger, store *admin.Store, log *slog.Logger) *PromRecorder {
+// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink; a nil traffic
+// sink is accepted and treated as a no-op (flush becomes a no-op) — used by metrics-only test wiring
+// that never records per-tunnel counters.
+func NewPromRecorder(m *Metrics, cl *caplog.Logger, sink TrafficSink, log *slog.Logger) *PromRecorder {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	if cl == nil {
 		cl = caplog.New(log)
 	}
-	return &PromRecorder{m: m, caplog: cl, admin: store, log: log, agg: map[string]*aggEntry{}}
+	return &PromRecorder{m: m, caplog: cl, traffic: sink, log: log, agg: map[string]*aggEntry{}}
 }
 
 // Reject bumps the reason counter and emits a deduped cap-hit log — except "no-route", whose tunnel
@@ -130,7 +135,7 @@ func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 	p.mu.Unlock()
 }
 
-// RunFlusher periodically drains the accumulated deltas into the admin.Store (a real async write path).
+// RunFlusher periodically drains the accumulated deltas into the TrafficSink (router.AddTraffic — a real async write path).
 // On ctx cancel it returns WITHOUT a final flush: the ordered server drain calls FinalFlush AFTER every
 // producer has stopped, so no late delta is lost to a flush that races the still-running data plane.
 func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) error {
@@ -157,12 +162,12 @@ func (p *PromRecorder) FinalFlush() {
 // FlushCapLog emits any pending cap-hit summaries (shutdown).
 func (p *PromRecorder) FlushCapLog() { p.caplog.Flush() }
 
-// flush swaps in a fresh empty map (so flushed names are dropped) and applies the deltas. A failed Incr
-// re-accumulates its delta into the (new) map so the next flush retries it — a counter write is never
-// dropped on a transient admin.Store error.
+// flush swaps in a fresh empty map (so flushed names are dropped) and applies the deltas via
+// router.AddTraffic (both directions in one call). A failed write re-accumulates BOTH deltas into the (new)
+// map so the next flush retries them — a counter write is never dropped on a transient sink error.
 func (p *PromRecorder) flush(ctx context.Context) {
-	if p.admin == nil {
-		return // no admin sink wired (e.g. metrics-only test wiring) — nothing to flush
+	if p.traffic == nil {
+		return // no traffic sink wired (e.g. metrics-only test wiring) — nothing to flush
 	}
 	p.mu.Lock()
 	drained := p.agg
@@ -170,17 +175,13 @@ func (p *PromRecorder) flush(ctx context.Context) {
 	p.mu.Unlock()
 
 	for name, e := range drained {
-		if e.bytesIn != 0 {
-			if err := p.admin.Incr(ctx, name, "bytes_in", e.bytesIn); err != nil {
-				p.accum(name, func(a *aggEntry) { a.bytesIn += e.bytesIn }) // retried next flush
-				p.log.Warn("admin counter flush failed (delta re-queued)", "tunnel", name, "field", "bytes_in", "err", err)
-			}
+		if e.bytesIn == 0 && e.bytesOut == 0 {
+			continue
 		}
-		if e.bytesOut != 0 {
-			if err := p.admin.Incr(ctx, name, "bytes_out", e.bytesOut); err != nil {
-				p.accum(name, func(a *aggEntry) { a.bytesOut += e.bytesOut }) // retried next flush
-				p.log.Warn("admin counter flush failed (delta re-queued)", "tunnel", name, "field", "bytes_out", "err", err)
-			}
+		if err := p.traffic.AddTraffic(ctx, name, e.bytesIn, e.bytesOut); err != nil {
+			// Re-queue BOTH deltas for the next flush — a transient sink error never drops a counter write.
+			p.accum(name, func(a *aggEntry) { a.bytesIn += e.bytesIn; a.bytesOut += e.bytesOut })
+			p.log.Warn("tunnel traffic flush failed (delta re-queued)", "tunnel", name, "err", err)
 		}
 	}
 }

@@ -14,14 +14,14 @@ var RejectReasons = []string{
 }
 
 // Recorder captures metric + cap-hit events. The concrete PromRecorder updates the
-// (per-tunnel-label-free) Prometheus families AND writes the per-tunnel tcnt:{name} Valkey counters
+// (per-tunnel-label-free) Prometheus families AND writes the per-tunnel byte counters in tunnel:{name}
 // that back /api/v1/admin/tunnels.
 type Recorder interface {
 	// --- Core rejection/byte events ---
 	// Reject bumps tunneld_rejections_total{reason} (reason ∈ RejectReasons) and emits a deduped
 	// cap-hit log. clientIP is a string ("" when no valid IP exists on the path).
 	Reject(reason, tunnelName, clientIP string)
-	// Bytes bumps tunneld_bytes_total{direction} and tcnt:{name} bytes_in/out. direction is
+	// Bytes bumps tunneld_bytes_total{direction} and tunnel:{name} bytes_in/out. direction is
 	// "in"/"out" from the peer's perspective.
 	Bytes(tunnelName, direction string, n int64)
 

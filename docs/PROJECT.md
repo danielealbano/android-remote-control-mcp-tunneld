@@ -118,11 +118,12 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
 - **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
   counters (`conc:{name}` — reset on phone (re)bind; the day/week traffic quotas persist across
-  reconnects), per-tunnel counters, the per-second bandwidth (`bw:`) + packet (`pkt:`) windows and the
-  per-direction day/week traffic (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment
-  nonces, ACME cooldown/backoff. Every key gets a TTL alongside its write — set atomically in the same
-  Lua script / `SET EX`, or via a pipelined `EXPIRE NX` right after the `INCR` for the self-healing
-  transient `bw:`/`pkt:` per-second AND `traf:` day/week windows. No permanent Valkey state.
+  reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
+  bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
+  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff. Every
+  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
+  `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
+  day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify

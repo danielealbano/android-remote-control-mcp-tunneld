@@ -3,11 +3,13 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,47 @@ import (
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// fakeSink is a TrafficSink test double recording per-tunnel byte deltas (the recorder writes here instead
+// of router.AddTraffic in unit tests). Setting err makes AddTraffic fail (for the re-queue test).
+type fakeSink struct {
+	mu      sync.Mutex
+	in, out map[string]int64
+	err     error
+}
+
+func newFakeSink() *fakeSink { return &fakeSink{in: map[string]int64{}, out: map[string]int64{}} }
+
+func (f *fakeSink) AddTraffic(_ context.Context, name string, bytesIn, bytesOut int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.in[name] += bytesIn
+	f.out[name] += bytesOut
+	return nil
+}
+
+func (f *fakeSink) got(name string) (int64, int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.in[name], f.out[name]
+}
+
+func (f *fakeSink) empty() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.in) == 0 && len(f.out) == 0
+}
+
+func (f *fakeSink) setErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+// setup builds the recorder over a fakeSink (its traffic sink); the returned *admin.Store still backs the
+// admin.Handler (retired in a later change). Access the sink for flush assertions via rec.traffic.(*fakeSink).
 func setup(t *testing.T) (*Metrics, *PromRecorder, *admin.Store, *miniredis.Miniredis, *redis.Client) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -26,13 +69,15 @@ func setup(t *testing.T) (*Metrics, *PromRecorder, *admin.Store, *miniredis.Mini
 	t.Cleanup(func() { _ = rdb.Close() })
 	m := NewMetrics()
 	store := admin.NewStore(rdb, time.Hour)
-	rec := NewPromRecorder(m, caplog.New(discardLog()), store, discardLog())
+	rec := NewPromRecorder(m, caplog.New(discardLog()), newFakeSink(), discardLog())
 	return m, rec, store, mr, rdb
 }
 
 func TestAdminTunnelsHandler(t *testing.T) {
 	m, _, store, mr, rdb := setup(t)
-	_ = store.Incr(context.Background(), "t1", "bytes_in", 100)
+	if err := rdb.HSet(context.Background(), "tcnt:t1", "bytes_in", 100).Err(); err != nil {
+		t.Fatal(err)
+	}
 	h := Handler(m.Registry(), rdb, store, discardLog())
 
 	rr := httptest.NewRecorder()
@@ -53,19 +98,20 @@ func TestAdminTunnelsHandler(t *testing.T) {
 }
 
 func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
-	_, rec, store, _, _ := setup(t)
+	_, rec, _, _, _ := setup(t)
+	sink := rec.traffic.(*fakeSink)
 	rec.Bytes("t1", "in", 500)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = rec.RunFlusher(ctx, 20*time.Millisecond) }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if stats, _ := store.TopN(context.Background(), 10); len(stats) == 1 && stats[0].BytesIn == 500 {
+		if in, _ := sink.got("t1"); in == 500 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("the flusher did not drain the accumulator to the store")
+	t.Error("the flusher did not drain the accumulator to the traffic sink")
 }
 
 func TestHealthz200WhenRedisUp(t *testing.T) {
@@ -181,28 +227,22 @@ func TestEnrollmentResultLabelled(t *testing.T) {
 	}
 }
 
-func TestPromRecorderFlushesTcnt(t *testing.T) {
-	_, rec, store, _, _ := setup(t)
+func TestPromRecorder_FlushCallsAddTraffic(t *testing.T) {
+	_, rec, _, _, _ := setup(t)
+	sink := rec.traffic.(*fakeSink)
 	rec.Bytes("tunA", "in", 100)
 	rec.Bytes("tunA", "out", 50)
 	rec.flush(context.Background()) // the real async write path, driven synchronously in the test
-	stats, err := store.TopN(context.Background(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stats) != 1 || stats[0].Name != "tunA" {
-		t.Fatalf("expected tunA stats, got %+v", stats)
-	}
-	if stats[0].BytesIn != 100 || stats[0].BytesOut != 50 {
-		t.Errorf("flushed counters wrong: %+v", stats[0])
+	if in, out := sink.got("tunA"); in != 100 || out != 50 {
+		t.Errorf("flush wrote (in=%d, out=%d) via AddTraffic, want (100, 50)", in, out)
 	}
 }
 
-// TestPromRecorder_NilAdminStoreFlushNoPanic verifies flush/FinalFlush do not panic when the admin
-// store is nil (metrics-only test wiring): the recorder treats a nil store as a no-op admin sink.
-func TestPromRecorder_NilAdminStoreFlushNoPanic(t *testing.T) {
+// TestPromRecorder_NilSinkFlushNoPanic verifies flush/FinalFlush do not panic when the traffic sink is
+// nil (metrics-only test wiring): the recorder treats a nil sink as a no-op.
+func TestPromRecorder_NilSinkFlushNoPanic(t *testing.T) {
 	m := NewMetrics()
-	rec := NewPromRecorder(m, nil, nil, nil) // nil admin store
+	rec := NewPromRecorder(m, nil, nil, nil) // nil traffic sink
 	rec.Bytes("tunA", "in", 100)             // accumulate a delta so flush has work
 	rec.flush(context.Background())          // must not panic
 	rec.FinalFlush()                         // must not panic
@@ -235,7 +275,7 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	rec := NewPromRecorder(m, caplog.New(logger), store, logger)
+	rec := NewPromRecorder(m, caplog.New(logger), newFakeSink(), logger)
 
 	rec.Reject("no-route", "ATTACKER-CONTROLLED-sni", "203.0.113.7")
 
@@ -262,13 +302,14 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 	}
 }
 
-// TestPromRecorder_FlushErrorRequeuesDelta: a failed admin.Incr must re-accumulate the delta so the next
-// flush retries it — a counter write is never dropped on a transient store error.
+// TestPromRecorder_FlushErrorRequeuesDelta: a failed AddTraffic must re-accumulate the delta so the next
+// flush retries it — a counter write is never dropped on a transient sink error.
 func TestPromRecorder_FlushErrorRequeuesDelta(t *testing.T) {
-	_, rec, _, mr, _ := setup(t)
+	_, rec, _, _, _ := setup(t)
+	sink := rec.traffic.(*fakeSink)
 	rec.Bytes("tunA", "in", 100)
 	rec.Bytes("tunA", "out", 50)
-	mr.Close() // admin.Incr now errors (Redis down)
+	sink.setErr(errors.New("sink down")) // AddTraffic now errors
 
 	rec.flush(context.Background())
 
@@ -283,16 +324,15 @@ func TestPromRecorder_FlushErrorRequeuesDelta(t *testing.T) {
 // TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the ordered
 // server drain owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
 func TestRunFlusher_NoFlushOnCancel(t *testing.T) {
-	_, rec, store, _, _ := setup(t)
+	_, rec, _, _, _ := setup(t)
 	rec.Bytes("tunA", "in", 100)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := rec.RunFlusher(ctx, time.Hour); err == nil {
 		t.Fatal("RunFlusher must return ctx.Err() on cancel")
 	}
-	stats, _ := store.TopN(context.Background(), 10)
-	if len(stats) != 0 {
-		t.Fatalf("RunFlusher must NOT flush on cancel, got %+v", stats)
+	if !rec.traffic.(*fakeSink).empty() {
+		t.Fatal("RunFlusher must NOT flush on cancel")
 	}
 	rec.mu.Lock()
 	e := rec.agg["tunA"]

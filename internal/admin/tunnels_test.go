@@ -18,11 +18,10 @@ func newStore(t *testing.T) (*Store, *miniredis.Miniredis) {
 }
 
 func TestAdminTopNSortsByBytes(t *testing.T) {
-	s, _ := newStore(t)
+	s, mr := newStore(t)
 	ctx := context.Background()
-	_ = s.Incr(ctx, "a", "bytes_in", 100)
-	_ = s.Incr(ctx, "a", "bytes_out", 50) // a total 150
-	_ = s.Incr(ctx, "b", "bytes_in", 500) // b total 500
+	mr.HSet("tcnt:a", "bytes_in", "100", "bytes_out", "50") // a total 150
+	mr.HSet("tcnt:b", "bytes_in", "500")                    // b total 500
 	stats, err := s.TopN(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -36,11 +35,11 @@ func TestAdminTopNSortsByBytes(t *testing.T) {
 }
 
 func TestAdminTopN_DedupAndEmptySkip(t *testing.T) {
-	s, _ := newStore(t)
+	s, mr := newStore(t)
 	ctx := context.Background()
-	_ = s.Incr(ctx, "a", "bytes_in", 100)
-	_ = s.Incr(ctx, "b", "bytes_in", 200)
-	_ = s.Incr(ctx, "c", "bytes_in", 300)
+	mr.HSet("tcnt:a", "bytes_in", "100")
+	mr.HSet("tcnt:b", "bytes_in", "200")
+	mr.HSet("tcnt:c", "bytes_in", "300")
 	stats, err := s.TopN(ctx, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -60,13 +59,5 @@ func TestAdminTopN_DedupAndEmptySkip(t *testing.T) {
 		if n != 1 {
 			t.Errorf("name %q listed %d times, want 1 (dedup)", name, n)
 		}
-	}
-}
-
-func TestAdminCounterKeyHasTTL(t *testing.T) {
-	s, mr := newStore(t)
-	_ = s.Incr(context.Background(), "x", "bytes_in", 1)
-	if ttl := mr.TTL("tcnt:x"); ttl <= 0 {
-		t.Errorf("tcnt:x TTL = %s, want > 0 (single-Lua HINCRBY+PEXPIRE)", ttl)
 	}
 }
