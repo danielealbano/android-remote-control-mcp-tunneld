@@ -49,7 +49,7 @@ does NOT duplicate them.
 | Language | **Go (see `go.mod` for the pinned version)**, `CGO_ENABLED=0` for released artifacts | Static binary; distroless `nonroot` runtime image. |
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`, `--s3-*` → `TUNNELD_S_3_*`); `Validate()` enforces every cross-field invariant at startup. |
 | Phone control + replica mesh | `golang.org/x/net/http2` (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
-| Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `route:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
+| Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
 | Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
 | ACME issuance | `github.com/go-acme/lego/v4` | LE→GTS→ZeroSSL chain, DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
@@ -68,6 +68,16 @@ does NOT duplicate them.
 
 These come from `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, and the Plan 3 decision record. They
 MUST NOT be relaxed without explicit user direction.
+
+### Engineering posture — simplest correct design
+- tunneld is a self-hosted, free service with small (4–8 KB) payloads, not a high-precision accounting
+  system. Prefer, in order: a single atomic command → a plain pipeline with self-healing TTLs
+  (`EXPIRE NX`, reset-on-bind) → a `SETNX` lock around a real critical section → anything heavier only if
+  none of those is correct. Never use Lua / WATCH / MULTI-EXEC to force "provable" atomicity on a rare,
+  self-healing race. The data-plane limiter fails **open**; abuse caps fail **safe** (an over-count
+  denies, never breaches). A simpler design is acceptable only while it converges to correct within
+  bounded time, leaves no persistently-wrong state, and opens no security/abuse gap — otherwise it is a
+  bug, not a trade.
 
 ### End-to-end encryption — SACRED
 - **tunneld relays OPAQUE TLS bytes and MUST NEVER read, terminate, or inspect tunnel traffic.** The
@@ -105,16 +115,19 @@ MUST NOT be relaxed without explicit user direction.
   per-path exceptions. Operators raise the `--limit-*` values, never the code.
 
 ### Valkey (transient) + S3 (durable) state — SACRED
-- **NO permanent Valkey state, EVER.** Every key (routing, node registry, rate-limit windows,
-  concurrency counters, per-tunnel `tcnt:{name}`, the per-second `bw:`/`pkt:` bandwidth windows and the
-  per-direction `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff)
-  gets a TTL alongside its mutation — set **atomically in the SAME Lua script** (or `SET EX`), OR, for the
-  transient per-second `bw:`/`pkt:` **AND `traf:` day/week** windows, via a pipelined `EXPIRE NX` right
-  after the `INCR`: `EXPIRE NX` self-heals a skipped TTL on the next same-window write, so a plain pipeline
-  (not `TxPipeline`/Lua) is the correct, simpler tool for these self-healing transient counters — strict
-  single-script atomicity is required only where an orphaned key would actually matter. Route
-  teardown/refresh is **owner-conditional on the per-connection `connID`** — a stale connection MUST NOT
-  clobber a re-bound route.
+- **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry, rate-limit
+  windows, concurrency counters, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
+  `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the per-name
+  locks) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
+  pipelined `EXPIRE NX` right after the `INCR`. `EXPIRE NX` self-heals a skipped TTL on the next
+  same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
+  counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
+  self-healing pipeline, or a `SETNX` lock covers every case.
+- **Route ownership is deterministic and clobber-free.** Create/delete of the `tunnel:{name}` routing key
+  is serialized by a per-name `SETNX` lock, and delete is conditional on the stored per-connection
+  `connID`, so a stale connection can NEVER clobber a re-bound route. The heartbeat only refreshes the TTL
+  (`PEXPIRE`) and never rewrites the value; the byte counters co-located in `tunnel:{name}` are written
+  existence-guarded (`HINCRBY` + `EXPIRE NX`) so a post-disconnect flush never resurrects a dead route.
 - **Live-vs-identity reset invariant.** Live-tunnel-scoped counters (`conc:{name}` concurrent streams)
   are RESET (`DEL`) when the phone (re)binds — a fresh phone connection means all prior streams are dead,
   so the count is implicitly zero. Identity-scoped cumulative quotas (`traf:` day/week traffic,
