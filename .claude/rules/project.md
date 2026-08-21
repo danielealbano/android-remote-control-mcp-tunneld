@@ -72,9 +72,9 @@ MUST NOT be relaxed without explicit user direction.
 ### Engineering posture — simplest correct design
 - tunneld is a self-hosted, free service with small (4–8 KB) payloads, not a high-precision accounting
   system. Prefer, in order: a single atomic command → a plain pipeline with self-healing TTLs
-  (`EXPIRE NX`, reset-on-bind) → a `SETNX` lock around a real critical section → anything heavier only if
-  none of those is correct. Never use Lua / WATCH / MULTI-EXEC to force "provable" atomicity on a rare,
-  self-healing race. The data-plane limiter fails **open**; abuse caps fail **safe** (an over-count
+  (`EXPIRE NX`, or an existence-guarded `HINCRBY`+`EXPIRE NX`) → a `SETNX` lock around a real critical
+  section → anything heavier only if none of those is correct. Never use Lua / WATCH / MULTI-EXEC to force
+  "provable" atomicity on a rare, self-healing race. The data-plane limiter fails **open**; abuse caps fail **safe** (an over-count
   denies, never breaches). A simpler design is acceptable only while it converges to correct within
   bounded time, leaves no persistently-wrong state, and opens no security/abuse gap — otherwise it is a
   bug, not a trade.
