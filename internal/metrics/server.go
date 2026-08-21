@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -79,6 +80,11 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 			Names []string `json:"names"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}

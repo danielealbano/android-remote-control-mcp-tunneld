@@ -145,6 +145,13 @@ func TestAdminTunnelsStatsHandler(t *testing.T) {
 	if rr3.Code != http.StatusBadRequest {
 		t.Errorf("bad-body /stats = %d, want 400", rr3.Code)
 	}
+	// An oversized body (past the MaxBytesReader cap) is a 413.
+	big := `{"names":["` + strings.Repeat("a", 70*1024) + `"]}`
+	rr4 := httptest.NewRecorder()
+	h.ServeHTTP(rr4, httptest.NewRequest("POST", "/api/v1/admin/tunnels/stats", strings.NewReader(big)))
+	if rr4.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized /stats = %d, want 413", rr4.Code)
+	}
 }
 
 func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
