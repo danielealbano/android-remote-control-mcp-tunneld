@@ -117,12 +117,13 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 ## 5. State + retention
 
 - **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
-  counters (`conc:{name}` — reset on phone (re)bind; the day/week traffic quotas persist across
-  reconnects), per-tunnel counters, the per-second bandwidth (`bw:`) + packet (`pkt:`) windows and the
-  per-direction day/week traffic (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment
-  nonces, ACME cooldown/backoff. Every key gets a TTL alongside its write — set atomically in the same
-  Lua script / `SET EX`, or via a pipelined `EXPIRE NX` right after the `INCR` for the self-healing
-  transient `bw:`/`pkt:` per-second AND `traf:` day/week windows. No permanent Valkey state.
+  counters (`conc:{name}` — a lock-guarded `{connID, count}` hash reset structurally at a fresh
+  connection's first acquire; the day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
+  bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
+  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff. Every
+  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
+  `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
+  day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
@@ -136,8 +137,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
 The internal listener (`--internal-listen`, never published) serves `GET /metrics` (Prometheus,
 aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable),
-`GET /api/v1/admin/tunnels` (top-N per-tunnel counters from TTL'd Valkey counters written asynchronously off
-the data plane), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
+`GET /api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, client-driven, no
+ranking) + `POST /api/v1/admin/tunnels/stats` (names → per-tunnel node/bytes/conc/bw/day/week, live tunnels
+only), `GET /api/v1/admin/nodes` (the node registry), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
 over the mesh `/api/v1/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack

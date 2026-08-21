@@ -171,11 +171,20 @@ func (h *meshCertHolder) rotateLoop(ctx context.Context) {
 }
 
 // heartbeatNode registers this node in the node registry and refreshes it at route-ttl/3 (matching the
-// route-entry TTL), until ctx is cancelled. A refresh error is transient (RefreshNode is a plain SET,
-// so the next tick re-registers): log and keep going — exiting would let node:{id} expire and break
-// cross-node routing to this node until restart.
-func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise string, routeTTL time.Duration, logger *slog.Logger) error {
-	if err := reg.RegisterNode(ctx, nodeID, advertise, routeTTL); err != nil {
+// route-entry TTL), until ctx is cancelled. It stamps the NodeInfo (incl. a fresh last_heartbeat) on every
+// write. A refresh error is transient (RefreshNode is a plain SET, so the next tick re-registers): log and
+// keep going — exiting would let node:{id} expire and break cross-node routing to this node until restart.
+func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise, nodeHost, version, startedAt string, routeTTL time.Duration, logger *slog.Logger) error {
+	info := func() router.NodeInfo {
+		return router.NodeInfo{
+			Advertise:     advertise,
+			Hostname:      nodeHost,
+			Version:       version,
+			StartedAt:     startedAt,
+			LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+	if err := reg.RegisterNode(ctx, nodeID, info(), routeTTL); err != nil {
 		logger.Warn("node register failed (retrying at heartbeat cadence)", "err", err)
 	}
 	interval := routeTTL / 3
@@ -189,7 +198,7 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise 
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if err := reg.RefreshNode(ctx, nodeID, advertise, routeTTL); err != nil {
+			if err := reg.RefreshNode(ctx, nodeID, info(), routeTTL); err != nil {
 				logger.Warn("node heartbeat refresh failed (will retry)", "err", err)
 			}
 		}

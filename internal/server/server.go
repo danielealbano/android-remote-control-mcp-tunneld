@@ -100,9 +100,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Metrics + admin + recorder.
 	m := metrics.NewMetrics()
-	adminStore := admin.NewStore(rdb, time.Hour)
+	adminTunnels := admin.NewTunnels(reg, lim) // composes routing meta (router) + live windows (limiter)
 	capLogger := caplog.New(logger)
-	rec := metrics.NewPromRecorder(m, capLogger, adminStore, logger)
+	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
 	// S3 write; a fixed worker pool drains with per-item retry, a full queue drops-newest and bumps the
@@ -141,7 +141,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
 		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
-		RouteTTL: cfg.RouteTTL, Streams: lim,
+		RouteTTL: cfg.RouteTTL,
 	})
 	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
 		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,
@@ -209,7 +209,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// /api/v1/admin/renew and delegates everything else to the existing metrics handler (unchanged).
 	internalMux := http.NewServeMux()
 	internalMux.Handle("/api/v1/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
-	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminStore, logger))
+	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
 
@@ -268,7 +268,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error { attSigners.Watch(gctx, cfg.BanPoll); return nil })
 
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
-	g.Go(func() error { return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, cfg.RouteTTL, logger) })
+	g.Go(func() error {
+		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
+	})
 	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
 	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
 	g.Go(func() error {

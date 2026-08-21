@@ -3,70 +3,66 @@ package admin
 import (
 	"context"
 	"testing"
-	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 )
 
-func newStore(t *testing.T) (*Store, *miniredis.Miniredis) {
-	t.Helper()
-	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	return NewStore(rdb, time.Hour), mr
+type fakeMeta struct {
+	names            []string
+	next             uint64
+	meta             map[string]router.TunnelMetaInfo
+	scanErr, metaErr error
 }
 
-func TestAdminTopNSortsByBytes(t *testing.T) {
-	s, _ := newStore(t)
-	ctx := context.Background()
-	_ = s.Incr(ctx, "a", "bytes_in", 100)
-	_ = s.Incr(ctx, "a", "bytes_out", 50) // a total 150
-	_ = s.Incr(ctx, "b", "bytes_in", 500) // b total 500
-	stats, err := s.TopN(ctx, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stats) != 2 || stats[0].Name != "b" || stats[1].Name != "a" {
-		t.Fatalf("topN ordering wrong: %+v", stats)
-	}
-	if stats[1].BytesIn != 100 || stats[1].BytesOut != 50 {
-		t.Errorf("a counters wrong: %+v", stats[1])
-	}
+func (f *fakeMeta) ScanTunnels(context.Context, uint64, int64) ([]string, uint64, error) {
+	return f.names, f.next, f.scanErr
 }
 
-func TestAdminTopN_DedupAndEmptySkip(t *testing.T) {
-	s, _ := newStore(t)
-	ctx := context.Background()
-	_ = s.Incr(ctx, "a", "bytes_in", 100)
-	_ = s.Incr(ctx, "b", "bytes_in", 200)
-	_ = s.Incr(ctx, "c", "bytes_in", 300)
-	stats, err := s.TopN(ctx, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stats) != 2 || stats[0].Name != "c" {
-		t.Fatalf("TopN(2) truncation/order wrong: %+v", stats)
-	}
-	all, err := s.TopN(ctx, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]int{}
-	for _, st := range all {
-		seen[st.Name]++
-	}
-	for name, n := range seen {
-		if n != 1 {
-			t.Errorf("name %q listed %d times, want 1 (dedup)", name, n)
-		}
+func (f *fakeMeta) TunnelMeta(context.Context, []string) (map[string]router.TunnelMetaInfo, error) {
+	return f.meta, f.metaErr
+}
+
+type fakeWin struct {
+	win map[string]limit.TunnelStat
+	err error
+}
+
+func (f *fakeWin) TunnelWindows(context.Context, []string) (map[string]limit.TunnelStat, error) {
+	return f.win, f.err
+}
+
+func TestTunnels_List(t *testing.T) {
+	tn := NewTunnels(&fakeMeta{names: []string{"a", "b"}, next: 42}, &fakeWin{})
+	names, next, err := tn.List(context.Background(), 0, 100)
+	if err != nil || next != 42 || len(names) != 2 {
+		t.Fatalf("List = (%v, %d, %v)", names, next, err)
 	}
 }
 
-func TestAdminCounterKeyHasTTL(t *testing.T) {
-	s, mr := newStore(t)
-	_ = s.Incr(context.Background(), "x", "bytes_in", 1)
-	if ttl := mr.TTL("tcnt:x"); ttl <= 0 {
-		t.Errorf("tcnt:x TTL = %s, want > 0 (single-Lua HINCRBY+PEXPIRE)", ttl)
+// TestTunnels_Stats_MergesLiveOnly: Stats includes only names with a live route (from TunnelMeta), merging
+// in their windows; a name present only in the windows (no route) is omitted.
+func TestTunnels_Stats_MergesLiveOnly(t *testing.T) {
+	meta := &fakeMeta{meta: map[string]router.TunnelMetaInfo{
+		"a": {Node: "node1", BytesIn: 100, BytesOut: 50},
+	}}
+	win := &fakeWin{win: map[string]limit.TunnelStat{
+		"a":      {Conc: 3, BwIn: 10, DayIn: 1000, WeekIn: 5000},
+		"orphan": {Conc: 1}, // windows-only (no live route) → must be omitted
+	}}
+	tn := NewTunnels(meta, win)
+	stats, err := tn.Stats(context.Background(), []string{"a", "orphan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("Stats must include live tunnels only, got %v", stats)
+	}
+	a := stats["a"]
+	if a.Node != "node1" || a.BytesIn != 100 || a.BytesOut != 50 || a.Conc != 3 || a.BwIn != 10 || a.DayIn != 1000 || a.WeekIn != 5000 {
+		t.Errorf("merged stats for a = %+v", a)
+	}
+	if _, ok := stats["orphan"]; ok {
+		t.Error("a windows-only (no live route) name must be omitted")
 	}
 }

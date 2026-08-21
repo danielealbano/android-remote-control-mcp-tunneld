@@ -11,10 +11,10 @@ import (
 
 // Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
 // per-tunnel/per-direction per-second byte cap (bwRate) and packet cap (pktCap), and the day/week
-// traffic caps, with an injectable clock for tests. Each key gets a TTL alongside its mutation — set
-// atomically in the same Lua script (or SET EX for the cooldown windows), or via a pipelined EXPIRE NX
+// traffic caps, with an injectable clock for tests. Each key gets a TTL in the same round-trip as its
+// mutation — via SET EX (cooldown windows), a SETNX lock (concurrency counter), or a pipelined EXPIRE NX
 // immediately after the INCR for the bw:/pkt: per-second and traf: day/week windows (self-healing on the
-// next same-window write; see Charge).
+// next same-window write; see Charge). NO Lua.
 type Limiter struct {
 	rdb       redis.UniversalClient
 	bwRate    int64 // per-second byte cap per tunnel per direction
@@ -29,7 +29,7 @@ type Limiter struct {
 // Option configures a Limiter (functional-options pattern).
 type Option func(*Limiter)
 
-// WithLogger sets the Limiter's logger (used for the issuance-slot heartbeat failure surface).
+// WithLogger sets the Limiter's logger (used for the issuance-lock refresh failure surface).
 func WithLogger(l *slog.Logger) Option { return func(lm *Limiter) { lm.logger = l } }
 
 // WithPacketCap sets the per-tunnel/per-direction reads-per-second cap (0 = disabled, the default).
@@ -60,7 +60,7 @@ const (
 )
 
 const (
-	bwWindowTTL   = 2 * time.Second            // per-second byte/packet windows (2× the 1s window)
+	bwWindowTTL   = 3 * time.Second            // per-second byte/packet windows (3× the 1s window, so the last complete second stays readable by the admin bandwidth view)
 	trafDayTTL    = 25 * time.Hour             // 24h window + 1h margin so a write never expires the counter mid-window
 	trafWeekTTL   = 7*24*time.Hour + time.Hour // 7d window + 1h margin (a small fixed margin, NOT 2× — the key is dead weight after its window)
 	maxPacingWait = 5 * time.Second            // over a cap resetting within this → wait; else kill
@@ -166,11 +166,4 @@ func (l *Limiter) TrafficExhausted(ctx context.Context, name string) (dayOver, w
 	dayOver = atoiCap(vals[0]) >= l.dayCap || atoiCap(vals[1]) >= l.dayCap
 	weekOver = atoiCap(vals[2]) >= l.weekCap || atoiCap(vals[3]) >= l.weekCap
 	return dayOver, weekOver, nil
-}
-
-// ResetStreams clears the live concurrent-stream counter for name (conc:{name}) — called when the phone
-// (re)binds, because a fresh phone connection means all prior streams are dead. It NEVER touches the
-// identity-scoped traf: day/week quotas (those must persist across reconnects).
-func (l *Limiter) ResetStreams(ctx context.Context, name string) error {
-	return l.rdb.Del(ctx, "conc:"+name).Err()
 }

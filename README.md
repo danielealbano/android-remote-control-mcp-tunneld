@@ -132,7 +132,9 @@ is hot-reloaded within `--ban-poll` and evicts any live matching connection.
 ## Observability
 
 The internal listener (never published) serves `GET /metrics` (Prometheus; no per-tunnel labels),
-`GET /healthz` (200 if Valkey reachable else 503), `GET /api/v1/admin/tunnels` (top-N per-tunnel counters), and
+`GET /healthz` (200 if Valkey reachable else 503), `GET /api/v1/admin/tunnels/list?cursor=&count=` (a
+paginated tunnel-name list) + `POST /api/v1/admin/tunnels/stats` (per-tunnel node/bytes/conc/bw/day/week
+for the requested names), `GET /api/v1/admin/nodes` (the node registry), and
 `POST /api/v1/admin/renew?tunnel=<name>` (force a renewal, routed to the owner node over the mesh).
 Grafana/Prometheus/Alertmanager/ntfy publish on `127.0.0.1`-only ports (SSH-forward to reach them).
 

@@ -2,137 +2,92 @@ package limit
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// The issuance counter iss:{name} is consumed ONLY on a SUCCESSFUL public-cert issuance (via
-// IssuanceRecord), so the per-tunnel/week cap counts successes only. The pre-issuance gate reserves a
-// short-lived INFLIGHT slot (iss_inflight:{name}) so concurrent /api/v1/issue calls cannot both pass a cap
-// that they only commit against at the end — a crashed order's slot self-expires, and a failed order
-// never burns the weekly window.
+// The issuance counter iss:{name} counts SUCCESSFUL public-cert issuances per rolling 7-day window. One
+// in-flight issuance per tunnel is the only real case, so concurrent /api/v1/issue calls are serialized by a
+// SETNX iss_lock:{name} lock: the holder gates against the weekly cap and only a successful order increments
+// the counter, so a failed/crashed order never burns the window and self-releases via the lock TTL.
 
 const (
-	// issuanceSlotTTL is the per-slot deadline: a crashed node's order slot self-expires after this
-	// and is purged lazily by the next acquire — no cleanup goroutine.
-	issuanceSlotTTL = 30 * time.Second
-	// issuanceHeartbeatEvery refreshes a live order's slot deadline (3 missed beats = expiry).
-	issuanceHeartbeatEvery = 10 * time.Second
-	// issuanceKeyTTLMargin pads the hash key's own TTL past the newest slot deadline.
-	issuanceKeyTTLMargin = 30 * time.Second
+	issLockTTL   = 15 * time.Second // 3 missed 5s beats; a crashed order releases within this
+	issLockBeat  = 5 * time.Second  // IssuanceHeartbeatLoop refresh cadence
+	issWindowTTL = 7 * 24 * time.Hour
 )
 
 func issuanceKey(name string) string { return "iss:" + name }
-func inflightKey(name string) string { return "iss_inflight:" + name }
+func issLockKey(name string) string  { return "iss_lock:" + name }
 
-// issuanceBeginScript purges expired slots, gates committed+inflight against the cap, and inserts
-// this order's slot — all in ONE script so concurrent /api/v1/issue calls cannot both pass.
-// KEYS[1]=iss:{name} KEYS[2]=iss_inflight:{name} ARGV: maxN, nowMs, orderID, slotTTLms, keyTTLms.
-var issuanceBeginScript = redis.NewScript(`
-local now = tonumber(ARGV[2])
-local fields = redis.call('HGETALL', KEYS[2])
-local inflight = 0
-for i = 1, #fields, 2 do
-  if tonumber(fields[i+1]) < now then
-    redis.call('HDEL', KEYS[2], fields[i])
-  else
-    inflight = inflight + 1
-  end
-end
-local committed = tonumber(redis.call('GET', KEYS[1]) or '0')
-if committed + inflight >= tonumber(ARGV[1]) then
-  return 0
-end
-redis.call('HSET', KEYS[2], ARGV[3], now + tonumber(ARGV[4]))
-redis.call('PEXPIRE', KEYS[2], ARGV[5])
-return 1
-`)
-
-// issuanceHeartbeatScript refreshes ONLY a still-present slot (an expired-and-purged slot must not
-// resurrect). KEYS[1]=iss_inflight:{name} ARGV: orderID, nowMs, slotTTLms, keyTTLms.
-var issuanceHeartbeatScript = redis.NewScript(`
-if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
-  redis.call('HSET', KEYS[1], ARGV[1], tonumber(ARGV[2]) + tonumber(ARGV[3]))
-  redis.call('PEXPIRE', KEYS[1], ARGV[4])
-end
-return 1
-`)
-
-// IssuanceBegin reserves an in-flight issuance slot for name (committed successes + live slots < maxN).
-// It returns the minted order id used by IssuanceHeartbeatLoop/IssuanceEnd to refer to this slot.
+// IssuanceBegin serializes issuance per tunnel via a SETNX lock (only one in-flight order per tunnel) and
+// gates against the weekly success cap under that lock. Returns the lock token as orderID for
+// HeartbeatLoop/End. ok=false = another order in flight OR cap reached.
 func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok bool, orderID string, err error) {
-	orderID, err = newOrderID()
+	token := mintToken()
+	got, err := l.rdb.SetNX(ctx, issLockKey(name), token, issLockTTL).Result()
 	if err != nil {
 		return false, "", err
 	}
-	now := l.now().UnixMilli()
-	res, err := issuanceBeginScript.Run(ctx, l.rdb, []string{issuanceKey(name), inflightKey(name)},
-		maxN, now, orderID, issuanceSlotTTL.Milliseconds(),
-		(issuanceSlotTTL + issuanceKeyTTLMargin).Milliseconds()).Int64()
-	if err != nil {
+	if !got {
+		return false, "", nil // another issuance in flight
+	}
+	n, err := l.rdb.Get(ctx, issuanceKey(name)).Int()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		l.releaseIssLock(ctx, name, token)
 		return false, "", err
 	}
-	return res == 1, orderID, nil
+	if n >= maxN {
+		l.releaseIssLock(ctx, name, token) // over cap — release and refuse
+		return false, "", nil
+	}
+	return true, token, nil
 }
 
-// IssuanceHeartbeatLoop refreshes the slot every issuanceHeartbeatEvery until ctx is done.
+// IssuanceHeartbeatLoop refreshes the lock TTL every issLockBeat until ctx is done, so a live (slow ACME)
+// order keeps the lock; a crash stops the refresh and the lock self-expires.
 func (l *Limiter) IssuanceHeartbeatLoop(ctx context.Context, name, orderID string) {
-	ticker := time.NewTicker(issuanceHeartbeatEvery)
-	defer ticker.Stop()
+	t := time.NewTicker(issLockBeat)
+	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			l.issuanceHeartbeat(ctx, name, orderID)
+		case <-t.C:
+			// Refresh the lock TTL while we still hold it. The GET(value==orderID) then PEXPIRE is a benign,
+			// rare TOCTOU: if the lock expired and another order re-acquired it between the two commands, the
+			// PEXPIRE extends the new holder's TTL — harmless and self-healing under the posture. Best-effort;
+			// a failure is logged.
+			if v, err := l.rdb.Get(ctx, issLockKey(name)).Result(); err == nil && v == orderID {
+				if err := l.rdb.PExpire(ctx, issLockKey(name), issLockTTL).Err(); err != nil {
+					l.logger.Warn("issuance lock refresh failed (lock may expire; a retry could then start)",
+						"tunnel", name, "err", err)
+				}
+			}
 		}
 	}
 }
 
-// issuanceHeartbeat refreshes the slot once. The 30s slot TTL is intentionally short (a Valkey blip is a
-// real problem — fail fast and let the phone retry via the documented 503/retry_after path); a failed
-// heartbeat is LOGGED so a voided slot (which could let a second concurrent order start) is diagnosable,
-// not silent.
-func (l *Limiter) issuanceHeartbeat(ctx context.Context, name, orderID string) {
-	now := l.now().UnixMilli()
-	if err := issuanceHeartbeatScript.Run(ctx, l.rdb, []string{inflightKey(name)},
-		orderID, now, issuanceSlotTTL.Milliseconds(),
-		(issuanceSlotTTL + issuanceKeyTTLMargin).Milliseconds()).Err(); err != nil {
-		l.logger.Warn("issuance slot heartbeat failed (slot may expire; a concurrent order could then start)",
-			"tunnel", name, "order", orderID, "err", err)
-	}
-}
-
-// IssuanceEnd frees the slot (called on success AND failure — failed orders never burn the window).
+// IssuanceEnd releases the lock (success AND failure — failed orders never burn the window).
 func (l *Limiter) IssuanceEnd(ctx context.Context, name, orderID string) error {
-	return l.rdb.HDel(ctx, inflightKey(name), orderID).Err()
+	l.releaseIssLock(ctx, name, orderID)
+	return nil
 }
 
-// recordIssuanceScript INCRs the counter and sets a 7d TTL on the first increment (a sliding 7d window
-// anchored at the first issuance in it).
-var recordIssuanceScript = redis.NewScript(`
-local c = redis.call('INCR', KEYS[1])
-if c == 1 then
-  redis.call('PEXPIRE', KEYS[1], ARGV[1])
-end
-return c
-`)
-
-// IssuanceRecord atomically increments the rolling-7d per-tunnel issuance counter (called ONLY after a
-// public cert is successfully issued).
-func (l *Limiter) IssuanceRecord(ctx context.Context, name string) error {
-	return recordIssuanceScript.Run(ctx, l.rdb, []string{issuanceKey(name)}, (7 * 24 * time.Hour).Milliseconds()).Err()
-}
-
-// newOrderID mints a per-order identifier (4 crypto/rand bytes, 8 lowercase hex) used as the inflight
-// hash field for one /api/v1/issue call.
-func newOrderID() (string, error) {
-	var buf [4]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
+func (l *Limiter) releaseIssLock(ctx context.Context, name, token string) {
+	if v, err := l.rdb.Get(ctx, issLockKey(name)).Result(); err == nil && v == token {
+		_ = l.rdb.Del(ctx, issLockKey(name)).Err()
 	}
-	return hex.EncodeToString(buf[:]), nil
+}
+
+// IssuanceRecord increments the rolling-7d success counter (called ONLY after a public cert issues, under
+// the still-held lock). INCR + EXPIRE NX (TTL anchored at the first success in the window).
+func (l *Limiter) IssuanceRecord(ctx context.Context, name string) error {
+	pipe := l.rdb.Pipeline()
+	pipe.Incr(ctx, issuanceKey(name))
+	pipe.ExpireNX(ctx, issuanceKey(name), issWindowTTL)
+	_, err := pipe.Exec(ctx)
+	return err
 }

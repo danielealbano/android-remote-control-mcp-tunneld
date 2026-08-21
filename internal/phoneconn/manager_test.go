@@ -38,7 +38,7 @@ func (s *syncBuf) String() string {
 }
 
 // TestHeartbeatLoop_LogsPersistentError verifies a persistent route-heartbeat error is logged at Warn
-// with identifiers (a silent failure would let route:{name} TTL-expire with no operator signal).
+// with identifiers (a silent failure would let tunnel:{name} TTL-expire with no operator signal).
 func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	fr := newFakeRouter()
 	fr.hbErr = errors.New("valkey unreachable")
@@ -542,85 +542,6 @@ func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 	}
 	if surviving.connID != storedConnID {
 		t.Fatalf("local survivor connID %q != Valkey connID %q (bind not serialized)", surviving.connID, storedConnID)
-	}
-}
-
-// fakeResetter records the names it was asked to reset (and can return a canned error).
-type fakeResetter struct {
-	mu    sync.Mutex
-	names []string
-	err   error
-}
-
-func (r *fakeResetter) ResetStreams(_ context.Context, name string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.names = append(r.names, name)
-	return r.err
-}
-
-func (r *fakeResetter) resetNames() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.names...)
-}
-
-// TestManager_ResetsConcOnBind: a successful bind resets the live concurrent-stream counter exactly once
-// (the reset precedes the local-map publish by construction).
-func TestManager_ResetsConcOnBind(t *testing.T) {
-	rst := &fakeResetter{}
-	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
-		Streams: rst, NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-20T00:00:00Z",
-		RouteTTL: 30 * time.Second})
-	c := newConn("abc")
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	teardown, err := m.register(ctx, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go m.heartbeatLoop(ctx, c)
-	defer teardown()
-	if got := rst.resetNames(); len(got) != 1 || got[0] != "abc" {
-		t.Fatalf("a successful bind must ResetStreams(name) exactly once, got %v", got)
-	}
-}
-
-// TestManager_BindNilResetterSafe: a Config with no StreamResetter binds without panicking.
-func TestManager_BindNilResetterSafe(t *testing.T) {
-	m, _, _, _ := newMgr(t) // newMgr builds a Config without Streams (nil-safe)
-	c := newConn("abc")
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	teardown, err := m.register(ctx, c)
-	if err != nil {
-		t.Fatalf("a nil resetter must not break register: %v", err)
-	}
-	go m.heartbeatLoop(ctx, c)
-	teardown()
-}
-
-// TestManager_BindResetErrorNonFatal: a ResetStreams that returns an error still lets register/bind
-// succeed and publish the conn (the conc:{name} TTL is the backstop).
-func TestManager_BindResetErrorNonFatal(t *testing.T) {
-	rst := &fakeResetter{err: errors.New("valkey down")}
-	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
-		Streams: rst, NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-20T00:00:00Z",
-		RouteTTL: 30 * time.Second})
-	c := newConn("abc")
-	ctx, cancel := context.WithCancel(context.Background())
-	c.cancel = cancel
-	teardown, err := m.register(ctx, c)
-	if err != nil {
-		t.Fatalf("a ResetStreams error must be non-fatal to register: %v", err)
-	}
-	go m.heartbeatLoop(ctx, c)
-	defer teardown()
-	if !m.HasConn("abc") {
-		t.Fatal("register must publish the conn even when ResetStreams errors")
-	}
-	if got := rst.resetNames(); len(got) != 1 {
-		t.Fatalf("ResetStreams must have been attempted once, got %v", got)
 	}
 }
 
