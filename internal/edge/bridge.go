@@ -25,17 +25,18 @@ var rollingWindow = time.Minute
 // activeStream tracks a live public stream for the connection policy (idle timeout, min-rate, and
 // eviction-on-saturation ranking).
 type activeStream struct {
-	tunnel   string
-	fp       string       // the route fingerprint this stream targets (ban sweeps match on it)
-	lastAct  atomic.Int64 // unix nanos of last byte activity
-	recent   atomic.Int64 // bytes in the current rolling window
-	started  time.Time
-	cancel   context.CancelFunc
-	evicted  atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
-	banned   atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over evicted/shutdown
-	release  func()      // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
-	bytesIn  int64
-	bytesOut int64
+	tunnel     string
+	fp         string       // the route fingerprint this stream targets (ban sweeps match on it)
+	lastAct    atomic.Int64 // unix nanos of last byte activity
+	recent     atomic.Int64 // bytes in the current rolling window
+	started    time.Time
+	cancel     context.CancelFunc
+	evicted    atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
+	banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over terminated/evicted/shutdown
+	terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
+	release    func()      // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
+	bytesIn    int64
+	bytesOut   int64
 }
 
 func (e *Edge) trackStream(s *activeStream) {
@@ -100,6 +101,24 @@ func (e *Edge) EvictBannedStreams(match func(name, fingerprint string) bool) {
 	e.smu.Unlock()
 	for _, s := range victims {
 		s.banned.Store(true)
+		s.cancel()
+	}
+}
+
+// EvictTunnelStreams cancels every ACTIVE public splice for the named tunnel (admin terminate) on THIS
+// node, attributing admin-terminate. Streams ingested on other nodes are not tracked here — they are torn
+// down when the owner's phone connection drops.
+func (e *Edge) EvictTunnelStreams(name string) {
+	e.smu.Lock()
+	var victims []*activeStream
+	for s := range e.streams {
+		if s.tunnel == name {
+			victims = append(victims, s)
+		}
+	}
+	e.smu.Unlock()
+	for _, s := range victims {
+		s.terminated.Store(true)
 		s.cancel()
 	}
 }
@@ -358,11 +377,14 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 			case <-stopWatch:
 				return
 			case <-ctx.Done():
-				// The stream ctx cancels on a ban reload (EvictBannedStreams marks banned first), on
-				// saturation eviction (evictLeastActive marks evicted first), OR on server drain (the
-				// parent ctx) — attribute each accurately, banned taking precedence.
+				// The stream ctx cancels on a ban reload (EvictBannedStreams marks banned first), on an
+				// admin terminate (EvictTunnelStreams marks terminated first), on saturation eviction
+				// (evictLeastActive marks evicted first), OR on server drain (the parent ctx) — attribute
+				// each accurately, banned taking precedence.
 				if as.banned.Load() {
 					setReason(store.CloseBanEvict)
+				} else if as.terminated.Load() {
+					setReason(store.CloseAdminTerminate)
 				} else if as.evicted.Load() {
 					setReason(store.CloseEvicted)
 				} else {

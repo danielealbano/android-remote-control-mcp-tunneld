@@ -807,6 +807,96 @@ func TestEvictBannedStreams_KillsMatching(t *testing.T) {
 	}
 }
 
+// TestEvictTunnelStreams_KillsMatching: an admin terminate cancels the named tunnel's active splice
+// (close_reason admin-terminate), marks it terminated, and leaves another tunnel's stream untouched.
+func TestEvictTunnelStreams_KillsMatching(t *testing.T) {
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0
+	cfg.MinRate = 0
+	te := newTestEdge(t, cfg, nil, nil)
+
+	client := newScriptConn("203.0.113.40", nil) // blocks until closed
+	far := newScriptConn("203.0.113.40", nil)    // blocks until closed
+	ctx, cancel := context.WithCancel(context.Background())
+	victim := &activeStream{tunnel: "t1", started: time.Now(), cancel: cancel}
+	victim.lastAct.Store(time.Now().UnixNano())
+	te.e.trackStream(victim)
+	defer te.e.untrackStream(victim)
+
+	other := &activeStream{tunnel: "t2", started: time.Now(), cancel: func() {}}
+	te.e.trackStream(other)
+	defer te.e.untrackStream(other)
+
+	reasonCh := make(chan string, 1)
+	go func() { reasonCh <- te.e.splice(ctx, "t1", client, far, victim) }()
+	time.Sleep(20 * time.Millisecond) // let the splice watcher start
+
+	te.e.EvictTunnelStreams("t1")
+
+	select {
+	case reason := <-reasonCh:
+		if reason != store.CloseAdminTerminate {
+			t.Fatalf("an admin-terminated splice must record %q, got %q", store.CloseAdminTerminate, reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the terminated splice was not torn down")
+	}
+	if !victim.terminated.Load() {
+		t.Fatal("the matching stream must be marked terminated")
+	}
+	if other.terminated.Load() {
+		t.Fatal("a different tunnel's stream must be left untouched")
+	}
+}
+
+// TestSpliceReason_BannedBeatsTerminated: with both banned and terminated set before a ctx cancel, the
+// splice attributes ban-evict (banned takes precedence).
+func TestSpliceReason_BannedBeatsTerminated(t *testing.T) {
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0
+	cfg.MinRate = 0
+	te := newTestEdge(t, cfg, nil, nil)
+
+	client := newScriptConn("203.0.113.41", nil) // blocks until closed
+	far := newScriptConn("203.0.113.41", nil)    // blocks until closed
+	ctx, cancel := context.WithCancel(context.Background())
+	as := &activeStream{tunnel: "t", started: time.Now(), cancel: cancel}
+	as.lastAct.Store(time.Now().UnixNano())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		as.banned.Store(true)
+		as.terminated.Store(true)
+		cancel()
+	}()
+	if got := te.e.splice(ctx, "t", client, far, as); got != store.CloseBanEvict {
+		t.Fatalf("banned must beat terminated: want %q, got %q", store.CloseBanEvict, got)
+	}
+}
+
+// TestSpliceReason_TerminatedBeatsEvicted: with both terminated and evicted set before a ctx cancel, the
+// splice attributes admin-terminate (terminated takes precedence over evicted).
+func TestSpliceReason_TerminatedBeatsEvicted(t *testing.T) {
+	cfg := baseConfig()
+	cfg.IdleTimeout = 0
+	cfg.MinRate = 0
+	te := newTestEdge(t, cfg, nil, nil)
+
+	client := newScriptConn("203.0.113.42", nil) // blocks until closed
+	far := newScriptConn("203.0.113.42", nil)    // blocks until closed
+	ctx, cancel := context.WithCancel(context.Background())
+	as := &activeStream{tunnel: "t", started: time.Now(), cancel: cancel}
+	as.lastAct.Store(time.Now().UnixNano())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		as.terminated.Store(true)
+		as.evicted.Store(true)
+		cancel()
+	}()
+	if got := te.e.splice(ctx, "t", client, far, as); got != store.CloseAdminTerminate {
+		t.Fatalf("terminated must beat evicted: want %q, got %q", store.CloseAdminTerminate, got)
+	}
+}
+
 // TestHandleTunnel_RetryPathBanRecordsBan: a fresh route that is banned on the retry path is recorded
 // as reason "ban", never "no-route".
 func TestHandleTunnel_RetryPathBanRecordsBan(t *testing.T) {
