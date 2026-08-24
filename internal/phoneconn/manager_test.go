@@ -218,6 +218,35 @@ func TestManager_Register_RerollsOnCollision(t *testing.T) {
 	}
 }
 
+// TestManager_Close_ClosesLiveConn: Close closes a registered live conn with the given reason (recorded on
+// the end event) and reports true.
+func TestManager_Close_ClosesLiveConn(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	if _, err := m.register(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	go m.heartbeatLoop(ctx, c) // stopped by the ctx cancel that Close triggers
+
+	if !m.Close("abc", store.CloseAdminTerminate) {
+		t.Fatal("Close must report true for a live conn")
+	}
+	if !c.isClosed() || c.closeReason() != store.CloseAdminTerminate {
+		t.Errorf("conn closed=%v reason=%q, want closed=true reason=%q",
+			c.isClosed(), c.closeReason(), store.CloseAdminTerminate)
+	}
+}
+
+// TestManager_Close_AbsentReturnsFalse: Close on a tunnel with no live conn is a no-op returning false.
+func TestManager_Close_AbsentReturnsFalse(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	if m.Close("nobody", store.CloseAdminTerminate) {
+		t.Fatal("Close must report false when no live conn exists")
+	}
+}
+
 func TestEvictBanned(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
