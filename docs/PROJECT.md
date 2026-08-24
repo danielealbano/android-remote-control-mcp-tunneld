@@ -139,8 +139,9 @@ The internal listener (`--internal-listen`, never published) serves `GET /metric
 aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valkey is reachable),
 `GET /api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, client-driven, no
 ranking) + `POST /api/v1/admin/tunnels/stats` (names → per-tunnel node/bytes/conc/bw/day/week, live tunnels
-only), `GET /api/v1/admin/nodes` (the node registry), and `POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node
-over the mesh `/api/v1/mesh/control` RPC — see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
+only), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
+`POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects), both routed to the owner node
+over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on
