@@ -18,6 +18,7 @@ const (
 	CloseMinRate        = "min-rate"
 	CloseEvicted        = "evicted"
 	CloseServerShutdown = "server-shutdown"
+	CloseAdminTerminate = "admin-terminate"
 	CloseCertExpired    = "cert-expired"
 	CloseError          = "error"
 )
