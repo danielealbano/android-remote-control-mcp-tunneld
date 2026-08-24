@@ -32,8 +32,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/server"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -270,9 +273,9 @@ func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 }
 
 // TestE2E_CrossNodeRenewNudge proves the cross-node force-renew path: the phone's control connection is
-// owned by replica B, but /api/v1/admin/renew is POSTed to the NON-owner replica A. A routes to the owner over
-// /api/v1/mesh/control, B mints a nonce and nudges the phone, and the Go client answers by rotating its public
-// cert. An unknown tunnel (no bound route) is 404.
+// owned by replica B, but /api/v1/admin/tunnels/<name>/reissue is POSTed to the NON-owner replica A. A routes
+// to the owner over /api/v1/mesh/control, B mints a nonce and nudges the phone, and the Go client answers by
+// rotating its public cert. An unknown tunnel (no bound route) is 404.
 func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 	inf := startE2EInfra(t)
 	edgeA := inf.startReplica(t, replicaOpts{})
@@ -291,10 +294,10 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 
 	before := sha256.Sum256(c.Identity().PublicCertPEM)
 
-	// Force a renew via the NON-owner replica A; A meshes to the owner B, which nudges the phone.
-	status, nudged := postAdminRenew(t, inf.internal[edgeA], ident.Name)
-	if status != http.StatusOK || !nudged {
-		t.Fatalf("/api/v1/admin/renew on the non-owner replica = (status %d, nudged %v), want (200, true)", status, nudged)
+	// Force a reissue via the NON-owner replica A; A meshes to the owner B, which nudges the phone.
+	status, reissued := postAdminReissue(t, inf.internal[edgeA], ident.Name)
+	if status != http.StatusOK || !reissued {
+		t.Fatalf("reissue on the non-owner replica = (status %d, reissued %v), want (200, true)", status, reissued)
 	}
 
 	// The Go client answers the RENEW_NUDGE by rotating its public cert.
@@ -305,8 +308,53 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 	}
 
 	// An unknown tunnel has no bound route → 404.
-	if s, _ := postAdminRenew(t, inf.internal[edgeA], "nosuchtunnel"); s != http.StatusNotFound {
-		t.Fatalf("/api/v1/admin/renew for an unknown tunnel = %d, want 404", s)
+	if s, _ := postAdminReissue(t, inf.internal[edgeA], "nosuchtunnel"); s != http.StatusNotFound {
+		t.Fatalf("reissue for an unknown tunnel = %d, want 404", s)
+	}
+}
+
+// TestE2E_CrossNodeTerminate proves the cross-node terminate path: the phone's control connection is owned
+// by replica B, but /api/v1/admin/tunnels/<name>/terminate is POSTed to the NON-owner replica A. A routes to
+// the owner over /api/v1/mesh/control, and B closes the phone control connection (its teardown unbinds the
+// route). The Go reference client does NOT auto-reconnect, so the deterministic observable is the route
+// transitioning to unbound (LookupRoute ok=false).
+func TestE2E_CrossNodeTerminate(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+
+	// Enroll via A, run the phone's control connection on B → B owns the route.
+	_, ident := echoPhone(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// A registry over the shared Valkey, to observe the route bind → unbind.
+	opt, err := redis.ParseURL(inf.redisURL)
+	if err != nil {
+		t.Fatalf("parse redis url: %v", err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { _ = rdb.Close() })
+	reg := router.NewRegistry(rdb, 30*time.Second)
+
+	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	if !waitBool(30*time.Second, func() bool {
+		return frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots) == nil
+	}) {
+		t.Fatal("route never bound on the owner replica")
+	}
+
+	// Terminate via the NON-owner replica A; A meshes to the owner B, which closes the phone conn.
+	status, terminated := postAdminTerminate(t, inf.internal[edgeA], ident.Name)
+	if status != http.StatusOK || !terminated {
+		t.Fatalf("terminate on the non-owner replica = (status %d, terminated %v), want (200, true)", status, terminated)
+	}
+
+	// The owner's teardown unbinds the route; the Go client does not reconnect, so it stays unbound.
+	if !waitBool(30*time.Second, func() bool {
+		_, _, _, ok, lerr := reg.LookupRoute(context.Background(), ident.Name)
+		return lerr == nil && !ok
+	}) {
+		t.Fatal("the route was not unbound after cross-node terminate")
 	}
 }
 
@@ -534,28 +582,39 @@ func metricCounterPositive(internalAddr, family string) bool {
 	return false
 }
 
-// postAdminRenew POSTs /api/v1/admin/renew?tunnel=<name> to a replica's internal listener. It returns the HTTP
-// status and, on a 200, the decoded {nudged} value (false for any non-200, so callers can assert both the
-// 200/nudged path and the 404 no-route path).
-func postAdminRenew(t *testing.T, internalAddr, name string) (int, bool) {
+// postAdminAction POSTs /api/v1/admin/tunnels/<name>/<action> to a replica's internal listener and returns
+// the HTTP status and, on a 200, the decoded result boolean under respField (false for any non-200, so
+// callers can assert both the 200 path and the 404 no-route path).
+func postAdminAction(t *testing.T, internalAddr, action, name, respField string) (int, bool) {
 	t.Helper()
 	c := &http.Client{Timeout: 5 * time.Second}
-	u := "http://" + internalAddr + "/api/v1/admin/renew?tunnel=" + url.QueryEscape(name)
+	u := "http://" + internalAddr + "/api/v1/admin/tunnels/" + url.PathEscape(name) + "/" + action
 	resp, err := c.Post(u, "application/json", nil)
 	if err != nil {
-		t.Fatalf("POST /api/v1/admin/renew: %v", err)
+		t.Fatalf("POST %s: %v", u, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, false
 	}
-	var out struct {
-		Nudged bool `json:"nudged"`
-	}
+	var out map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatalf("decode /api/v1/admin/renew response: %v", err)
+		t.Fatalf("decode %s response: %v", u, err)
 	}
-	return resp.StatusCode, out.Nudged
+	applied, _ := out[respField].(bool)
+	return resp.StatusCode, applied
+}
+
+// postAdminReissue forces a reissue (renewal) for name, routed to the tunnel's owner node.
+func postAdminReissue(t *testing.T, internalAddr, name string) (int, bool) {
+	t.Helper()
+	return postAdminAction(t, internalAddr, "reissue", name, "reissued")
+}
+
+// postAdminTerminate terminates name's live phone connection, routed to the tunnel's owner node.
+func postAdminTerminate(t *testing.T, internalAddr, name string) (int, bool) {
+	t.Helper()
+	return postAdminAction(t, internalAddr, "terminate", name, "terminated")
 }
 
 func healthOK(internalAddr string) bool {
