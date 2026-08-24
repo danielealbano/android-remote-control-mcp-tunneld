@@ -28,9 +28,9 @@ No Mermaid charts are added or modified, so the §9 Mermaid-validation step does
 
 ## User Stories
 
-- [ ] **US1 — Terminate primitives (close-reason + phone close + edge splice evict)**
-- [ ] **US2 — Owner-routed reissue + terminate (mesh envelope, admin controller, admin endpoints)**
-- [ ] **US3 — Documentation + ground-up verification**
+- [x] **US1 — Terminate primitives (close-reason + phone close + edge splice evict)**
+- [x] **US2 — Owner-routed reissue + terminate (mesh envelope, admin controller, admin endpoints)**
+- [x] **US3 — Documentation + ground-up verification**
 
 ---
 
@@ -41,16 +41,16 @@ a per-name phone-connection close, and an edge method that evicts a tunnel's in-
 that reason.
 
 Acceptance criteria:
-- [ ] `store.CloseAdminTerminate == "admin-terminate"` exists.
-- [ ] `Manager.Close(name, reason)` closes the named live phone control connection with that reason and
+- [x] `store.CloseAdminTerminate == "admin-terminate"` exists.
+- [x] `Manager.Close(name, reason)` closes the named live phone control connection with that reason and
       reports whether one existed.
-- [ ] `Edge.EvictTunnelStreams(name)` cancels every active public splice of that tunnel; each records
+- [x] `Edge.EvictTunnelStreams(name)` cancels every active public splice of that tunnel; each records
       `close_reason=admin-terminate`.
-- [ ] Splice close-reason attribution precedence is `banned > terminated > evicted > server-shutdown`.
+- [x] Splice close-reason attribution precedence is `banned > terminated > evicted > server-shutdown`.
 
 ### Task 1.1 — Add the `admin-terminate` close reason
 
-- [ ] **Action** — modify `internal/store/event.go`: add the constant to the close-reason enum block.
+- [x] **Action** — modify `internal/store/event.go`: add the constant to the close-reason enum block.
 
 ```go
 CloseServerShutdown = "server-shutdown"
@@ -59,11 +59,11 @@ CloseCertExpired    = "cert-expired"
 ```
 
 Definition of Done:
-- [ ] The constant sits inside the existing `const (...)` close-reason block.
+- [x] The constant sits inside the existing `const (...)` close-reason block.
 
 ### Task 1.2 — Per-name phone-connection close
 
-- [ ] **Action** — modify `internal/phoneconn/manager.go`: add `Close` on `*Manager` (mirrors the
+- [x] **Action** — modify `internal/phoneconn/manager.go`: add `Close` on `*Manager` (mirrors the
   `SendRenewNudge` lookup/liveness guard; `conn.close` is idempotent).
 
 ```go
@@ -80,7 +80,7 @@ func (m *Manager) Close(name, reason string) bool {
 ```
 
 Definition of Done:
-- [ ] Returns `false` (no side effect) when no live connection exists; `true` after closing one.
+- [x] Returns `false` (no side effect) when no live connection exists; `true` after closing one.
 
 Tests (`internal/phoneconn/manager_test.go` or the existing phoneconn test file):
 
@@ -91,7 +91,7 @@ Tests (`internal/phoneconn/manager_test.go` or the existing phoneconn test file)
 
 ### Task 1.3 — Edge splice eviction by tunnel name
 
-- [ ] **Action** — modify `internal/edge/bridge.go`: add a `terminated` marker to `activeStream`, and amend
+- [x] **Action** — modify `internal/edge/bridge.go`: add a `terminated` marker to `activeStream`, and amend
   the existing `banned` field comment's precedence enumeration (`… over evicted/shutdown`) to include the new
   `terminated` state.
 
@@ -101,7 +101,7 @@ banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice att
 terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
 ```
 
-- [ ] **Action** — modify `internal/edge/bridge.go`: add `EvictTunnelStreams` (peer of
+- [x] **Action** — modify `internal/edge/bridge.go`: add `EvictTunnelStreams` (peer of
   `EvictBannedStreams`, keyed on the tunnel name only).
 
 ```go
@@ -124,7 +124,7 @@ func (e *Edge) EvictTunnelStreams(name string) {
 }
 ```
 
-- [ ] **Action** — modify `internal/edge/bridge.go`: extend the splice watcher's `ctx.Done()`
+- [x] **Action** — modify `internal/edge/bridge.go`: extend the splice watcher's `ctx.Done()`
   attribution (currently `banned → evicted → shutdown`) to include `terminated`, keeping `banned` first, AND
   update the preceding comment so its ctx-cancel-trigger enumeration lists the new admin-terminate case.
 
@@ -146,9 +146,9 @@ func (e *Edge) EvictTunnelStreams(name string) {
 ```
 
 Definition of Done:
-- [ ] A matching in-flight splice is cancelled and records `admin-terminate`; a non-matching splice is
+- [x] A matching in-flight splice is cancelled and records `admin-terminate`; a non-matching splice is
       untouched.
-- [ ] `banned` still wins over `terminated` when both are set.
+- [x] `banned` still wins over `terminated` when both are set.
 
 Tests (`internal/edge/fixes_test.go`, modeled on `TestEvictBannedStreams_KillsMatching`):
 
@@ -167,19 +167,19 @@ the single renew endpoint with the two per-tunnel action URLs. Implemented as th
 reference dangles at any point (the `Nudged`→`Applied` rename and the handler rewrite land together).
 
 Acceptance criteria:
-- [ ] `mesh.Controller` exposes `Renew` and `Terminate`; `mesh.ControlRequest.Op` accepts `"renew"` |
+- [x] `mesh.Controller` exposes `Renew` and `Terminate`; `mesh.ControlRequest.Op` accepts `"renew"` |
       `"terminate"`; `mesh.ControlResponse` reports a single `applied` boolean.
-- [ ] `POST /api/v1/admin/tunnels/{name}/reissue` behaves exactly as the old `/api/v1/admin/renew` (owner
+- [x] `POST /api/v1/admin/tunnels/{name}/reissue` behaves exactly as the old `/api/v1/admin/renew` (owner
       routing, 405/400/404 paths, JSON `{tunnel, owner, reissued}`), addressed by path segment. The
       operator-facing result field is action-named (`reissued`), symmetric with terminate's `terminated`;
       the internal mesh op and controller method stay `renew`/`Renew`.
-- [ ] `POST /api/v1/admin/tunnels/{name}/terminate` routes to the owner, closes the phone control conn +
+- [x] `POST /api/v1/admin/tunnels/{name}/terminate` routes to the owner, closes the phone control conn +
       evicts that node's in-flight public splices, and returns `{tunnel, owner, terminated}`.
-- [ ] `POST /api/v1/admin/renew` no longer exists; NO Go file (unit or e2e) references it.
+- [x] `POST /api/v1/admin/renew` no longer exists; NO Go file (unit or e2e) references it.
 
 ### Task 2.1 — Generalize the mesh control envelope + Controller
 
-- [ ] **Action** — modify `internal/mesh/listener.go`: extend the `Controller` interface, generalize the
+- [x] **Action** — modify `internal/mesh/listener.go`: extend the `Controller` interface, generalize the
   request/response, and add the `terminate` dispatch (shared missing-tunnel + JSON-write path).
 
 ```go
@@ -243,8 +243,8 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 ```
 
 Definition of Done:
-- [ ] `client.go` needs no change (it decodes into `ControlResponse` without field references).
-- [ ] Unknown op and missing tunnel both → 400; op failure → 502; non-POST → 405.
+- [x] `client.go` needs no change (it decodes into `ControlResponse` without field references).
+- [x] Unknown op and missing tunnel both → 400; op failure → 502; non-POST → 405.
 
 Tests (`internal/mesh/mesh_test.go` — reconcile existing, add terminate):
 
@@ -257,7 +257,7 @@ Tests (`internal/mesh/mesh_test.go` — reconcile existing, add terminate):
 
 ### Task 2.2 — Admin controller with Terminate + edge wiring
 
-- [ ] **Action** — modify `internal/server/serve.go`: rename `renewController` → `adminController`, add the
+- [x] **Action** — modify `internal/server/serve.go`: rename `renewController` → `adminController`, add the
   `evictStreams` dependency and the `Terminate` method (add the `internal/store` import if absent).
 
 ```go
@@ -294,7 +294,7 @@ func (c *adminController) Terminate(_ context.Context, tunnel string) (bool, err
 }
 ```
 
-- [ ] **Action** — modify `internal/server/server.go`: reorder construction so the edge `ed` is built
+- [x] **Action** — modify `internal/server/server.go`: reorder construction so the edge `ed` is built
   before the controller and the mesh handler, then build the controller with `ed.EvictTunnelStreams`. (The
   edge already depends only on `meshClient`, which is built earlier; nothing between them depends on the
   controller or mesh handler, so moving `edge.New(...)` ahead of them is safe.)
@@ -318,9 +318,9 @@ func (c *adminController) Terminate(_ context.Context, tunnel string) (bool, err
 ```
 
 Definition of Done:
-- [ ] `adminController` satisfies the two-method `mesh.Controller`; `*phoneconn.Manager` satisfies
+- [x] `adminController` satisfies the two-method `mesh.Controller`; `*phoneconn.Manager` satisfies
       `phoneControl`.
-- [ ] Construction order compiles with the edge built before the controller/mesh handler; the "bind
+- [x] Construction order compiles with the edge built before the controller/mesh handler; the "bind
       listeners LAST" ordering below is unchanged.
 
 Tests (`internal/server/admin_controller_test.go`; a `fakePhoneControl` records `SendRenewNudge`/`Close`
@@ -333,7 +333,7 @@ calls, and `evictStreams` is a spy recording the name + a shared call-order coun
 
 ### Task 2.3 — Admin action endpoints (reissue + terminate); remove renew
 
-- [ ] **Action** — modify `internal/server/server.go`: replace `adminRenewHandler` with a shared
+- [x] **Action** — modify `internal/server/server.go`: replace `adminRenewHandler` with a shared
   `adminActionHandler` (path-addressed, owner-routed).
 
 ```go
@@ -388,7 +388,7 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 }
 ```
 
-- [ ] **Action** — modify `internal/server/server.go`: register the two action patterns and remove the old
+- [x] **Action** — modify `internal/server/server.go`: register the two action patterns and remove the old
   renew registration (Go 1.26 `ServeMux` wildcard patterns; the handler checks the method itself, matching
   the existing style, so no reliance on `ServeMux` 405 semantics). Also rewrite the stale preceding block
   comment (currently "Internal server (… force-renew …). The mux mounts /api/v1/admin/renew and delegates
@@ -407,7 +407,7 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 ```
 
-- [ ] **Action** — modify `e2e/e2e_test.go` and `e2e/tunnel_app_test.go`: migrate the admin e2e caller off
+- [x] **Action** — modify `e2e/e2e_test.go` and `e2e/tunnel_app_test.go`: migrate the admin e2e caller off
   the removed endpoint (otherwise `make test-e2e` in Task 3.2 breaks — the POST would fall through to the
   `/` catch-all). Rename the `postAdminRenew` helper to `postAdminReissue`; POST
   `http://<internalAddr>/api/v1/admin/tunnels/<name>/reissue` (name in the path via `url.PathEscape`, no
@@ -416,17 +416,17 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
   `tunnel_app_test.go`, including their comments and failure messages, to the new endpoint. (The RENEW_NUDGE
   mechanism is unchanged, so the `TestE2E_CrossNodeRenewNudge` function name stays.)
 
-- [ ] **Action** — add to `e2e/e2e_test.go` a `postAdminTerminate` helper (peer of `postAdminReissue`,
+- [x] **Action** — add to `e2e/e2e_test.go` a `postAdminTerminate` helper (peer of `postAdminReissue`,
   POSTing `/api/v1/admin/tunnels/<name>/terminate` and decoding `{terminated}`) and a cross-node terminate
   roundtrip test `TestE2E_CrossNodeTerminate` (see the E2E test table below), giving terminate the same
   integrated cross-node coverage the reissue/renew path has via `TestE2E_CrossNodeRenewNudge`.
 
 Definition of Done:
-- [ ] `adminRenewHandler` and the `/api/v1/admin/renew` registration are gone.
-- [ ] The `{name}/reissue` and `{name}/terminate` patterns do not collide with the `tunnels/list` /
+- [x] `adminRenewHandler` and the `/api/v1/admin/renew` registration are gone.
+- [x] The `{name}/reissue` and `{name}/terminate` patterns do not collide with the `tunnels/list` /
       `tunnels/stats` paths served under `/` (distinct path shapes).
-- [ ] `grep -rn "admin/renew\|postAdminRenew" --include='*.go' .` returns nothing.
-- [ ] The cross-node terminate path (entry node → mesh RPC → owner closes the phone conn + unbinds the
+- [x] `grep -rn "admin/renew\|postAdminRenew" --include='*.go' .` returns nothing.
+- [x] The cross-node terminate path (entry node → mesh RPC → owner closes the phone conn + unbinds the
       route) is exercised end-to-end by `TestE2E_CrossNodeTerminate`.
 
 Tests (`internal/server/admin_renew_test.go` → rename to `admin_actions_test.go`; the `{name}` path value is
@@ -451,53 +451,57 @@ E2E test (`e2e/e2e_test.go`, `//go:build e2e`; mirrors `TestE2E_CrossNodeRenewNu
 ## US3 — Documentation + ground-up verification
 
 Acceptance criteria:
-- [ ] `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `README.md` describe the two action
+- [x] `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `README.md` describe the two action
       endpoints and the generalized mesh control op; no doc mentions `/api/v1/admin/renew`.
-- [ ] `admin-terminate` appears in the connection-log close-reason enumeration.
-- [ ] All quality gates pass on the final code.
+- [x] `admin-terminate` appears in the connection-log close-reason enumeration.
+- [x] All quality gates pass on the final code.
 
 ### Task 3.1 — Update the canonical docs
 
-- [ ] **Action** — modify `docs/PROTOCOL.md` §5 (mesh control paragraph): ops `renew` | `terminate`,
+- [x] **Action** — modify `docs/PROTOCOL.md` §5 (mesh control paragraph): ops `renew` | `terminate`,
   response `{applied}`; `renew` forces a `RENEW_NUDGE`; `terminate` closes the owner's live phone control
   connection and evicts that node's in-flight public splices (`close_reason=admin-terminate`), after which
   the phone reconnects. These are the mechanisms behind `POST /api/v1/admin/tunnels/{name}/reissue` and
   `.../terminate`. Unknown op / missing tunnel → 400, non-POST → 405, op failure → 502.
-- [ ] **Action** — modify `docs/ARCHITECTURE.md`: (a) §8 — replace the `/api/v1/admin/renew` line with the
+- [x] **Action** — modify `docs/ARCHITECTURE.md`: (a) §8 — replace the `/api/v1/admin/renew` line with the
   two `/api/v1/admin/tunnels/{name}/reissue` + `/terminate` endpoints (owner-routed over the mesh control
   RPC); (b) §8 — add `admin-terminate` to the close-reason list on the connection-log line (~190); (c) §9 —
   amend the splice close-reason attribution sentence (~222-223, currently "…record `close_reason=server-shutdown`
   (`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload)") to also name
   `admin-terminate` for an admin terminate, so the canonical splice-attribution set stays complete.
-- [ ] **Action** — modify `docs/PROJECT.md`: replace the `/api/v1/admin/renew` clause in the admin-surface
+- [x] **Action** — modify `docs/PROJECT.md`: replace the `/api/v1/admin/renew` clause in the admin-surface
   sentence with the reissue + terminate endpoints.
-- [ ] **Action** — modify `README.md`: replace the `/api/v1/admin/renew` clause with the reissue +
+- [x] **Action** — modify `README.md`: replace the `/api/v1/admin/renew` clause with the reissue +
   terminate endpoints.
 
 Definition of Done:
-- [ ] `grep -n "admin/renew" README.md docs/PROJECT.md docs/ARCHITECTURE.md docs/PROTOCOL.md` returns
+- [x] `grep -n "admin/renew" README.md docs/PROJECT.md docs/ARCHITECTURE.md docs/PROTOCOL.md` returns
       nothing. (Scope to the canonical docs ONLY — NEVER `docs/plans/`: the sacred plan artifacts, incl. this
       plan and plan 8, legitimately contain `admin/renew` and MUST NOT be edited.)
-- [ ] Each doc states terminate is ephemeral (the phone reconnects) and attributed `admin-terminate`.
+- [x] Each doc states terminate is ephemeral (the phone reconnects) and attributed `admin-terminate`.
 
 ### Task 3.2 — Ground-up double-check + quality gates
 
-- [ ] **Action** — re-read this plan from the top and verify EVERY action landed: the close reason, the
+- [x] **Action** — re-read this plan from the top and verify EVERY action landed: the close reason, the
   phone `Close`, the edge `EvictTunnelStreams` + attribution precedence, the mesh envelope/Controller, the
   `adminController` + construction reorder, the two endpoints, the removal of `/api/v1/admin/renew`
   (including the e2e caller migration), and the four doc updates. Confirm no stray reference remains via
   greps scoped to source + canonical docs (NEVER `docs/plans/`, whose sacred artifacts legitimately contain
   these tokens): `grep -rn 'adminRenewHandler\|renewController\|ControlResponse.Nudged\|postAdminRenew\|admin/renew' --include='*.go' .` returns nothing, and
   `grep -n 'admin/renew' README.md docs/PROJECT.md docs/ARCHITECTURE.md docs/PROTOCOL.md` returns nothing.
-- [ ] **Action** — run the full quality gates via the project commands and fix anything they surface:
+- [x] **Action** — run the full quality gates via the project commands and fix anything they surface:
   `make lint`, `make vet`, `make govulncheck`, `make test-unit`, `make test-integration`, `make test-e2e`,
   `make compose-config`, `make tidy` (drift check).
 
 Definition of Done:
-- [ ] Every checkbox above is `[x]`; all gates green on the final code.
+- [x] Every checkbox above is `[x]`; all gates green on the final code.
 
 ---
 
 ## Deviations
 
-_(none yet)_
+- **US2 Task 2.3 (e2e helper).** The plan specified renaming `postAdminRenew` → `postAdminReissue` and adding
+  a peer `postAdminTerminate`. Both public helpers exist exactly as specified, but they are implemented as
+  thin wrappers over one shared `postAdminAction(t, internalAddr, action, name, respField)` helper (which
+  POSTs `.../tunnels/<name>/<action>` and decodes the result boolean under `respField` via a generic map) —
+  to avoid duplicating the HTTP round-trip. No behavioral difference from the plan.
