@@ -29,20 +29,21 @@ type Bridge interface {
 type OwnerCheck func(tunnel, connID string) bool
 
 // Controller executes a mesh control op on THIS (owner) node. Implemented in internal/server (mesh MUST
-// NOT import phoneconn/enroll). Renew mints a fresh renewal nonce and enqueues a RENEW_NUDGE to the
-// named tunnel's live phone connection, returning whether it was enqueued.
+// NOT import phoneconn/enroll). Renew enqueues a RENEW_NUDGE; Terminate closes the tunnel's live phone
+// connection and evicts this node's in-flight public splices. Each returns whether it applied.
 type Controller interface {
 	Renew(ctx context.Context, tunnel string) (bool, error)
+	Terminate(ctx context.Context, tunnel string) (bool, error)
 }
 
 // ControlRequest / ControlResponse are the /api/v1/mesh/control JSON envelope (replica↔replica only).
 type ControlRequest struct {
-	Op     string `json:"op"`     // "renew"
-	Tunnel string `json:"tunnel"` // the tunnel name whose phone to nudge
+	Op     string `json:"op"`     // "renew" | "terminate"
+	Tunnel string `json:"tunnel"` // the tunnel name to act on
 }
 
 type ControlResponse struct {
-	Nudged bool `json:"nudged"`
+	Applied bool `json:"applied"` // renew: a nudge was enqueued; terminate: a live phone conn was closed
 }
 
 // Handler is the mesh listener handler. It requires a mesh-role peer cert — the mTLS config verifies the
@@ -80,8 +81,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveControl handles the mesh control RPC (mesh-role mTLS already enforced by ServeHTTP): a JSON
-// {op, tunnel} → {nudged} request/response. The first op is "renew", which forces this owner node to
-// nudge the named tunnel's live phone connection.
+// {op, tunnel} → {applied} request/response. op is "renew" (enqueue a RENEW_NUDGE to the named tunnel's
+// live phone connection) or "terminate" (close that phone connection and evict this node's in-flight
+// public splices). Unknown op / missing tunnel → 400; op failure → 502.
 func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -92,22 +94,28 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad control request", http.StatusBadRequest)
 		return
 	}
+	if req.Op != "renew" && req.Op != "terminate" {
+		http.Error(w, "unknown op", http.StatusBadRequest)
+		return
+	}
+	if req.Tunnel == "" {
+		http.Error(w, "missing tunnel", http.StatusBadRequest)
+		return
+	}
+	var applied bool
+	var err error
 	switch req.Op {
 	case "renew":
-		if req.Tunnel == "" {
-			http.Error(w, "missing tunnel", http.StatusBadRequest)
-			return
-		}
-		nudged, err := h.control.Renew(r.Context(), req.Tunnel)
-		if err != nil {
-			http.Error(w, "renew failed", http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(ControlResponse{Nudged: nudged})
-	default:
-		http.Error(w, "unknown op", http.StatusBadRequest)
+		applied, err = h.control.Renew(r.Context(), req.Tunnel)
+	case "terminate":
+		applied, err = h.control.Terminate(r.Context(), req.Tunnel)
 	}
+	if err != nil {
+		http.Error(w, req.Op+" failed", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ControlResponse{Applied: applied})
 }
 
 // serveData is the opaque bidirectional splice (docs/PROTOCOL.md §5): the request/response bodies ARE the
