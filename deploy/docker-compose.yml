@@ -85,7 +85,7 @@ services:
     logging: *caplog
 
   prometheus:
-    image: prom/prometheus:v3.13.2
+    image: prom/prometheus:v3.14.0
     restart: unless-stopped
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
