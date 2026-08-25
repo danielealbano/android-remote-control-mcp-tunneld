@@ -189,20 +189,36 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 	}
 }
 
-// renewController is this node's mesh.Controller: it mints a fresh renewal nonce (the same challenge the
-// renewal watcher uses) and enqueues a RENEW_NUDGE to the tunnel's LOCAL phone connection. Used both
-// directly by the /api/v1/admin/renew local path and by the mesh /api/v1/mesh/control handler on the owner node.
-type renewController struct {
-	mgr   *phoneconn.Manager
-	nonce func(ctx context.Context) (string, error)
+// phoneControl is the consumer-side surface the admin controller needs from the phone manager (satisfied by
+// *phoneconn.Manager) — an interface so adminController's Renew/Terminate logic is unit-testable in isolation.
+type phoneControl interface {
+	SendRenewNudge(name, nonceHex, ariWindow string) bool
+	Close(name, reason string) bool
 }
 
-func (rc *renewController) Renew(ctx context.Context, tunnel string) (bool, error) {
-	nonceHex, err := rc.nonce(ctx)
+// adminController is this node's mesh.Controller: Renew enqueues a RENEW_NUDGE to the tunnel's LOCAL phone
+// connection; Terminate evicts this node's in-flight public splices then closes that phone connection. Used
+// both by the local admin path and by the mesh /api/v1/mesh/control handler on the owner node.
+type adminController struct {
+	mgr          phoneControl
+	nonce        func(ctx context.Context) (string, error) // mints the single-use renewal challenge nonce
+	evictStreams func(name string)                         // edge.EvictTunnelStreams on this node
+}
+
+func (c *adminController) Renew(ctx context.Context, tunnel string) (bool, error) {
+	nonceHex, err := c.nonce(ctx)
 	if err != nil {
 		return false, err
 	}
-	return rc.mgr.SendRenewNudge(tunnel, nonceHex, ""), nil
+	return c.mgr.SendRenewNudge(tunnel, nonceHex, ""), nil
+}
+
+// Terminate kicks the tunnel on THIS (owner) node: it first evicts this node's in-flight public splices
+// (attributed admin-terminate), then closes the live phone control connection. The phone reconnects
+// afterwards — terminate is a force-reconnect, not a keep-down. Returns whether a live phone conn existed.
+func (c *adminController) Terminate(_ context.Context, tunnel string) (bool, error) {
+	c.evictStreams(tunnel)
+	return c.mgr.Close(tunnel, store.CloseAdminTerminate), nil
 }
 
 // challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the

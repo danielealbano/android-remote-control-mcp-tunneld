@@ -171,10 +171,12 @@ bridging (the entry node takes one fresh route lookup + retry on a mismatch/stal
 The mesh is replica↔replica only — it is NOT part of the phone-client contract.
 
 The mesh also carries a control RPC, `POST /api/v1/mesh/control`: a JSON request `{op, tunnel}` → response
-`{nudged}` (mesh-role mTLS, replica↔replica only). The first op is `renew`, which forces the owner node
-to mint a fresh renewal nonce and enqueue a `RENEW_NUDGE` to the named tunnel's live phone connection —
-the mechanism behind the internal `POST /api/v1/admin/renew` endpoint. Unknown op → `400`, missing tunnel →
-`400`, non-POST → `405`.
+`{applied}` (mesh-role mTLS, replica↔replica only). `op` is `renew` (mint a fresh renewal nonce and enqueue a
+`RENEW_NUDGE` to the named tunnel's live phone connection) or `terminate` (close that phone connection and
+evict the owner node's in-flight public splices, `close_reason=admin-terminate`; the phone reconnects
+afterwards). These are the mechanisms behind the internal `POST /api/v1/admin/tunnels/{name}/reissue` and
+`POST /api/v1/admin/tunnels/{name}/terminate` endpoints. Unknown op → `400`, missing tunnel → `400`,
+non-POST → `405`, op failure → `502`.
 
 ## 6. Security invariants
 

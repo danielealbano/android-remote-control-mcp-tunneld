@@ -169,8 +169,10 @@ The internal listener serves `/metrics` (custom registry, aggregate families onl
 `/api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
 `/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
 `/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
-`POST /api/v1/admin/renew?tunnel=<name>` (force a RENEW_NUDGE, routed to the owner node over the mesh
-`/api/v1/mesh/control` RPC — see PROTOCOL.md §5).
+the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
+`POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's
+in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects). Both route to
+the owner node over the mesh `/api/v1/mesh/control` RPC (see PROTOCOL.md §5).
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
@@ -187,7 +189,7 @@ other string, so labels cannot be invented at call sites). The writers:
 
 Distinct signals, no double-counting: `QuotaExhausted(tunnel, window)` fires when an IN-FLIGHT stream
 hits the window (its LOG is caplog-deduped), and forced closures of existing connections (`min-rate`,
-`evicted`, `idle-timeout`, `quota-exhausted`, `cert-expired`, `ban-evict`, …) are recorded via
+`evicted`, `idle-timeout`, `quota-exhausted`, `cert-expired`, `ban-evict`, `admin-terminate`, …) are recorded via
 `PublicConnClose(reason)` / `PhoneConnClose(reason)` — never via `Reject`.
 `tunneld_enrollments_total{result}` carries the enrollment outcome;
 `tunneld_attest_verify_total{result}` the attestation verdicts; and
@@ -220,7 +222,8 @@ flowchart LR
 ```
 
 Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
-(`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload). The ordering is load-bearing:
+(`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload, `admin-terminate` for an admin
+terminate). The ordering is load-bearing:
 the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the async conn-log queue
 is drained, and only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
 

@@ -330,6 +330,17 @@ func (m *Manager) EvictBanned(match func(name, fingerprint string) bool) {
 	}
 }
 
+// Close closes the named tunnel's live phone control connection with the given close reason (recorded on
+// the phone end event) and reports whether a live connection existed. Used by the admin terminate action.
+func (m *Manager) Close(name, reason string) bool {
+	c, ok := m.lookup(name)
+	if !ok || c.isClosed() {
+		return false
+	}
+	c.close(reason)
+	return true
+}
+
 // ConnectedNames returns a snapshot of the tunnel names with a live phone connection on this node (the
 // renewal watcher scans these to decide which certs to nudge).
 func (m *Manager) ConnectedNames() []string {

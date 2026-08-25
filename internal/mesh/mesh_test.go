@@ -66,19 +66,26 @@ func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
 func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
 func (nopRWC) Close() error                { return nil }
 
-// fakeController is a func-backed mesh.Controller for the /api/v1/mesh/control tests: it records the call and
-// returns the configured (nudged, err).
+// fakeController is a func-backed mesh.Controller for the /api/v1/mesh/control tests: it records the call
+// and returns the configured result (nudged for Renew, terminated for Terminate).
 type fakeController struct {
-	called bool
-	tunnel string
-	nudged bool
-	err    error
+	called     bool
+	tunnel     string
+	nudged     bool
+	terminated bool
+	err        error
 }
 
 func (f *fakeController) Renew(_ context.Context, tunnel string) (bool, error) {
 	f.called = true
 	f.tunnel = tunnel
 	return f.nudged, f.err
+}
+
+func (f *fakeController) Terminate(_ context.Context, tunnel string) (bool, error) {
+	f.called = true
+	f.tunnel = tunnel
+	return f.terminated, f.err
 }
 
 // meshRoleReq builds a mesh-role-authenticated request to https://node/<path> with an optional JSON body.
@@ -226,7 +233,7 @@ func TestDataPathRenamed(t *testing.T) {
 }
 
 // TestControlRenewDispatches covers the /api/v1/mesh/control renew op: a mesh-role POST {op:"renew",tunnel:"t"}
-// invokes the controller and returns {nudged:true}.
+// invokes the controller and returns {applied:true}.
 func TestControlRenewDispatches(t *testing.T) {
 	fc := &fakeController{nudged: true}
 	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
@@ -243,8 +250,34 @@ func TestControlRenewDispatches(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if !resp.Nudged {
-		t.Errorf("response nudged = false, want true")
+	if !resp.Applied {
+		t.Errorf("response applied = false, want true")
+	}
+	if !fc.called || fc.tunnel != "t" {
+		t.Errorf("controller called=%v tunnel=%q, want called=true tunnel=%q", fc.called, fc.tunnel, "t")
+	}
+}
+
+// TestControlTerminateDispatches covers the /api/v1/mesh/control terminate op: a mesh-role POST
+// {op:"terminate",tunnel:"t"} invokes the controller and returns {applied:true}.
+func TestControlTerminateDispatches(t *testing.T) {
+	fc := &fakeController{terminated: true}
+	h := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	body, err := json.Marshal(ControlRequest{Op: "terminate", Tunnel: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+	if w.Code != 200 {
+		t.Fatalf("terminate must be 200, got %d", w.Code)
+	}
+	var resp ControlResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Applied {
+		t.Errorf("response applied = false, want true")
 	}
 	if !fc.called || fc.tunnel != "t" {
 		t.Errorf("controller called=%v tunnel=%q, want called=true tunnel=%q", fc.called, fc.tunnel, "t")
@@ -300,16 +333,16 @@ func TestControlRejectsNonMeshRole(t *testing.T) {
 	}
 }
 
-// TestControlClient_Errors covers Client.Control: it decodes {nudged} on a 200 and returns an error on a
+// TestControlClient_Errors covers Client.Control: it decodes {applied} on a 200 and returns an error on a
 // non-200 mesh response.
 func TestControlClient_Errors(t *testing.T) {
 	tests := []struct {
-		name       string
-		status     int
-		wantErr    bool
-		wantNudged bool
+		name        string
+		status      int
+		wantErr     bool
+		wantApplied bool
 	}{
-		{name: "200 decodes nudged", status: http.StatusOK, wantErr: false, wantNudged: true},
+		{name: "200 decodes applied", status: http.StatusOK, wantErr: false, wantApplied: true},
 		{name: "502 errors", status: http.StatusBadGateway, wantErr: true},
 	}
 	for _, tc := range tests {
@@ -317,7 +350,7 @@ func TestControlClient_Errors(t *testing.T) {
 			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if tc.status == http.StatusOK {
 					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(ControlResponse{Nudged: true})
+					_ = json.NewEncoder(w).Encode(ControlResponse{Applied: true})
 					return
 				}
 				w.WriteHeader(tc.status)
@@ -339,8 +372,8 @@ func TestControlClient_Errors(t *testing.T) {
 			if err != nil {
 				t.Fatalf("status %d: unexpected error: %v", tc.status, err)
 			}
-			if resp.Nudged != tc.wantNudged {
-				t.Errorf("nudged = %v, want %v", resp.Nudged, tc.wantNudged)
+			if resp.Applied != tc.wantApplied {
+				t.Errorf("applied = %v, want %v", resp.Applied, tc.wantApplied)
 			}
 		})
 	}

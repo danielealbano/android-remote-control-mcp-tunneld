@@ -157,12 +157,10 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
-	renewCtl := &renewController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc)}
-	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,
-		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, renewCtl)
 
 	// Public edge (constructed from the resolved static address — the raw listener is bound LAST, below,
-	// so the edge never depends on a live socket at construction time).
+	// so the edge never depends on a live socket at construction time). Built BEFORE the admin controller
+	// and mesh handler so the controller can take ed.EvictTunnelStreams (for the terminate action).
 	edgeAddr, err := net.ResolveTCPAddr("tcp", cfg.Listen)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", cfg.Listen, err)
@@ -175,6 +173,10 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
 	}, banIP, banTunnel, rec,
 		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, edgeAddr)
+
+	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
+	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,
+		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, adminCtl)
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
@@ -205,10 +207,14 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return fmt.Errorf("configure mesh http2: %w", err)
 	}
 
-	// Internal server (metrics + healthz + admin + force-renew; never proxied). The mux mounts
-	// /api/v1/admin/renew and delegates everything else to the existing metrics handler (unchanged).
+	// Internal server (metrics + healthz + admin actions; never proxied). The mux mounts the per-tunnel
+	// admin actions /api/v1/admin/tunnels/{name}/reissue and .../terminate and delegates everything else to
+	// the existing metrics handler (unchanged).
 	internalMux := http.NewServeMux()
-	internalMux.Handle("/api/v1/admin/renew", adminRenewHandler(nodeID, reg, renewCtl, meshClient, logger))
+	internalMux.Handle("/api/v1/admin/tunnels/{name}/reissue",
+		adminActionHandler(nodeID, reg, meshClient, logger, "renew", "reissued", adminCtl.Renew))
+	internalMux.Handle("/api/v1/admin/tunnels/{name}/terminate",
+		adminActionHandler(nodeID, reg, meshClient, logger, "terminate", "terminated", adminCtl.Terminate))
 	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
@@ -317,24 +323,26 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	return nil
 }
 
-// adminRenewHandler forces a RENEW_NUDGE for ?tunnel=<name>, routing to the owner node. Internal-listener
-// only (never published). 404 when no route is bound; the owner mints the nonce and enqueues the nudge.
-// ctl is the mesh.Controller INTERFACE (renewController satisfies it) so the local-nudge path is unit
-// testable with a stub — consistent with the OwnerCheck/Bridge/Controller consumer-site seams.
-func adminRenewHandler(nodeID string, reg *router.Registry, ctl mesh.Controller, mc *mesh.Client, log *slog.Logger) http.HandlerFunc {
+// adminActionHandler routes a per-tunnel admin action ({name} from the path) to the tunnel's owner node:
+// the local controller method when this node owns the route, else the mesh control RPC. op is the mesh op
+// ("renew" | "terminate"); respField is the operator-facing JSON boolean key ("reissued" | "terminated").
+// Internal listener only (never published). 404 when no route is bound. local is the mesh.Controller method
+// (adminController.Renew/Terminate) so the owner-local path is unit-testable with a stub.
+func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, log *slog.Logger,
+	op, respField string, local func(ctx context.Context, name string) (bool, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		name := r.URL.Query().Get("tunnel")
+		name := r.PathValue("name")
 		if name == "" {
 			http.Error(w, "missing tunnel", http.StatusBadRequest)
 			return
 		}
 		owner, _, _, ok, err := reg.LookupRoute(r.Context(), name)
 		if err != nil {
-			log.Warn("admin renew: route lookup failed", "tunnel", name, "err", err)
+			log.Warn("admin "+op+": route lookup failed", "tunnel", name, "err", err)
 			http.Error(w, "route lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -342,27 +350,27 @@ func adminRenewHandler(nodeID string, reg *router.Registry, ctl mesh.Controller,
 			http.Error(w, "no route bound for tunnel", http.StatusNotFound)
 			return
 		}
-		var nudged bool
+		var applied bool
 		if owner == nodeID {
-			nudged, err = ctl.Renew(r.Context(), name)
+			applied, err = local(r.Context(), name)
 		} else {
 			addr, addrOK, lerr := reg.LookupNode(r.Context(), owner)
 			if lerr != nil || !addrOK {
-				log.Warn("admin renew: owner node unresolved", "tunnel", name, "owner", owner, "err", lerr)
+				log.Warn("admin "+op+": owner node unresolved", "tunnel", name, "owner", owner, "err", lerr)
 				http.Error(w, "owner node unavailable", http.StatusBadGateway)
 				return
 			}
 			var res mesh.ControlResponse
-			res, err = mc.Control(r.Context(), addr, mesh.ControlRequest{Op: "renew", Tunnel: name})
-			nudged = res.Nudged
+			res, err = mc.Control(r.Context(), addr, mesh.ControlRequest{Op: op, Tunnel: name})
+			applied = res.Applied
 		}
 		if err != nil {
-			log.Warn("admin renew: nudge failed", "tunnel", name, "owner", owner, "err", err)
-			http.Error(w, "renew failed", http.StatusBadGateway)
+			log.Warn("admin "+op+": failed", "tunnel", name, "owner", owner, "err", err)
+			http.Error(w, op+" failed", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, "nudged": nudged})
+		_ = json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied})
 	}
 }
 
