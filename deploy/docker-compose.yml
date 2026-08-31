@@ -127,7 +127,7 @@ services:
     logging: *caplog
 
   ntfy-alertmanager:
-    image: xenrox/ntfy-alertmanager:1.0.0
+    image: xenrox/ntfy-alertmanager:1.0.1
     restart: unless-stopped
     volumes:
       - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config.scfg:ro
