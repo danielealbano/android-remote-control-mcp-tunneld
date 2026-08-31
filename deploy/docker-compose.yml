@@ -115,7 +115,7 @@ services:
     logging: *caplog
 
   ntfy:
-    image: binwiederhier/ntfy:v2.27.0
+    image: binwiederhier/ntfy:v2.28.0
     restart: unless-stopped
     command: ["serve"]
     environment:
