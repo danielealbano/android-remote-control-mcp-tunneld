@@ -17,8 +17,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -135,9 +133,6 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 		NextProtos:   []string{"h2", "http/1.1"},
 	}
 	srv := &http.Server{Handler: mux, TLSConfig: tlsConf}
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

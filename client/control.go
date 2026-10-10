@@ -11,8 +11,6 @@ import (
 	"net/http"
 	"sync"
 
-	"golang.org/x/net/http2"
-
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -34,7 +32,7 @@ type Client struct {
 	ident *Identity
 	cert  *tls.Certificate
 
-	tr *http2.Transport
+	tr *http.Transport
 	hc *http.Client
 
 	sendMu sync.Mutex
@@ -64,20 +62,39 @@ func (c *Client) Close() {
 	c.tr.CloseIdleConnections()
 }
 
+var errNotHTTP2 = errors.New("client: server did not negotiate HTTP/2 (ALPN h2)")
+
 // newMTLSTransport builds an HTTP/2 transport that dials dialAddr, negotiates TLS with SNI/Host
 // controlHost (trusting caPool), and presents the identity cert returned by getCert as the mTLS client
 // cert (getCert is re-invoked per handshake, so a rotated identity is picked up on reconnect).
-func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCert func() *tls.Certificate) *http2.Transport {
-	return &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCert func() *tls.Certificate) *http.Transport {
+	var protocols http.Protocols
+	protocols.SetHTTP2(true)
+	return &http.Transport{
+		Protocols:       &protocols,
+		MaxConnsPerHost: 1,
+		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			d := &tls.Dialer{Config: &tls.Config{
 				ServerName: controlHost, RootCAs: caPool, MinVersion: tls.VersionTLS12,
 				NextProtos:           []string{"h2"},
 				GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return getCert(), nil },
 			}}
-			return d.DialContext(ctx, network, dialAddr)
+			conn, err := d.DialContext(ctx, network, dialAddr)
+			if err != nil {
+				return nil, err
+			}
+			return requireH2(conn)
 		},
 	}
+}
+
+func requireH2(conn net.Conn) (net.Conn, error) {
+	tc, ok := conn.(*tls.Conn)
+	if !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
+		_ = conn.Close()
+		return nil, errNotHTTP2
+	}
+	return conn, nil
 }
 
 func (c *Client) currentCert() *tls.Certificate {
