@@ -97,14 +97,14 @@ No Mermaid charts are added or modified, so the §9 Mermaid-validation step does
 
 ## User Stories
 
-- [ ] **US1 — Go 1.27.2 + Go module refresh**
-- [ ] **US2 — Migrate to net/http's built-in HTTP/2**
-- [ ] **US3 — Migrate to lego v5**
-- [ ] **US4 — Replace the unpublished MinIO images with PGSTY Silo**
-- [ ] **US5 — Refresh the deploy compose images**
-- [ ] **US6 — Refresh CI + release workflows**
-- [ ] **US7 — Refresh the `support/` Android toolchains + regenerate fixtures**
-- [ ] **US8 — Documentation + ground-up verification**
+- [x] **US1 — Go 1.27.2 + Go module refresh**
+- [x] **US2 — Migrate to net/http's built-in HTTP/2**
+- [x] **US3 — Migrate to lego v5**
+- [x] **US4 — Replace the unpublished MinIO images with PGSTY Silo**
+- [x] **US5 — Refresh the deploy compose images**
+- [x] **US6 — Refresh CI + release workflows**
+- [x] **US7 — Refresh the `support/` Android toolchains + regenerate fixtures**
+- [x] **US8 — Documentation + ground-up verification**
 
 ---
 
@@ -114,9 +114,9 @@ The standard-library and x/net / grpc vulnerability fixes require go1.27.2 and t
 
 Acceptance criteria:
 - [x] `go.mod` declares `go 1.27.2` and has NO `toolchain` line.
-- [ ] Every module required by `go.mod` is at its latest version within its major (checked in Task 8.2, after
+- [x] Every module required by `go.mod` is at its latest version within its major (checked in Task 8.2, after
       US3's re-refresh).
-- [ ] The `Dockerfile` builds on `golang:1.27.2`; `release.yml` takes the Go version from `go.mod`.
+- [x] The `Dockerfile` builds on `golang:1.27.2`; `release.yml` takes the Go version from `go.mod`.
 
 ### [x] Task 1.1 — Bump the toolchain and every module
 
@@ -158,11 +158,11 @@ Remove every `golang.org/x/net/http2` import (6 files) without changing behaviou
 
 Acceptance criteria:
 - [x] No file in any build-tag set imports `golang.org/x/net/http2`; `golang.org/x/net` is `// indirect`.
-- [ ] The control client and the mesh client open ONE connection for concurrent requests on a cold pool,
+- [x] The control client and the mesh client open ONE connection for concurrent requests on a cold pool,
       open a second one only when the first is saturated, reconnect after a drop, and refuse a peer that does
       not negotiate ALPN `h2`.
-- [ ] The control and mesh servers serve HTTP/2 (and HTTP/1.1) on their pre-built `tls.Listener`.
-- [ ] Mesh PING health keeps its timings (`readIdle` → `SendPingTimeout`, `pingTimeout` → `PingTimeout`).
+- [x] The control and mesh servers serve HTTP/2 (and HTTP/1.1) on their pre-built `tls.Listener`.
+- [x] Mesh PING health keeps its timings (`readIdle` → `SendPingTimeout`, `pingTimeout` → `PingTimeout`).
 
 ### [x] Task 2.1 — Phone control client transport
 
@@ -375,9 +375,9 @@ behaviour change.
 
 Acceptance criteria:
 - [x] No file imports `github.com/go-acme/lego/v4`; `go.mod` requires `github.com/go-acme/lego/v5 v5.5.2`.
-- [ ] Issuance, EAB registration, DNS-01 (incl. `--acme-dns-resolver` / `--acme-dns-skip-propagation-check`) and
+- [x] Issuance, EAB registration, DNS-01 (incl. `--acme-dns-resolver` / `--acme-dns-skip-propagation-check`) and
       Retry-After classification behave as before.
-- [ ] lego's log output stays on stderr.
+- [x] lego's log output stays on stderr.
 
 ### [x] Task 3.1 — Switch the module
 
@@ -586,8 +586,8 @@ Silo is the maintained build of the same server (verified 2026-10-10: `server /d
 idempotent `mc mb`, read-after-overwrite and the "no lifecycle configuration" error all behave as tunneld needs).
 
 Acceptance criteria:
-- [ ] The integration + e2e tiers start the S3 stand-in from `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`.
-- [ ] The compose stack runs `pgsty/silo` + `pgsty/mc` (`RELEASE.2026-09-16T00-00-00Z`) with unchanged commands,
+- [x] The integration + e2e tiers start the S3 stand-in from `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`.
+- [x] The compose stack runs `pgsty/silo` + `pgsty/mc` (`RELEASE.2026-09-16T00-00-00Z`) with unchanged commands,
       environment and bucket-creation script.
 
 ### [x] Task 4.1 — Test containers
@@ -619,11 +619,11 @@ The observability stack in the compose file is several releases behind (Dependab
 its alert bridge has never been reachable (see Scope).
 
 Acceptance criteria:
-- [ ] `deploy/docker-compose.yml` pins the latest releases below with no configuration change (release notes
+- [x] `deploy/docker-compose.yml` pins the latest releases below with no configuration change (release notes
       reviewed: our Prometheus config uses only `static_configs` + `rule_files`, Grafana only a plain `prometheus`
       datasource + file-provisioned dashboards, and ntfy 2.28's 1 KB title / 512 B tag caps exceed our alerts); the
       unchanged configs pass the new images' config checks and start cleanly (Task 8.2).
-- [ ] The bridge reads its config from the path its binary uses and listens on all interfaces (`:8080`), the
+- [x] The bridge reads its config from the path its binary uses and listens on all interfaces (`:8080`), the
       address `alertmanager.yml`'s webhook (`http://ntfy-alertmanager:8080`) targets.
 
 ### [x] Task 5.1 — Bump the images
@@ -675,9 +675,9 @@ Every pinned action runs on the removed Node 20 runtime, the linter predates Go 
 with no timeout.
 
 Acceptance criteria:
-- [ ] Every `uses:` in `.github/workflows/*.yml` pins the latest release's commit SHA (Node 24 runtime).
-- [ ] golangci-lint v2.14.0 in CI; `make mermaid-check` runs on Node 24 with mermaid-cli 12.0.0.
-- [ ] Every job has a `timeout-minutes` above its normal runtime and above any inner `go test -timeout`.
+- [x] Every `uses:` in `.github/workflows/*.yml` pins the latest release's commit SHA (Node 24 runtime).
+- [x] golangci-lint v2.14.0 in CI; `make mermaid-check` runs on Node 24 with mermaid-cli 12.0.0.
+- [x] Every job has a `timeout-minutes` above its normal runtime and above any inner `go test -timeout`.
 
 ### [x] Task 6.1 — Pin the latest action releases
 
@@ -730,11 +730,11 @@ okhttp 5.5.0 / BouncyCastle 1.86 / Ktor 3.6.0, with `compileSdk 37` and `targetS
 SDK packages (android-37.0, build-tools 36.0.0) are installed locally.
 
 Acceptance criteria:
-- [ ] Both projects build from clean with those versions; the only warning is the user-accepted AGP-internal
+- [x] Both projects build from clean with those versions; the only warning is the user-accepted AGP-internal
       `Configuration.setVisible` deprecation (see Scope).
 - [x] The fixtures (`fixtures/attest-probe/`, `fixtures/tunnel-app/`) are regenerated from clean builds;
       `signers.allow` is unchanged (same debug signing key).
-- [ ] `TestE2E_DeviceAttestation` + `TestE2E_ReferenceTunnelApp` pass on the connected device (Task 8.2).
+- [x] `TestE2E_DeviceAttestation` + `TestE2E_ReferenceTunnelApp` pass on the connected device (Task 8.2).
 
 ### [x] Task 7.1 — Gradle wrapper → 9.8.1 (first pass)
 
@@ -836,9 +836,9 @@ The canonical docs MUST describe the new stack, and every change MUST be proven 
 final code.
 
 Acceptance criteria:
-- [ ] `.claude/rules/project.md`, `README.md`, `docs/PROJECT.md` and both `support/*/README.md` reflect the new
+- [x] `.claude/rules/project.md`, `README.md`, `docs/PROJECT.md` and both `support/*/README.md` reflect the new
       stack.
-- [ ] Every superseded Dependabot PR is closed with a comment naming this plan's branch and the version it carries.
+- [x] Every superseded Dependabot PR is closed with a comment naming this plan's branch and the version it carries.
 
 ### [x] Task 8.1 — Update the docs
 
@@ -862,16 +862,16 @@ Acceptance criteria:
 Definition of Done:
 - [x] `grep -n 'x/net/http2\|lego/v4' .claude/rules/project.md` returns nothing.
 
-### [ ] Task 8.2 — Ground-up double-check + quality gates
+### [x] Task 8.2 — Ground-up double-check + quality gates
 
-- [ ] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds
+- [x] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds
   NO comment line to hand-written code in any language (exempt per Scope: the regenerated
   `support/*/gradlew` / `support/*/gradlew.bat` and the action-pin `# vX.Y.Z` tags) and every REMOVE instruction
   above is applied. Then:
   `grep -rn 'golang.org/x/net/http2\|go-acme/lego/v4' --include='*.go' .` and
   `grep -rn 'minio/minio\|minio/mc' --include='*.go' --include='*.yml' .` return nothing;
   `grep -n '^go \|^toolchain' go.mod` shows only `go 1.27.2`.
-- [ ] **Action** — scoped latest-version check over `go.mod`'s requirements; for each module it prints run
+- [x] **Action** — scoped latest-version check over `go.mod`'s requirements; for each module it prints run
   `go get <path>@latest`, then `go mod tidy`, until it prints nothing:
 
 ```sh
@@ -879,17 +879,17 @@ go list -m -u -f '{{if .Update}}{{.Path}} {{.Version}} -> {{.Update.Version}}{{e
   $(go mod edit -json | python3 -c 'import json,sys; print(" ".join(r["Path"] for r in json.load(sys.stdin)["Require"]))')
 ```
 
-- [ ] **Action** — re-check that every NON-Go pin in this plan is still the latest stable release (the eight action
+- [x] **Action** — re-check that every NON-Go pin in this plan is still the latest stable release (the eight action
   SHAs, the compose + Silo/mc + `golang` images, the Pebble + challtestsrv test images, golangci-lint, mermaid-cli,
   Gradle, AGP, Kotlin, okhttp, BouncyCastle, Ktor); if any newer stable release exists, STOP and ask the user. Node is pinned by the user's
   choice of the 24 line (`node-version: '24'` floats within it): only Node 24 losing LTS status would be a reason
   to stop — a newer Node major (Current or LTS) is not.
-- [ ] **Action** — connect the Realme T70 (single adb device), then run every gate ONCE with output captured
+- [x] **Action** — connect the Realme T70 (single adb device), then run every gate ONCE with output captured
   (agent.md §5), fix anything surfaced, and re-run: `make lint`, `make vet`, `make govulncheck` (reports no
   vulnerability affecting our code), `make build`, `make test-unit`, `make test-integration`, `make test-e2e` (MUST
   show `TestE2E_DeviceAttestation` and `TestE2E_ReferenceTunnelApp` PASS, not SKIP), `make test-scripts`,
   `make compose-config`, `make mermaid-check`, `make tidy` + `git diff --exit-code -- go.mod go.sum`.
-- [ ] **Action** — verify the Android warning budget on CLEAN rebuilds (Kotlin compiler and AGP task warnings are
+- [x] **Action** — verify the Android warning budget on CLEAN rebuilds (Kotlin compiler and AGP task warnings are
   emitted only when the tasks actually run; plain `assembleDebug` prints only Gradle's summary line):
 
 ```sh
@@ -901,7 +901,7 @@ set -o pipefail
   Both logs and both `support/*/build/reports/problems/problems-report.html` MUST contain no warning other than the
   user-accepted AGP-internal `Configuration.setVisible` deprecation (and Gradle's resulting summary line) — no
   Kotlin compiler warning, no other deprecation.
-- [ ] **Action** — run the compose S3 stand-in with the new images and require the bucket job to succeed, in an
+- [x] **Action** — run the compose S3 stand-in with the new images and require the bucket job to succeed, in an
   isolated compose project (never touching any other stack); the command MUST exit 0 and the log MUST show the
   `createbuckets` container exiting with code 0:
 
@@ -913,7 +913,7 @@ docker compose -p plan13-silo-check --env-file deploy/.env.example -f deploy/doc
 [ "$rc" -eq 0 ] && grep -E 'createbuckets-1 exited with code 0' /tmp/plan13-compose-silo.log
 ```
 
-- [ ] **Action** — validate the unchanged observability configs against the five bumped images (offline config
+- [x] **Action** — validate the unchanged observability configs against the five bumped images (offline config
   checks, then a bounded start of the three services whose configs have no checker; containers are uniquely named
   and NOT published on any host port, so no local service is touched):
 
@@ -946,21 +946,21 @@ docker rm -f plan13-obs-grafana plan13-obs-ntfy plan13-obs-ntfy-am
   `auth-file` / `cache-file` need). The bridge's log MUST show `Listening on :8080` (all interfaces — Task 5.2),
   not `127.0.0.1:8080`.
 
-- [ ] **Action** — build the production image (exercises the `golang:1.27.2` Dockerfile):
+- [x] **Action** — build the production image (exercises the `golang:1.27.2` Dockerfile):
   `set -o pipefail; docker build -f Dockerfile -t tunneld:plan13 . 2>&1 | tee /tmp/plan13-docker-build.log`.
-- [ ] **Action** — push the branch and run the CI workflow on it (CI does not trigger on branch pushes):
+- [x] **Action** — push the branch and run the CI workflow on it (CI does not trigger on branch pushes):
   `gh workflow run ci.yml --ref chore/plan-13-dependency-refresh`, then `gh run watch` the run; ALL six jobs
   (`static-checks`, `build`, `test-unit`, `test-integration`, `test-e2e`, `image`) MUST finish green. The
   `release.yml` changes (pins, `go-version-file`, timeout) are NOT executed here — a run publishes a release —
   their inputs are unchanged (verified against each new action's `action.yml`) and the next `v*` tag runs them.
-- [ ] **Action** — once every gate above is green: for each open Dependabot PR (`gh pr list --state open --author
+- [x] **Action** — once every gate above is green: for each open Dependabot PR (`gh pr list --state open --author
   app/dependabot` — expected #4, #5, #6, #7, #8, #18, #20, #25, #26, #27, #28, #29, #30, #31, #33, #34 plus any
   opened since) confirm this branch pins the same or a newer version of its dependency (if a PR targets a NEWER
   version, apply it first and re-run the gates), then close it with a comment naming this branch and the version
   it carries; confirm the list is then empty.
 
 Definition of Done:
-- [ ] Every checkbox above is `[x]`; all gates green on the final code.
+- [x] Every checkbox above is `[x]`; all gates green on the final code.
 
 ---
 
