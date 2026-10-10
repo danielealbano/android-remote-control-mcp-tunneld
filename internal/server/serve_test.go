@@ -2,8 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"sync"
@@ -13,6 +20,69 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
+
+func serveTestCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "serve-test"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"serve-test"}}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func TestServeTLS_ServesHTTP2OnPrebuiltListener(t *testing.T) {
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Proto) }),
+		ReadHeaderTimeout: 5 * time.Second,
+		Protocols:         h2Protocols(),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{serveTestCert(t)}, MinVersion: tls.VersionTLS12,
+			NextProtos: h2NextProtos()},
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveTLS(ctx, srv, tls.NewListener(ln, srv.TLSConfig), testLogger(), "test") }()
+	defer func() {
+		cancel()
+		_ = srv.Close()
+		<-done
+	}()
+	tests := []struct {
+		name  string
+		http2 bool
+		want  string
+	}{
+		{name: "h2 client", http2: true, want: "HTTP/2.0"},
+		{name: "http/1.1 client", http2: false, want: "HTTP/1.1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var protocols http.Protocols
+			protocols.SetHTTP2(tc.http2)
+			protocols.SetHTTP1(!tc.http2)
+			tr := &http.Transport{Protocols: &protocols,
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}}
+			defer tr.CloseIdleConnections()
+			resp, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get("https://" + ln.Addr().String() + "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.Proto != tc.want {
+				t.Fatalf("negotiated %s, want %s", resp.Proto, tc.want)
+			}
+		})
+	}
+}
 
 // errListener is a net.Listener whose Accept always fails with a fixed error (drives serveTLS's
 // error-propagation branch without a real socket).
