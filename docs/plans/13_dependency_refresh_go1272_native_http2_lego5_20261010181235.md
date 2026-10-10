@@ -44,6 +44,8 @@ Agreed with the user — bring EVERY dependency to its latest stable release and
   `/etc/ntfy-alertmanager/config` ("Failed to read config"), and the bridge's default listen address is
   `127.0.0.1:8080` (unreachable from the Alertmanager container). Both verified on 2026-10-10 against the v1.0.1
   image and its `config/config.go` (`http-address` directive).
+- **Grafana provisioning directories** (user decision, after Task 8.2 surfaced Grafana's startup errors for the
+  missing `plugins/` + `alerting/` provisioning directories): provision both (Task 5.3).
 - Close every superseded Dependabot PR (Task 8.2).
 - Branch: `chore/plan-13-dependency-refresh` (github.md `<type>/plan-<n>-<desc>`).
 
@@ -500,6 +502,70 @@ func (a *legoDNSAdapter) CleanUp(ctx context.Context, domain, _, keyAuth string)
 - [x] **Action** — modify the now-wrong test comments: `internal/acme/lazy_test.go` (above
   `TestLegoClient_ObtainRespectsCtxCancel`) REMOVE the word `(ctx-less) `; `internal/acme/lego_client_test.go`
   (above `TestClassifyRateLimitedErrorHonorsRetryAfter`) REMOVE the words `literal ` and `parse and `.
+- [x] **Action** — modify `internal/tunneltest/containers.go`: real readiness waits for the shell-less Pebble and
+  challtestsrv images (`wait.ForListeningPort` cannot probe inside them — see Deviations). Add after `StartPebble`
+  (imports gain `net` and `strings`):
+
+```go
+const pebbleStartupTimeout = 60 * time.Second
+
+func pebbleHTTPSReady(path, port string) *wait.HTTPStrategy {
+	return wait.ForHTTP(path).WithPort(port).WithTLS(true).WithAllowInsecure(true).
+		WithStartupTimeout(pebbleStartupTimeout)
+}
+
+func dnsAnswers(port string) func(context.Context, wait.StrategyTarget) error {
+	return func(ctx context.Context, target wait.StrategyTarget) error {
+		host, err := target.Host(ctx)
+		if err != nil {
+			return err
+		}
+		mapped, err := target.MappedPort(ctx, port)
+		if err != nil {
+			return err
+		}
+		addr := net.JoinHostPort(host, mapped.Port())
+		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", addr)
+		}}
+		for {
+			qctx, cancel := context.WithTimeout(ctx, time.Second)
+			_, err := r.LookupNetIP(qctx, "ip4", "readiness.test.")
+			cancel()
+			if err == nil {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("dns %s not answering: %w", addr, err)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+}
+```
+
+  and in `StartPebble` replace the challtestsrv and Pebble `WaitingFor` values (`/dns-request-history` is
+  challtestsrv's read-only management endpoint — 200 for any JSON `host`; the A query is answered with the
+  `-defaultIPv4`; `/roots/0` is the management endpoint `fetchIssuingRoots` reads; `ForNop` ignores its own timeout,
+  so the `ForAll` deadline bounds it):
+
+```go
+		WaitingFor: wait.ForAll(
+			wait.ForHTTP("/dns-request-history").WithPort("8055/tcp").WithMethod(http.MethodPost).
+				WithBody(strings.NewReader(`{"host":"readiness.test"}`)),
+			wait.ForNop(dnsAnswers("8053/udp")),
+		).WithDeadline(pebbleStartupTimeout),
+```
+
+```go
+		WaitingFor: wait.ForAll(
+			pebbleHTTPSReady("/dir", "14000/tcp"),
+			pebbleHTTPSReady("/roots/0", "15000/tcp"),
+		).WithDeadline(pebbleStartupTimeout),
+```
+
 - [x] **Action** — modify `internal/tunneltest/containers.go`: add the shared EAB Pebble helper. Pebble 2.10.1
   ships `/test/config/pebble-config-external-account-bindings.json` (`externalAccountBindingRequired: true` plus
   test kid→key pairs); the keys are read from the container, never hardcoded in the repo.
@@ -520,8 +586,7 @@ func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[
 		ExposedPorts: []string{"14000/tcp"},
 		Cmd:          []string{"-config", pebbleEABConfig},
 		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
-		WaitingFor: wait.ForHTTP("/dir").WithPort("14000/tcp").WithTLS(true).WithAllowInsecure(true).
-			WithStartupTimeout(60 * time.Second),
+		WaitingFor:   pebbleHTTPSReady("/dir", "14000/tcp"),
 	})
 	var cfg pebbleEABConfigFile
 	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {
@@ -666,6 +731,15 @@ the same `http-address :8080` line to their copy.
 Definition of Done:
 - [x] The compose mount target is `/etc/ntfy-alertmanager/config`; the example's first directive is
       `http-address :8080`.
+
+### [x] Task 5.3 — Grafana provisioning directories
+
+- [x] **Action** — create `deploy/grafana/provisioning/plugins/plugins.yml` and
+  `deploy/grafana/provisioning/alerting/alerting.yml`, each containing only `apiVersion: 1` (see Deviations: a
+  `.gitkeep` would make Grafana's alerting reader log an "invalid suffix" warning).
+
+Definition of Done:
+- [x] The Grafana runtime check in Task 8.2 logs no `level=error` line.
 
 ---
 
@@ -971,7 +1045,8 @@ Definition of Done:
   check, and the host port is accepted by docker-proxy early), so the valid-key case failed with `EOF` on the
   directory GET and the mismatched-key case passed for the wrong reason (the same connection error). The helper now
   waits with `wait.ForHTTP("/dir")` over TLS (`WithAllowInsecure` — Pebble's minica cert) with a 60 s startup
-  timeout, and the test asserts the mismatched case fails at EAB registration (`EAB register` in the error).
+  timeout (the shared `pebbleHTTPSReady` helper since the code-review fix below), and the test asserts the
+  mismatched case fails at EAB registration (`EAB register` in the error).
 - **US8 Task 8.2 (observability runtime check — Grafana log lines).** Grafana 13.2.3 starts and stays running with the
   committed provisioning, but logs two `level=error` lines: "Failed to read plugin provisioning files from directory
   /etc/grafana/provisioning/plugins" and "can't read alerting provisioning files from directory
@@ -984,3 +1059,19 @@ Definition of Done:
   `deploy/grafana/provisioning/alerting/alerting.yml`. Re-running the Grafana runtime check on 13.2.3 shows no
   `level=error` line, the datasource + dashboards still provisioned, and only Grafana's internal migrator /
   sub-resource warnings that the pre-change run logged identically.
+- **Code review (US3 Task 3.2 — `StartPebble` readiness).** The same shell-less false-ready affected the existing
+  `StartPebble`: challtestsrv waited on `wait.ForListeningPort("8055/tcp")`, Pebble on `wait.ForListeningPort("14000/tcp")`,
+  and the management port 15000 that `fetchIssuingRoots` GETs once was never awaited (integration log: "Shell not
+  found in container" → "Container is ready" in the same second). challtestsrv starts its DNS servers in goroutines
+  separate from its management server (`challtestsrv` v1.4.2 `ChallSrv.Run`), so a management 200 does not prove
+  the DNS listener; both are now awaited. `StartPebble` waits for HTTP on 8055 + a DNS A answer on 8053/udp
+  (challtestsrv) and for `/dir` on 14000 + `/roots/0` on 15000 (Pebble); `StartPebbleEAB` reuses
+  `pebbleHTTPSReady`. Task 3.2 carries the code.
+- **Code review (US2 Tasks 2.1–2.3, US3 Task 3.2 — `t.Parallel()`).** go.md requires `t.Parallel()` on tests that are
+  safe to run concurrently: the new tests that own their listeners and fakes call it
+  (`TestNewMTLSTransport_RejectsNonH2Server`, `_OneConnForConcurrentColdRequests`,
+  `_OpensSecondConnWhenStreamsSaturated`, `_ReconnectsAfterConnDrop`; `TestClient_RejectsNonH2Peer`,
+  `_OneConnForConcurrentColdStreams`, `_OpensSecondConnWhenStreamsSaturated`, `_ReconnectsAfterPeerConnDrop`,
+  `_NewH2ClientMapsPingTimeouts`; `TestServeTLS_ServesHTTP2OnPrebuiltListener`;
+  `TestLazyCA_BuildCtxSurvivesCallerButIsBounded`, `TestLegoClient_ObtainDetachesCallerCancel`,
+  `TestLegoConfig_DNSChallengeOpts_RecursiveCheckAlwaysOff`); the tests marked NOT parallel above stay sequential.
