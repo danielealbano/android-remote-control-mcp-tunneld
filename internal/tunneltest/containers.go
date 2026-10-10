@@ -35,7 +35,7 @@ import (
 // feature is used — MinIO is a plain-S3 stand-in). Pebble + challtestsrv: the hermetic ACME test CA.
 const (
 	valkeyImage       = "valkey/valkey:9.1-alpine"
-	minioImage        = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+	minioImage        = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 	pebbleImage       = "ghcr.io/letsencrypt/pebble:2.10.1"
 	challtestsrvImage = "ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1"
 
