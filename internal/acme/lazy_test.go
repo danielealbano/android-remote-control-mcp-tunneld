@@ -20,8 +20,11 @@ func TestLegoClient_ObtainRespectsCtxCancel(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block) // release the stranded obtain goroutine on test exit (the result chan is buffered)
 	l := &legoClient{
-		cfg:       LegoConfig{CAID: "x"},
-		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) { <-block; return nil, nil },
+		cfg: LegoConfig{CAID: "x"},
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			<-block
+			return nil, nil
+		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
