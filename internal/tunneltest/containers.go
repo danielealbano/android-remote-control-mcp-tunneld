@@ -276,7 +276,8 @@ func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[
 		ExposedPorts: []string{"14000/tcp"},
 		Cmd:          []string{"-config", pebbleEABConfig},
 		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
-		WaitingFor:   wait.ForListeningPort("14000/tcp"),
+		WaitingFor: wait.ForHTTP("/dir").WithPort("14000/tcp").WithTLS(true).WithAllowInsecure(true).
+			WithStartupTimeout(60 * time.Second),
 	})
 	var cfg pebbleEABConfigFile
 	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {

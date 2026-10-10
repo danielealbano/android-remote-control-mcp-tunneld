@@ -4,6 +4,7 @@ package acme_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
@@ -32,6 +33,9 @@ func TestNewLegoClient_EABRegistration(t *testing.T) {
 			})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("NewLegoClient err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !strings.Contains(err.Error(), "EAB register") {
+				t.Fatalf("the mismatched key must fail at EAB registration, got %v", err)
 			}
 		})
 	}
