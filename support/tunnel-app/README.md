@@ -55,5 +55,5 @@ different machine's debug key must re-run `make tunnel-app` to refresh the allow
 
 `TestE2E_ReferenceTunnelApp` is a **local-only developer gate**: it needs a connected phone and live
 Google attestation reachability, so it SKIPS (never fails) when no single adb device is connected, and
-it is **never** wired into CI-with-device. The Gradle build outputs (`build/`, `.gradle/`) and the
+it is **never** wired into CI-with-device. The Gradle build outputs (`build/`, `.gradle/`, `.kotlin/`) and the
 machine-specific `local.properties` are gitignored; only the three fixtures above are committed.

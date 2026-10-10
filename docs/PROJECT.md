@@ -155,7 +155,7 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   `ghcr.io/danielealbano/tunneld`.
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
   `test-integration`, `test-e2e`, `test-scripts`, `compose-config`, `mermaid-check`). The integration
-  and e2e tiers require Docker (testcontainers: Valkey, MinIO, Pebble).
+  and e2e tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble).
 - **Attribution**: country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the
   attribution; it MUST be preserved).
 

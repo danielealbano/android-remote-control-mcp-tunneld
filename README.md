@@ -56,7 +56,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
 4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host, and
    set `TUNNELD_ACME_DNS_PROVIDER` + its credential (tunneld runs ACME DNS-01 to issue the phone's public
    cert). Publish the CAA `issue` records for Let's Encrypt / GTS / ZeroSSL as an operator DNS step.
-5. **S3**: for the local MinIO stand-in the compose creates the bucket automatically. For a real
+5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
+   images are no longer published) the compose creates the bucket automatically. For a real
    provider, set the `S3_*` / `TUNNELD_S_3_*` values and **run a pre-go-live read-after-write probe**
    (PUT → GET → overwrite-PUT → GET returns the newest body) — the name-claim protocol relies on it.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.
