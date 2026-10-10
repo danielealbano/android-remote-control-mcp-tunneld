@@ -15,7 +15,6 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
-	golang.org/x/net v0.61.0
 	golang.org/x/sync v0.24.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -253,6 +252,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/telemetry v0.0.0-20261010193011-f71dc92da45e // indirect
