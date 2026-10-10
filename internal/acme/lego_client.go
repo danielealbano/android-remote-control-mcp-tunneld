@@ -10,16 +10,18 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"time"
 
-	legoacme "github.com/go-acme/lego/v4/acme"
-	"github.com/go-acme/lego/v4/acme/api"
-	"github.com/go-acme/lego/v4/certificate"
-	"github.com/go-acme/lego/v4/challenge"
-	"github.com/go-acme/lego/v4/challenge/dns01"
-	"github.com/go-acme/lego/v4/lego"
-	"github.com/go-acme/lego/v4/registration"
+	legoacme "github.com/go-acme/lego/v5/acme"
+	"github.com/go-acme/lego/v5/certificate"
+	"github.com/go-acme/lego/v5/challenge"
+	"github.com/go-acme/lego/v5/challenge/dns01"
+	"github.com/go-acme/lego/v5/lego"
+	legolog "github.com/go-acme/lego/v5/log"
+	"github.com/go-acme/lego/v5/registration"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -27,22 +29,22 @@ import (
 // acmeUser implements lego's registration.User for one operator ACME account per CA.
 type acmeUser struct {
 	email string
-	reg   *registration.Resource
-	key   crypto.PrivateKey
+	reg   *legoacme.ExtendedAccount
+	key   crypto.Signer
 }
 
-func (u *acmeUser) GetEmail() string                        { return u.email }
-func (u *acmeUser) GetRegistration() *registration.Resource { return u.reg }
-func (u *acmeUser) GetPrivateKey() crypto.PrivateKey        { return u.key }
+func (u *acmeUser) GetEmail() string                           { return u.email }
+func (u *acmeUser) GetRegistration() *legoacme.ExtendedAccount { return u.reg }
+func (u *acmeUser) GetPrivateKey() crypto.Signer               { return u.key }
 
 // LegoConfig configures one per-CA lego client.
 type LegoConfig struct {
 	CAID         string
 	DirectoryURL string
 	Email        string
-	AccountKey   crypto.PrivateKey // persisted per-CA account key
-	Profile      string            // LE "shortlived" ("" for GTS/ZeroSSL)
-	Validity     time.Duration     // requested validity (GTS); 0 = CA default
+	AccountKey   crypto.Signer // persisted per-CA account key
+	Profile      string        // LE "shortlived" ("" for GTS/ZeroSSL)
+	Validity     time.Duration // requested validity (GTS); 0 = CA default
 	RenewMargin  time.Duration
 	Shortlived   time.Duration // 160h (fixed-cadence anchor for non-LE)
 	UseARI       bool          // LE only: renew at the NotAfter−margin floor (vs the fixed non-LE cadence)
@@ -52,37 +54,42 @@ type LegoConfig struct {
 	RawDNS       challenge.Provider // a lego-native DNS-01 provider (production, selected by --acme-dns-provider); preferred over DNS when set
 
 	// DNS-01 propagation pre-check tuning (--acme-dns-resolver / --acme-dns-skip-propagation-check).
-	// Empty/false preserve lego's defaults (system resolvers + authoritative-NS propagation required).
 	DNSResolvers            []string // recursive nameservers for the propagation pre-check (split-horizon / hermetic test CA)
 	DNSSkipPropagationCheck bool     // drop the authoritative-NS propagation requirement
 }
 
 // dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
 func (cfg LegoConfig) dnsChallengeOpts() []dns01.ChallengeOption {
-	var opts []dns01.ChallengeOption
-	if len(cfg.DNSResolvers) > 0 {
-		opts = append(opts, dns01.AddRecursiveNameservers(cfg.DNSResolvers))
-	}
+	opts := []dns01.ChallengeOption{dns01.DisableRecursiveNSsPropagationRequirement()}
 	if cfg.DNSSkipPropagationCheck {
 		opts = append(opts, dns01.DisableAuthoritativeNssPropagationRequirement())
 	}
 	return opts
 }
 
+func (cfg LegoConfig) applyDNSResolvers() {
+	if len(cfg.DNSResolvers) == 0 {
+		return
+	}
+	opts := dns01.NewOptions()
+	opts.RecursiveNameservers = cfg.DNSResolvers
+	dns01.SetDefaultClient(dns01.NewClient(opts))
+}
+
 // legoClient implements caIssuer via lego.
 type legoClient struct {
 	cfg    LegoConfig
 	client *lego.Client
-	// obtainCSR is the (ctx-less) lego call, seamed so a test can drive a blocking obtain against the
+	// obtainCSR is the lego call, seamed so a test can drive a blocking obtain against the
 	// ctx-cancel path. Defaults to client.Certificate.ObtainForCSR.
-	obtainCSR func(certificate.ObtainForCSRRequest) (*certificate.Resource, error)
+	obtainCSR func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error)
 }
 
 var _ caIssuer = (*legoClient)(nil)
 
 // NewLegoClient constructs and registers (or EAB-registers) the per-CA account and wires the DNS-01
 // provider. Network-touching; exercised by the Pebble-backed integration tier.
-func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
+func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	key := cfg.AccountKey
 	if key == nil {
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -98,6 +105,7 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
 	}
+	cfg.applyDNSResolvers()
 	dnsOpts := cfg.dnsChallengeOpts()
 	switch {
 	case cfg.RawDNS != nil:
@@ -110,7 +118,7 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 		}
 	}
 	if cfg.EABKID != "" {
-		reg, err := client.Registration.RegisterWithExternalAccountBinding(registration.RegisterEABOptions{
+		reg, err := client.Registration.RegisterWithExternalAccountBinding(ctx, registration.RegisterEABOptions{
 			TermsOfServiceAgreed: true, Kid: cfg.EABKID, HmacEncoded: cfg.EABHMAC,
 		})
 		if err != nil {
@@ -118,7 +126,7 @@ func NewLegoClient(cfg LegoConfig) (*legoClient, error) {
 		}
 		user.reg = reg
 	} else {
-		reg, err := client.Registration.Register(registration.RegisterOptions{TermsOfServiceAgreed: true})
+		reg, err := client.Registration.Register(ctx, registration.RegisterOptions{TermsOfServiceAgreed: true})
 		if err != nil {
 			return nil, fmt.Errorf("acme: register (%s): %w", cfg.CAID, err)
 		}
@@ -136,8 +144,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _
 	if l.cfg.Validity > 0 {
 		req.NotAfter = time.Now().Add(l.cfg.Validity)
 	}
-	// lego's ObtainForCSR takes no context (DNS-01 propagation polling can run for minutes, bounded only
-	// by lego's internal per-request HTTP timeout). Run it off-goroutine and honor the caller's ctx so a
+	// Run it off-goroutine and honor the caller's ctx so a
 	// shutdown / aborted /api/v1/issue stops waiting; the abandoned call completes and is discarded.
 	type result struct {
 		res *certificate.Resource
@@ -145,7 +152,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _
 	}
 	ch := make(chan result, 1)
 	go func() {
-		res, err := l.obtainCSR(req)
+		res, err := l.obtainCSR(context.WithoutCancel(ctx), req)
 		ch <- result{res, err}
 	}()
 	select {
@@ -176,25 +183,24 @@ func (l *legoClient) shouldRenew(_ context.Context, cur store.CertInfo, now time
 	return !now.Before(at), at, nil
 }
 
-// dnsProviderTimeout bounds one TXT publish/cleanup against our neutral DNSProvider seam. lego's
-// challenge.Provider interface is ctx-less, so this is the only place a deadline can be imposed; the
+// dnsProviderTimeout bounds one TXT publish/cleanup against our neutral DNSProvider seam. The
 // record publish/remove is a quick API call (propagation waiting is lego's own concern).
 const dnsProviderTimeout = 2 * time.Minute
 
 // legoDNSAdapter adapts our DNSProvider to lego's challenge.Provider (computing the record).
 type legoDNSAdapter struct{ p DNSProvider }
 
-func (a *legoDNSAdapter) Present(domain, _, keyAuth string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), dnsProviderTimeout)
+func (a *legoDNSAdapter) Present(ctx context.Context, domain, _, keyAuth string) error {
+	ctx, cancel := context.WithTimeout(ctx, dnsProviderTimeout)
 	defer cancel()
-	info := dns01.GetChallengeInfo(domain, keyAuth)
+	info := dns01.GetChallengeInfo(ctx, domain, keyAuth)
 	return a.p.Present(ctx, info.EffectiveFQDN, info.Value)
 }
 
-func (a *legoDNSAdapter) CleanUp(domain, _, keyAuth string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), dnsProviderTimeout)
+func (a *legoDNSAdapter) CleanUp(ctx context.Context, domain, _, keyAuth string) error {
+	ctx, cancel := context.WithTimeout(ctx, dnsProviderTimeout)
 	defer cancel()
-	info := dns01.GetChallengeInfo(domain, keyAuth)
+	info := dns01.GetChallengeInfo(ctx, domain, keyAuth)
 	return a.p.CleanUp(ctx, info.EffectiveFQDN, info.Value)
 }
 
@@ -214,16 +220,12 @@ func certInfoFromPEM(caID string, pemChain []byte) (store.CertInfo, error) {
 }
 
 // classifyLego maps a lego/ACME error to an IssuerError class. An official rate-limit answer arrives
-// as *acme.RateLimitedError carrying the CA's literal Retry-After header — that value is HONORED
+// as *acme.RateLimitedError carrying the CA's Retry-After header — that value is HONORED
 // (parsed per RFC 7231), so the chain and the phone are told exactly when the CA will accept a retry;
 // the --acme-cooldown-default applies only when no header was sent.
 func classifyLego(err error) *IssuerError {
 	if rle, ok := errors.AsType[*legoacme.RateLimitedError](err); ok {
-		retry, perr := api.ParseRetryAfter(rle.RetryAfter)
-		if perr != nil {
-			retry = 0 // absent/unparsable header → the chain falls back to --acme-cooldown-default
-		}
-		return rateLimited(retry, err)
+		return rateLimited(rle.RetryAfter, err)
 	}
 	if pd, ok := errors.AsType[*legoacme.ProblemDetails](err); ok {
 		switch {
@@ -240,4 +242,8 @@ func classifyLego(err error) *IssuerError {
 	}
 	// Non-ACME transport errors are transient.
 	return transient(err)
+}
+
+func SetLogOutput(w io.Writer) {
+	legolog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
 }

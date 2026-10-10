@@ -1,12 +1,18 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
-	legoacme "github.com/go-acme/lego/v4/acme"
+	legoacme "github.com/go-acme/lego/v5/acme"
+	"github.com/go-acme/lego/v5/challenge/dns01"
+	legolog "github.com/go-acme/lego/v5/log"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -60,23 +66,22 @@ func TestShouldRenewLEMarginFloor(t *testing.T) {
 }
 
 // TestClassifyRateLimitedErrorHonorsRetryAfter: lego's *acme.RateLimitedError carries the CA's
-// literal Retry-After header — classification must parse and honor it (and fall back to 0 → the
+// Retry-After header — classification must honor it (and fall back to 0 → the
 // cooldown default when the header is absent or unparsable).
 func TestClassifyRateLimitedErrorHonorsRetryAfter(t *testing.T) {
 	tests := []struct {
-		name string
-		hdr  string
-		want time.Duration
+		name  string
+		retry time.Duration
+		want  time.Duration
 	}{
-		{name: "seconds form", hdr: "120", want: 2 * time.Minute},
-		{name: "absent header", hdr: "", want: 0},
-		{name: "garbage header", hdr: "not-a-time", want: 0},
+		{name: "seconds form", retry: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "absent or unparsable header", retry: 0, want: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			err := &legoacme.RateLimitedError{
 				ProblemDetails: &legoacme.ProblemDetails{Type: "urn:ietf:params:acme:error:rateLimited", HTTPStatus: 429},
-				RetryAfter:     tc.hdr,
+				RetryAfter:     tc.retry,
 			}
 			ie := classifyLego(err)
 			if ie.Class != ClassRateLimited {
@@ -86,5 +91,58 @@ func TestClassifyRateLimitedErrorHonorsRetryAfter(t *testing.T) {
 				t.Fatalf("Retry = %s, want %s", ie.Retry, tc.want)
 			}
 		})
+	}
+}
+
+func TestSetLogOutput_WritesToWriter(t *testing.T) {
+	prev := legolog.Default()
+	t.Cleanup(func() { legolog.SetDefault(prev) })
+	var buf bytes.Buffer
+	SetLogOutput(&buf)
+	legolog.Info("probe")
+	if !strings.Contains(buf.String(), "probe") {
+		t.Fatalf("lego log line not written to the configured writer: %q", buf.String())
+	}
+}
+
+func dnsOptionName(opt dns01.ChallengeOption) string {
+	return runtime.FuncForPC(reflect.ValueOf(opt).Pointer()).Name()
+}
+
+func TestLegoConfig_DNSChallengeOpts_RecursiveCheckAlwaysOff(t *testing.T) {
+	tests := []struct {
+		name string
+		skip bool
+		want []string
+	}{
+		{name: "default", skip: false, want: []string{"DisableRecursiveNSsPropagationRequirement"}},
+		{name: "skip propagation check", skip: true,
+			want: []string{"DisableRecursiveNSsPropagationRequirement", "DisableAuthoritativeNssPropagationRequirement"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := LegoConfig{DNSSkipPropagationCheck: tc.skip}.dnsChallengeOpts()
+			if len(opts) != len(tc.want) {
+				t.Fatalf("got %d options, want %d", len(opts), len(tc.want))
+			}
+			for i, w := range tc.want {
+				if n := dnsOptionName(opts[i]); !strings.Contains(n, w) {
+					t.Fatalf("option %d = %s, want %s", i, n, w)
+				}
+			}
+		})
+	}
+}
+
+func TestLegoConfig_ApplyDNSResolvers(t *testing.T) {
+	prev := dns01.DefaultClient()
+	t.Cleanup(func() { dns01.SetDefaultClient(prev) })
+	LegoConfig{}.applyDNSResolvers()
+	if dns01.DefaultClient() != prev {
+		t.Fatal("no resolvers must leave lego's default DNS client untouched")
+	}
+	LegoConfig{DNSResolvers: []string{"127.0.0.1:53"}}.applyDNSResolvers()
+	if dns01.DefaultClient() == prev {
+		t.Fatal("configured resolvers must replace lego's default DNS client")
 	}
 }

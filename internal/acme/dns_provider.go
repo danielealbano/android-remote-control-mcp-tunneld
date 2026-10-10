@@ -1,8 +1,8 @@
 package acme
 
 import (
-	"github.com/go-acme/lego/v4/challenge"
-	"github.com/go-acme/lego/v4/providers/dns"
+	"github.com/go-acme/lego/v5/challenge"
+	"github.com/go-acme/lego/v5/providers/dns"
 )
 
 // DNSProviderByName resolves a lego-native DNS-01 provider from its id (the --acme-dns-provider flag,

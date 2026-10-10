@@ -9,19 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v5/certificate"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
 // TestLegoClient_ObtainRespectsCtxCancel verifies obtain returns promptly when ctx is cancelled even
-// though the (ctx-less) lego call is still blocked.
+// though the lego call is still blocked.
 func TestLegoClient_ObtainRespectsCtxCancel(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block) // release the stranded obtain goroutine on test exit (the result chan is buffered)
 	l := &legoClient{
 		cfg:       LegoConfig{CAID: "x"},
-		obtainCSR: func(certificate.ObtainForCSRRequest) (*certificate.Resource, error) { <-block; return nil, nil },
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) { <-block; return nil, nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -42,7 +42,7 @@ func TestLegoClient_ObtainRespectsCtxCancel(t *testing.T) {
 
 func TestLazyCA_ConcurrentResolveSingleBuild(t *testing.T) {
 	var builds atomic.Int32
-	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func() (caIssuer, error) {
+	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
 		builds.Add(1)
 		return &fakeCA{caID: "x"}, nil
 	})
@@ -57,7 +57,7 @@ func TestLazyCA_ConcurrentResolveSingleBuild(t *testing.T) {
 	}
 
 	var errBuilds atomic.Int32
-	le := newLazyCA("y", 0, 0, func() (caIssuer, error) {
+	le := newLazyCA("y", 0, 0, func(context.Context) (caIssuer, error) {
 		errBuilds.Add(1)
 		return nil, errors.New("boom")
 	})
@@ -74,7 +74,7 @@ func TestLazyCA_ConcurrentResolveSingleBuild(t *testing.T) {
 
 func TestLazyCA_ResolveCancelWhileBuildHangs(t *testing.T) {
 	release := make(chan struct{})
-	l := newLazyCA("x", 0, 0, func() (caIssuer, error) {
+	l := newLazyCA("x", 0, 0, func(context.Context) (caIssuer, error) {
 		<-release
 		return &fakeCA{caID: "x"}, nil
 	})
@@ -95,7 +95,7 @@ func TestLazyCA_ResolveCancelWhileBuildHangs(t *testing.T) {
 
 func TestLazyCA_ShouldRenewNeverTriggersBuild(t *testing.T) {
 	var builds atomic.Int32
-	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func() (caIssuer, error) {
+	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
 		builds.Add(1)
 		return &fakeCA{caID: "x"}, nil
 	})
@@ -125,10 +125,70 @@ func (d *deadlineDNS) CleanUp(context.Context, string, string) error { return ni
 func TestLegoDNSAdapter_PresentUsesDeadline(t *testing.T) {
 	d := &deadlineDNS{}
 	a := &legoDNSAdapter{p: d}
-	if err := a.Present("example.test", "token", "keyauth"); err != nil {
+	if err := a.Present(context.Background(), "example.test", "token", "keyauth"); err != nil {
 		t.Fatal(err)
 	}
 	if !d.hasDeadline {
 		t.Fatal("Present must pass a ctx with a deadline to the DNSProvider")
+	}
+}
+
+func TestLazyCA_BuildCtxSurvivesCallerButIsBounded(t *testing.T) {
+	got := make(chan context.Context, 1)
+	release := make(chan struct{})
+	defer close(release)
+	l := newLazyCA("x", 0, 0, func(ctx context.Context) (caIssuer, error) {
+		got <- ctx
+		<-release
+		return &fakeCA{caID: "x"}, nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	resolved := make(chan error, 1)
+	go func() {
+		_, err := l.resolve(ctx)
+		resolved <- err
+	}()
+	bctx := <-got
+	cancel()
+	if err := <-resolved; err == nil {
+		t.Fatal("a cancelled caller must return an error")
+	}
+	if bctx.Err() != nil {
+		t.Fatalf("the build ctx must survive the caller's cancellation, got %v", bctx.Err())
+	}
+	deadline, ok := bctx.Deadline()
+	if !ok || time.Until(deadline) > lazyBuildTimeout {
+		t.Fatalf("the build ctx must carry a deadline within lazyBuildTimeout, got %v (ok=%v)", deadline, ok)
+	}
+}
+
+func TestLegoClient_ObtainDetachesCallerCancel(t *testing.T) {
+	got := make(chan context.Context, 1)
+	release := make(chan struct{})
+	defer close(release)
+	l := &legoClient{
+		cfg: LegoConfig{CAID: "x"},
+		obtainCSR: func(ctx context.Context, _ certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			got <- ctx
+			<-release
+			return nil, errors.New("released")
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+		done <- err
+	}()
+	octx := <-got
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("a cancelled obtain must return an error")
+	}
+	if octx.Err() != nil {
+		t.Fatalf("the lego call's ctx must survive the caller's cancellation, got %v", octx.Err())
+	}
+	if _, ok := octx.Deadline(); ok {
+		t.Fatal("the lego call's ctx must carry no deadline")
 	}
 }
