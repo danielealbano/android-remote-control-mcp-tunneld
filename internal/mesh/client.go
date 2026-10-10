@@ -18,12 +18,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // ErrNoOwner is returned when the owner rejects the stream (stale route / connID mismatch).
 var ErrNoOwner = errors.New("mesh: owner rejected the stream")
+
+var errPeerNotHTTP2 = errors.New("mesh: peer did not negotiate HTTP/2 (ALPN h2)")
 
 // Stream is a bidirectional splice to the owner node: Read pulls phone→client bytes, Write pushes
 // client→phone bytes.
@@ -155,16 +155,32 @@ func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
 // newH2Client builds one HTTP/2 client backed by its own transport (so N clients ≈ N connections,
 // round-robin spreading load), with PING health + a bounded dial so a dead peer never pins a caller.
 func (c *Client) newH2Client() *http.Client {
-	tr := &http2.Transport{
-		TLSClientConfig: c.tlsConf(),
-		ReadIdleTimeout: c.readIdle,
-		PingTimeout:     c.pingTimeout,
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	var protocols http.Protocols
+	protocols.SetHTTP2(true)
+	cfg := c.tlsConf()
+	tr := &http.Transport{
+		Protocols:       &protocols,
+		HTTP2:           &http.HTTP2Config{SendPingTimeout: c.readIdle, PingTimeout: c.pingTimeout},
+		MaxConnsPerHost: 1,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: c.dialTimeout}, Config: cfg}
-			return d.DialContext(ctx, network, addr)
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return requirePeerH2(conn)
 		},
 	}
 	return &http.Client{Transport: tr}
+}
+
+func requirePeerH2(conn net.Conn) (net.Conn, error) {
+	tc, ok := conn.(*tls.Conn)
+	if !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
+		_ = conn.Close()
+		return nil, errPeerNotHTTP2
+	}
+	return conn, nil
 }
 
 // OpenStream dials peer and opens a connID-checked mesh stream for (tunnel, connID, streamID). The

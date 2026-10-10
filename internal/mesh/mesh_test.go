@@ -13,10 +13,12 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -644,5 +646,192 @@ func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
 	}
 	if got := p.active.Load(); got != 0 {
 		t.Fatalf("active after a failed OpenStream = %d, want 0", got)
+	}
+}
+
+type meshPeer struct {
+	addr    string
+	accepts atomic.Int64
+	mu      sync.Mutex
+	conns   []net.Conn
+}
+
+type meshPeerListener struct {
+	net.Listener
+	p *meshPeer
+}
+
+func (l *meshPeerListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.p.accepts.Add(1)
+	l.p.mu.Lock()
+	l.p.conns = append(l.p.conns, c)
+	l.p.mu.Unlock()
+	return c, nil
+}
+
+func (p *meshPeer) closeConns() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.conns {
+		_ = c.Close()
+	}
+	p.conns = nil
+}
+
+func startMeshPeer(t *testing.T, maxStreams int) *meshPeer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &meshPeer{addr: ln.Addr().String()}
+	tlsConf := selfSignedServerTLS(t)
+	srv := &http.Server{
+		TLSConfig: tlsConf, ReadHeaderTimeout: 5 * time.Second,
+		HTTP2: &http.HTTP2Config{MaxConcurrentStreams: maxStreams},
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			_, _ = io.Copy(io.Discard, r.Body)
+		}),
+	}
+	go func() { _ = srv.Serve(tls.NewListener(&meshPeerListener{Listener: ln, p: p}, tlsConf)) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return p
+}
+
+func insecureMeshTLS() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+}
+
+func TestClient_RejectsNonH2Peer(t *testing.T) {
+	tlsConf := selfSignedServerTLS(t)
+	tlsConf.NextProtos = nil
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsConf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			conn, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					if _, rerr := conn.Read(buf); rerr != nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}()
+		}
+	}()
+	c := NewClient(insecureMeshTLS, 1)
+	_, err = c.OpenStream(context.Background(), ln.Addr().String(), "t", "conn", "s1")
+	if !errors.Is(err, errPeerNotHTTP2) {
+		t.Fatalf("want errPeerNotHTTP2, got %v", err)
+	}
+}
+
+func TestClient_OneConnForConcurrentColdStreams(t *testing.T) {
+	p := startMeshPeer(t, 0)
+	c := NewClient(insecureMeshTLS, 1)
+	var wg sync.WaitGroup
+	streams := make(chan io.ReadWriteCloser, 8)
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			s, err := c.OpenStream(context.Background(), p.addr, "t", "conn", "s1")
+			if err != nil {
+				errs <- err
+				return
+			}
+			streams <- s
+		})
+	}
+	wg.Wait()
+	close(errs)
+	close(streams)
+	for s := range streams {
+		_ = s.Close()
+	}
+	for err := range errs {
+		t.Fatal(err)
+	}
+	if got := p.accepts.Load(); got != 1 {
+		t.Fatalf("want 1 TCP connection for 8 concurrent cold streams, got %d", got)
+	}
+}
+
+func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
+	p := startMeshPeer(t, 2)
+	c := NewClient(insecureMeshTLS, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var streams []io.ReadWriteCloser
+	defer func() {
+		for _, s := range streams {
+			_ = s.Close()
+		}
+	}()
+	for i := range 3 {
+		s, err := c.OpenStream(ctx, p.addr, "t", "conn", "s1")
+		if err != nil {
+			t.Fatalf("stream %d: %v", i+1, err)
+		}
+		streams = append(streams, s)
+	}
+	if got := p.accepts.Load(); got != 2 {
+		t.Fatalf("want a 2nd TCP connection once the first is saturated (2 streams), got %d", got)
+	}
+}
+
+func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
+	p := startMeshPeer(t, 0)
+	c := NewClient(insecureMeshTLS, 1)
+	s, err := c.OpenStream(context.Background(), p.addr, "t", "conn", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.Close()
+	p.closeConns()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		s, err = c.OpenStream(ctx, p.addr, "t", "conn", "s2")
+		if err == nil {
+			_ = s.Close()
+			cancel()
+			break
+		}
+		cancel()
+		if time.Now().After(deadline) {
+			t.Fatalf("no successful OpenStream after the drop: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := p.accepts.Load(); got != 2 {
+		t.Fatalf("want exactly 2 TCP connections (original + reconnect), got %d", got)
+	}
+}
+
+func TestClient_NewH2ClientMapsPingTimeouts(t *testing.T) {
+	c := NewClient(insecureMeshTLS, 1, WithHealthTimeouts(3*time.Second, 7*time.Second, time.Second))
+	tr, ok := c.newH2Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("the mesh client transport must be *http.Transport")
+	}
+	if tr.HTTP2 == nil || tr.HTTP2.SendPingTimeout != 3*time.Second || tr.HTTP2.PingTimeout != 7*time.Second {
+		t.Fatalf("HTTP2 config = %+v, want SendPingTimeout=3s PingTimeout=7s", tr.HTTP2)
+	}
+	if tr.MaxConnsPerHost != 1 || tr.Protocols == nil || !tr.Protocols.HTTP2() || tr.Protocols.HTTP1() {
+		t.Fatal("want an HTTP/2-only transport capped at one connection per host")
 	}
 }
