@@ -253,7 +253,7 @@ require (
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/ns1/ns1-go.v2 v2.18.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	software.sslmate.com/src/go-pkcs12 v0.7.3 // indirect
+	software.sslmate.com/src/go-pkcs12 v0.7.4 // indirect
 )
 
 tool golang.org/x/vuln/cmd/govulncheck
