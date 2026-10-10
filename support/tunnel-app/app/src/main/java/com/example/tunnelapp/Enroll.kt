@@ -176,7 +176,7 @@ object Enroll {
 
     private fun getJson(client: OkHttpClient, url: String): JSONObject {
         client.newCall(Request.Builder().url(url).get().build()).execute().use { resp ->
-            val b = resp.body?.string().orEmpty()
+            val b = resp.body.string()
             require(resp.code == 200) { "GET $url -> ${resp.code} $b" }
             return JSONObject(b)
         }
@@ -184,7 +184,7 @@ object Enroll {
 
     private fun postJson(client: OkHttpClient, url: String, json: String): Pair<Int, String> {
         val req = Request.Builder().url(url).post(json.toRequestBody("application/json".toMediaType())).build()
-        client.newCall(req).execute().use { resp -> return resp.code to resp.body?.string().orEmpty() }
+        client.newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
     }
 
     private fun parseChain(pem: String): Array<X509Certificate> =
