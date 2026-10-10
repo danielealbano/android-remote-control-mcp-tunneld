@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,7 +228,11 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		Cmd:            []string{"-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"},
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"challtestsrv"}},
-		WaitingFor:     wait.ForListeningPort("8055/tcp"),
+		WaitingFor: wait.ForAll(
+			wait.ForHTTP("/dns-request-history").WithPort("8055/tcp").WithMethod(http.MethodPost).
+				WithBody(strings.NewReader(`{"host":"readiness.test"}`)),
+			wait.ForNop(dnsAnswers("8053/udp")),
+		).WithDeadline(pebbleStartupTimeout),
 	})
 
 	// Pebble: ACME directory on 14000, management (issuing roots) on 15000. NOSLEEP + no nonce rejection
@@ -241,7 +247,10 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		},
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"pebble"}},
-		WaitingFor:     wait.ForListeningPort("14000/tcp"),
+		WaitingFor: wait.ForAll(
+			pebbleHTTPSReady("/dir", "14000/tcp"),
+			pebbleHTTPSReady("/roots/0", "15000/tcp"),
+		).WithDeadline(pebbleStartupTimeout),
 	})
 
 	minica := copyFromContainer(t, pebble, "/test/certs/pebble.minica.pem")
@@ -261,6 +270,44 @@ func StartPebble(t *testing.T) *PebbleEnv {
 	}
 }
 
+const pebbleStartupTimeout = 60 * time.Second
+
+func pebbleHTTPSReady(path, port string) *wait.HTTPStrategy {
+	return wait.ForHTTP(path).WithPort(port).WithTLS(true).WithAllowInsecure(true).
+		WithStartupTimeout(pebbleStartupTimeout)
+}
+
+func dnsAnswers(port string) func(context.Context, wait.StrategyTarget) error {
+	return func(ctx context.Context, target wait.StrategyTarget) error {
+		host, err := target.Host(ctx)
+		if err != nil {
+			return err
+		}
+		mapped, err := target.MappedPort(ctx, port)
+		if err != nil {
+			return err
+		}
+		addr := net.JoinHostPort(host, mapped.Port())
+		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", addr)
+		}}
+		for {
+			qctx, cancel := context.WithTimeout(ctx, time.Second)
+			_, err := r.LookupNetIP(qctx, "ip4", "readiness.test.")
+			cancel()
+			if err == nil {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("dns %s not answering: %w", addr, err)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+}
+
 const pebbleEABConfig = "/test/config/pebble-config-external-account-bindings.json"
 
 type pebbleEABConfigFile struct {
@@ -276,8 +323,7 @@ func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[
 		ExposedPorts: []string{"14000/tcp"},
 		Cmd:          []string{"-config", pebbleEABConfig},
 		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
-		WaitingFor: wait.ForHTTP("/dir").WithPort("14000/tcp").WithTLS(true).WithAllowInsecure(true).
-			WithStartupTimeout(60 * time.Second),
+		WaitingFor:   pebbleHTTPSReady("/dir", "14000/tcp"),
 	})
 	var cfg pebbleEABConfigFile
 	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {
