@@ -261,6 +261,32 @@ func StartPebble(t *testing.T) *PebbleEnv {
 	}
 }
 
+const pebbleEABConfig = "/test/config/pebble-config-external-account-bindings.json"
+
+type pebbleEABConfigFile struct {
+	Pebble struct {
+		ExternalAccountMACKeys map[string]string `json:"externalAccountMACKeys"`
+	} `json:"pebble"`
+}
+
+func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[string]string) {
+	t.Helper()
+	c := startContainer(t, testcontainers.ContainerRequest{
+		Image:        pebbleImage,
+		ExposedPorts: []string{"14000/tcp"},
+		Cmd:          []string{"-config", pebbleEABConfig},
+		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
+		WaitingFor:   wait.ForListeningPort("14000/tcp"),
+	})
+	var cfg pebbleEABConfigFile
+	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {
+		t.Fatalf("parse pebble EAB config: %v", err)
+	}
+	minica := copyFromContainer(t, c, "/test/certs/pebble.minica.pem")
+	return "https://" + endpoint(t, c, "14000/tcp") + "/dir",
+		writeTempFile(t, "pebble-eab-minica-*.pem", minica), cfg.Pebble.ExternalAccountMACKeys
+}
+
 // fetchIssuingRoots downloads Pebble's per-run issuing CA (management /roots/0), trusting the minica for
 // the management endpoint's TLS, and returns a pool a frontend client uses to verify issued leaf certs.
 func fetchIssuingRoots(t *testing.T, minica []byte, mgmtEndpoint string) (*x509.CertPool, []byte) {
