@@ -113,14 +113,14 @@ No Mermaid charts are added or modified, so the §9 Mermaid-validation step does
 The standard-library and x/net / grpc vulnerability fixes require go1.27.2 and the latest modules.
 
 Acceptance criteria:
-- [ ] `go.mod` declares `go 1.27.2` and has NO `toolchain` line.
+- [x] `go.mod` declares `go 1.27.2` and has NO `toolchain` line.
 - [ ] Every module required by `go.mod` is at its latest version within its major (checked in Task 8.2, after
       US3's re-refresh).
 - [ ] The `Dockerfile` builds on `golang:1.27.2`; `release.yml` takes the Go version from `go.mod`.
 
-### [ ] Task 1.1 — Bump the toolchain and every module
+### [x] Task 1.1 — Bump the toolchain and every module
 
-- [ ] **Action** — run at the repo root (default `GOTOOLCHAIN=auto` downloads go1.27.2):
+- [x] **Action** — run at the repo root (default `GOTOOLCHAIN=auto` downloads go1.27.2):
 
 ```sh
 go get go@1.27.2 toolchain@none
@@ -130,13 +130,13 @@ go get -u tool
 go mod tidy
 ```
 
-- [ ] **Action** — modify `Dockerfile` line 1:
+- [x] **Action** — modify `Dockerfile` line 1:
 
 ```dockerfile
 FROM golang:1.27.2 AS build
 ```
 
-- [ ] **Action** — modify `.github/workflows/release.yml`, the `actions/setup-go` step's `with:` (its SHA is
+- [x] **Action** — modify `.github/workflows/release.yml`, the `actions/setup-go` step's `with:` (its SHA is
   bumped in US6):
 
 ```yaml
@@ -145,7 +145,7 @@ FROM golang:1.27.2 AS build
 ```
 
 Definition of Done:
-- [ ] `golang.org/x/vuln` (the `tool` requirement) is v1.8.0 or newer; `release.yml` no longer contains
+- [x] `golang.org/x/vuln` (the `tool` requirement) is v1.8.0 or newer; `release.yml` no longer contains
       `go-version: '1.26'`.
 
 No new tests: the full suites + `make govulncheck` in Task 8.2 verify the bump.
@@ -157,16 +157,16 @@ No new tests: the full suites + `make govulncheck` in Task 8.2 verify the bump.
 Remove every `golang.org/x/net/http2` import (6 files) without changing behaviour (see Scope).
 
 Acceptance criteria:
-- [ ] No file in any build-tag set imports `golang.org/x/net/http2`; `golang.org/x/net` is `// indirect`.
+- [x] No file in any build-tag set imports `golang.org/x/net/http2`; `golang.org/x/net` is `// indirect`.
 - [ ] The control client and the mesh client open ONE connection for concurrent requests on a cold pool,
       open a second one only when the first is saturated, reconnect after a drop, and refuse a peer that does
       not negotiate ALPN `h2`.
 - [ ] The control and mesh servers serve HTTP/2 (and HTTP/1.1) on their pre-built `tls.Listener`.
 - [ ] Mesh PING health keeps its timings (`readIdle` → `SendPingTimeout`, `pingTimeout` → `PingTimeout`).
 
-### [ ] Task 2.1 — Phone control client transport
+### [x] Task 2.1 — Phone control client transport
 
-- [ ] **Action** — modify `client/control.go`: drop the `golang.org/x/net/http2` import; field
+- [x] **Action** — modify `client/control.go`: drop the `golang.org/x/net/http2` import; field
   `tr *http2.Transport` → `tr *http.Transport`; declare `errNotHTTP2` above `newMTLSTransport`'s doc comment (the
   package has no other package-level errors; the doc comment MUST stay attached to `newMTLSTransport`); replace
   `newMTLSTransport`'s signature + body (its existing doc comment stays unchanged); add `requireH2`.
@@ -208,7 +208,7 @@ func requireH2(conn net.Conn) (net.Conn, error) {
 Context: `Client.Close` keeps calling `c.tr.CloseIdleConnections()` (provided by `*http.Transport`).
 
 Definition of Done:
-- [ ] `client/control.go` no longer imports `golang.org/x/net/http2`; the `Client` struct holds `*http.Transport`.
+- [x] `client/control.go` no longer imports `golang.org/x/net/http2`; the `Client` struct holds `*http.Transport`.
 
 Tests (`client/control_test.go`, package `client`):
 
@@ -219,9 +219,9 @@ Tests (`client/control_test.go`, package `client`):
 | `TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated` | with the server's `HTTP2.MaxConcurrentStreams: 2`, a 3rd held-open stream is served on a 2nd TCP connection and all 3 succeed | DETERMINISTIC: open stream 1 and wait for its response headers (the client has then read the server's SETTINGS), then open streams 2 and 3 one after another, each held open; assert accept count 2 |
 | `TestNewMTLSTransport_ReconnectsAfterConnDrop` | after the server closes the live connection, a request succeeds on a NEW connection | close the server-side conn via a listener wrapper; retry the request until success within a 5 s deadline, then assert exactly 2 accepts |
 
-### [ ] Task 2.2 — Mesh client transport
+### [x] Task 2.2 — Mesh client transport
 
-- [ ] **Action** — modify `internal/mesh/client.go`: drop the `golang.org/x/net/http2` import; declare
+- [x] **Action** — modify `internal/mesh/client.go`: drop the `golang.org/x/net/http2` import; declare
   `errPeerNotHTTP2` next to `ErrNoOwner`; replace `newH2Client`'s body (its existing doc comment stays
   unchanged); add `requirePeerH2`.
 
@@ -262,7 +262,7 @@ Context: `c.tlsConf()` already sets `NextProtos: ["h2"]` and an empty `ServerNam
 from `addr` — the same SNI x/net's per-dial clone carried.
 
 Definition of Done:
-- [ ] `internal/mesh/client.go` no longer imports `golang.org/x/net/http2`; `readIdle`/`pingTimeout` feed
+- [x] `internal/mesh/client.go` no longer imports `golang.org/x/net/http2`; `readIdle`/`pingTimeout` feed
       `HTTP2Config`.
 
 Tests (`internal/mesh/mesh_test.go`, package `mesh`):
@@ -276,9 +276,9 @@ Tests (`internal/mesh/mesh_test.go`, package `mesh`):
 | `TestClient_NewH2ClientMapsPingTimeouts` | `newH2Client`'s transport carries `HTTP2.SendPingTimeout == readIdle` and `HTTP2.PingTimeout == pingTimeout` | white-box; DIFFERENT durations for the two fields |
 | `TestOpenStreamUnblocksOnDeadPeer` (existing) | still passes — PING health via `SendPingTimeout`/`PingTimeout` | unchanged |
 
-### [ ] Task 2.3 — Control + mesh servers
+### [x] Task 2.3 — Control + mesh servers
 
-- [ ] **Action** — modify `internal/server/serve.go`: add the two helpers above `serveTLS`'s doc comment (which MUST
+- [x] **Action** — modify `internal/server/serve.go`: add the two helpers above `serveTLS`'s doc comment (which MUST
   stay attached to `serveTLS`); in `serveTLS`'s doc
   comment REMOVE the now-wrong clause ` — http2.ConfigureServer was applied at the call site` (leaving
   `(enroll/control/mesh)`).
@@ -294,7 +294,7 @@ func h2Protocols() *http.Protocols {
 func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 ```
 
-- [ ] **Action** — modify `internal/server/server.go`: drop the `golang.org/x/net/http2` import; add
+- [x] **Action** — modify `internal/server/server.go`: drop the `golang.org/x/net/http2` import; add
   `Protocols` + `NextProtos` to `controlSrv` and `meshSrv`; delete both `http2.ConfigureServer` blocks (with their
   `configure … http2` error returns); in the "Bind the public + mesh listeners LAST" comment REMOVE the
   now-wrong words ` and both http2.ConfigureServer calls` (leaving `(reserved-cert issuance)`).
@@ -317,7 +317,7 @@ func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 Context: the existing comments above `controlSrv` and `meshSrv` stay unchanged (still correct).
 
 Definition of Done:
-- [ ] `grep -n 'ConfigureServer' internal/server/*.go` returns nothing.
+- [x] `grep -n 'ConfigureServer' internal/server/*.go` returns nothing.
 
 Tests (`internal/server/serve_test.go`, package `server`):
 
@@ -325,13 +325,13 @@ Tests (`internal/server/serve_test.go`, package `server`):
 |---|---|---|
 | `TestServeTLS_ServesHTTP2OnPrebuiltListener` | `serveTLS` answers an `h2`-ALPN client with `resp.Proto == "HTTP/2.0"` and an `http/1.1`-ALPN client with `"HTTP/1.1"` | mirror `server.go`: `srv.Protocols = h2Protocols()`, `srv.TLSConfig = &tls.Config{Certificates: …, NextProtos: h2NextProtos()}` (NON-nil — a nil `TLSConfig` takes net/http's always-HTTP/2 compatibility branch and would not test the property), listener `tls.NewListener(ln, srv.TLSConfig)`; self-signed cert; cancel ctx at the end |
 
-### [ ] Task 2.4 — Test harnesses + e2e helper
+### [x] Task 2.4 — Test harnesses + e2e helper
 
-- [ ] **Action** — modify `client/enroll_test.go`: drop the x/net import and the `http2.ConfigureServer` block
+- [x] **Action** — modify `client/enroll_test.go`: drop the x/net import and the `http2.ConfigureServer` block
   in `startEnrollServer` (its `tlsConf` already lists `NextProtos: ["h2","http/1.1"]`).
-- [ ] **Action** — modify `client/harness_test.go`: drop the x/net import and the `http2.ConfigureServer` block
+- [x] **Action** — modify `client/harness_test.go`: drop the x/net import and the `http2.ConfigureServer` block
   in `startTestServer`; add `NextProtos: []string{"h2", "http/1.1"}` to its `tlsConf`.
-- [ ] **Action** — modify `e2e/tunnel_app_test.go`: drop the x/net import, add `"errors"`; replace `h2Client`'s
+- [x] **Action** — modify `e2e/tunnel_app_test.go`: drop the x/net import, add `"errors"`; replace `h2Client`'s
   body (its existing doc comment stays unchanged):
 
 ```go
@@ -360,10 +360,10 @@ func h2Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
 }
 ```
 
-- [ ] **Action** — run `go mod tidy` (x/net becomes `// indirect`).
+- [x] **Action** — run `go mod tidy` (x/net becomes `// indirect`).
 
 Definition of Done:
-- [ ] `client/enroll_test.go`, `client/harness_test.go` and `e2e/tunnel_app_test.go` no longer import
+- [x] `client/enroll_test.go`, `client/harness_test.go` and `e2e/tunnel_app_test.go` no longer import
       `golang.org/x/net/http2`.
 
 ---
@@ -374,23 +374,23 @@ go-acme supports and patches only the latest lego (Scope); move `internal/acme` 
 behaviour change.
 
 Acceptance criteria:
-- [ ] No file imports `github.com/go-acme/lego/v4`; `go.mod` requires `github.com/go-acme/lego/v5 v5.5.2`.
+- [x] No file imports `github.com/go-acme/lego/v4`; `go.mod` requires `github.com/go-acme/lego/v5 v5.5.2`.
 - [ ] Issuance, EAB registration, DNS-01 (incl. `--acme-dns-resolver` / `--acme-dns-skip-propagation-check`) and
       Retry-After classification behave as before.
 - [ ] lego's log output stays on stderr.
 
-### [ ] Task 3.1 — Switch the module
+### [x] Task 3.1 — Switch the module
 
-- [ ] **Action** — run `go get github.com/go-acme/lego/v5@v5.5.2`.
+- [x] **Action** — run `go get github.com/go-acme/lego/v5@v5.5.2`.
 
 Definition of Done:
-- [ ] `go.mod` lists `github.com/go-acme/lego/v5 v5.5.2`.
+- [x] `go.mod` lists `github.com/go-acme/lego/v5 v5.5.2`.
 
-### [ ] Task 3.2 — `internal/acme` on the v5 API + EAB test harness
+### [x] Task 3.2 — `internal/acme` on the v5 API + EAB test harness
 
-- [ ] **Action** — modify `internal/acme/dns_provider.go`: imports → `github.com/go-acme/lego/v5/challenge`,
+- [x] **Action** — modify `internal/acme/dns_provider.go`: imports → `github.com/go-acme/lego/v5/challenge`,
   `github.com/go-acme/lego/v5/providers/dns` (code unchanged).
-- [ ] **Action** — modify `internal/acme/lego_client.go`:
+- [x] **Action** — modify `internal/acme/lego_client.go`:
   - imports: `legoacme ".../lego/v5/acme"`, `.../lego/v5/certificate`, `.../lego/v5/challenge`,
     `.../lego/v5/challenge/dns01`, `.../lego/v5/lego`, `.../lego/v5/registration`; drop `.../acme/api`.
   - `acmeUser` (its doc comment stays):
@@ -480,7 +480,7 @@ func (a *legoDNSAdapter) CleanUp(ctx context.Context, domain, _, keyAuth string)
 
   - `classifyLego`: the rate-limit branch becomes `return rateLimited(rle.RetryAfter, err)` (v5 parses Retry-After
     into a `time.Duration`; absent/invalid → 0); in its doc comment REMOVE the now-wrong word `literal `.
-- [ ] **Action** — modify `internal/acme/lazy.go`: `build func(ctx context.Context) (caIssuer, error)` (field +
+- [x] **Action** — modify `internal/acme/lazy.go`: `build func(ctx context.Context) (caIssuer, error)` (field +
   `newLazyCA` parameter); `NewChain` passes `func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }`;
   add `const lazyBuildTimeout = 2 * time.Minute`; in `resolve`'s `DoChan` func:
 
@@ -490,17 +490,17 @@ func (a *legoDNSAdapter) CleanUp(ctx context.Context, domain, _, keyAuth string)
 		c, err := l.build(bctx)
 ```
 
-- [ ] **Action** — modify `internal/config/config.go`: in the `// DNS-01 propagation pre-check tuning …` comment
+- [x] **Action** — modify `internal/config/config.go`: in the `// DNS-01 propagation pre-check tuning …` comment
   above `ACMEDNSResolvers` REMOVE the now-wrong sentence `Defaults preserve lego's standard behaviour: system
   resolvers + authoritative-NS propagation required.` (lego v5's standard behaviour also requires recursive-NS
   propagation, which tunneld turns off); the first sentence stays.
-- [ ] **Action** — modify `internal/acme/lazy_test.go` and `internal/acme/lego_client_test.go` imports:
+- [x] **Action** — modify `internal/acme/lazy_test.go` and `internal/acme/lego_client_test.go` imports:
   `github.com/go-acme/lego/v4/certificate` → `github.com/go-acme/lego/v5/certificate`;
   `legoacme "github.com/go-acme/lego/v4/acme"` → `legoacme "github.com/go-acme/lego/v5/acme"`.
-- [ ] **Action** — modify the now-wrong test comments: `internal/acme/lazy_test.go` (above
+- [x] **Action** — modify the now-wrong test comments: `internal/acme/lazy_test.go` (above
   `TestLegoClient_ObtainRespectsCtxCancel`) REMOVE the word `(ctx-less) `; `internal/acme/lego_client_test.go`
   (above `TestClassifyRateLimitedErrorHonorsRetryAfter`) REMOVE the words `literal ` and `parse and `.
-- [ ] **Action** — modify `internal/tunneltest/containers.go`: add the shared EAB Pebble helper. Pebble 2.10.1
+- [x] **Action** — modify `internal/tunneltest/containers.go`: add the shared EAB Pebble helper. Pebble 2.10.1
   ships `/test/config/pebble-config-external-account-bindings.json` (`externalAccountBindingRequired: true` plus
   test kid→key pairs); the keys are read from the container, never hardcoded in the repo.
 
@@ -520,7 +520,8 @@ func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[
 		ExposedPorts: []string{"14000/tcp"},
 		Cmd:          []string{"-config", pebbleEABConfig},
 		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
-		WaitingFor:   wait.ForListeningPort("14000/tcp"),
+		WaitingFor: wait.ForHTTP("/dir").WithPort("14000/tcp").WithTLS(true).WithAllowInsecure(true).
+			WithStartupTimeout(60 * time.Second),
 	})
 	var cfg pebbleEABConfigFile
 	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {
@@ -533,7 +534,7 @@ func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[
 ```
 
 Definition of Done:
-- [ ] `internal/acme` imports only `github.com/go-acme/lego/v5/…` paths; every comment REMOVE instruction above is
+- [x] `internal/acme` imports only `github.com/go-acme/lego/v5/…` paths; every comment REMOVE instruction above is
       applied.
 
 Tests (`internal/acme`, package `acme`):
@@ -555,19 +556,19 @@ only exported API):
 
 | Test | Verifies | Setup notes |
 |---|---|---|
-| `TestNewLegoClient_EABRegistration` | `NewLegoClient` registers against an EAB-REQUIRED ACME server with a valid `EABKID`/`EABHMAC`, and fails with a mismatched HMAC | `tunneltest.StartPebbleEAB`; `t.Setenv("LEGO_CA_CERTIFICATES", minicaFile)`; valid = `kid-1` + `macKeys["kid-1"]`, mismatched = `kid-1` + `macKeys["kid-2"]` |
+| `TestNewLegoClient_EABRegistration` | `NewLegoClient` registers against an EAB-REQUIRED ACME server with a valid `EABKID`/`EABHMAC`, and fails AT EAB REGISTRATION (error contains `EAB register`) with a mismatched HMAC | `tunneltest.StartPebbleEAB`; `t.Setenv("LEGO_CA_CERTIFICATES", minicaFile)`; valid = `kid-1` + `macKeys["kid-1"]`, mismatched = `kid-1` + `macKeys["kid-2"]` |
 
-### [ ] Task 3.3 — Server wiring + module re-refresh
+### [x] Task 3.3 — Server wiring + module re-refresh
 
-- [ ] **Action** — modify `internal/server/acmewire.go`: `loadAccountKey` returns `crypto.Signer` (it already
+- [x] **Action** — modify `internal/server/acmewire.go`: `loadAccountKey` returns `crypto.Signer` (it already
   returns an `*ecdsa.PrivateKey`); the first statement of `buildACMEChain` becomes `acme.SetLogOutput(os.Stderr)`
   (`os` is already imported).
 
-- [ ] **Action** — re-run the Task 1.1 `go get -u` commands (its lines 2–4) and `go mod tidy`, so the modules
+- [x] **Action** — re-run the Task 1.1 `go get -u` commands (its lines 2–4) and `go mod tidy`, so the modules
   that only lego v5 brings in are at their latest too.
 
 Definition of Done:
-- [ ] `go.mod` no longer lists `github.com/go-acme/lego/v4`.
+- [x] `go.mod` no longer lists `github.com/go-acme/lego/v4`.
 
 Tests (`internal/server/acmewire_test.go`, package `server`):
 
@@ -589,21 +590,21 @@ Acceptance criteria:
 - [ ] The compose stack runs `pgsty/silo` + `pgsty/mc` (`RELEASE.2026-09-16T00-00-00Z`) with unchanged commands,
       environment and bucket-creation script.
 
-### [ ] Task 4.1 — Test containers
+### [x] Task 4.1 — Test containers
 
-- [ ] **Action** — modify `internal/tunneltest/containers.go`: `minioImage = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"`
+- [x] **Action** — modify `internal/tunneltest/containers.go`: `minioImage = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"`
   (the comment above the `const` block stays — it remains correct).
 
 Definition of Done:
-- [ ] `minioImage` is the only image constant changed in the block.
+- [x] `minioImage` is the only image constant changed in the block.
 
-### [ ] Task 4.2 — Compose stack
+### [x] Task 4.2 — Compose stack
 
-- [ ] **Action** — modify `deploy/docker-compose.yml`: `minio` service `image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z`;
+- [x] **Action** — modify `deploy/docker-compose.yml`: `minio` service `image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z`;
   `createbuckets` service `image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z` (comments unchanged).
 
 Definition of Done:
-- [ ] Only the two `image:` values changed in those services.
+- [x] Only the two `image:` values changed in those services.
 
 Tests: the existing `StartMinIO` users (`internal/store/lifecycle_integration_test.go`,
 `internal/server/integration_test.go`, `internal/server/drain_startup_integration_test.go`, `e2e/e2e_test.go`) —
@@ -625,9 +626,9 @@ Acceptance criteria:
 - [ ] The bridge reads its config from the path its binary uses and listens on all interfaces (`:8080`), the
       address `alertmanager.yml`'s webhook (`http://ntfy-alertmanager:8080`) targets.
 
-### [ ] Task 5.1 — Bump the images
+### [x] Task 5.1 — Bump the images
 
-- [ ] **Action** — modify `deploy/docker-compose.yml`:
+- [x] **Action** — modify `deploy/docker-compose.yml`:
 
 | Service | From | To |
 |---|---|---|
@@ -638,17 +639,17 @@ Acceptance criteria:
 | `ntfy-alertmanager` | `xenrox/ntfy-alertmanager:1.0.0` | `xenrox/ntfy-alertmanager:1.0.1` |
 
 Definition of Done:
-- [ ] The five `image:` lines match the "To" column; nothing else in those services changed in this task.
+- [x] The five `image:` lines match the "To" column; nothing else in those services changed in this task.
 
-### [ ] Task 5.2 — Fix the alert bridge
+### [x] Task 5.2 — Fix the alert bridge
 
-- [ ] **Action** — modify `deploy/docker-compose.yml`, the `ntfy-alertmanager` service's volume:
+- [x] **Action** — modify `deploy/docker-compose.yml`, the `ntfy-alertmanager` service's volume:
 
 ```yaml
       - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config:ro
 ```
 
-- [ ] **Action** — modify `deploy/ntfy-alertmanager/config.scfg.example`: add `http-address :8080` as the first
+- [x] **Action** — modify `deploy/ntfy-alertmanager/config.scfg.example`: add `http-address :8080` as the first
   directive (above `base-url http://ntfy`); REMOVE the now-wrong comment lines 1–3 (`# The bridge listens on :8080
   by default, …`, `# ntfy-alertmanager version's default differs, set its HTTP-address directive …` and the `#`
   separator line) — the default is `127.0.0.1:8080` and the directive is now set explicitly; line 4 (`# Copy this
@@ -663,7 +664,7 @@ Context: operators who already copied the example to `deploy/ntfy-alertmanager/c
 the same `http-address :8080` line to their copy.
 
 Definition of Done:
-- [ ] The compose mount target is `/etc/ntfy-alertmanager/config`; the example's first directive is
+- [x] The compose mount target is `/etc/ntfy-alertmanager/config`; the example's first directive is
       `http-address :8080`.
 
 ---
@@ -678,9 +679,9 @@ Acceptance criteria:
 - [ ] golangci-lint v2.14.0 in CI; `make mermaid-check` runs on Node 24 with mermaid-cli 12.0.0.
 - [ ] Every job has a `timeout-minutes` above its normal runtime and above any inner `go test -timeout`.
 
-### [ ] Task 6.1 — Pin the latest action releases
+### [x] Task 6.1 — Pin the latest action releases
 
-- [ ] **Action** — modify `.github/workflows/ci.yml` and `.github/workflows/release.yml`: replace every
+- [x] **Action** — modify `.github/workflows/ci.yml` and `.github/workflows/release.yml`: replace every
   occurrence (SHA + trailing version comment):
 
 | Action | New pin |
@@ -698,11 +699,11 @@ Context: resolved via `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (annotate
 2026-10-10; re-resolve each one at implementation time and STOP if any differs.
 
 Definition of Done:
-- [ ] `grep -n 'uses:' .github/workflows/*.yml` shows only the eight SHAs above.
+- [x] `grep -n 'uses:' .github/workflows/*.yml` shows only the eight SHAs above.
 
-### [ ] Task 6.2 — Tool versions + job timeouts
+### [x] Task 6.2 — Tool versions + job timeouts
 
-- [ ] **Action** — modify `.github/workflows/ci.yml`: the three golangci-lint steps `version: v2.14.0`; the
+- [x] **Action** — modify `.github/workflows/ci.yml`: the three golangci-lint steps `version: v2.14.0`; the
   `actions/setup-node` step `node-version: '24'`; add `timeout-minutes` to every job:
 
 | Job | `timeout-minutes` |
@@ -714,11 +715,11 @@ Definition of Done:
 | `test-e2e` | 35 |
 | `image` | 20 |
 
-- [ ] **Action** — modify `.github/workflows/release.yml`: add `timeout-minutes: 30` to the `release` job.
-- [ ] **Action** — modify `scripts/mermaid-check.sh` line 30: `@mermaid-js/mermaid-cli@12.0.0`.
+- [x] **Action** — modify `.github/workflows/release.yml`: add `timeout-minutes: 30` to the `release` job.
+- [x] **Action** — modify `scripts/mermaid-check.sh` line 30: `@mermaid-js/mermaid-cli@12.0.0`.
 
 Definition of Done:
-- [ ] Every job in both workflows has `timeout-minutes`; no `v2.12.2`, `node-version: '20'` or `@11.16.0` remains.
+- [x] Every job in both workflows has `timeout-minutes`; no `v2.12.2`, `node-version: '20'` or `@11.16.0` remains.
 
 ---
 
@@ -731,13 +732,13 @@ SDK packages (android-37.0, build-tools 36.0.0) are installed locally.
 Acceptance criteria:
 - [ ] Both projects build from clean with those versions; the only warning is the user-accepted AGP-internal
       `Configuration.setVisible` deprecation (see Scope).
-- [ ] The fixtures (`fixtures/attest-probe/`, `fixtures/tunnel-app/`) are regenerated from clean builds;
+- [x] The fixtures (`fixtures/attest-probe/`, `fixtures/tunnel-app/`) are regenerated from clean builds;
       `signers.allow` is unchanged (same debug signing key).
 - [ ] `TestE2E_DeviceAttestation` + `TestE2E_ReferenceTunnelApp` pass on the connected device (Task 8.2).
 
-### [ ] Task 7.1 — Gradle wrapper → 9.8.1 (first pass)
+### [x] Task 7.1 — Gradle wrapper → 9.8.1 (first pass)
 
-- [ ] **Action** — in BOTH `support/attest-probe` and `support/tunnel-app` (current Gradle 8.14.4), output
+- [x] **Action** — in BOTH `support/attest-probe` and `support/tunnel-app` (current Gradle 8.14.4), output
   captured per agent.md §5:
 
 ```sh
@@ -748,11 +749,11 @@ set -o pipefail
 ```
 
 Definition of Done:
-- [ ] Both `gradle-wrapper.properties` carry `gradle-9.8.1-bin.zip` + `distributionSha256Sum=dce76f55…dc01f`.
+- [x] Both `gradle-wrapper.properties` carry `gradle-9.8.1-bin.zip` + `distributionSha256Sum=dce76f55…dc01f`.
 
-### [ ] Task 7.2 — Build files (AGP 9, built-in Kotlin)
+### [x] Task 7.2 — Build files (AGP 9, built-in Kotlin)
 
-- [ ] **Action** — modify `support/attest-probe/build.gradle.kts` and `support/tunnel-app/build.gradle.kts`
+- [x] **Action** — modify `support/attest-probe/build.gradle.kts` and `support/tunnel-app/build.gradle.kts`
   (identical):
 
 ```kotlin
@@ -769,10 +770,10 @@ plugins {
 
 Context: AGP 9 compiles Kotlin itself (the `org.jetbrains.kotlin.android` plugin MUST go); the `buildscript`
 classpath pins the Kotlin compiler (otherwise AGP falls back to its own 2.2.10).
-- [ ] **Action** — modify `support/attest-probe/app/build.gradle.kts` and
+- [x] **Action** — modify `support/attest-probe/app/build.gradle.kts` and
   `support/tunnel-app/app/build.gradle.kts`: delete `id("org.jetbrains.kotlin.android")` from `plugins`;
   `compileSdk = 37` (`targetSdk` stays 36).
-- [ ] **Action** — modify `support/tunnel-app/app/build.gradle.kts` `dependencies` (all three existing comments
+- [x] **Action** — modify `support/tunnel-app/app/build.gradle.kts` `dependencies` (all three existing comments
   stay unchanged):
 
 ```kotlin
@@ -789,32 +790,32 @@ dependencies {
 
 Context: Ktor 3.6.0 pulls `netty-codec-native-quic`'s desktop-only HTTP/3 native jars (HTTP/3 is opt-in and
 unused); their duplicate license files fail `mergeDebugJavaResource`.
-- [ ] **Action** — modify `support/attest-probe/gradle.properties`: delete `android.useAndroidX=false`. AGP 9
+- [x] **Action** — modify `support/attest-probe/gradle.properties`: delete `android.useAndroidX=false`. AGP 9
   deprecates that setting (a warning) and defaults it to `true`; the flip is harmless here — the probe has no
   AndroidX/support dependency and the rebuild without the line was fully up-to-date.
-- [ ] **Action** — modify `.gitignore`: add `/support/attest-probe/.kotlin/` and `/support/tunnel-app/.kotlin/` to
+- [x] **Action** — modify `.gitignore`: add `/support/attest-probe/.kotlin/` and `/support/tunnel-app/.kotlin/` to
   the respective blocks (Kotlin's per-project session directory).
 
 Definition of Done:
-- [ ] Neither project references `org.jetbrains.kotlin.android`; both apps declare `compileSdk = 37` and
+- [x] Neither project references `org.jetbrains.kotlin.android`; both apps declare `compileSdk = 37` and
       `targetSdk = 36`.
 
-### [ ] Task 7.3 — okhttp 5 (non-null `Response.body`)
+### [x] Task 7.3 — okhttp 5 (non-null `Response.body`)
 
-- [ ] **Action** — modify `support/tunnel-app/app/src/main/java/com/example/tunnelapp/Enroll.kt`:
+- [x] **Action** — modify `support/tunnel-app/app/src/main/java/com/example/tunnelapp/Enroll.kt`:
   `resp.body?.string().orEmpty()` → `resp.body.string()` (both occurrences, `getJson` + `postJson`).
-- [ ] **Action** — modify `support/tunnel-app/app/src/main/java/com/example/tunnelapp/Tunnel.kt`:
+- [x] **Action** — modify `support/tunnel-app/app/src/main/java/com/example/tunnelapp/Tunnel.kt`:
   `resp.body!!.source()` → `resp.body.source()`; `resp.body!!.byteStream()` → `resp.body.byteStream()`.
 
 Definition of Done:
-- [ ] `grep -rn 'resp.body?\|resp.body!!' support/tunnel-app/app/src` returns nothing.
+- [x] `grep -rn 'resp.body?\|resp.body!!' support/tunnel-app/app/src` returns nothing.
 
-### [ ] Task 7.4 — Wrapper second pass + fixtures
+### [x] Task 7.4 — Wrapper second pass + fixtures
 
-- [ ] **Action** — in BOTH projects re-run the Task 7.1 command (now executing on Gradle 9.8.1, so `gradlew`,
+- [x] **Action** — in BOTH projects re-run the Task 7.1 command (now executing on Gradle 9.8.1, so `gradlew`,
   `gradlew.bat` and `gradle-wrapper.jar` are regenerated by 9.8.1 itself), teeing to
   `/tmp/plan13-<project>-wrapper2.log`.
-- [ ] **Action** — regenerate the fixtures from clean builds (output captured per agent.md §5; `pipefail` so a
+- [x] **Action** — regenerate the fixtures from clean builds (output captured per agent.md §5; `pipefail` so a
   failed build fails the command):
 
 ```sh
@@ -824,7 +825,7 @@ set -o pipefail
 ```
 
 Definition of Done:
-- [ ] Both committed APKs changed (`git diff --stat fixtures/` lists both `.apk` files) and
+- [x] Both committed APKs changed (`git diff --stat fixtures/` lists both `.apk` files) and
       `fixtures/*/*.apk.sha256` match them; `git diff fixtures/*/signers.allow` is empty.
 
 ---
@@ -839,9 +840,9 @@ Acceptance criteria:
       stack.
 - [ ] Every superseded Dependabot PR is closed with a comment naming this plan's branch and the version it carries.
 
-### [ ] Task 8.1 — Update the docs
+### [x] Task 8.1 — Update the docs
 
-- [ ] **Action** — modify `.claude/rules/project.md` Tech Stack — replace these four rows in full:
+- [x] **Action** — modify `.claude/rules/project.md` Tech Stack — replace these four rows in full:
 
 ```markdown
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
@@ -850,16 +851,16 @@ Acceptance criteria:
 | Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e`); needs Docker. |
 ```
 
-- [ ] **Action** — modify `README.md` Deployment quickstart step 5: `for the local MinIO stand-in the compose
+- [x] **Action** — modify `README.md` Deployment quickstart step 5: `for the local MinIO stand-in the compose
   creates the bucket automatically.` → `for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
   images are no longer published) the compose creates the bucket automatically.`
-- [ ] **Action** — modify `docs/PROJECT.md` §7: `(testcontainers: Valkey, MinIO, Pebble)` →
+- [x] **Action** — modify `docs/PROJECT.md` §7: `(testcontainers: Valkey, MinIO, Pebble)` →
   `(testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble)`.
-- [ ] **Action** — modify `support/attest-probe/README.md` and `support/tunnel-app/README.md`: the gitignored
+- [x] **Action** — modify `support/attest-probe/README.md` and `support/tunnel-app/README.md`: the gitignored
   Gradle outputs `(`build/`, `.gradle/`)` → `(`build/`, `.gradle/`, `.kotlin/`)`.
 
 Definition of Done:
-- [ ] `grep -n 'x/net/http2\|lego/v4' .claude/rules/project.md` returns nothing.
+- [x] `grep -n 'x/net/http2\|lego/v4' .claude/rules/project.md` returns nothing.
 
 ### [ ] Task 8.2 — Ground-up double-check + quality gates
 
@@ -964,3 +965,17 @@ Definition of Done:
 ---
 
 ## Deviations
+
+- **US3 Task 3.2 (`StartPebbleEAB` readiness + EAB test assertion).** The planned `wait.ForListeningPort("14000/tcp")`
+  reported Pebble ready before it served (testcontainers found no shell in the image for its in-container port
+  check, and the host port is accepted by docker-proxy early), so the valid-key case failed with `EOF` on the
+  directory GET and the mismatched-key case passed for the wrong reason (the same connection error). The helper now
+  waits with `wait.ForHTTP("/dir")` over TLS (`WithAllowInsecure` — Pebble's minica cert) with a 60 s startup
+  timeout, and the test asserts the mismatched case fails at EAB registration (`EAB register` in the error).
+- **US8 Task 8.2 (observability runtime check — Grafana log lines).** Grafana 13.2.3 starts and stays running with the
+  committed provisioning, but logs two `level=error` lines: "Failed to read plugin provisioning files from directory
+  /etc/grafana/provisioning/plugins" and "can't read alerting provisioning files from directory
+  /etc/grafana/provisioning/alerting" — the repo provisions only `dashboards/` and `datasources/`. The identical two
+  lines appear with the previous `grafana/grafana:13.0.6` (verified 2026-10-10), so they are not a configuration
+  incompatibility introduced by the bump; reported to the user for a decision (adding empty `plugins/` + `alerting/`
+  provisioning directories would silence them, outside this plan's agreed scope).
