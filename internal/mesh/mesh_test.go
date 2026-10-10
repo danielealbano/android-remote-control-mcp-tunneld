@@ -709,6 +709,7 @@ func insecureMeshTLS() *tls.Config {
 }
 
 func TestClient_RejectsNonH2Peer(t *testing.T) {
+	t.Parallel()
 	tlsConf := selfSignedServerTLS(t)
 	tlsConf.NextProtos = nil
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsConf)
@@ -741,6 +742,7 @@ func TestClient_RejectsNonH2Peer(t *testing.T) {
 }
 
 func TestClient_OneConnForConcurrentColdStreams(t *testing.T) {
+	t.Parallel()
 	p := startMeshPeer(t, 0)
 	c := NewClient(insecureMeshTLS, 1)
 	var wg sync.WaitGroup
@@ -771,6 +773,7 @@ func TestClient_OneConnForConcurrentColdStreams(t *testing.T) {
 }
 
 func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
+	t.Parallel()
 	p := startMeshPeer(t, 2)
 	c := NewClient(insecureMeshTLS, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -794,6 +797,7 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 }
 
 func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
+	t.Parallel()
 	p := startMeshPeer(t, 0)
 	c := NewClient(insecureMeshTLS, 1)
 	s, err := c.OpenStream(context.Background(), p.addr, "t", "conn", "s1")
@@ -823,6 +827,7 @@ func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
 }
 
 func TestClient_NewH2ClientMapsPingTimeouts(t *testing.T) {
+	t.Parallel()
 	c := NewClient(insecureMeshTLS, 1, WithHealthTimeouts(3*time.Second, 7*time.Second, time.Second))
 	tr, ok := c.newH2Client().Transport.(*http.Transport)
 	if !ok {

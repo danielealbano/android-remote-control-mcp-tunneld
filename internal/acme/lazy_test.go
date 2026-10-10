@@ -137,6 +137,7 @@ func TestLegoDNSAdapter_PresentUsesDeadline(t *testing.T) {
 }
 
 func TestLazyCA_BuildCtxSurvivesCallerButIsBounded(t *testing.T) {
+	t.Parallel()
 	got := make(chan context.Context, 1)
 	release := make(chan struct{})
 	defer close(release)
@@ -166,6 +167,7 @@ func TestLazyCA_BuildCtxSurvivesCallerButIsBounded(t *testing.T) {
 }
 
 func TestLegoClient_ObtainDetachesCallerCancel(t *testing.T) {
+	t.Parallel()
 	got := make(chan context.Context, 1)
 	release := make(chan struct{})
 	defer close(release)

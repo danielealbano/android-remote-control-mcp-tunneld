@@ -37,6 +37,7 @@ func serveTestCert(t *testing.T) tls.Certificate {
 }
 
 func TestServeTLS_ServesHTTP2OnPrebuiltListener(t *testing.T) {
+	t.Parallel()
 	srv := &http.Server{
 		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Proto) }),
 		ReadHeaderTimeout: 5 * time.Second,

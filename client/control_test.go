@@ -92,6 +92,7 @@ func getOnce(hc *http.Client) (*http.Response, error) {
 }
 
 func TestNewMTLSTransport_RejectsNonH2Server(t *testing.T) {
+	t.Parallel()
 	s := startH2TestServer(t, nil, 0, okHandler())
 	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
 	defer tr.CloseIdleConnections()
@@ -102,6 +103,7 @@ func TestNewMTLSTransport_RejectsNonH2Server(t *testing.T) {
 }
 
 func TestNewMTLSTransport_OneConnForConcurrentColdRequests(t *testing.T) {
+	t.Parallel()
 	s := startH2TestServer(t, []string{"h2", "http/1.1"}, 0, okHandler())
 	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
 	defer tr.CloseIdleConnections()
@@ -130,6 +132,7 @@ func TestNewMTLSTransport_OneConnForConcurrentColdRequests(t *testing.T) {
 }
 
 func TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	held := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -164,6 +167,7 @@ func TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 }
 
 func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
+	t.Parallel()
 	s := startH2TestServer(t, []string{"h2", "http/1.1"}, 0, okHandler())
 	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
 	defer tr.CloseIdleConnections()

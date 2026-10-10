@@ -110,6 +110,7 @@ func dnsOptionName(opt dns01.ChallengeOption) string {
 }
 
 func TestLegoConfig_DNSChallengeOpts_RecursiveCheckAlwaysOff(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		skip bool
