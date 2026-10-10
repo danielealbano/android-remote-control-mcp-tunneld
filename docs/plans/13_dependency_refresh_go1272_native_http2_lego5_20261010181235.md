@@ -977,5 +977,10 @@ Definition of Done:
   /etc/grafana/provisioning/plugins" and "can't read alerting provisioning files from directory
   /etc/grafana/provisioning/alerting" — the repo provisions only `dashboards/` and `datasources/`. The identical two
   lines appear with the previous `grafana/grafana:13.0.6` (verified 2026-10-10), so they are not a configuration
-  incompatibility introduced by the bump; reported to the user for a decision (adding empty `plugins/` + `alerting/`
-  provisioning directories would silence them, outside this plan's agreed scope).
+  incompatibility introduced by the bump. The user approved adding the two provisioning directories. Git cannot
+  track an empty directory and Grafana's alerting reader logs a `level=warn` "invalid suffix" line for any
+  non-`.yaml`/`.yml`/`.json` file (so a `.gitkeep` would trade the error for a warning), so each directory holds a
+  no-op `apiVersion: 1` file: `deploy/grafana/provisioning/plugins/plugins.yml` and
+  `deploy/grafana/provisioning/alerting/alerting.yml`. Re-running the Grafana runtime check on 13.2.3 shows no
+  `level=error` line, the datasource + dashboards still provisioned, and only Grafana's internal migrator /
+  sub-resource warnings that the pre-change run logged identically.
