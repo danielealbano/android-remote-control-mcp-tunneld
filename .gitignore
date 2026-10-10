@@ -18,6 +18,7 @@
 /support/attest-probe/app/build/
 /support/attest-probe/local.properties
 /support/attest-probe/.idea/
+/support/attest-probe/.kotlin/
 
 # tunnel-app Gradle build outputs & machine-specific SDK pointer (the built APK fixture under
 # fixtures/tunnel-app/ IS committed — only these are ignored).
@@ -26,3 +27,4 @@
 /support/tunnel-app/app/build/
 /support/tunnel-app/local.properties
 /support/tunnel-app/.idea/
+/support/tunnel-app/.kotlin/
