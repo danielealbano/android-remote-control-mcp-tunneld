@@ -451,23 +451,44 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 
 	logs := tunneltest.NewLogCounter(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- server.Run(ctx, cfg, logs.Logger(), "staging") }()
+	var runErr error
+	runReported := false
+	stopped := make(chan struct{})
+	go func() {
+		runErr = server.Run(ctx, cfg, logs.Logger(), "staging")
+		close(stopped)
+	}()
 	defer func() {
 		cancel()
 		select {
-		case <-done:
+		case <-stopped:
+			if runErr != nil && !runReported {
+				t.Errorf("server run: %s", env.redact(runErr.Error()))
+			}
 		case <-time.After(30 * time.Second):
 			t.Error("server did not drain within 30s")
 		}
 	}()
+	failIfStopped := func() {
+		select {
+		case <-stopped:
+			runReported = true
+			t.Fatalf("the server exited early: %s", env.redact(fmt.Sprint(runErr)))
+		default:
+		}
+	}
 
 	var probeErr error
-	if !waitTrue(60*time.Second, func() bool { probeErr = tunnelResponds(env); return probeErr == nil }) {
+	if !waitTrue(60*time.Second, func() bool {
+		failIfStopped()
+		probeErr = tunnelResponds(env)
+		return probeErr == nil
+	}) {
 		t.Fatalf("the reverse tunnel never reached the local HTTP-01 listener: %s", env.redact(probeErr.Error()))
 	}
 	var bundleErr error
 	if !waitTrue(5*time.Minute, func() bool {
+		failIfStopped()
 		for _, host := range []string{enrollHost, controlHost} {
 			if _, bundleErr = os.Stat(filepath.Join(accountDir, "self", host, "bundle.json")); bundleErr != nil {
 				return false
