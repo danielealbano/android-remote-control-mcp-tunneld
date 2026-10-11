@@ -172,8 +172,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout, DialBackTimeout: cfg.LimitDialBackTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
+		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, edgeAddr)
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
 	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,

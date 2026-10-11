@@ -2,8 +2,10 @@ package edge
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
@@ -56,6 +58,10 @@ type Recorder interface {
 	QuotaExhausted(tunnelName, window string)
 }
 
+type ACMEChallenges interface {
+	TLSALPNCertificate(ctx context.Context, domain string) (*tls.Certificate, bool, error)
+}
+
 // Config wires the Edge.
 type Config struct {
 	EnrollHost   string
@@ -72,6 +78,8 @@ type Config struct {
 	MinGrace         time.Duration
 	EvictIdle        time.Duration
 	ProtectRate      int64
+
+	Logger *slog.Logger
 }
 
 // Edge is the raw :443 public edge.
@@ -85,6 +93,7 @@ type Edge struct {
 	mesh   MeshDialer
 	lim    StreamLimiter
 	logs   PhoneEventSink
+	chal   ACMEChallenges
 
 	enrollLn  *chanListener
 	controlLn *chanListener
@@ -130,10 +139,10 @@ type PublicEvent struct {
 // New builds the Edge. enrollLn/controlLn are the reserved-SNI listeners the http servers accept from.
 func New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool,
 	rec Recorder, r Router, local LocalDialer, mesh MeshDialer, lim StreamLimiter, logs PhoneEventSink,
-	addr net.Addr) *Edge {
+	chal ACMEChallenges, addr net.Addr) *Edge {
 	return &Edge{
 		cfg: cfg, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,
-		lim: lim, logs: logs,
+		lim: lim, logs: logs, chal: chal,
 		enrollLn: newChanListener(addr), controlLn: newChanListener(addr), now: time.Now,
 	}
 }

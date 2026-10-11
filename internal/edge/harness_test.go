@@ -2,7 +2,9 @@ package edge
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
@@ -232,6 +234,31 @@ func (s *fakeSink) PutConnLogPublic(_ context.Context, ev PublicEvent) {
 	s.mu.Unlock()
 }
 
+type fakeACMEChallenges struct {
+	mu      sync.Mutex
+	cert    *tls.Certificate
+	err     error
+	domains []string
+	ctxs    []context.Context
+}
+
+func (f *fakeACMEChallenges) TLSALPNCertificate(ctx context.Context, domain string) (*tls.Certificate, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.domains = append(f.domains, domain)
+	f.ctxs = append(f.ctxs, ctx)
+	if f.err != nil {
+		return nil, false, f.err
+	}
+	return f.cert, f.cert != nil, nil
+}
+
+func (f *fakeACMEChallenges) lookups() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.domains...)
+}
+
 // testEdge builds an Edge wired to fakes + a miniredis-backed limiter.
 type testEdge struct {
 	e     *Edge
@@ -240,6 +267,7 @@ type testEdge struct {
 	rtr   *fakeRouter
 	local *fakeLocal
 	mesh  *fakeMesh
+	chal  *fakeACMEChallenges
 }
 
 func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun func(string, string) bool) *testEdge {
@@ -254,9 +282,13 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	rtr := &fakeRouter{}
 	local := &fakeLocal{}
 	mesh := &fakeMesh{}
+	chal := &fakeACMEChallenges{}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.DiscardHandler)
+	}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
-	e := New(cfg, banIP, banTun, rec, rtr, local, mesh, lim, sink, addr)
-	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, local: local, mesh: mesh}
+	e := New(cfg, banIP, banTun, rec, rtr, local, mesh, lim, sink, chal, addr)
+	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, local: local, mesh: mesh, chal: chal}
 }
 
 func containsStr(ss []string, want string) bool {
