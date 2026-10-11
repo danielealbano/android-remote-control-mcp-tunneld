@@ -100,12 +100,14 @@ func TestRootRefresherSwapAndLastKnownGood(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go rs.Refresh(ctx, 5*time.Millisecond)
 	waitFor(t, time.Second, func() bool { return rs.Pool() != first })
-	swapped := rs.Pool()
 
 	// A failing refetch RETAINS the last-known-good pool AND logs the failure at Warn.
 	sw.fail.Store(true)
 	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > 0 })
-	if rs.Pool() != swapped {
+	retained := rs.Pool()
+	warns := ch.count(slog.LevelWarn)
+	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > warns })
+	if rs.Pool() != retained || retained == first {
 		t.Fatal("a failing refetch must retain the last-known-good pool")
 	}
 	cancel()
@@ -210,7 +212,10 @@ func TestStatusRefresherSwapAndLastKnownGood(t *testing.T) {
 	// A failing refetch RETAINS the last-known-good snapshot (fetchedAt does NOT advance) AND logs Warn.
 	sw.fail.Store(true)
 	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > 0 })
-	if !sl.FetchedAt().Equal(swapped) || !sl.Revoked("abcd") {
+	retained := sl.FetchedAt()
+	warns := ch.count(slog.LevelWarn)
+	waitFor(t, time.Second, func() bool { return ch.count(slog.LevelWarn) > warns })
+	if !sl.FetchedAt().Equal(retained) || retained.Before(swapped) || !sl.Revoked("abcd") {
 		t.Fatal("a failing refetch must retain the last-known-good snapshot")
 	}
 	cancel()
