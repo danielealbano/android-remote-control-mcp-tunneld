@@ -204,9 +204,51 @@ func TestChallengeStore_ErrorsWrapChallengeStore(t *testing.T) {
 	}
 }
 
+type commandCtxRecorder struct {
+	mu   sync.Mutex
+	seen []commandCtx
+}
+
+type commandCtx struct {
+	name      string
+	remaining time.Duration
+	deadline  bool
+	cancelled bool
+}
+
+func (h *commandCtxRecorder) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *commandCtxRecorder) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *commandCtxRecorder) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		dl, ok := ctx.Deadline()
+		h.mu.Lock()
+		h.seen = append(h.seen, commandCtx{name: cmd.Name(), remaining: time.Until(dl), deadline: ok, cancelled: ctx.Err() != nil})
+		h.mu.Unlock()
+		return next(ctx, cmd)
+	}
+}
+
+func (h *commandCtxRecorder) reset() {
+	h.mu.Lock()
+	h.seen = nil
+	h.mu.Unlock()
+}
+
+func (h *commandCtxRecorder) commands() []commandCtx {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]commandCtx(nil), h.seen...)
+}
+
 func TestChallengeStore_LockSelf(t *testing.T) {
 	t.Parallel()
-	s, mr, _ := newTestChallengeStore(t)
+	s, mr, rdb := newTestChallengeStore(t)
+	hook := &commandCtxRecorder{}
+	rdb.AddHook(hook)
 	ctx, cancel := context.WithCancel(context.Background())
 	unlock, ok, err := s.LockSelf(ctx, "enroll.example.test")
 	if err != nil || !ok {
@@ -219,8 +261,19 @@ func TestChallengeStore_LockSelf(t *testing.T) {
 		t.Fatalf("second lock: ok=%v err=%v, want busy", ok, err)
 	}
 	cancel()
+	hook.reset()
 	if err := unlock(); err != nil {
 		t.Fatalf("unlock after the lock ctx was cancelled: %v", err)
+	}
+	unlockCmds := hook.commands()
+	if len(unlockCmds) == 0 {
+		t.Fatal("unlock issued no Valkey command")
+	}
+	for _, c := range unlockCmds {
+		if !c.deadline || c.cancelled || c.remaining <= 0 || c.remaining > selfUnlockTimeout {
+			t.Fatalf("unlock %s ran with deadline=%v cancelled=%v remaining=%s, want a live ctx bounded by %s",
+				c.name, c.deadline, c.cancelled, c.remaining, selfUnlockTimeout)
+		}
 	}
 	if mr.Exists(selfLockKey("enroll.example.test")) {
 		t.Fatal("unlock did not release the lock")

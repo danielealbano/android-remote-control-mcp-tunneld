@@ -194,8 +194,8 @@ func TestNewLegoClient_ChallengeNeedsStore(t *testing.T) {
 			if err == nil {
 				t.Fatalf("%s without a challenge store must fail", method)
 			}
-			if !strings.Contains(err.Error(), CAGTS) {
-				t.Fatalf("error must name the CA, got %v", err)
+			if !strings.Contains(err.Error(), CAGTS) || !strings.Contains(err.Error(), "needs a challenge store") {
+				t.Fatalf("error must name the CA and the missing challenge store, got %v", err)
 			}
 		})
 	}
