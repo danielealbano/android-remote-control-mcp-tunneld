@@ -1075,3 +1075,12 @@ Definition of Done:
   `_NewH2ClientMapsPingTimeouts`; `TestServeTLS_ServesHTTP2OnPrebuiltListener`;
   `TestLazyCA_BuildCtxSurvivesCallerButIsBounded`, `TestLegoClient_ObtainDetachesCallerCancel`,
   `TestLegoConfig_DNSChallengeOpts_RecursiveCheckAlwaysOff`); the tests marked NOT parallel above stay sequential.
+- **PR CI (`internal/attest` refresher tests — outside this plan's scope, fixed per go.md "Fix broken tests").** The
+  pull-request CI run failed `TestStatusRefresherSwapAndLastKnownGood` ("a failing refetch must retain the
+  last-known-good snapshot"). Both refresher tests captured the last-known-good value while the fake server still
+  answered 200, so a 5 ms refresh tick landing before `sw.fail.Store(true)` stored a newer snapshot / pool and the
+  assertion failed although the code was correct (reproduced deterministically by widening that window with a
+  test overlay). Both tests (`TestStatusRefresherSwapAndLastKnownGood`, `TestRootRefresherSwapAndLastKnownGood`)
+  now capture the retained value after the first failure Warn — the refresh loop is sequential, so every
+  successful store has landed by then — and assert it is unchanged after one more failed refetch. Verified: pass
+  with the widened window, fail against a refresher that drops its state on error, pass 1800 stressed `-race` runs.
