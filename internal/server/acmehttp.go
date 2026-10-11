@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
@@ -18,10 +19,14 @@ type connRateLimiter interface {
 	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)
 }
 
-func connRateAllow(lim connRateLimiter, rate int) func(context.Context, netip.Addr) bool {
+func connRateAllow(lim connRateLimiter, rate int, logger *slog.Logger) func(context.Context, netip.Addr) bool {
 	return func(ctx context.Context, ip netip.Addr) bool {
 		ok, _, err := lim.Allow(ctx, "conn-rate", ip, rate, time.Second)
-		return err != nil || ok
+		if err != nil {
+			logger.Debug("acme-http conn-rate check failed (allowing)", "ip", ip, "err", err)
+			return true
+		}
+		return ok
 	}
 }
 
@@ -32,6 +37,7 @@ type guardedListener struct {
 	admit   func() bool
 	release func()
 	reject  func(reason, tunnelName, clientIP string)
+	logger  *slog.Logger
 	conns   chan net.Conn
 	closed  chan struct{}
 	once    sync.Once
@@ -40,9 +46,9 @@ type guardedListener struct {
 
 func newGuardedListener(ctx context.Context, ln net.Listener, ban func(netip.Addr) bool,
 	allow func(context.Context, netip.Addr) bool, admit func() bool, release func(),
-	reject func(reason, tunnelName, clientIP string)) *guardedListener {
+	reject func(reason, tunnelName, clientIP string), logger *slog.Logger) *guardedListener {
 	l := &guardedListener{
-		ln: ln, ban: ban, allow: allow, admit: admit, release: release, reject: reject,
+		ln: ln, ban: ban, allow: allow, admit: admit, release: release, reject: reject, logger: logger,
 		conns: make(chan net.Conn), closed: make(chan struct{}),
 	}
 	l.wg.Add(1)
@@ -62,6 +68,7 @@ func (l *guardedListener) acceptLoop(ctx context.Context) {
 				return
 			}
 			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			l.logger.Warn("acme-http accept failed (backing off)", "backoff", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-l.closed:
@@ -86,24 +93,24 @@ func (l *guardedListener) check(ctx context.Context, c net.Conn) {
 	ip, perr := netip.ParseAddr(host)
 	if perr == nil && l.ban(ip) {
 		l.reject("ban", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	if perr == nil && !l.allow(ctx, ip) {
 		l.reject("conn-rate", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	if !l.admit() {
 		l.reject("max-clients", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	sc := &slotConn{Conn: c, release: l.release}
 	select {
 	case l.conns <- sc:
 	case <-l.closed:
-		_ = sc.Close()
+		closeLogged(l.logger, "acme-http pending conn", sc)
 	}
 }
 

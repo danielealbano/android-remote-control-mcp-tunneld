@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"io"
 	"log/slog"
 	"math/big"
 	"os"
@@ -71,7 +70,9 @@ func TestReservedCerts_LoadCacheUsesInjectedClock(t *testing.T) {
 	}
 }
 
-func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 // mintSelfCert produces a self-signed cert (PEM) + key (PEM) + CertInfo for host with the given NotAfter.
 func mintSelfCert(t *testing.T, host string, notAfter time.Time) (certPEM, keyPEM []byte, info store.CertInfo) {

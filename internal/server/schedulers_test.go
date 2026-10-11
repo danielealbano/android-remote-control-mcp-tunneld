@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,7 +81,7 @@ func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	reg := router.NewRegistry(rdb, time.Minute)
-	logger := slog.New(slog.DiscardHandler)
+	logger := testLogger()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

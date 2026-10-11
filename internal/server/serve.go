@@ -45,6 +45,18 @@ func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *sl
 	return nil
 }
 
+func closeLogged(logger *slog.Logger, what string, c io.Closer) {
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		logger.Warn("close failed", "what", what, "err", err)
+	}
+}
+
+func shutdownLogged(ctx context.Context, logger *slog.Logger, which string, srv *http.Server) {
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.Warn("server shutdown did not complete cleanly", "which", which, "err", err)
+	}
+}
+
 // validNameFunc validates a derived CN as EXACTLY a server-generated tunnel name: the configured
 // prefix + --name-length lowercase-base32 ([a-z2-7]) characters, and not a reserved label. Only names
 // this server's generator can have produced pass — anything looser would accept CNs the CA never signs.

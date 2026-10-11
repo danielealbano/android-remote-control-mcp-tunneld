@@ -56,7 +56,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 	}
 
 	chainCfg := acme.ChainConfig{
-		Limiter: lim, Recorder: rec,
+		Limiter: lim, Recorder: rec, Logger: logger,
 		CooldownDefault: cfg.ACMECooldownDefault, BackoffInitial: cfg.ACMEBackoffInitial,
 		BackoffMax: cfg.ACMEBackoffMax, RenewMargin: cfg.ACMERenewMargin, ShortlivedLifetime: shortlivedLifetime,
 	}

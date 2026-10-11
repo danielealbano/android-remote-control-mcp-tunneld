@@ -58,7 +58,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 	rdb := redis.NewClient(redisOpts)
-	defer func() { _ = rdb.Close() }()
+	defer closeLogged(logger, "valkey client", rdb)
 
 	nodeID := newNodeID()
 	nodeHost := hostname()
@@ -239,24 +239,24 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 	meshLn, err := net.Listen("tcp", cfg.MeshListen)
 	if err != nil {
-		_ = rawLn.Close() // never leak a bound listener on a construction error
+		closeLogged(logger, "raw listener", rawLn) // never leak a bound listener on a construction error
 		return fmt.Errorf("mesh listen %s: %w", cfg.MeshListen, err)
 	}
 	// The internal (metrics/healthz/admin) listener binds HERE too — a bind failure must be fatal, not a
 	// silent Warn that leaves health checking and metrics dead forever.
 	internalLn, err := net.Listen("tcp", cfg.InternalListen)
 	if err != nil {
-		_ = rawLn.Close()
-		_ = meshLn.Close()
+		closeLogged(logger, "raw listener", rawLn)
+		closeLogged(logger, "mesh listener", meshLn)
 		return fmt.Errorf("internal listen %s: %w", cfg.InternalListen, err)
 	}
 	var acmeHTTPLn net.Listener
 	if acmeHTTPSrv != nil {
 		acmeHTTPLn, err = net.Listen("tcp", cfg.ACMEHTTPListen)
 		if err != nil {
-			_ = rawLn.Close()
-			_ = meshLn.Close()
-			_ = internalLn.Close()
+			closeLogged(logger, "raw listener", rawLn)
+			closeLogged(logger, "mesh listener", meshLn)
+			closeLogged(logger, "internal listener", internalLn)
 			return fmt.Errorf("acme http listen %s: %w", cfg.ACMEHTTPListen, err)
 		}
 	}
@@ -283,8 +283,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g.Go(func() error { ed.Serve(gctx, rawLn); return nil })
 	var guarded *guardedListener
 	if acmeHTTPSrv != nil {
-		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate),
-			ed.Admit, ed.Release, rec.Reject)
+		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate, logger),
+			ed.Admit, ed.Release, rec.Reject, logger)
 		g.Go(func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") })
 	}
 
@@ -330,17 +330,17 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// node is explicitly deregistered last. The route/node TTLs remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
-	_ = rawLn.Close()
+	closeLogged(logger, "raw listener", rawLn)
 	if acmeHTTPLn != nil {
-		_ = acmeHTTPLn.Close()
+		closeLogged(logger, "acme-http listener", acmeHTTPLn)
 	}
 	phoneMgr.CloseAll(store.CloseServerShutdown)
-	_ = enrollSrv.Shutdown(sctx)
-	_ = controlSrv.Shutdown(sctx)
-	_ = meshSrv.Shutdown(sctx)
-	_ = internalSrv.Shutdown(sctx)
+	shutdownLogged(sctx, logger, "enroll", enrollSrv)
+	shutdownLogged(sctx, logger, "control", controlSrv)
+	shutdownLogged(sctx, logger, "mesh", meshSrv)
+	shutdownLogged(sctx, logger, "internal", internalSrv)
 	if acmeHTTPSrv != nil {
-		_ = acmeHTTPSrv.Shutdown(sctx)
+		shutdownLogged(sctx, logger, "acme-http", acmeHTTPSrv)
 	}
 	ed.Wait(sctx) // every public handler (splice + end-event enqueue + slot release) has returned
 	if guarded != nil {
@@ -406,7 +406,9 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied})
+		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied}); err != nil {
+			log.Warn("admin "+op+": response write failed", "tunnel", name, "err", err)
+		}
 	}
 }
 

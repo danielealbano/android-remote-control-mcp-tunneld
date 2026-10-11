@@ -1,16 +1,36 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 type guardProbe struct {
 	mu       sync.Mutex
@@ -42,7 +62,7 @@ func newProbedGuard(t *testing.T, ban func(netip.Addr) bool, allow func(context.
 	g := newGuardedListener(context.Background(), ln, ban,
 		func(ctx context.Context, ip netip.Addr) bool { p.allows.Add(1); return allow(ctx, ip) },
 		func() bool { p.admits.Add(1); return admit() },
-		func() { p.releases.Add(1) }, p.reject)
+		func() { p.releases.Add(1) }, p.reject, testLogger())
 	t.Cleanup(func() {
 		_ = g.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -64,7 +84,9 @@ func dialGuard(t *testing.T, g *guardedListener) net.Conn {
 
 func expectClosedByPeer(t *testing.T, c net.Conn) {
 	t.Helper()
-	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("connection must be closed by the guard, read err = %v", err)
 	}
@@ -161,9 +183,14 @@ func TestConnRateAllow(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeConnRateLimiter{ok: tc.ok, err: tc.err}
-			got := connRateAllow(f, 42)(context.Background(), netip.MustParseAddr("192.0.2.1"))
+			var buf syncBuffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			got := connRateAllow(f, 42, logger)(context.Background(), netip.MustParseAddr("192.0.2.1"))
 			if got != tc.want {
 				t.Fatalf("allow = %v, want %v", got, tc.want)
+			}
+			if logged := strings.Contains(buf.String(), "conn-rate check failed"); logged != (tc.err != nil) {
+				t.Fatalf("limiter error logged = %v, want %v; log = %q", logged, tc.err != nil, buf.String())
 			}
 			if f.scope != "conn-rate" || f.limit != 42 || f.window != time.Second {
 				t.Fatalf("Allow(scope=%q limit=%d window=%s), want conn-rate/42/1s", f.scope, f.limit, f.window)
@@ -206,9 +233,11 @@ func (l *failingListener) attempts() []time.Time {
 
 func TestGuardListener_AcceptErrorBackoff(t *testing.T) {
 	fl := &failingListener{closed: make(chan struct{})}
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	g := newGuardedListener(context.Background(), fl, func(netip.Addr) bool { return false },
 		func(context.Context, netip.Addr) bool { return true }, func() bool { return true }, func() {},
-		func(string, string, string) {})
+		func(string, string, string) {}, logger)
 	waitFor(t, 5*time.Second, func() bool { return len(fl.attempts()) >= 4 })
 	times := fl.attempts()
 	for i := 1; i < len(times); i++ {
@@ -223,6 +252,9 @@ func TestGuardListener_AcceptErrorBackoff(t *testing.T) {
 	g.Wait(ctx)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Close during the backoff must end the accept loop, Wait took %s", elapsed)
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "acme-http accept failed") {
+		t.Fatalf("an unexpected accept error must be logged at Warn; log = %q", buf.String())
 	}
 }
 
@@ -270,7 +302,7 @@ func TestGuardListener_WaitJoinsGoroutines(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := newGuardedListener(context.Background(), ln, func(netip.Addr) bool { return false }, allow,
-		func() bool { return true }, func() {}, func(string, string, string) {})
+		func() bool { return true }, func() {}, func(string, string, string) {}, testLogger())
 	c := dialGuard(t, g)
 	defer func() { _ = c.Close() }()
 	<-entered
