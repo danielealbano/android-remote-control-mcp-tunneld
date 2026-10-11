@@ -12,6 +12,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -216,10 +218,9 @@ func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
 		t.Fatal("an unrouted SNI must be closed, not served")
 	}
 	_ = raw.Close()
-	if !waitBool(10*time.Second, func() bool {
-		return metricLineValue(cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`) >= 1
-	}) {
-		t.Fatal("an unrouted SNI must be recorded as no-route")
+	if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`,
+		func(v float64) bool { return v >= 1 }); !met {
+		t.Fatalf("an unrouted SNI must be recorded as no-route (no-route = %v, last scrape error: %v)", v, err)
 	}
 
 	if tunneltest.ServesCertificate(cfg.Listen, itEnrollHost) || tunneltest.ServesCertificate(cfg.Listen, itControlHost) {
@@ -298,35 +299,45 @@ func presentedLeaf(t *testing.T, edgeAddr, host string) []byte {
 		},
 	})
 	if err == nil {
-		_ = conn.Close()
+		if cerr := conn.Close(); cerr != nil {
+			t.Logf("%s: close the probe connection: %v", host, cerr)
+		}
 	}
 	if leaf == nil {
-		t.Fatalf("%s presented no certificate", host)
+		t.Fatalf("%s presented no certificate (dial: %v)", host, err)
 	}
 	return leaf
 }
 
-func metricLineValue(internalAddr, series string) float64 {
+func metricLineValue(internalAddr, series string) (float64, error) {
 	c := &http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Get("http://" + internalAddr + "/metrics")
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0
+	if err := errors.Join(err, resp.Body.Close()); err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("metrics status %d", resp.StatusCode)
 	}
 	for _, line := range strings.Split(string(body), "\n") {
-		if !strings.HasPrefix(line, series+" ") {
-			continue
-		}
-		v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, series)), 64)
-		if err == nil {
-			return v
+		if strings.HasPrefix(line, series+" ") {
+			return strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, series)), 64)
 		}
 	}
-	return 0
+	return 0, nil
+}
+
+func waitMetric(d time.Duration, internalAddr, series string, cond func(float64) bool) (float64, bool, error) {
+	var v float64
+	var err error
+	met := waitBool(d, func() bool {
+		v, err = metricLineValue(internalAddr, series)
+		return err == nil && cond(v)
+	})
+	return v, met, err
 }
 
 // dialFrontend opens a frontend TLS connection to the edge for fqdn (verified against roots) and returns

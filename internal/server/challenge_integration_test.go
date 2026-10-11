@@ -37,9 +37,12 @@ func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer func() { _ = conn.Close() }()
 		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "fqdn", fqdn, "err", err)
 			return
 		}
-		_, _ = io.Copy(conn, conn)
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Warn("echo phone stream ended with an error", "fqdn", fqdn, "err", err)
+		}
 	}
 	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
@@ -94,7 +97,10 @@ func TestIntegration_TLSALPNNeverSpliced(t *testing.T) {
 	env, _ := startChallengeServer(t, config.ChallengeTLSALPN01)
 	fqdn, streams := bindEchoPhone(t, env)
 	before := streams.Load()
-	noRouteBefore := metricLineValue(env.internalAddr, `tunneld_rejections_total{reason="no-route"}`)
+	noRouteBefore, err := metricLineValue(env.internalAddr, `tunneld_rejections_total{reason="no-route"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	raw, err := net.DialTimeout("tcp", env.edgeAddr, 5*time.Second)
 	if err != nil {
@@ -109,10 +115,9 @@ func TestIntegration_TLSALPNNeverSpliced(t *testing.T) {
 	}
 	_ = raw.Close()
 
-	if !waitBool(10*time.Second, func() bool {
-		return metricLineValue(env.internalAddr, `tunneld_rejections_total{reason="no-route"}`) > noRouteBefore
-	}) {
-		t.Fatal("the acme-tls/1 attempt must be recorded as no-route")
+	if v, met, err := waitMetric(10*time.Second, env.internalAddr, `tunneld_rejections_total{reason="no-route"}`,
+		func(v float64) bool { return v > noRouteBefore }); !met {
+		t.Fatalf("the acme-tls/1 attempt must be recorded as no-route (no-route = %v, was %v; last scrape error: %v)", v, noRouteBefore, err)
 	}
 	if got := streams.Load(); got != before {
 		t.Fatalf("the acme-tls/1 attempt reached the phone (%d new streams)", got-before)
@@ -179,10 +184,9 @@ func TestIntegration_ACMEHTTPMissCounted(t *testing.T) {
 			t.Fatalf("%s: status %d, want 404", requestLine, resp.StatusCode)
 		}
 	}
-	if !waitBool(10*time.Second, func() bool {
-		return metricLineValue(env.internalAddr, `tunneld_rejections_total{reason="acme-http-miss"}`) == 2
-	}) {
-		t.Fatalf("acme-http-miss = %v, want 2", metricLineValue(env.internalAddr, `tunneld_rejections_total{reason="acme-http-miss"}`))
+	if v, met, err := waitMetric(10*time.Second, env.internalAddr, `tunneld_rejections_total{reason="acme-http-miss"}`,
+		func(v float64) bool { return v == 2 }); !met {
+		t.Fatalf("acme-http-miss = %v, want 2 (last scrape error: %v)", v, err)
 	}
 }
 
