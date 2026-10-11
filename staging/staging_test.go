@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -94,7 +95,9 @@ func discardStderr(t *testing.T) {
 		t.Fatal(err)
 	}
 	prev := os.Stderr
+	prevLog := log.Writer()
 	os.Stderr = w
+	log.SetOutput(w)
 	drained := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, r)
@@ -102,6 +105,7 @@ func discardStderr(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		os.Stderr = prev
+		log.SetOutput(prevLog)
 		_ = w.Close()
 		<-drained
 		_ = r.Close()
