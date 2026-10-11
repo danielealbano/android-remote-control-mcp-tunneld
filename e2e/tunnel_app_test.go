@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,8 +25,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // tunnelAppPkg is the committed reference client (support/tunnel-app/, built via `make tunnel-app`).
@@ -354,12 +353,24 @@ func h1Get(edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
 // h2Client builds an HTTP/2 client over ONE tunnel connection (SNI fqdn + h2 ALPN); concurrent requests
 // multiplex as streams.
 func h2Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
-	tr := &http2.Transport{
-		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
+	var protocols http.Protocols
+	protocols.SetHTTP2(true)
+	tr := &http.Transport{
+		Protocols:       &protocols,
+		MaxConnsPerHost: 1,
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			d := &tls.Dialer{Config: &tls.Config{
 				ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"},
 			}}
-			return d.DialContext(ctx, "tcp", edge)
+			conn, err := d.DialContext(ctx, "tcp", edge)
+			if err != nil {
+				return nil, err
+			}
+			if tc, ok := conn.(*tls.Conn); !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
+				_ = conn.Close()
+				return nil, errors.New("e2e: tunnel peer did not negotiate HTTP/2")
+			}
+			return conn, nil
 		},
 	}
 	return &http.Client{Transport: tr, Timeout: 90 * time.Second}

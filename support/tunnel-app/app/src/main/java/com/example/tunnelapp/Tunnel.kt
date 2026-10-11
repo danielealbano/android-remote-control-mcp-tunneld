@@ -38,7 +38,7 @@ class Tunnel(
             .execute().use { resp ->
                 if (resp.code != 200) return
                 val s = sink ?: return
-                val source = resp.body!!.source()
+                val source = resp.body.source()
                 while (running.get()) {
                     val frame = Frames.read(source) ?: break
                     when (frame.first) {
@@ -75,7 +75,7 @@ class Tunnel(
                     } catch (_: Throwable) {} finally { try { s.close() } catch (_: Throwable) {} }
                 }.apply { isDaemon = true }
                 up.start()
-                val out = local.getOutputStream(); val src = resp.body!!.byteStream(); val buf = ByteArray(16384)
+                val out = local.getOutputStream(); val src = resp.body.byteStream(); val buf = ByteArray(16384)
                 while (true) { val n = src.read(buf); if (n < 0) break; out.write(buf, 0, n); out.flush() }
                 up.join(5000)
             }

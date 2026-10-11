@@ -1,11 +1,10 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.example.tunnelapp"
-    compileSdk = 36
+    compileSdk = 37
     defaultConfig {
         applicationId = "com.example.tunnelapp"
         minSdk = 33
@@ -36,9 +35,11 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0") // 5.x requires compileSdk 37
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.85")
-    implementation("io.ktor:ktor-server-core:3.4.0")  // Netty engine + platform Conscrypt terminate TLS;
-    implementation("io.ktor:ktor-server-netty:3.4.0") // no explicit netty-* / conscrypt-android dep
+    implementation("com.squareup.okhttp3:okhttp:5.5.0") // 5.x requires compileSdk 37
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
+    implementation("io.ktor:ktor-server-core:3.6.0")  // Netty engine + platform Conscrypt terminate TLS;
+    implementation("io.ktor:ktor-server-netty:3.6.0") { // no explicit netty-* / conscrypt-android dep
+        exclude(group = "io.netty", module = "netty-codec-native-quic")
+    }
 }

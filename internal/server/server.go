@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/net/http2"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
@@ -193,19 +192,16 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	controlSrv := &http.Server{Handler: phoneHandler, ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout: 4 * cfg.ControlPingInterval,
 		ConnContext: phoneconn.ConnContext,
+		Protocols:   h2Protocols(),
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.ControlHost),
-			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12}}
-	if err := http2.ConfigureServer(controlSrv, &http2.Server{}); err != nil {
-		return fmt.Errorf("configure control http2: %w", err)
-	}
+			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12,
+			NextProtos: h2NextProtos()}}
 
 	// Mesh server (mTLS mesh-role, HTTP/2); its listener is bound LAST, below.
 	meshSrv := &http.Server{Handler: meshHandler, ReadHeaderTimeout: readHeaderTimeout,
+		Protocols: h2Protocols(),
 		TLSConfig: &tls.Config{GetCertificate: meshCert.getCert, ClientAuth: tls.RequireAndVerifyClientCert,
-			ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12}}
-	if err := http2.ConfigureServer(meshSrv, &http2.Server{}); err != nil {
-		return fmt.Errorf("configure mesh http2: %w", err)
-	}
+			ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12, NextProtos: h2NextProtos()}}
 
 	// Internal server (metrics + healthz + admin actions; never proxied). The mux mounts the per-tunnel
 	// admin actions /api/v1/admin/tunnels/{name}/reissue and .../terminate and delegates everything else to
@@ -220,7 +216,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		Handler: internalMux}
 
 	// Bind the public + mesh listeners LAST: every fallible construction step above (reserved-cert
-	// issuance and both http2.ConfigureServer calls) has now succeeded, so no socket is ever left bound
+	// issuance) has now succeeded, so no socket is ever left bound
 	// but unserved. A mesh-bind failure closes the already-bound raw listener before returning.
 	rawLn, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {

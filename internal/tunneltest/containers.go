@@ -16,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,7 +37,7 @@ import (
 // feature is used — MinIO is a plain-S3 stand-in). Pebble + challtestsrv: the hermetic ACME test CA.
 const (
 	valkeyImage       = "valkey/valkey:9.1-alpine"
-	minioImage        = "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+	minioImage        = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 	pebbleImage       = "ghcr.io/letsencrypt/pebble:2.10.1"
 	challtestsrvImage = "ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1"
 
@@ -226,7 +228,11 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		Cmd:            []string{"-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"},
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"challtestsrv"}},
-		WaitingFor:     wait.ForListeningPort("8055/tcp"),
+		WaitingFor: wait.ForAll(
+			wait.ForHTTP("/dns-request-history").WithPort("8055/tcp").WithMethod(http.MethodPost).
+				WithBody(strings.NewReader(`{"host":"readiness.test"}`)),
+			wait.ForNop(dnsAnswers("8053/udp")),
+		).WithDeadline(pebbleStartupTimeout),
 	})
 
 	// Pebble: ACME directory on 14000, management (issuing roots) on 15000. NOSLEEP + no nonce rejection
@@ -241,7 +247,10 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		},
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"pebble"}},
-		WaitingFor:     wait.ForListeningPort("14000/tcp"),
+		WaitingFor: wait.ForAll(
+			pebbleHTTPSReady("/dir", "14000/tcp"),
+			pebbleHTTPSReady("/roots/0", "15000/tcp"),
+		).WithDeadline(pebbleStartupTimeout),
 	})
 
 	minica := copyFromContainer(t, pebble, "/test/certs/pebble.minica.pem")
@@ -259,6 +268,70 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		DNSResolver:     endpoint(t, chal, "8053/udp"),
 		ChallMgmtURL:    "http://" + endpoint(t, chal, "8055/tcp"),
 	}
+}
+
+const pebbleStartupTimeout = 60 * time.Second
+
+func pebbleHTTPSReady(path, port string) *wait.HTTPStrategy {
+	return wait.ForHTTP(path).WithPort(port).WithTLS(true).WithAllowInsecure(true).
+		WithStartupTimeout(pebbleStartupTimeout)
+}
+
+func dnsAnswers(port string) func(context.Context, wait.StrategyTarget) error {
+	return func(ctx context.Context, target wait.StrategyTarget) error {
+		host, err := target.Host(ctx)
+		if err != nil {
+			return err
+		}
+		mapped, err := target.MappedPort(ctx, port)
+		if err != nil {
+			return err
+		}
+		addr := net.JoinHostPort(host, mapped.Port())
+		r := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "udp", addr)
+		}}
+		for {
+			qctx, cancel := context.WithTimeout(ctx, time.Second)
+			_, err := r.LookupNetIP(qctx, "ip4", "readiness.test.")
+			cancel()
+			if err == nil {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("dns %s not answering: %w", addr, err)
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+}
+
+const pebbleEABConfig = "/test/config/pebble-config-external-account-bindings.json"
+
+type pebbleEABConfigFile struct {
+	Pebble struct {
+		ExternalAccountMACKeys map[string]string `json:"externalAccountMACKeys"`
+	} `json:"pebble"`
+}
+
+func StartPebbleEAB(t *testing.T) (directoryURL, minicaFile string, macKeys map[string]string) {
+	t.Helper()
+	c := startContainer(t, testcontainers.ContainerRequest{
+		Image:        pebbleImage,
+		ExposedPorts: []string{"14000/tcp"},
+		Cmd:          []string{"-config", pebbleEABConfig},
+		Env:          map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
+		WaitingFor:   pebbleHTTPSReady("/dir", "14000/tcp"),
+	})
+	var cfg pebbleEABConfigFile
+	if err := json.Unmarshal(copyFromContainer(t, c, pebbleEABConfig), &cfg); err != nil {
+		t.Fatalf("parse pebble EAB config: %v", err)
+	}
+	minica := copyFromContainer(t, c, "/test/certs/pebble.minica.pem")
+	return "https://" + endpoint(t, c, "14000/tcp") + "/dir",
+		writeTempFile(t, "pebble-eab-minica-*.pem", minica), cfg.Pebble.ExternalAccountMACKeys
 }
 
 // fetchIssuingRoots downloads Pebble's per-run issuing CA (management /roots/0), trusting the minica for

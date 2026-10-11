@@ -39,6 +39,7 @@ type acmeChain interface {
 // --acme-dns-provider, per-CA accounts whose keys are persisted under --acme-account-dir/accounts, and
 // lazy self-healing clients (startup never blocks on CA reachability).
 func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, logger *slog.Logger) (acmeChain, error) {
+	acme.SetLogOutput(os.Stderr)
 	dnsProvider, err := acme.DNSProviderByName(cfg.ACMEDNSProvider)
 	if err != nil {
 		logger.Warn("acme dns provider unavailable (issuance degraded until configured)",
@@ -93,7 +94,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, 
 // means something is wrong (corruption / wrong file / bad permissions), and silently minting a new
 // account would abandon the existing (EAB-bound) account. A new key is generated ONLY when the file is
 // absent; generation/persistence there is best-effort (a failure costs a re-registered account).
-func loadAccountKey(dir, caID string, logger *slog.Logger) (crypto.PrivateKey, error) {
+func loadAccountKey(dir, caID string, logger *slog.Logger) (crypto.Signer, error) {
 	path := filepath.Join(dir, caID+".key")
 	raw, err := os.ReadFile(path)
 	switch {

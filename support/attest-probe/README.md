@@ -36,7 +36,7 @@ different machine's debug key must re-run `make attest-probe` to refresh the all
 
 `TestE2E_DeviceAttestation` is a **local-only developer gate**: it SKIPS (never fails) when no single
 adb device is connected, and it is **never** wired into CI-with-device. The Gradle build outputs
-(`build/`, `.gradle/`) and the machine-specific `local.properties` are gitignored; only the three
+(`build/`, `.gradle/`, `.kotlin/`) and the machine-specific `local.properties` are gitignored; only the three
 fixtures above are committed.
 
 Placeholder namespace `com.example.attestprobe` only.

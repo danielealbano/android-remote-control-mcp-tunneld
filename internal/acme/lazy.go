@@ -20,7 +20,7 @@ type lazyCA struct {
 	caID        string
 	shortlived  time.Duration // configured cert lifetime for the degraded renewal floor
 	renewMargin time.Duration // configured --acme-renew-margin for the degraded renewal floor
-	build       func() (caIssuer, error)
+	build       func(ctx context.Context) (caIssuer, error)
 
 	group singleflight.Group       // dedups concurrent first-use registration
 	inner atomic.Pointer[caIssuer] // fast-path read; nil until first successful build
@@ -28,8 +28,10 @@ type lazyCA struct {
 
 var _ caIssuer = (*lazyCA)(nil)
 
+const lazyBuildTimeout = 2 * time.Minute
+
 // newLazyCA wraps a builder for one CA's client behind lazy, self-healing construction.
-func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func() (caIssuer, error)) *lazyCA {
+func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ctx context.Context) (caIssuer, error)) *lazyCA {
 	return &lazyCA{caID: caID, shortlived: shortlived, renewMargin: renewMargin, build: build}
 }
 
@@ -41,7 +43,7 @@ func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
 	cas := make([]caIssuer, 0, len(legoCfgs))
 	for _, lc := range legoCfgs {
 		cas = append(cas, newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
-			func() (caIssuer, error) { return NewLegoClient(lc) }))
+			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }))
 	}
 	return NewChainIssuer(cfg, cas...)
 }
@@ -67,7 +69,9 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 		if c, ok := l.cached(); ok {
 			return c, nil
 		}
-		c, err := l.build()
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lazyBuildTimeout)
+		defer cancel()
+		c, err := l.build(bctx)
 		if err != nil {
 			return nil, err // not cached → retried on the next call
 		}

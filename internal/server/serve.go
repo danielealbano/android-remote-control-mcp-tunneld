@@ -21,8 +21,17 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
+func h2Protocols() *http.Protocols {
+	var p http.Protocols
+	p.SetHTTP1(true)
+	p.SetHTTP2(true)
+	return &p
+}
+
+func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
+
 // serveTLS runs srv on ln until ctx is cancelled, then closes the listener. ln is a tls.Listener for the
-// TLS servers (enroll/control/mesh — http2.ConfigureServer was applied at the call site), or the plain
+// TLS servers (enroll/control/mesh), or the plain
 // internal (metrics/healthz/admin) listener. A non-shutdown Serve error is returned so the errgroup
 // cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
 // normal drain signals and stay non-fatal (the drain's srv.Shutdown bounds in-flight requests).

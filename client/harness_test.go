@@ -18,7 +18,6 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/net/http2"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
@@ -155,12 +154,9 @@ func startTestServer(t *testing.T) *testServer {
 	}
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{srvCert}, ClientAuth: tls.RequireAndVerifyClientCert,
-		ClientCAs: ca.pool, MinVersion: tls.VersionTLS12,
+		ClientCAs: ca.pool, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"},
 	}
 	srv := &http.Server{Handler: handler, TLSConfig: tlsConf}
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-		t.Fatal(err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

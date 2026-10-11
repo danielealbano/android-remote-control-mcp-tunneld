@@ -87,8 +87,7 @@ type ServeCmd struct {
 	ACMEDNSProvider    string `name:"acme-dns-provider" help:"lego DNS-01 provider id (e.g. cloudflare, route53). Required for serve."`
 
 	// DNS-01 propagation pre-check tuning (split-horizon / internal-DNS deployments; also the hermetic
-	// ACME test tier). Defaults preserve lego's standard behaviour: system resolvers + authoritative-NS
-	// propagation required.
+	// ACME test tier).
 	ACMEDNSResolvers            []string `name:"acme-dns-resolver" help:"Recursive nameserver(s) host[:port] used for the DNS-01 propagation pre-check; empty uses the system resolvers. Repeatable. Set for split-horizon/internal DNS or a hermetic ACME test server."`
 	ACMEDNSSkipPropagationCheck bool     `name:"acme-dns-skip-propagation-check" default:"false" help:"Skip the authoritative-nameserver DNS-01 propagation requirement (split-horizon/internal DNS, or a test ACME server that validates via its own resolver)."`
 

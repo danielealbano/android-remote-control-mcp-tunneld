@@ -6,13 +6,45 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	legolog "github.com/go-acme/lego/v5/log"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 )
+
+func TestBuildACMEChain_LegoLogsToStderr(t *testing.T) {
+	prevLog := legolog.Default()
+	prevStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Stderr = prevStderr
+		legolog.SetDefault(prevLog)
+		_ = r.Close()
+		_ = w.Close()
+	})
+	os.Stderr = w
+	if _, err := buildACMEChain(config.ServeCmd{ACMEAccountDir: t.TempDir()}, nil, nil, testLogger()); err != nil {
+		t.Fatal(err)
+	}
+	legolog.Info("probe")
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "probe") {
+		t.Fatalf("lego log line must go to stderr, got %q", out)
+	}
+}
 
 func TestLoadAccountKey_AbsentGenerates(t *testing.T) {
 	dir := t.TempDir()
