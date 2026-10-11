@@ -114,7 +114,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			return pemChain, info, nil
 		}
 		if ctx.Err() != nil {
-			return nil, store.CertInfo{}, transient(ctx.Err())
+			return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", ctx.Err(), err))
 		}
 		class := ClassTransient
 		var ie *IssuerError

@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -40,6 +42,13 @@ func (f *fakeCA) id() string { return f.caID }
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func closeOrLog(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Logf("close %T: %v", c, err)
+	}
 }
 
 func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
@@ -412,6 +421,9 @@ func TestChain_StopsWhenContextDone(t *testing.T) {
 		var ie *IssuerError
 		if !errors.Is(err, context.Canceled) || !errors.As(err, &ie) || ie.Class == ClassLocal {
 			t.Fatalf("error = %v, want a context.Canceled error that is not of class %s", err, ClassLocal)
+		}
+		if !strings.Contains(err.Error(), ErrChallengePending.Error()) {
+			t.Fatalf("error = %v, want the interrupted CA order's error carried in its text", err)
 		}
 		if gts.calls != 0 || len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
 			t.Fatalf("an interrupted attempt must record nothing: gts=%d issues=%v cooldowns=%v", gts.calls, rec.issues, rec.cooldowns)
