@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,22 +218,34 @@ func seedCache(t *testing.T, dir, host string, certPEM, keyPEM []byte, info stor
 func TestReservedCerts_CacheReused(t *testing.T) {
 	dir := t.TempDir()
 	host := "enroll.example.test"
-	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour)) // well past the margin
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
 	seedCache(t, dir, host, certPEM, keyPEM, info)
 
 	iss := &countingIssuer{}
-	rc := newTestReserved(dir, []string{host}, iss.obtain, neverRenew, &fakeLocker{}, testLogger())
+	lock := &fakeLocker{}
+	var checks atomic.Int32
+	notDue := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+		checks.Add(1)
+		return false, time.Time{}, nil
+	}
+	rc := newTestReserved(dir, []string{host}, iss.obtain, notDue, lock, testLogger())
 	rc.loadCache()
 	if _, err := rc.getCertificateFor(host)(nil); err != nil {
 		t.Fatalf("cached cert must be served, got %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rc.run(ctx, time.Hour, time.Hour) }()
+	waitFor(t, 5*time.Second, func() bool { return checks.Load() >= 1 })
 	cancel()
-	if err := rc.run(ctx, time.Hour, time.Hour); err != nil {
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if iss.callCount() != 0 {
-		t.Fatalf("a valid, not-due cached pair must NOT trigger ObtainSelf, got %d calls", iss.callCount())
+	lock.mu.Lock()
+	lockCalls := lock.calls
+	lock.mu.Unlock()
+	if iss.callCount() != 0 || lockCalls != 0 {
+		t.Fatalf("a valid, not-due cached pair must NOT trigger issuance: obtains=%d lock calls=%d", iss.callCount(), lockCalls)
 	}
 }
 
@@ -350,7 +363,12 @@ func TestReservedCerts_RunRetriesDegradedSooner(t *testing.T) {
 		host := "enroll.example.test"
 		certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
 		iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
-		rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, &fakeLocker{}, testLogger())
+		var checks atomic.Int32
+		notDue := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+			checks.Add(1)
+			return false, time.Time{}, nil
+		}
+		rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, notDue, &fakeLocker{}, testLogger())
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- rc.run(ctx, time.Hour, 20*time.Millisecond) }()
@@ -360,8 +378,8 @@ func TestReservedCerts_RunRetriesDegradedSooner(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
-		if iss.callCount() != 1 {
-			t.Fatalf("a healthy host must wait renewEvery before the next pass, got %d obtains", iss.callCount())
+		if iss.callCount() != 1 || checks.Load() != 0 {
+			t.Fatalf("a healthy host must wait renewEvery before the next pass: obtains=%d renewal checks=%d", iss.callCount(), checks.Load())
 		}
 	})
 }

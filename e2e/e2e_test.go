@@ -496,8 +496,6 @@ func TestE2E_Eviction(t *testing.T) {
 	}
 }
 
-// --- helpers ---
-
 func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
 	const alpnServed, httpServed = "acme tls-alpn-01 challenge served", "acme http-01 challenge served"
 	tests := []struct {
@@ -557,6 +555,8 @@ func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
 		})
 	}
 }
+
+// --- helpers ---
 
 func echoOn(conn *tls.Conn) error {
 	msg := []byte("evict-check")

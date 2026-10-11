@@ -57,6 +57,27 @@ func (h *levelRecorder) aboveDebug() []string {
 	return out
 }
 
+type rejectArgs struct{ reason, tunnel, ip string }
+
+type argRecorder struct {
+	*recRecorder
+	amu  sync.Mutex
+	args []rejectArgs
+}
+
+func (r *argRecorder) Reject(reason, tunnel, ip string) {
+	r.amu.Lock()
+	r.args = append(r.args, rejectArgs{reason: reason, tunnel: tunnel, ip: ip})
+	r.amu.Unlock()
+	r.recRecorder.Reject(reason, tunnel, ip)
+}
+
+func (r *argRecorder) rejected() []rejectArgs {
+	r.amu.Lock()
+	defer r.amu.Unlock()
+	return append([]rejectArgs(nil), r.args...)
+}
+
 func selfSignedChallengeCert(t *testing.T, domain string) *tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -163,6 +184,8 @@ func TestEdge_ACMETLSALPN_NoChallenge(t *testing.T) {
 			te := newTestEdge(t, baseConfig(), nil, nil)
 			logs := &levelRecorder{}
 			te.e.cfg.Logger = slog.New(logs)
+			rec := &argRecorder{recRecorder: te.rec}
+			te.e.rec = rec
 			te.chal.err = tc.err
 			client, server := net.Pipe()
 			done := runHandleConn(te, ipConn{Conn: server, peer: "198.51.100.21"})
@@ -170,8 +193,9 @@ func TestEdge_ACMETLSALPN_NoChallenge(t *testing.T) {
 				t.Fatal("handshake must fail without a pending challenge")
 			}
 			waitDone(t, done, 5*time.Second)
-			if !containsStr(te.rec.rejects, "no-route") {
-				t.Fatalf("rejects = %v, want no-route", te.rec.rejects)
+			want := rejectArgs{reason: "no-route", tunnel: "a.example.test", ip: "198.51.100.21"}
+			if got := rec.rejected(); len(got) != 1 || got[0] != want {
+				t.Fatalf("rejects = %+v, want [%+v]", got, want)
 			}
 			if above := logs.aboveDebug(); len(above) != 0 {
 				t.Fatalf("records above Debug: %v", above)
@@ -182,8 +206,9 @@ func TestEdge_ACMETLSALPN_NoChallenge(t *testing.T) {
 
 func TestEdge_ACMETLSALPN_HandshakeFailure(t *testing.T) {
 	tests := []struct {
-		name  string
-		drive func(t *testing.T, client net.Conn)
+		name    string
+		bounded bool
+		drive   func(t *testing.T, client net.Conn)
 	}{
 		{name: "client aborts", drive: func(t *testing.T, client net.Conn) {
 			if err := acmeClient(client, "a.example.test", true).Handshake(); err == nil {
@@ -191,7 +216,7 @@ func TestEdge_ACMETLSALPN_HandshakeFailure(t *testing.T) {
 			}
 			_ = client.Close()
 		}},
-		{name: "client stalls", drive: func(t *testing.T, client net.Conn) {
+		{name: "client stalls", bounded: true, drive: func(t *testing.T, client net.Conn) {
 			if _, err := client.Write(captureClientHello(t, "a.example.test", acmeTLS1Protocol)); err != nil {
 				t.Errorf("write ClientHello: %v", err)
 			}
@@ -210,7 +235,11 @@ func TestEdge_ACMETLSALPN_HandshakeFailure(t *testing.T) {
 			t.Cleanup(func() { _ = client.Close() })
 			done := runHandleConn(te, ipConn{Conn: server, peer: "198.51.100.22"})
 			tc.drive(t, client)
-			waitDone(t, done, 5*time.Second)
+			wait := 5 * time.Second
+			if tc.bounded {
+				wait = cfg.HandshakeTimeout + 500*time.Millisecond
+			}
+			waitDone(t, done, wait)
 			if !te.e.Admit() {
 				t.Fatal("the max-clients slot must be released after a failed challenge handshake")
 			}
