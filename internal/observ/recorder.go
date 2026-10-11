@@ -3,14 +3,14 @@
 // implementations. metrics.PromRecorder is the concrete implementation, injected in server.Run.
 package observ
 
-// RejectReasons is the exact tunneld_rejections_total{reason} label set: every rejection writer
-// (enroll, edge, phoneconn, acme) uses ONLY these values; the metrics registration pre-registers the
-// family against this exact set (docs/ARCHITECTURE.md §8).
+// RejectReasons is the exact tunneld_rejections_total{reason} label set: every rejection writer uses
+// ONLY these values; the metrics registration pre-registers the family against this exact set
+// (docs/ARCHITECTURE.md §8).
 var RejectReasons = []string{
 	"ban", "no-route", "handshake-timeout", "conn-rate", "max-clients", "quota-day", "quota-week",
 	"stream-cap", "attest-untrusted", "attest-challenge", "attest-signer", "attest-security-level",
 	"attest-boot", "attest-device-unlocked", "attest-revoked", "attest-stale", "csr-mismatch",
-	"enroll-limit", "issuance-cap", "acme-failed",
+	"enroll-limit", "issuance-cap", "acme-failed", "acme-http-miss",
 }
 
 // Recorder captures metric + cap-hit events. The concrete PromRecorder updates the

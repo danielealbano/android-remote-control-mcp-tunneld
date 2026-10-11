@@ -259,6 +259,22 @@ func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	}
 }
 
+func TestRejectionIncrementsACMEHTTPMiss(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	var buf bytes.Buffer
+	rec := NewPromRecorder(m, caplog.New(discardLog()), newFakeSink(), slog.New(slog.NewTextHandler(&buf, nil)))
+	rec.Reject("acme-http-miss", "", "192.0.2.1")
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="acme-http-miss"} 1`) {
+		t.Errorf("acme-http-miss counter not incremented:\n%s", rr.Body.String())
+	}
+	if strings.Contains(buf.String(), "unregistered rejection reason") {
+		t.Errorf("acme-http-miss must be a registered reason; log = %q", buf.String())
+	}
+}
+
 func TestRejectRefusesUnregisteredReason(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("made-up-reason", "t", "1.1.1.1")

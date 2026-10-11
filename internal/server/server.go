@@ -181,8 +181,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, adminCtl)
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
-	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, cfg.ACMERenewMargin, logger)
+	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
+		chain.ObtainSelf, chain.ShouldRenew, chal, logger)
+	reserved.loadCache()
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
@@ -218,8 +219,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
 
-	// Bind the public + mesh listeners LAST: every fallible construction step above (reserved-cert
-	// issuance) has now succeeded, so no socket is ever left bound
+	var acmeHTTPSrv *http.Server
+	if cfg.UsesChallenge(config.ChallengeHTTP01) {
+		acmeHTTPSrv = &http.Server{
+			Handler:           acme.HTTPChallengeHandler(chal, func(ip string) { rec.Reject("acme-http-miss", "", ip) }, logger),
+			ReadHeaderTimeout: readHeaderTimeout, ReadTimeout: readHeaderTimeout, WriteTimeout: readHeaderTimeout,
+			IdleTimeout: acmeHTTPIdleTimeout, MaxHeaderBytes: acmeHTTPMaxHeaderBytes,
+			DisableGeneralOptionsHandler: true,
+		}
+		acmeHTTPSrv.SetKeepAlivesEnabled(false)
+	}
+
+	// Bind the public + mesh listeners LAST: every fallible construction step above
+	// has now succeeded, so no socket is ever left bound
 	// but unserved. A mesh-bind failure closes the already-bound raw listener before returning.
 	rawLn, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -237,6 +249,16 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		_ = rawLn.Close()
 		_ = meshLn.Close()
 		return fmt.Errorf("internal listen %s: %w", cfg.InternalListen, err)
+	}
+	var acmeHTTPLn net.Listener
+	if acmeHTTPSrv != nil {
+		acmeHTTPLn, err = net.Listen("tcp", cfg.ACMEHTTPListen)
+		if err != nil {
+			_ = rawLn.Close()
+			_ = meshLn.Close()
+			_ = internalLn.Close()
+			return fmt.Errorf("acme http listen %s: %w", cfg.ACMEHTTPListen, err)
+		}
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -259,6 +281,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Edge accept loop.
 	g.Go(func() error { ed.Serve(gctx, rawLn); return nil })
+	var guarded *guardedListener
+	if acmeHTTPSrv != nil {
+		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate),
+			ed.Admit, ed.Release, rec.Reject)
+		g.Go(func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") })
+	}
 
 	// Recorder flusher.
 	g.Go(func() error { return rec.RunFlusher(gctx, 5*time.Second) })
@@ -277,7 +305,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
 	})
 	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
-	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
+	g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })
 	g.Go(func() error {
 		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, nonce: challengeFunc(enrollSvc), logger: logger}
 		return rw.run(gctx, renewalScanInterval)
@@ -303,12 +331,21 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	_ = rawLn.Close()
+	if acmeHTTPLn != nil {
+		_ = acmeHTTPLn.Close()
+	}
 	phoneMgr.CloseAll(store.CloseServerShutdown)
 	_ = enrollSrv.Shutdown(sctx)
 	_ = controlSrv.Shutdown(sctx)
 	_ = meshSrv.Shutdown(sctx)
 	_ = internalSrv.Shutdown(sctx)
+	if acmeHTTPSrv != nil {
+		_ = acmeHTTPSrv.Shutdown(sctx)
+	}
 	ed.Wait(sctx) // every public handler (splice + end-event enqueue + slot release) has returned
+	if guarded != nil {
+		guarded.Wait(sctx)
+	}
 	werr := g.Wait()
 	asyncLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
 	rec.FinalFlush()      // after ALL producers stopped — no late deltas lost (self-bounded)

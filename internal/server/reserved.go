@@ -24,6 +24,17 @@ type selfIssuer func(ctx context.Context, host string) (certPEM, keyPEM []byte, 
 // shouldRenewFunc reports whether cur should renew now (chain.ShouldRenew, CA-dispatched).
 type shouldRenewFunc func(ctx context.Context, cur store.CertInfo) (bool, time.Time, error)
 
+type selfLocker interface {
+	LockSelf(ctx context.Context, host string) (unlock func() error, ok bool, err error)
+}
+
+const (
+	reservedDegradedRetry = time.Minute
+	selfLockWait          = 5 * time.Minute
+	selfIssueTimeout      = 5 * time.Minute
+	selfLockPoll          = 2 * time.Second
+)
+
 var errNoReservedCert = errors.New("server: no reserved-host certificate yet")
 
 // reservedHost holds one reserved hostname's hot-swappable cert + issuing metadata.
@@ -36,35 +47,157 @@ type reservedHost struct {
 }
 
 // reservedCerts manages the --enroll-host/--control-host server certs: on start it reuses a valid
-// cached pair from disk (a restart orders nothing) or obtains one via the ACME chain; when no CA can
-// issue AND no usable cache exists it starts DEGRADED (reserved-host TLS refused until a cert lands,
-// tunnel splicing unaffected); and it renews on the chain's schedule, re-persisting each new pair.
+// cached pair from disk (a restart orders nothing) or obtains one via the ACME chain; when no usable
+// cache exists it starts DEGRADED (reserved-host TLS refused until a cert lands, tunnel splicing
+// unaffected); and it renews on the chain's schedule, re-persisting each new pair.
 type reservedCerts struct {
-	dir         string // <acme-account-dir>/self
-	obtain      selfIssuer
-	shouldRenew shouldRenewFunc
-	renewMargin time.Duration
-	logger      *slog.Logger
-	now         func() time.Time
+	dir          string // <acme-account-dir>/self
+	obtain       selfIssuer
+	shouldRenew  shouldRenewFunc
+	lock         selfLocker
+	lockWait     time.Duration
+	issueTimeout time.Duration
+	lockPoll     time.Duration
+	logger       *slog.Logger
+	now          func() time.Time
 
 	hosts map[string]*reservedHost
 }
 
-// newReservedCerts builds the manager and ensures each host's cert at startup (reuse cache or obtain;
-// degraded on failure). It runs BEFORE any listener is bound, so a cold-start ACME issuance delays
-// readiness but never leaves a socket bound-but-unserved; a failed obtain starts the host degraded.
-func newReservedCerts(ctx context.Context, accountDir string, hosts []string, obtain selfIssuer,
-	shouldRenew shouldRenewFunc, renewMargin time.Duration, logger *slog.Logger) *reservedCerts {
+// newReservedCerts builds the manager.
+func newReservedCerts(accountDir string, hosts []string, obtain selfIssuer, shouldRenew shouldRenewFunc,
+	lock selfLocker, logger *slog.Logger) *reservedCerts {
 	rc := &reservedCerts{
-		dir: filepath.Join(accountDir, "self"), obtain: obtain, shouldRenew: shouldRenew,
-		renewMargin: renewMargin, logger: logger, now: time.Now, hosts: map[string]*reservedHost{},
+		dir: filepath.Join(accountDir, "self"), obtain: obtain, shouldRenew: shouldRenew, lock: lock,
+		lockWait: selfLockWait, issueTimeout: selfIssueTimeout, lockPoll: selfLockPoll,
+		logger: logger, now: time.Now, hosts: map[string]*reservedHost{},
 	}
 	for _, h := range hosts {
-		rh := &reservedHost{host: h}
-		rc.hosts[h] = rh
-		rc.ensure(ctx, rh)
+		rc.hosts[h] = &reservedHost{host: h}
 	}
 	return rc
+}
+
+func (rc *reservedCerts) loadCache() {
+	for _, rh := range rc.hosts {
+		if cert, info, ok := rc.loadCached(rh.host); ok && rc.now().Before(info.NotAfter) {
+			rh.store(cert, info)
+		}
+	}
+}
+
+func (rc *reservedCerts) run(ctx context.Context, renewEvery, degradedEvery time.Duration) error {
+	for {
+		for _, rh := range rc.hosts {
+			rc.maybeRenew(ctx, rh)
+		}
+		wait := renewEvery
+		if rc.degraded() {
+			wait = degradedEvery
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
+func (rc *reservedCerts) degraded() bool {
+	for _, rh := range rc.hosts {
+		if rh.cur.Load() == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (rc *reservedCerts) maybeRenew(ctx context.Context, rh *reservedHost) {
+	if rh.cur.Load() != nil {
+		due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
+		if err != nil {
+			rc.logger.Warn("reserved-host renewal check failed (will retry next scan)", "host", rh.host, "err", err)
+			return
+		}
+		if !due {
+			return
+		}
+	}
+	rc.issue(ctx, rh)
+}
+
+func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
+	lockCtx, lockCancel := context.WithTimeout(ctx, rc.lockWait)
+	unlock, locked, err := rc.acquire(lockCtx, rh.host)
+	lockCancel()
+	switch {
+	case ctx.Err() != nil:
+		if locked {
+			rc.releaseLock(rh.host, unlock)
+		}
+		return
+	case err != nil:
+		rc.logger.Warn("reserved-host issuance lock unavailable (issuing without it)", "host", rh.host, "err", err)
+	case !locked:
+		rc.logger.Info("reserved-host issuance busy on another node (will retry)", "host", rh.host)
+		return
+	}
+	issueCtx, cancel := context.WithTimeout(ctx, rc.issueTimeout)
+	defer cancel()
+	certPEM, keyPEM, info, err := rc.obtain(issueCtx, rh.host)
+	abandoned := err != nil && ctx.Err() == nil && issueCtx.Err() != nil
+	if locked {
+		if abandoned {
+			rc.logger.Warn("reserved-host issuance abandoned at its deadline (lock kept until its TTL)", "host", rh.host)
+		} else {
+			rc.releaseLock(rh.host, unlock)
+		}
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if rh.cur.Load() == nil {
+			rc.logger.Warn("reserved-host cert unavailable (degraded; will retry)", "host", rh.host, "err", err)
+		} else {
+			rc.logger.Warn("reserved-host cert renewal failed (keeping current)", "host", rh.host, "err", err)
+		}
+		return
+	}
+	c, perr := tls.X509KeyPair(certPEM, keyPEM)
+	if perr != nil {
+		rc.logger.Warn("reserved-host cert parse failed", "host", rh.host, "err", perr)
+		return
+	}
+	rh.store(&c, info)
+	rc.persist(rh.host, certPEM, keyPEM, info)
+}
+
+func (rc *reservedCerts) releaseLock(host string, unlock func() error) {
+	if err := unlock(); err != nil {
+		rc.logger.Warn("reserved-host issuance lock release failed (expires by TTL)", "host", host, "err", err)
+	}
+}
+
+func (rc *reservedCerts) acquire(ctx context.Context, host string) (func() error, bool, error) {
+	for {
+		unlock, ok, err := rc.lock.LockSelf(ctx, host)
+		if err != nil && ctx.Err() != nil {
+			return unlock, false, nil
+		}
+		if err != nil || ok {
+			return unlock, ok, err
+		}
+		t := time.NewTimer(rc.lockPoll)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return unlock, false, nil
+		case <-t.C:
+		}
+	}
 }
 
 // getCertificateFor returns a tls.Config.GetCertificate bound to one host (the edge already routed by
@@ -82,36 +215,6 @@ func (rc *reservedCerts) getCertificateFor(host string) func(*tls.ClientHelloInf
 	}
 }
 
-// ensure loads a valid cached pair (reuse), else obtains + persists one; on obtain failure it keeps any
-// non-expired cache and otherwise leaves the host degraded.
-func (rc *reservedCerts) ensure(ctx context.Context, rh *reservedHost) {
-	cert, info, ok := rc.loadCached(rh.host)
-	if ok {
-		notAfter := info.NotAfter
-		switch {
-		case notAfter.Sub(rc.now()) > rc.renewMargin:
-			rh.store(cert, info)
-			return // valid cache — reuse, order nothing
-		case rc.now().Before(notAfter):
-			rh.store(cert, info) // still valid but expiring — serve it, then try to renew below
-		}
-	}
-	certPEM, keyPEM, newInfo, err := rc.obtain(ctx, rh.host)
-	if err != nil {
-		if rh.cur.Load() == nil {
-			rc.logger.Warn("reserved-host cert unavailable (degraded; will retry on schedule)", "host", rh.host, "err", err)
-		}
-		return
-	}
-	c, perr := tls.X509KeyPair(certPEM, keyPEM)
-	if perr != nil {
-		rc.logger.Warn("reserved-host cert parse failed", "host", rh.host, "err", perr)
-		return
-	}
-	rh.store(&c, newInfo)
-	rc.persist(rh.host, certPEM, keyPEM, newInfo)
-}
-
 func (rh *reservedHost) store(cert *tls.Certificate, info store.CertInfo) {
 	rh.cur.Store(cert)
 	rh.mu.Lock()
@@ -123,53 +226,6 @@ func (rh *reservedHost) currentInfo() store.CertInfo {
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
 	return rh.info
-}
-
-// runRenewal renews each reserved cert on the chain's schedule (or immediately when a host is still
-// degraded), re-persisting each new pair. It runs until ctx is cancelled.
-func (rc *reservedCerts) runRenewal(ctx context.Context, interval time.Duration) error {
-	if interval <= 0 {
-		interval = time.Hour
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-t.C:
-			for _, rh := range rc.hosts {
-				rc.maybeRenew(ctx, rh)
-			}
-		}
-	}
-}
-
-func (rc *reservedCerts) maybeRenew(ctx context.Context, rh *reservedHost) {
-	if rh.cur.Load() == nil {
-		rc.ensure(ctx, rh) // still degraded — retry issuance
-		return
-	}
-	due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
-	if err != nil {
-		rc.logger.Warn("reserved-host renewal check failed (will retry next scan)", "host", rh.host, "err", err)
-		return
-	}
-	if !due {
-		return
-	}
-	certPEM, keyPEM, info, err := rc.obtain(ctx, rh.host)
-	if err != nil {
-		rc.logger.Warn("reserved-host cert renewal failed (keeping current)", "host", rh.host, "err", err)
-		return
-	}
-	c, perr := tls.X509KeyPair(certPEM, keyPEM)
-	if perr != nil {
-		rc.logger.Warn("reserved-host renewed cert parse failed", "host", rh.host, "err", perr)
-		return
-	}
-	rh.store(&c, info)
-	rc.persist(rh.host, certPEM, keyPEM, info)
 }
 
 func (rc *reservedCerts) hostDir(host string) string { return filepath.Join(rc.dir, host) }
