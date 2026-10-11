@@ -177,7 +177,7 @@ func startChallengeServer(t *testing.T, method string, mutate ...func(*config.Se
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("config invalid: %v", err)
 		}
-		logs := tunneltest.NewLogCounter()
+		logs := tunneltest.NewLogCounter(testLogger().Handler())
 		if env, ok := runIntegrationServer(t, cfg, pebble, logs.Logger(), redisURL, s3URL, access, secret); ok {
 			return env, logs
 		}

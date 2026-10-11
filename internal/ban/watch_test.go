@@ -15,7 +15,7 @@ func TestWatcher_InitialDoesNotFireOnReload(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	// Initial takes no onReload; it fires zero callbacks.
 	if atomic.LoadInt32(&reloads) != 0 {
@@ -42,7 +42,7 @@ func TestWatcher_TornReadNeverGoesLive(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
 		t.Fatal("Initial must apply the bans")
@@ -79,7 +79,7 @@ func TestWatcher_SingleLoadNoDoubleExpansion(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	snapAfterInitial := e.current.Load() // the single startup load's snapshot
 	w.tick(cb)                           // no change since Initial → must not rebuild/re-commit/reload

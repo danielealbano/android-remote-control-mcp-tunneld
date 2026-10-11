@@ -153,7 +153,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	if opts.challengeZeroSSL != "" {
 		challengeZeroSSL = opts.challengeZeroSSL
 	}
-	logger := discardLogger()
+	logger := testOutputLogger()
 	if opts.logger != nil {
 		logger = opts.logger
 	}
@@ -508,7 +508,7 @@ func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.method, func(t *testing.T) {
 			inf := startE2EInfra(t)
-			logsA, logsB := tunneltest.NewLogCounter(), tunneltest.NewLogCounter()
+			logsA, logsB := tunneltest.NewLogCounter(testOutputLogger().Handler()), tunneltest.NewLogCounter(testOutputLogger().Handler())
 			var edgeB string
 			for range 5 {
 				p := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
@@ -593,7 +593,9 @@ func emptyFile(t *testing.T) string {
 	return p
 }
 
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testOutputLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 func writeCA(t *testing.T) (certPath, keyPath string) {
 	t.Helper()

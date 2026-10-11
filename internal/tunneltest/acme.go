@@ -42,29 +42,43 @@ func WaitReservedHosts(t *testing.T, edgeAddr string, hosts []string, timeout ti
 }
 
 type LogCounter struct {
+	state *logCounts
+	next  slog.Handler
+}
+
+type logCounts struct {
 	mu     sync.Mutex
 	counts map[string]int
 }
 
-func NewLogCounter() *LogCounter { return &LogCounter{counts: map[string]int{}} }
+func NewLogCounter(next slog.Handler) *LogCounter {
+	return &LogCounter{state: &logCounts{counts: map[string]int{}}, next: next}
+}
 
 func (c *LogCounter) Logger() *slog.Logger { return slog.New(c) }
 
 func (c *LogCounter) Enabled(context.Context, slog.Level) bool { return true }
 
-func (c *LogCounter) Handle(_ context.Context, r slog.Record) error {
-	c.mu.Lock()
-	c.counts[r.Message]++
-	c.mu.Unlock()
-	return nil
+func (c *LogCounter) Handle(ctx context.Context, r slog.Record) error {
+	c.state.mu.Lock()
+	c.state.counts[r.Message]++
+	c.state.mu.Unlock()
+	if !c.next.Enabled(ctx, r.Level) {
+		return nil
+	}
+	return c.next.Handle(ctx, r)
 }
 
-func (c *LogCounter) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *LogCounter) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &LogCounter{state: c.state, next: c.next.WithAttrs(attrs)}
+}
 
-func (c *LogCounter) WithGroup(string) slog.Handler { return c }
+func (c *LogCounter) WithGroup(name string) slog.Handler {
+	return &LogCounter{state: c.state, next: c.next.WithGroup(name)}
+}
 
 func (c *LogCounter) Count(msg string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.counts[msg]
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	return c.state.counts[msg]
 }

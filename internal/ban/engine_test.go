@@ -2,7 +2,6 @@ package ban
 
 import (
 	"bytes"
-	"io"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -13,7 +12,9 @@ import (
 	"time"
 )
 
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 // captureLog returns a logger writing Warn+Error records into the returned buffer (for warn/error
 // assertions).
@@ -47,7 +48,7 @@ func TestMatchSingleIPVia32(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip 9.9.9.9\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("9.9.9.9")); !ok {
@@ -62,7 +63,7 @@ func TestMatchCIDRCoversRange(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "cidr 10.1.0.0/16\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("10.1.42.7")); !ok {
@@ -77,7 +78,7 @@ func TestMatchReturnsReasonSource(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "# header comment\nip 9.9.9.9\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	src, ok := e.Match(mustAddr("9.9.9.9"))
@@ -97,7 +98,7 @@ func TestUnionAcrossMultipleFiles(t *testing.T) {
 	a := writeBan(t, dir, "a.txt", "ip 1.1.1.1\n")
 	b := writeBan(t, dir, "b.txt", "ip 2.2.2.2\n")
 	e := NewEngine()
-	if err := e.Load([]string{a, b}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{a, b}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
@@ -112,14 +113,14 @@ func TestReloadSwapsAtomically(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip 1.1.1.1\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
 		t.Fatal("1.1.1.1 must match before reload")
 	}
 	writeBan(t, dir, "bans.txt", "ip 2.2.2.2\n")
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
@@ -134,7 +135,7 @@ func TestMatchTunnelNameAndFingerprint(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "tunnel-name abcdef2345\ntunnel-fingerprint sha256:deadbeef\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if src, ok := e.MatchTunnel("abcdef2345", ""); !ok || src.Reason != ReasonTunnelName {
@@ -153,14 +154,14 @@ func TestMissingBanFileSkipped(t *testing.T) {
 	good := writeBan(t, dir, "good.txt", "ip 1.1.1.1\n")
 	missing := filepath.Join(dir, "absent.txt")
 	e := NewEngine()
-	if err := e.Load([]string{good, missing}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{good, missing}, "", nil, testLog()); err != nil {
 		t.Fatalf("absent file must not fail load: %v", err)
 	}
 	if _, ok := e.Match(mustAddr("1.1.1.1")); !ok {
 		t.Error("other file must still be enforced when one is absent")
 	}
 	writeBan(t, dir, "absent.txt", "ip 2.2.2.2\n")
-	if err := e.Load([]string{good, missing}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{good, missing}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("2.2.2.2")); !ok {
@@ -174,7 +175,7 @@ func TestWatchFiresOnReloadOnMtimeChange(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("Initial must NOT fire onReload (no live connections yet), got %d", reloads)
@@ -197,7 +198,7 @@ func TestBan_MappedIPv6Matches(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip ::ffff:9.9.9.9\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("9.9.9.9")); !ok {
@@ -209,7 +210,7 @@ func TestBan_IPv6EntriesMatch(t *testing.T) {
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "ip 2001:db8::1\ncidr 2001:db8:1::/48\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("2001:db8::1")); !ok {
@@ -263,7 +264,7 @@ func TestBanLoad_PresentCSVFailureKeepsSnapshot(t *testing.T) {
 	csv := writeBan(t, dir, "dbip.csv", dbipFixture)
 	f := writeBan(t, dir, "bans.txt", "country XX\nip 5.5.5.5\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, csv, nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, csv, nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("1.0.0.5")); !ok {
@@ -271,7 +272,7 @@ func TestBanLoad_PresentCSVFailureKeepsSnapshot(t *testing.T) {
 	}
 	// Replace the CSV with content that yields zero parseable rows (present-but-garbage).
 	writeBan(t, dir, "dbip.csv", "not,an,ip\nrow,at,all\n")
-	if err := e.Load([]string{f}, csv, nil, discardLog()); err == nil {
+	if err := e.Load([]string{f}, csv, nil, testLog()); err == nil {
 		t.Error("a present CSV with zero parseable rows must cause a load error")
 	}
 	if _, ok := e.Match(mustAddr("1.0.0.5")); !ok {
@@ -285,7 +286,7 @@ func TestWatcher_DetectsDeletionAndEqualMtime(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("Initial reload count = %d, want 0", reloads)
@@ -321,7 +322,7 @@ func TestWatcher_RetriesAfterFailedLoad(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	// Make the next load fail (file → directory).
 	if err := os.Remove(f); err != nil {
@@ -354,7 +355,7 @@ func TestWatchLoadErrorKeepsPreviousSnapshot(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("Initial onReload count = %d, want 0", reloads)
@@ -472,7 +473,7 @@ func TestWatcher_FirstDeployAbsenceStillSkips(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	w.Initial()
 	// Initial fires no callback; that it COMPLETED (recorded the baseline) is proven by the next,
 	// unchanged tick doing nothing — a nil baseline would instead treat the absent file as a change.
@@ -497,7 +498,7 @@ func TestWatcher_TornReadRetries(t *testing.T) {
 	e := NewEngine()
 	var reloads int32
 	cb := func(*Engine) { atomic.AddInt32(&reloads, 1) }
-	w := NewWatcher(e, []string{f}, "", 0, discardLog())
+	w := NewWatcher(e, []string{f}, "", 0, testLog())
 	// Seed the last-loaded baseline so the tick sees a change and proceeds past the fast-path check.
 	base := time.Now()
 	w.last = map[string]fileState{f: {exists: true, modTime: base, size: 11}}

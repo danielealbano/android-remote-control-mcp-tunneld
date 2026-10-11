@@ -50,7 +50,7 @@ func TestParseSkipsMalformedLines(t *testing.T) {
 	// good entry still loaded.
 	dir := t.TempDir()
 	f := writeBan(t, dir, "bans.txt", "cidr not-a-cidr\nip 7.7.7.7\n")
-	p, err := parseFile(f, discardLog())
+	p, err := parseFile(f, testLog())
 	if err != nil {
 		t.Fatalf("parseFile error: %v", err)
 	}

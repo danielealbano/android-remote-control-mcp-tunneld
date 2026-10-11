@@ -208,7 +208,9 @@ func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	conn := tls.Client(raw, &tls.Config{ServerName: "unrouted.other.test", InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an unrouted SNI must be closed, not served")

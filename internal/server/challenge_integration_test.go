@@ -47,7 +47,12 @@ func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	runDone := make(chan struct{})
-	go func() { _ = c.Run(runCtx); close(runDone) }()
+	go func() {
+		defer close(runDone)
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			t.Errorf("tunnel client run: %v", err)
+		}
+	}()
 	t.Cleanup(func() {
 		runCancel()
 		<-runDone
@@ -95,7 +100,9 @@ func TestIntegration_TLSALPNNeverSpliced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, NextProtos: []string{"acme-tls/1"}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an acme-tls/1 handshake with no pending challenge must be closed")
@@ -121,8 +128,12 @@ func rawHTTP(t *testing.T, conn net.Conn, br *bufio.Reader, requestLine, host st
 	if err != nil {
 		return nil, err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return nil, err
+	}
+	if err := resp.Body.Close(); err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 
@@ -133,7 +144,9 @@ func TestIntegration_ACMEHTTPNoKeepAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	br := bufio.NewReader(conn)
 	resp, err := rawHTTP(t, conn, br, "GET /.well-known/acme-challenge/unknown HTTP/1.1", itEnrollHost)
 	if err != nil {
@@ -154,7 +167,9 @@ func TestIntegration_ACMEHTTPMissCounted(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+		if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
 		resp, err := rawHTTP(t, conn, bufio.NewReader(conn), requestLine, itEnrollHost)
 		_ = conn.Close()
 		if err != nil {

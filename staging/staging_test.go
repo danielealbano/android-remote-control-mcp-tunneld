@@ -4,6 +4,7 @@ package staging_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,8 +15,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -25,6 +28,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,28 +92,73 @@ func writeSecretFile(t *testing.T, dir, name, value string) string {
 	return path
 }
 
-func discardStderr(t *testing.T) {
+type redactingWriter struct {
+	mu      sync.Mutex
+	redact  func(string) string
+	out     io.Writer
+	pending []byte
+}
+
+func (w *redactingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pending = append(w.pending, p...)
+	for {
+		i := bytes.IndexByte(w.pending, '\n')
+		if i < 0 {
+			return len(p), nil
+		}
+		line := string(w.pending[:i])
+		w.pending = w.pending[i+1:]
+		if _, err := io.WriteString(w.out, w.redact(line)+"\n"); err != nil {
+			return len(p), err
+		}
+	}
+}
+
+func (w *redactingWriter) flush() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.pending) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.out, w.redact(string(w.pending))+"\n")
+	w.pending = nil
+	return err
+}
+
+func redirectOutput(t *testing.T, env *stagingEnv) *redactingWriter {
 	t.Helper()
+	out := &redactingWriter{redact: env.redact, out: os.Stdout}
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev := os.Stderr
-	prevLog := log.Writer()
+	prevStderr, prevLog := os.Stderr, log.Writer()
 	os.Stderr = w
 	log.SetOutput(w)
-	drained := make(chan struct{})
+	copied := make(chan error, 1)
 	go func() {
-		_, _ = io.Copy(io.Discard, r)
-		close(drained)
+		_, err := io.Copy(out, r)
+		copied <- err
 	}()
 	t.Cleanup(func() {
-		os.Stderr = prev
+		os.Stderr = prevStderr
 		log.SetOutput(prevLog)
-		_ = w.Close()
-		<-drained
-		_ = r.Close()
+		if err := w.Close(); err != nil {
+			t.Errorf("close the redirected stderr pipe: %v", err)
+		}
+		if err := <-copied; err != nil {
+			t.Errorf("copy the redirected output: %v", err)
+		}
+		if err := r.Close(); err != nil {
+			t.Errorf("close the redirected stderr reader: %v", err)
+		}
+		if err := out.flush(); err != nil {
+			t.Errorf("flush the redirected output: %v", err)
+		}
 	})
+	return out
 }
 
 func freeLocalPort(t *testing.T) int {
@@ -133,7 +182,7 @@ const (
 	tunnelFailed
 )
 
-func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, httpPort int) (*exec.Cmd, <-chan error, tunnelOutcome, error) {
+func startTunnel(t *testing.T, env *stagingEnv, out io.Writer, keyPath, knownHostsPath string, edgePort, httpPort int) (*exec.Cmd, <-chan error, tunnelOutcome, error) {
 	cmd := exec.Command("ssh", "-v", "-N", "-F", "/dev/null",
 		"-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes",
 		"-o", "UserKnownHostsFile="+knownHostsPath, "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=10",
@@ -142,7 +191,7 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 		"-R", "0.0.0.0:443:127.0.0.1:"+strconv.Itoa(edgePort),
 		"-R", "0.0.0.0:80:127.0.0.1:"+strconv.Itoa(httpPort),
 		env.user+"@"+env.host)
-	cmd.Stdout = io.Discard
+	cmd.Stdout = out
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, nil, tunnelFailed, err
@@ -158,6 +207,9 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 		sc := bufio.NewScanner(stderr)
 		for sc.Scan() {
 			line := sc.Text()
+			if _, err := io.WriteString(out, "ssh: "+line+"\n"); err != nil {
+				t.Errorf("write ssh output: %v", err)
+			}
 			if sent {
 				continue
 			}
@@ -175,6 +227,9 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 				sent = true
 			}
 		}
+		if err := sc.Err(); err != nil {
+			t.Errorf("read ssh output: %v", err)
+		}
 	}()
 	exited := make(chan error, 1)
 	go func() {
@@ -191,8 +246,11 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 			return nil, nil, tunnelFailed, <-exited
 		}
 	case <-time.After(60 * time.Second):
-		_ = cmd.Process.Kill()
+		killErr := cmd.Process.Kill()
 		<-exited
+		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			return nil, nil, tunnelFailed, fmt.Errorf("remote forwards not confirmed within 60s; kill ssh: %w", killErr)
+		}
 		return nil, nil, tunnelFailed, errors.New("remote forwards not confirmed within 60s")
 	}
 	if outcome == tunnelBusy {
@@ -201,18 +259,20 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 	return cmd, exited, outcome, nil
 }
 
-func openTunnel(t *testing.T, env *stagingEnv, edgePort, httpPort int) {
+func openTunnel(t *testing.T, env *stagingEnv, out io.Writer, edgePort, httpPort int) {
 	t.Helper()
 	dir := t.TempDir()
 	keyPath := writeSecretFile(t, dir, "id", env.key)
 	knownHostsPath := writeSecretFile(t, dir, "known_hosts", env.knownHosts)
 	deadline := time.Now().Add(20 * time.Minute)
 	for {
-		cmd, exited, outcome, err := startTunnel(env, keyPath, knownHostsPath, edgePort, httpPort)
+		cmd, exited, outcome, err := startTunnel(t, env, out, keyPath, knownHostsPath, edgePort, httpPort)
 		switch outcome {
 		case tunnelEstablished:
 			t.Cleanup(func() {
-				_ = cmd.Process.Kill()
+				if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					t.Errorf("stop the ssh tunnel: %v", err)
+				}
 				<-exited
 			})
 			return
@@ -283,19 +343,24 @@ func waitTrue(d time.Duration, cond func() bool) bool {
 	return false
 }
 
-func tunnelResponds(env *stagingEnv) bool {
+func tunnelResponds(env *stagingEnv) error {
 	req, err := http.NewRequest(http.MethodGet, "http://"+net.JoinHostPort(env.host, "80")+"/.well-known/acme-challenge/probe", nil)
 	if err != nil {
-		return false
+		return err
 	}
 	req.Host = "probe." + env.domain
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
-		return false
+		return err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusNotFound
+	_, copyErr := io.Copy(io.Discard, resp.Body)
+	if err := errors.Join(copyErr, resp.Body.Close()); err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("probe status %d, want 404", resp.StatusCode)
+	}
+	return nil
 }
 
 func bundleTrustPool(t *testing.T, env *stagingEnv, accountDir string, hosts ...string) *x509.CertPool {
@@ -328,7 +393,7 @@ type stagingCase struct {
 	writeLEKey, writeGTSKey bool
 }
 
-func runStagingCase(t *testing.T, env *stagingEnv, tc stagingCase, redisURL, s3URL, access, secret string, edgePort, httpPort int) {
+func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase, redisURL, s3URL, access, secret string, edgePort, httpPort int) {
 	t.Helper()
 	caCert, caKey := writeCA(t)
 	signers := filepath.Join(t.TempDir(), "signers.txt")
@@ -378,7 +443,7 @@ func runStagingCase(t *testing.T, env *stagingEnv, tc stagingCase, redisURL, s3U
 		t.Fatalf("config invalid: %s", env.redact(err.Error()))
 	}
 
-	logs := tunneltest.NewLogCounter()
+	logs := tunneltest.NewLogCounter(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- server.Run(ctx, cfg, logs.Logger(), "staging") }()
@@ -391,18 +456,20 @@ func runStagingCase(t *testing.T, env *stagingEnv, tc stagingCase, redisURL, s3U
 		}
 	}()
 
-	if !waitTrue(60*time.Second, func() bool { return tunnelResponds(env) }) {
-		t.Fatal("the reverse tunnel never reached the local HTTP-01 listener")
+	var probeErr error
+	if !waitTrue(60*time.Second, func() bool { probeErr = tunnelResponds(env); return probeErr == nil }) {
+		t.Fatalf("the reverse tunnel never reached the local HTTP-01 listener: %s", env.redact(probeErr.Error()))
 	}
+	var bundleErr error
 	if !waitTrue(5*time.Minute, func() bool {
 		for _, host := range []string{enrollHost, controlHost} {
-			if _, err := os.Stat(filepath.Join(accountDir, "self", host, "bundle.json")); err != nil {
+			if _, bundleErr = os.Stat(filepath.Join(accountDir, "self", host, "bundle.json")); bundleErr != nil {
 				return false
 			}
 		}
 		return true
 	}) {
-		t.Fatal("the staging CA never issued both reserved-host certificates")
+		t.Fatalf("the staging CA never issued both reserved-host certificates: %s", env.redact(bundleErr.Error()))
 	}
 
 	roots := bundleTrustPool(t, env, accountDir, enrollHost, controlHost)
@@ -449,14 +516,14 @@ func TestStaging_ACMEValidation(t *testing.T) {
 		t.Skip("TUNNELD_STAGING_SSH_KEY is not set; the real-CA staging tier needs the staging node")
 	}
 	env := loadStagingEnv(t)
-	discardStderr(t)
+	out := redirectOutput(t, env)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 
 	redisURL := tunneltest.StartValkey(t)
 	s3URL, access, secret := tunneltest.StartMinIO(t)
 	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, stagingBucket)
 	edgePort, httpPort := freeLocalPort(t), freeLocalPort(t)
-	openTunnel(t, env, edgePort, httpPort)
+	openTunnel(t, env, out, edgePort, httpPort)
 
 	cases := []stagingCase{
 		{
@@ -482,7 +549,7 @@ func TestStaging_ACMEValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			runStagingCase(t, env, tc, redisURL, s3URL, access, secret, edgePort, httpPort)
+			runStagingCase(t, env, out, tc, redisURL, s3URL, access, secret, edgePort, httpPort)
 		})
 	}
 }
