@@ -35,16 +35,11 @@ type acmeChain interface {
 	ObtainSelf(ctx context.Context, host string) (certPEM, keyPEM []byte, info store.CertInfo, err error)
 }
 
-// buildACMEChain constructs the LE→GTS→ZeroSSL chain from config: the DNS-01 provider selected by
-// --acme-dns-provider, per-CA accounts whose keys are persisted under --acme-account-dir/accounts, and
-// lazy self-healing clients (startup never blocks on CA reachability).
-func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, logger *slog.Logger) (acmeChain, error) {
+// buildACMEChain constructs the LE→GTS→ZeroSSL chain from config: per-CA accounts whose keys are
+// persisted under --acme-account-dir/accounts, and lazy self-healing clients (startup never blocks on CA
+// reachability).
+func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.ChallengeStore, rec acme.Recorder, logger *slog.Logger) (acmeChain, error) {
 	acme.SetLogOutput(os.Stderr)
-	dnsProvider, err := acme.DNSProviderByName(cfg.ACMEDNSProvider)
-	if err != nil {
-		logger.Warn("acme dns provider unavailable (issuance degraded until configured)",
-			"provider", cfg.ACMEDNSProvider, "err", err)
-	}
 	accountsDir := filepath.Join(cfg.ACMEAccountDir, "accounts")
 
 	leKey, err := loadAccountKey(accountsDir, acme.CALetsEncrypt, logger)
@@ -69,22 +64,34 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, rec acme.Recorder, 
 		CAID: acme.CALetsEncrypt, DirectoryURL: cfg.ACMEDirLE, Email: cfg.ACMEEmail,
 		AccountKey: leKey,
 		Profile:    cfg.ACMELEProfile, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
-		UseARI: true, RawDNS: dnsProvider,
+		UseARI:    true,
+		Challenge: cfg.ACMEChallengeLE, TLSALPN: chal, HTTP: chal,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	gts := acme.LegoConfig{
 		CAID: acme.CAGTS, DirectoryURL: cfg.ACMEDirGTS, Email: cfg.ACMEEmail,
 		AccountKey: gtsKey,
 		Validity:   cfg.ACMEGTSValidity, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
-		EABKID: cfg.ACMEEABGTSKID, EABHMAC: cfg.ACMEEABGTSHMAC, RawDNS: dnsProvider,
+		EABKID: cfg.ACMEEABGTSKID, EABHMAC: cfg.ACMEEABGTSHMAC,
+		Challenge: cfg.ACMEChallengeGTS, TLSALPN: chal, HTTP: chal,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	zerossl := acme.LegoConfig{
 		CAID: acme.CAZeroSSL, DirectoryURL: cfg.ACMEDirZeroSSL, Email: cfg.ACMEEmail,
 		AccountKey:  zerosslKey,
 		RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
-		EABKID: cfg.ACMEEABZeroSSLKID, EABHMAC: cfg.ACMEEABZeroSSLHMAC, RawDNS: dnsProvider,
+		EABKID: cfg.ACMEEABZeroSSLKID, EABHMAC: cfg.ACMEEABZeroSSLHMAC,
+		Challenge: cfg.ACMEChallengeZeroSSL, TLSALPN: chal, HTTP: chal,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
+	}
+	if cfg.UsesChallenge(config.ChallengeDNS01) {
+		dnsProvider, err := acme.DNSProviderByName(cfg.ACMEDNSProvider)
+		if err != nil {
+			logger.Warn("acme dns provider unavailable (issuance degraded until configured)",
+				"provider", cfg.ACMEDNSProvider, "err", err)
+		} else {
+			le.RawDNS, gts.RawDNS, zerossl.RawDNS = dnsProvider, dnsProvider, dnsProvider
+		}
 	}
 	return acme.NewChain(chainCfg, le, gts, zerossl), nil
 }

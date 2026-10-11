@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ban"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
@@ -87,6 +88,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
 	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle,
 		limit.WithLogger(logger), limit.WithPacketCap(int64(cfg.LimitPackets)))
+	chal := acme.NewChallengeStore(rdb, acme.ChallengeTTL)
 
 	// Durable store.
 	st, err := store.NewS3Store(ctx, store.S3Config{
@@ -115,9 +117,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 
-	// ACME chain (lazy self-healing lego clients; DNS-01 provider selected by --acme-dns-provider). An
+	// ACME chain (lazy self-healing lego clients). An
 	// existing-but-unreadable account key aborts startup (never overwrites it).
-	chain, err := buildACMEChain(cfg, lim, rec, logger)
+	chain, err := buildACMEChain(cfg, lim, chal, rec, logger)
 	if err != nil {
 		return err
 	}

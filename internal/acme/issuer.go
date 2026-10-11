@@ -1,5 +1,5 @@
 // Package acme implements the public-cert issuance chain behind enroll.PublicIssuer: lego-backed
-// per-CA clients with automatic LE→GTS→ZeroSSL spillover, DNS-01, the split renewal timing (LE NotAfter−margin floor /
+// per-CA clients with automatic LE→GTS→ZeroSSL spillover, the split renewal timing (LE NotAfter−margin floor /
 // fixed cadence for GTS+ZeroSSL), and reactive per-CA cooldown+backoff (a rate-limited CA gets a Valkey
 // retry-after; the spillover skips a cooling CA). Issue and renew share the same LE-first order, so every
 // renewal opportunistically migrates the name to LE. See docs/PROTOCOL.md and docs/ARCHITECTURE.md §3.
@@ -18,6 +18,7 @@ const (
 	ClassRateLimited = "rate-limited"
 	ClassTransient   = "transient"
 	ClassPermanent   = "permanent"
+	ClassLocal       = "local"
 )
 
 // IssuerError is a classified issuance error. It implements enroll.ClassifiedIssuerError so the enroll
@@ -47,6 +48,9 @@ func transient(err error) *IssuerError {
 }
 func permanent(err error) *IssuerError {
 	return &IssuerError{Class: ClassPermanent, Reason: "permanent", Err: err}
+}
+func local(retry time.Duration, err error) *IssuerError {
+	return &IssuerError{Class: ClassLocal, Reason: "challenge store", Retry: retry, Err: err}
 }
 
 // caIssuer is one CA's issuance seam (implemented by legoClient; faked in unit tests).

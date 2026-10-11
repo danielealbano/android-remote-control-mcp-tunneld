@@ -1,18 +1,22 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	legolog "github.com/go-acme/lego/v5/log"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
@@ -32,7 +36,7 @@ func TestBuildACMEChain_LegoLogsToStderr(t *testing.T) {
 		_ = w.Close()
 	})
 	os.Stderr = w
-	if _, err := buildACMEChain(config.ServeCmd{ACMEAccountDir: t.TempDir()}, nil, nil, testLogger()); err != nil {
+	if _, err := buildACMEChain(config.ServeCmd{ACMEAccountDir: t.TempDir()}, nil, testChallengeStore(t), nil, testLogger()); err != nil {
 		t.Fatal(err)
 	}
 	legolog.Info("probe")
@@ -138,7 +142,42 @@ func TestBuildACMEChain_CorruptAccountKeyAborts(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.ServeCmd{ACMEAccountDir: dir}
-	if _, err := buildACMEChain(cfg, nil, nil, testLogger()); err == nil {
+	if _, err := buildACMEChain(cfg, nil, testChallengeStore(t), nil, testLogger()); err == nil {
 		t.Fatal("a corrupt existing account key must abort buildACMEChain")
+	}
+}
+
+func testChallengeStore(t *testing.T) *acme.ChallengeStore {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return acme.NewChallengeStore(rdb, acme.ChallengeTTL)
+}
+
+func TestBuildACMEChain_DNSProviderOnlyWhenUsed(t *testing.T) {
+	tests := []struct {
+		name     string
+		le       string
+		wantWarn bool
+	}{
+		{name: "no dns-01", le: config.ChallengeTLSALPN01, wantWarn: false},
+		{name: "le dns-01", le: config.ChallengeDNS01, wantWarn: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			cfg := config.ServeCmd{
+				ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "no-such-provider",
+				ACMEChallengeLE: tc.le, ACMEChallengeGTS: config.ChallengeTLSALPN01, ACMEChallengeZeroSSL: config.ChallengeHTTP01,
+			}
+			if _, err := buildACMEChain(cfg, nil, testChallengeStore(t), nil, logger); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(buf.String(), "acme dns provider unavailable"); got != tc.wantWarn {
+				t.Fatalf("dns provider warning logged = %v, want %v; log = %q", got, tc.wantWarn, buf.String())
+			}
+		})
 	}
 }

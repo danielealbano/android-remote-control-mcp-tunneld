@@ -79,13 +79,15 @@ func (c *chainIssuer) Renew(ctx context.Context, csr *x509.CertificateRequest, n
 	return c.run(ctx, csr, name, c.cas)
 }
 
-// run tries the CAs in order, skipping any that are cooling (an active Valkey retry-after) and applying
-// reactive cooldown/backoff on failure. The first success wins; a rate-limited CA gets a retry-after
-// honoring its Retry-After, other repeated failures get exponential backoff. When every CA is cooling or
-// failing, the error is retryable ("quota exhausted, retry later") with the shortest remaining cooldown.
+// run tries the CAs in order, skipping any that are cooling (an active Valkey retry-after). The first
+// success wins; a rate-limited CA gets a retry-after honoring its Retry-After. When every CA is cooling
+// or failing, the error is retryable ("quota exhausted, retry later") with the shortest remaining cooldown.
 func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, name string, cas []caIssuer) ([]byte, store.CertInfo, error) {
 	shortest := time.Duration(0)
 	for _, ca := range cas {
+		if err := ctx.Err(); err != nil {
+			return nil, store.CertInfo{}, transient(err)
+		}
 		// Cooldown bookkeeping is best-effort: a Valkey error reads as "not cooling" (fail-open — try
 		// the CA) rather than blocking issuance on the control plane.
 		if cool, _ := c.cfg.Limiter.CACooldown(ctx, ca.id()); cool > 0 {
@@ -99,6 +101,13 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			_ = c.cfg.Limiter.ResetCAFailures(ctx, ca.id()) // best-effort streak reset; a stale count self-expires at TTL
 			c.cfg.Recorder.ACMEIssue(ca.id(), "ok")
 			return pemChain, info, nil
+		}
+		if ctx.Err() != nil {
+			return nil, store.CertInfo{}, err
+		}
+		var ie *IssuerError
+		if asIssuerError(err, &ie) && ie.Class == ClassLocal {
+			return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 		}
 		c.cfg.Recorder.ACMEIssue(ca.id(), "fail")
 		cool, permanent := c.handleFailure(ctx, ca.id(), err)

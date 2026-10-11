@@ -3,7 +3,9 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,4 +278,109 @@ func TestShortRetryAfterHonoredAsIs(t *testing.T) {
 	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d > 30*time.Second {
 		t.Fatalf("LE cooldown must be the honored 30s, got %s", d)
 	}
+}
+
+type recordingChainRecorder struct {
+	mu        sync.Mutex
+	issues    []string
+	cooldowns []string
+}
+
+func (r *recordingChainRecorder) ACMECooldown(ca string) {
+	r.mu.Lock()
+	r.cooldowns = append(r.cooldowns, ca)
+	r.mu.Unlock()
+}
+
+func (r *recordingChainRecorder) ACMEIssue(ca, result string) {
+	r.mu.Lock()
+	r.issues = append(r.issues, ca+" "+result)
+	r.mu.Unlock()
+}
+
+func (r *recordingChainRecorder) ACMERenew(string, string) {}
+
+func assertNoCAFailureState(t *testing.T, lim *limit.Limiter, ca string) {
+	t.Helper()
+	ctx := context.Background()
+	if cool, err := lim.CACooldown(ctx, ca); err != nil || cool != 0 {
+		t.Fatalf("%s cooldown = %s (err %v), want none", ca, cool, err)
+	}
+	if n, err := lim.BumpCAFailures(ctx, ca, time.Hour); err != nil || n != 1 {
+		t.Fatalf("%s failure streak before this probe = %d (err %v), want 0", ca, n-1, err)
+	}
+}
+
+func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt, err: local(localChallengeRetry, ErrChallengePending)}
+	gts := &fakeCA{caID: CAGTS}
+	rec := &recordingChainRecorder{}
+	ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+	_, _, err := ch.Obtain(context.Background(), nil, "name")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassRateLimited || ie.Retry != localChallengeRetry {
+		t.Fatalf("error = %v, want rate-limited with Retry %s", err, localChallengeRetry)
+	}
+	if gts.calls != 0 {
+		t.Fatalf("the chain must stop on a local error, but GTS was called %d times", gts.calls)
+	}
+	if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+		t.Fatalf("a local error must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+	}
+	assertNoCAFailureState(t, lim, CALetsEncrypt)
+}
+
+type cancellingCA struct {
+	caID   string
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancellingCA) obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	c.calls++
+	c.cancel()
+	return nil, store.CertInfo{}, transient(ctx.Err())
+}
+
+func (c *cancellingCA) shouldRenew(context.Context, store.CertInfo, time.Time) (bool, time.Time, error) {
+	return false, time.Time{}, nil
+}
+
+func (c *cancellingCA) id() string { return c.caID }
+
+func TestChain_StopsWhenContextDone(t *testing.T) {
+	t.Run("cancelled before the call", func(t *testing.T) {
+		le := &fakeCA{caID: CALetsEncrypt}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if le.calls != 0 || gts.calls != 0 || len(rec.issues) != 0 {
+			t.Fatalf("no CA may be tried: le=%d gts=%d issues=%v", le.calls, gts.calls, rec.issues)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("cancelled while the first CA runs", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		le := &cancellingCA{caID: CALetsEncrypt, cancel: cancel}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if le.calls != 1 || gts.calls != 0 {
+			t.Fatalf("only the in-flight CA may have run: le=%d gts=%d", le.calls, gts.calls)
+		}
+		if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+			t.Fatalf("an interrupted attempt must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
 }
