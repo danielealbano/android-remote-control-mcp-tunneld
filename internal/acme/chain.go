@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
@@ -40,6 +41,7 @@ func (nopRecorder) ACMERenew(string, string) {}
 type ChainConfig struct {
 	Limiter            *limit.Limiter
 	Recorder           Recorder
+	Logger             *slog.Logger
 	CooldownDefault    time.Duration
 	BackoffInitial     time.Duration
 	BackoffMax         time.Duration
@@ -60,6 +62,9 @@ type chainIssuer struct {
 func NewChainIssuer(cfg ChainConfig, cas ...caIssuer) *chainIssuer {
 	if cfg.Recorder == nil {
 		cfg.Recorder = nopRecorder{}
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
 	return &chainIssuer{cfg: cfg, cas: cas, now: time.Now}
 }
@@ -90,7 +95,11 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 		}
 		// Cooldown bookkeeping is best-effort: a Valkey error reads as "not cooling" (fail-open — try
 		// the CA) rather than blocking issuance on the control plane.
-		if cool, _ := c.cfg.Limiter.CACooldown(ctx, ca.id()); cool > 0 {
+		cool, cerr := c.cfg.Limiter.CACooldown(ctx, ca.id())
+		if cerr != nil {
+			c.cfg.Logger.Warn("acme CA cooldown check failed (trying the CA)", "ca", ca.id(), "name", name, "err", cerr)
+		}
+		if cool > 0 {
 			if shortest == 0 || cool < shortest {
 				shortest = cool
 			}
@@ -98,15 +107,22 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 		}
 		pemChain, info, err := ca.obtain(ctx, csr, name)
 		if err == nil {
-			_ = c.cfg.Limiter.ResetCAFailures(ctx, ca.id()) // best-effort streak reset; a stale count self-expires at TTL
+			if rerr := c.cfg.Limiter.ResetCAFailures(ctx, ca.id()); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
+				c.cfg.Logger.Warn("acme CA failure-streak reset failed", "ca", ca.id(), "name", name, "err", rerr)
+			}
 			c.cfg.Recorder.ACMEIssue(ca.id(), "ok")
 			return pemChain, info, nil
 		}
 		if ctx.Err() != nil {
 			return nil, store.CertInfo{}, transient(ctx.Err())
 		}
+		class := ClassTransient
 		var ie *IssuerError
-		if asIssuerError(err, &ie) && ie.Class == ClassLocal {
+		if asIssuerError(err, &ie) {
+			class = ie.Class
+		}
+		c.cfg.Logger.Warn("acme CA order failed", "ca", ca.id(), "name", name, "class", class, "err", err)
+		if class == ClassLocal {
 			return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 		}
 		c.cfg.Recorder.ACMEIssue(ca.id(), "fail")
@@ -150,16 +166,24 @@ func (c *chainIssuer) handleFailure(ctx context.Context, ca string, err error) (
 		if d <= 0 {
 			d = c.cfg.CooldownDefault
 		}
-		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
-		c.cfg.Recorder.ACMECooldown(ca)
+		c.setCooldown(ctx, ca, d)
 		return d, false
 	default: // transient / unknown → exponential backoff
-		n, _ := c.cfg.Limiter.BumpCAFailures(ctx, ca, c.cfg.BackoffMax) // best-effort streak counter (see above)
+		n, berr := c.cfg.Limiter.BumpCAFailures(ctx, ca, c.cfg.BackoffMax) // best-effort streak counter (see above)
+		if berr != nil {
+			c.cfg.Logger.Warn("acme CA failure-streak bump failed", "ca", ca, "err", berr)
+		}
 		d := backoff(c.cfg.BackoffInitial, c.cfg.BackoffMax, n)
-		_ = c.cfg.Limiter.SetCACooldown(ctx, ca, d)
-		c.cfg.Recorder.ACMECooldown(ca)
+		c.setCooldown(ctx, ca, d)
 		return d, false
 	}
+}
+
+func (c *chainIssuer) setCooldown(ctx context.Context, ca string, d time.Duration) {
+	if err := c.cfg.Limiter.SetCACooldown(ctx, ca, d); err != nil {
+		c.cfg.Logger.Warn("acme CA cooldown write failed", "ca", ca, "cooldown", d, "err", err)
+	}
+	c.cfg.Recorder.ACMECooldown(ca)
 }
 
 // ShouldRenew dispatches to the CA that issued cur (LE: NotAfter−margin floor; GTS/ZeroSSL: fixed cadence).

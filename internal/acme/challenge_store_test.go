@@ -95,8 +95,8 @@ func TestChallengeStore_TLSALPNExpiredBetweenRetries(t *testing.T) {
 	if err := s.PutTLSALPN(context.Background(), "a.example.test", "fresh"); err != nil {
 		t.Fatalf("put after the pending key vanished: %v", err)
 	}
-	if got, _ := mr.Get(key); got != "fresh" {
-		t.Fatalf("stored %q, want fresh", got)
+	if got, err := mr.Get(key); err != nil || got != "fresh" {
+		t.Fatalf("stored %q (err %v), want fresh", got, err)
 	}
 }
 
@@ -171,8 +171,8 @@ func TestChallengeStore_HTTPPutGetDelete(t *testing.T) {
 			if err := s.DeleteHTTP(ctx, tc.getHost, tc.getToken, "key-auth"); err != nil {
 				t.Fatal(err)
 			}
-			if _, found, _ := s.HTTPKeyAuth(ctx, tc.getHost, tc.getToken); found {
-				t.Fatal("key still present after delete")
+			if _, found, err := s.HTTPKeyAuth(ctx, tc.getHost, tc.getToken); err != nil || found {
+				t.Fatalf("after delete: found=%v err=%v, want absent", found, err)
 			}
 		})
 	}
@@ -289,8 +289,8 @@ func TestChallengeStore_LockSelf(t *testing.T) {
 	if err := staleUnlock(); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := mr.Get(selfLockKey("enroll.example.test")); got != "new-holder" {
-		t.Fatalf("a stale unlock removed the new holder's lock (now %q)", got)
+	if got, err := mr.Get(selfLockKey("enroll.example.test")); err != nil || got != "new-holder" {
+		t.Fatalf("a stale unlock removed the new holder's lock (now %q, err %v)", got, err)
 	}
 
 	unreachableUnlock, ok, err := s.LockSelf(context.Background(), "control.example.test")

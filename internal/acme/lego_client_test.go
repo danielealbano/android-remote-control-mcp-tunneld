@@ -160,9 +160,11 @@ func acmeDirectoryStub(t *testing.T) string {
 	var srv *httptest.Server
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		if err := json.NewEncoder(w).Encode(map[string]string{
 			"newNonce": srv.URL + "/nonce", "newAccount": srv.URL + "/account", "newOrder": srv.URL + "/order",
-		})
+		}); err != nil {
+			t.Errorf("directory stub encode: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")

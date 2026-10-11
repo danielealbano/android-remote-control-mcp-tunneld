@@ -1,9 +1,12 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"errors"
+	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -35,14 +38,26 @@ func (f *fakeCA) shouldRenew(_ context.Context, cur store.CertInfo, now time.Tim
 }
 func (f *fakeCA) id() string { return f.caID }
 
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
 func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	return newChainOn(t, mr, cfg, cas...)
+}
+
+func newChainOn(t *testing.T, mr *miniredis.Miniredis, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
+	t.Helper()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
 	lim := limit.NewLimiter(rdb, 1, 1, 1, time.Hour)
 	lim.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	cfg.Limiter = lim
+	if cfg.Logger == nil {
+		cfg.Logger = testLogger()
+	}
 	if cfg.CooldownDefault == 0 {
 		cfg.CooldownDefault = time.Hour
 	}
@@ -403,4 +418,57 @@ func TestChain_StopsWhenContextDone(t *testing.T) {
 		}
 		assertNoCAFailureState(t, lim, CALetsEncrypt)
 	})
+}
+
+func TestChain_LogsEachCAFailure(t *testing.T) {
+	var buf bytes.Buffer
+	le := &fakeCA{caID: CALetsEncrypt, err: rateLimited(0, errors.New("le refused the order"))}
+	gts := &fakeCA{caID: CAGTS, err: transient(errors.New("gts unreachable"))}
+	zs := &fakeCA{caID: CAZeroSSL}
+	ch, _ := newChain(t, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))}, le, gts, zs)
+	if _, _, err := ch.Obtain(context.Background(), nil, "name"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`msg="acme CA order failed" ca=letsencrypt name=name class=rate-limited err="acme: rate limited: le refused the order"`,
+		`msg="acme CA order failed" ca=gts name=name class=transient err="acme: transient: gts unreachable"`,
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("log is missing %s; log = %q", want, buf.String())
+		}
+	}
+}
+
+func TestChain_LogsBookkeepingErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{name: "failed order", err: transient(errors.New("down")), want: []string{
+			"acme CA cooldown check failed", "acme CA failure-streak bump failed", "acme CA cooldown write failed",
+		}},
+		{name: "rate-limited order", err: rateLimited(time.Minute, errors.New("slow down")), want: []string{
+			"acme CA cooldown check failed", "acme CA cooldown write failed",
+		}},
+		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			mr := miniredis.RunT(t)
+			ch, _ := newChainOn(t, mr, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))},
+				&fakeCA{caID: CALetsEncrypt, err: tc.err})
+			mr.Close()
+			_, _, err := ch.Obtain(context.Background(), nil, "name")
+			if (err == nil) != (tc.err == nil) {
+				t.Fatalf("Obtain error = %v, want error %v", err, tc.err != nil)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), `msg="`+want) {
+					t.Fatalf("log is missing %q; log = %q", want, buf.String())
+				}
+			}
+		})
+	}
 }

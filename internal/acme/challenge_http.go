@@ -43,7 +43,9 @@ func HTTPChallengeHandler(keyAuths HTTPKeyAuths, onMiss func(clientIP string), l
 		}
 		logger.Debug("acme http-01 challenge served", "domain", host, "ip", ip)
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = io.WriteString(w, html.EscapeString(keyAuth))
+		if _, err := io.WriteString(w, html.EscapeString(keyAuth)); err != nil {
+			logger.Debug("acme http-01 challenge response write failed", "domain", host, "ip", ip, "err", err)
+		}
 	})
 }
 
