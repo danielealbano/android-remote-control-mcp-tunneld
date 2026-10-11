@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -282,7 +283,7 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	mesh := &fakeMesh{}
 	chal := &fakeACMEChallenges{}
 	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.DiscardHandler)
+		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
 	e := New(cfg, banIP, banTun, rec, rtr, local, mesh, lim, sink, chal, addr)
