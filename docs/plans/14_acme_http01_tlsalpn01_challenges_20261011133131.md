@@ -2142,7 +2142,9 @@ Setup notes (whole file):
   log output is bound to `os.Stderr` when the chain is built), restored and flushed in `t.Cleanup` (each error
   reported); `server.Run` gets a fresh `tunneltest.LogCounter` per case whose next handler is a Debug text handler
   on the redacting writer; ssh's stdout and every stderr line (prefixed `ssh: `) go to the redacting writer; every
-  error passed to `t.Fatal`/`t.Error` is redacted the same way, and a timed-out wait reports its last error. The
+  error passed to `t.Fatal`/`t.Error` is redacted the same way, and a timed-out wait reports its last error;
+  `server.Run`'s result is kept: an early exit fails the readiness waits at once with its redacted error, and a
+  non-nil result at the case's shutdown is reported. The
   redaction also replaces SSH key fingerprints (`SHA256:…`) and the node's OpenSSH version (`remote software
   version …`, `compat_banner: match: … pat`), which `ssh -v` prints and would identify the node.
 - Valkey + MinIO from `tunneltest` (bucket via `EnsureS3Bucket`); one free local edge port and one free local
@@ -2483,7 +2485,8 @@ Definition of Done:
     closes in goroutines that can outlive the test log through the slog test logger; `captureClientHello`
     asserts its expected handshake failure; `tunneltest.ServesCertificate` takes `t` and returns the probe error,
     which `WaitReservedHosts` and `runIntegrationServer` report on timeout (with the server's `Run` result); the
-    Docker client close in `networkGateway` is logged.
+    Docker client close in `networkGateway` is logged; the staging case keeps `server.Run`'s result, failing its
+    readiness waits at once on an early exit and reporting a non-nil result at shutdown (Task 7.2).
   - Tests: `TestChain_LogsEachCAFailure` and `TestChain_LogsBookkeepingErrors` added to Task 3.3;
     `TestConnRateAllow` and `TestGuardListener_AcceptErrorBackoff` assert the new log lines (Task 5.2).
 - **Task 5.3 — drain closes the `:80` listener once (code review).** Logging the drain's `Shutdown` errors exposed a
