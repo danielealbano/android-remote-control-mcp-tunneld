@@ -147,7 +147,9 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 		return nil, nil, tunnelFailed, err
 	}
 	signal := make(chan tunnelOutcome, 1)
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		var ok443, ok80, sent bool
 		sc := bufio.NewScanner(stderr)
 		for sc.Scan() {
@@ -171,20 +173,28 @@ func startTunnel(env *stagingEnv, keyPath, knownHostsPath string, edgePort, http
 		}
 	}()
 	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
+	go func() {
+		<-drained
+		exited <- cmd.Wait()
+	}()
+	var outcome tunnelOutcome
 	select {
-	case outcome := <-signal:
-		if outcome == tunnelBusy {
-			<-exited
+	case outcome = <-signal:
+	case <-drained:
+		select {
+		case outcome = <-signal:
+		default:
+			return nil, nil, tunnelFailed, <-exited
 		}
-		return cmd, exited, outcome, nil
-	case err := <-exited:
-		return nil, nil, tunnelFailed, err
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		<-exited
 		return nil, nil, tunnelFailed, errors.New("remote forwards not confirmed within 60s")
 	}
+	if outcome == tunnelBusy {
+		<-exited
+	}
+	return cmd, exited, outcome, nil
 }
 
 func openTunnel(t *testing.T, env *stagingEnv, edgePort, httpPort int) {
