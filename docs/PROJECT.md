@@ -43,7 +43,7 @@ flowchart LR
   prom -. "scrape internal listeners" .-> ta
 ```
 
-**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` is
+**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and, when a CA uses HTTP-01, the ACME challenge listener `:80` are
 public; the mesh + metrics are reachable on the internal network only. The tunnel relays opaque TLS, so
 there is no proxy trust boundary and no `X-Forwarded-For` handling: the client's IP is the peer address
 of the raw TCP connection.
@@ -58,7 +58,7 @@ of the raw TCP connection.
   tunneld re-verifies attestation, and issues the **public WebPKI cert** via server-run ACME. See
   [`PROTOCOL.md`](PROTOCOL.md) §2.
 - **Server-run ACME chain**: Let's Encrypt → Google Trust Services → ZeroSSL, with automatic spillover,
-  DNS-01, and short-lived certs renewed on a uniform ~4.7-day cadence. The phone holds the TLS private key;
+  a per-CA validation method (DNS-01 / HTTP-01 / TLS-ALPN-01; defaults LE + GTS TLS-ALPN-01, ZeroSSL HTTP-01 — answered by tunneld's own listeners from Valkey, so any replica answers), and short-lived certs renewed on a uniform ~4.7-day cadence. The phone holds the TLS private key;
   only CSRs leave it.
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
@@ -76,10 +76,13 @@ The public edge is raw TCP `:443`. It peeks the ClientHello and dispatches by SN
 
 | SNI | Behaviour |
 |---|---|
+| any SNI, first ALPN protocol `acme-tls/1` (checked before the rows below) | ACME TLS-ALPN-01 validation: answered locally with the challenge certificate; no pending challenge → closed (`no-route`); never spliced |
 | `<name>.<tunnel-domain>` | resolve the route → splice opaque TLS to the phone (local fast path or mesh) |
 | `--enroll-host` | terminate locally: server-TLS enrollment endpoint (Phase 1) |
 | `--control-host` | terminate locally: mTLS phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) |
 | anything else / no route | connection closed (`no-route`) |
+
+When a CA uses HTTP-01, a plain `:80` listener (`--acme-http-listen`) serves ONLY `/.well-known/acme-challenge/<token>` for pending challenges (one request per connection; anything else → 404, `acme-http-miss`).
 
 There is no HTTP method/path allowlist on relayed traffic — the phone terminates TLS and enforces its
 own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
@@ -110,7 +113,7 @@ Caps are uniform by design — no per-path exceptions, no bulk-transfer carve-ou
 One or more `--ban-file` (hot-reloaded on mtime, entries UNIONed): `ip`, `cidr`, `country XX`,
 `tunnel-name`, `tunnel-fingerprint`. `country` entries expand at reload from a DB-IP Country Lite CSV
 into a longest-prefix-match table (one lookup per connection). The ban check is the FIRST handler-level
-check on every ingress edge (public, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP. Country
+check on every ingress edge (public `:443`, the HTTP-01 `:80` listener, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/CIDR/country ban can fail HTTP-01 / TLS-ALPN-01 issuance (DNS-01 is unaffected). Country
 codes in repo artifacts are placeholders (`XX`/`YY`). The `fetcher` compose service keeps a Spamhaus
 DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
@@ -120,7 +123,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   counters (`conc:{name}` — a lock-guarded `{connID, count}` hash reset structurally at a fresh
   connection's first acquire; the day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
   bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
-  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff. Every
+  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) and the reserved-host issuance lock (`lock:acme-self:`, 10 min). Every
   key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
   day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
@@ -154,8 +157,8 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 - **Releases**: `v*` tags → goreleaser → linux amd64/arm64 archives + multi-arch image
   `ghcr.io/danielealbano/tunneld`.
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
-  `test-integration`, `test-e2e`, `test-scripts`, `compose-config`, `mermaid-check`). The integration
-  and e2e tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble).
+  `test-integration`, `test-e2e`, `test-staging`, `test-scripts`, `compose-config`, `mermaid-check`). The integration,
+  e2e and staging tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble); the staging tier also reaches Let's Encrypt staging + GTS staging through a reverse SSH tunnel and skips without `TUNNELD_STAGING_SSH_KEY`.
 - **Attribution**: country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the
   attribution; it MUST be preserved).
 

@@ -8,9 +8,12 @@ This document maps the E2E-encrypted tunnel internals. The operational overview 
 
 `tunneld serve` assembles everything in `server.Run` (constructor DI — no package globals) and runs it
 under one `errgroup`. The public edge is a raw TCP `:443` listener; the phone control plane, the replica
-mesh, and the internal metrics listener are separate servers. ALL construction — reserved-host cert
-issuance included — completes BEFORE the `:443` and `:9443` listeners bind: a socket is never bound while
-unserved (a cold-start issuance delays readiness, never leaves an accepting-but-dead port).
+mesh, and the internal metrics listener are separate servers. ALL construction completes BEFORE the
+`:443`, `:9443` and `:9090` listeners (and, when a CA uses HTTP-01, the `:80` challenge listener) bind: a
+socket is never bound while unserved. A valid reserved-host certificate cached on disk is loaded before the
+bind; reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
+the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded; tunnel
+splicing is unaffected) and issuance is retried every minute.
 
 ```mermaid
 flowchart TD
@@ -26,15 +29,19 @@ flowchart TD
   limit["limit: rate / traffic / concurrency / ACME cooldown"]
   store["store: durable S3 registry + logs + evidence"]
   metrics["metrics: internal listener + PromRecorder"]
+  acmehttp[":80 ACME HTTP-01 challenge listener (only when a CA uses http-01)"]
 
   run --> edge
   run --> enroll
   run --> phone
   run --> mesh
   run --> metrics
+  run --> acmehttp
   edge --> router
   edge --> phone
   edge --> mesh
+  edge --> acme
+  acmehttp --> acme
   enroll --> attest
   enroll --> ca
   enroll --> acme
@@ -48,11 +55,11 @@ flowchart TD
 | Package | Role |
 |---|---|
 | `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
-| `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, bridge (fast path + mesh), connection policy (idle/min-rate/eviction) |
+| `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, `acme-tls/1` TLS-ALPN-01 answering, bridge (fast path + mesh), connection policy (idle/min-rate/eviction) |
 | `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back, `/api/v1/issue` cert generation |
 | `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
-| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal) |
+| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-CA cooldown/backoff retry-after, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
@@ -89,7 +96,16 @@ sequenceDiagram
 
 The entry node accounts bytes (day/week traffic), paces bandwidth against the per-second byte + packet
 windows, and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
-WebPKI cert (a hermetic Pebble CA stands in for the test tiers) — tunneld never sees plaintext.
+WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; the staging tier uses Let's Encrypt staging + GTS staging) — tunneld never sees plaintext.
+
+**ACME validations.** A ClientHello whose first ALPN protocol is `acme-tls/1` is a TLS-ALPN-01 validation
+addressed to tunneld itself, not tunnel traffic: after the ban / conn-rate / `--max-clients` checks the edge
+answers it locally with the challenge certificate built from the Valkey challenge store (ECDSA P-256, key
+usage `digitalSignature`, critical `id-pe-acmeIdentifier`, one DNS SAN) and never routes or splices it; with
+no pending challenge it is closed (`no-route`). When a CA uses HTTP-01, a plain `:80` listener
+(`--acme-http-listen`) serves ONLY `GET`/`HEAD /.well-known/acme-challenge/<token>` from the same store — one
+request per connection (keep-alives off); any other request is a 404 (`acme-http-miss`) — behind the same check
+order (ban → conn-rate → the shared `--max-clients` counter), evaluated off the accept loop.
 
 ## 3. Enrollment, issuance, renewal
 
@@ -99,7 +115,22 @@ attestation + key binding, write-verify-claims a name in S3, and signs a bootstr
 `<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
 The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
-certs are obtained by the server itself (`ObtainSelf`) at startup and renewed on schedule.
+certs are obtained by the server itself (`ObtainSelf`) after the listeners bind (a valid disk cache is served
+immediately), retried every minute while missing, and renewed on schedule. Reserved-host issuance is
+serialized across replicas by a per-host Valkey lock (`lock:acme-self:{host}`): a replica waits up to 5 min
+for it, then gets up to 5 min to issue; an issuance abandoned at that deadline keeps the lock until its
+10-min TTL (the background lego order may still hold the challenge); a shutdown releases it; a lock error
+issues without it.
+
+Each CA validates with its own method (`--acme-challenge-le` / `--acme-challenge-gts` /
+`--acme-challenge-zerossl`: `dns-01`, `http-01`, `tls-alpn-01` — ZeroSSL has no `tls-alpn-01`; defaults LE +
+GTS `tls-alpn-01`, ZeroSSL `http-01`); `--acme-dns-provider` is needed only when a CA uses `dns-01`. The
+challenge material lives in Valkey, so any replica answers a validation. The TLS-ALPN-01 certificate is
+tunneld's own: lego's built-in one carries key usage `keyEncipherment` only, which BoringSSL validators
+(Google Trust Services) reject in TLS 1.3 (RFC 8446 §4.4.2.2). Only ONE TLS-ALPN-01 challenge can be pending
+per domain cluster-wide (a validator sends only the SNI); a conflicting or failed challenge-store write is a
+LOCAL error: the chain stops with Retry-After 30 s and sets no per-CA cooldown. When CAA records carry
+`validationmethods`, they must allow each CA's configured method.
 
 ## 4. Unified per-window limit model
 
@@ -129,8 +160,8 @@ Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/dele
 the global concurrency counter (`conc:{name}`, a lock-guarded `{connID, count}` hash: a fresh connection's
 first acquire STRUCTURALLY resets it and a straggler release from a superseded connection is a no-op; TTL =
 3 × `--limit-conn-idle`, refreshed by every traffic chunk via the `Charge` pipeline's `PEXPIRE` that no-ops
-on a missing key), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, and per-CA ACME
-cooldown/backoff. No permanent Valkey state; a stale connection never clobbers a re-bound route.
+on a missing key), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-CA ACME
+cooldown/backoff, the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), and the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way). No permanent Valkey state; a stale connection never clobbers a re-bound route.
 Connection/stream ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
 and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic.
@@ -153,7 +184,7 @@ in-flight public splices (`EvictBannedStreams`, `close_reason=ban-evict`) — ba
 so a reload must stop live traffic, not just new admissions. A `--ban-file` or the DB-IP CSV that was
 present at the last successful load but VANISHES at runtime is refused: the previous snapshot is kept
 (Error-logged, retried), never silently unbanning (a first-deploy absence stays a benign skip). The ban
-check is the FIRST handler-level check on every ingress edge.
+check is the FIRST handler-level check on every ingress edge. This includes ACME validation connections (TLS-ALPN-01 on `:443`, HTTP-01 on `:80`): an `ip` / `cidr` / `country` ban can drop a CA's validation perspectives and fail issuance (DNS-01 is unaffected).
 
 Ban inputs are loaded **exactly once** at startup (synchronously, before any listener binds); the watcher
 then polls and reloads with **build-verify-commit** — it builds the snapshot, re-reads the input
@@ -181,11 +212,14 @@ other string, so labels cannot be invented at call sites). The writers:
 
 | Reason(s) | Writer |
 |---|---|
-| `ban` | edge accept, enroll handler, phone control handler (each ban gate) |
-| `no-route`, `handshake-timeout`, `conn-rate`, `max-clients` | edge accept/dispatch |
+| `ban` | edge accept, HTTP-01 accept guard, enroll handler, phone control handler (each ban gate) |
+| `no-route` | edge accept/dispatch, edge TLS-ALPN-01 interception (no pending challenge) |
+| `handshake-timeout` | edge accept/dispatch |
+| `conn-rate`, `max-clients` | edge accept/dispatch, HTTP-01 accept guard |
 | `quota-day`, `quota-week` | bridge admission (one per NEW stream refused on an exhausted window) |
 | `stream-cap` | bridge (global per-tunnel stream counter refusal) |
 | `attest-*`, `csr-mismatch`, `enroll-limit`, `issuance-cap`, `acme-failed` | enroll/issuance service |
+| `acme-http-miss` | HTTP-01 handler (an unmatched `:80` request; not in `NoRouteSpike`, covered by `HighRejectionRate`) |
 
 Distinct signals, no double-counting: `QuotaExhausted(tunnel, window)` fires when an IN-FLIGHT stream
 hits the window (its LOG is caplog-deduped), and forced closures of existing connections (`min-rate`,
@@ -211,10 +245,10 @@ events land.
 
 ```mermaid
 flowchart LR
-  cancel["ctx cancel"] --> close["close raw :443 listener (stop new public conns)"]
+  cancel["ctx cancel"] --> close["close raw :443 + HTTP-01 :80 listeners (stop new public conns)"]
   close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + enqueues end events"]
-  phones --> drain["Shutdown enroll / control / mesh / internal servers"]
-  drain --> join["join public handlers (Edge.Wait): splice + end-event enqueue + slot release returned"]
+  phones --> drain["Shutdown enroll / control / mesh / internal / acme-http servers"]
+  drain --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
   join --> group["errgroup unwinds: schedulers + watchers on the drain ctx"]
   group --> queue["drain conn-log queue: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
@@ -231,4 +265,4 @@ is drained, and only then the admin/cap-log final flush runs — so no end event
 
 Config is a kong flag surface with `TUNNELD_*` env twins (note `--s3-*` → `TUNNELD_S_3_*`), validated
 fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are DECIMAL bits
-(`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`.
+(`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01`).

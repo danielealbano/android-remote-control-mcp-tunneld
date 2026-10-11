@@ -51,14 +51,14 @@ does NOT duplicate them.
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
 | Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
-| ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01, spillover, per-CA cooldown/backoff retry-after, self-heal. |
+| ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, per-CA cooldown/backoff retry-after, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
 | Metrics | `github.com/prometheus/client_golang` | Custom registry on the INTERNAL listener only; NO per-tunnel labels. |
 | Logging | `log/slog` fan-out + `gopkg.in/natefinch/lumberjack.v2` | Repeatable composite `--log` sinks; `std` splits by severity (info+ → stdout, warn+ → stderr). |
 | Unit-test Valkey | `github.com/alicebob/miniredis/v2` | In-process; UNIT tier only. |
-| Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e`); needs Docker. |
-| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443, valkey, minio (+bucket-create), fetcher, prometheus/grafana/alertmanager/ntfy on `127.0.0.1`-only ports. |
+| Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e` / `staging`); needs Docker. The `staging` tier also uses real LE / GTS staging through a reverse SSH tunnel. |
+| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443 (+ :80 for ACME HTTP-01), valkey, minio (+bucket-create), fetcher, prometheus/grafana/alertmanager/ntfy on `127.0.0.1`-only ports. |
 | Release | goreleaser (`v*` tags) | linux amd64+arm64 archives + multi-arch image `ghcr.io/danielealbano/tunneld`. |
 | Source control | **GitHub**, `danielealbano/android-remote-control-mcp-tunneld` | See `github.md`. |
 
@@ -83,7 +83,7 @@ MUST NOT be relaxed without explicit user direction.
 - **tunneld relays OPAQUE TLS bytes and MUST NEVER read, terminate, or inspect tunnel traffic.** The
   phone terminates TLS with its own WebPKI cert. There is NO HTTP request forwarding, NO method/path
   allowlist on relayed traffic, and NO `X-Forwarded-*` handling. The public edge is a raw `:443` SNI
-  splice; `wire.ChunkSize` = 16384 is the paced-copy read-slice size, NOT a framed protocol.
+  splice; `wire.ChunkSize` = 16384 is the paced-copy read-slice size, NOT a framed protocol. A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation addressed to tunneld — answered locally with its challenge certificate and NEVER spliced (it carries no tunnel traffic).
 
 ### Identity & authentication — SACRED
 - **Two-phase attested enrollment.** Phase 1 (`/api/v1/enroll`, server-TLS): attestation (seven-point
@@ -107,18 +107,18 @@ MUST NOT be relaxed without explicit user direction.
 ### Source-IP + ingress — SACRED
 - The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
   edge is the internet edge — there is no proxy and no `--client-ip-header`).
-- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, `/api/v1/enroll`,
+- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, the ACME HTTP-01 `:80` listener, `/api/v1/enroll`,
   `/api/v1/control`), keyed on that IP. **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
-  only the raw edge `:443` is public.
-- The public edge dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
+  only the raw edge `:443` and the ACME HTTP-01 listener `:80` are public.
+- The public edge answers a ClientHello whose first ALPN protocol is `acme-tls/1` locally (TLS-ALPN-01), then dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
   `--control-host` → local termination; anything else → close (`no-route`). Caps are UNIFORM — NO
   per-path exceptions. Operators raise the `--limit-*` values, never the code.
 
 ### Valkey (transient) + S3 (durable) state — SACRED
 - **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry, rate-limit
   windows, concurrency counters, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
-  `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the per-name
-  locks) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
+  `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
+  locks and the reserved-host issuance lock `lock:acme-self:`) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
   pipelined `EXPIRE NX` right after the `INCR`. `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
   counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
@@ -179,7 +179,7 @@ MUST NOT be relaxed without explicit user direction.
   background flusher — never synchronously on the data plane).
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
   summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
-  value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map.
+  value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert.
 - Connection-log S3 writes are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and MUST NEVER block an
   admission/splice/teardown path; a bounded 5000-event queue + 8 workers + per-item exponential retry
   drain it; a full queue drops-newest and increments `tunneld_connlog_dropped_total`; shutdown drains
@@ -226,7 +226,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
 | `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
-| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01, per-CA cooldown/backoff retry-after) |
+| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-CA cooldown/backoff retry-after) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
 | `wire` | `internal/wire`: v1 control-frame codec + mesh stream header |
 | `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back, renewal, eviction) |
@@ -240,6 +240,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
 | `client` | `client/`: the Go tunnel client library |
 | `e2e` | `e2e/`: testcontainers harness + scenarios |
+| `staging` | `staging/`: real-CA staging tier (LE / GTS staging through the reverse SSH tunnel) |
 | `deploy` | `deploy/`: compose, MinIO/Valkey, observability provisioning, fetcher |
 | `scripts` | `deploy/scripts/` + `scripts/`: fetch/gen-ca/dev-tooling scripts |
 | `ci` | `.github/workflows/` |
@@ -258,14 +259,15 @@ fix(phoneconn): supersede a stale connection on rebind without clobbering the ro
 The `Makefile` is the authoritative command surface:
 
 - `make build` — `bin/tunneld` (version ldflags)
-- `make lint` — `golangci-lint` ×3 (default / `integration` / `e2e` build tags — tagged files are
+- `make lint` — `golangci-lint` ×4 (default / `integration` / `e2e` / `staging` build tags — tagged files are
   invisible to an untagged run) + `shellcheck` + `compose-config`
 - `make vet` — `go vet`
 - `make govulncheck` — vulnerability scan (pinned via the `go.mod` `tool` directive, never `@latest`)
 - `make test-unit` — unit tests (`-short -race -count=1`)
 - `make test-integration` — `-tags=integration` suite (`-race`; real `server.Run` + testcontainers Valkey/MinIO/Pebble; needs Docker)
 - `make test-e2e` — `-tags=e2e` suite (`-race`; two in-process replicas + testcontainers; adb-gated attestation test skips without a device; needs Docker)
-- `make test-all` — `test-unit` + `test-integration` + `test-e2e`
+- `make test-staging` — `-tags=staging` suite (`-race`; real `server.Run` against Let's Encrypt staging + GTS staging through a reverse SSH tunnel; skips without `TUNNELD_STAGING_SSH_KEY`; needs Docker)
+- `make test-all` — `test-unit` + `test-integration` + `test-e2e` + `test-staging`
 - `make test-scripts` — POSIX harness for the `deploy/scripts/` fetch/gen-ca scripts
 - `make compose-config` — validates `deploy/docker-compose.yml` (placeholder env from
   `deploy/.env.example`)
@@ -274,9 +276,9 @@ The `Makefile` is the authoritative command surface:
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
 httptest, temp CA files); the integration + e2e tiers provision everything via testcontainers and need a
-working Docker daemon. CI
-(`.github/workflows/ci.yml`) runs `static-checks` (lint ×3, govulncheck, tidy-drift, shellcheck,
-script tests, compose config, mermaid-check), `build`, `test-unit`, `test-integration`, `test-e2e`,
+working Docker daemon. The staging tier additionally reads seven `TUNNELD_STAGING_*` environment variables (GitHub secrets in CI) and skips when `TUNNELD_STAGING_SSH_KEY` is empty. CI
+(`.github/workflows/ci.yml`) runs `static-checks` (lint ×4, govulncheck, tidy-drift, shellcheck,
+script tests, compose config, mermaid-check), `build`, `test-unit`, `test-integration`, `test-e2e`, `test-staging`,
 and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
 
 ---
@@ -299,7 +301,7 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   invent reason strings at call sites.
 - **Testing**: unit = miniredis/httptest/fake clock, no sockets where avoidable; integration
   (`//go:build integration`) = the REAL assembled server (`server.Run`) + testcontainers
-  Valkey/MinIO/Pebble; e2e (`//go:build e2e`) = two in-process replicas + shared testcontainers. Shared
+  Valkey/MinIO/Pebble; e2e (`//go:build e2e`) = two in-process replicas + shared testcontainers; staging (`//go:build staging`, `staging/`) = the real server against Let's Encrypt staging + GTS staging through a reverse SSH tunnel (every CI run; skips without the key). Shared
   fakes + the containers harness live in `internal/tunneltest`.
 - **Logging with `log/slog`** through the fan-out handler; identifiers on every line; deduped
   cap-hit events via `internal/caplog`.

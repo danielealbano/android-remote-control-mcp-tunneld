@@ -91,7 +91,7 @@ Decisions made while planning (consistent with the discussion; surfaced at the p
    to loopback only by default) and `ClientAliveInterval 30` / `ClientAliveCountMax 4` (a dead CI run's session
    releases 80/443 within ~2 min). While 80/443 are held by another run, the test waits (≤ 20 min), which
    serializes local and CI runs. Wildcard DNS `*.<staging-domain>` → `<staging-node>` (`<staging-domain>` is a
-   sub-zone of the deployment's tunnel zone; its value is a secret). The ACME contact is the hygiene placeholder
+   name directly under the registered domain, chosen by the user; its value is a secret). The ACME contact is the hygiene placeholder
    `ops@free.example.com` (Boulder's `policy.ValidEmail` accepts it; GTS staging accepted it when re-registering
    the reused account on 2026-10-11). Both staging CAs use a persisted account key — the reused GTS account and
    one LE staging account key generated once on the workstation (a seventh secret) — so runs create no new ACME
@@ -128,13 +128,13 @@ account registered there (PKCS#8 EC); both values are in the operator's private 
 
 ## User Stories
 
-- [ ] **US1 — Per-CA validation method configuration**
-- [ ] **US2 — Challenge store, challenge certificate, HTTP-01 handler**
-- [ ] **US3 — lego wiring per CA**
-- [ ] **US4 — Edge answers TLS-ALPN-01**
-- [ ] **US5 — Server assembly: HTTP-01 listener, startup order, cluster lock**
-- [ ] **US6 — Hermetic Pebble coverage for both methods**
-- [ ] **US7 — Real-CA staging tier**
+- [x] **US1 — Per-CA validation method configuration**
+- [x] **US2 — Challenge store, challenge certificate, HTTP-01 handler**
+- [x] **US3 — lego wiring per CA**
+- [x] **US4 — Edge answers TLS-ALPN-01**
+- [x] **US5 — Server assembly: HTTP-01 listener, startup order, cluster lock**
+- [x] **US6 — Hermetic Pebble coverage for both methods**
+- [x] **US7 — Real-CA staging tier**
 - [ ] **US8 — Deployment, documentation, ground-up verification**
 
 ---
@@ -144,13 +144,13 @@ account registered there (PKCS#8 EC); both values are in the operator's private 
 Operators choose each CA's validation method; the DNS credential stops being mandatory.
 
 Acceptance criteria:
-- [ ] The four new flags exist with the defaults above; kong rejects an unknown method; `Validate()` rejects an
+- [x] The four new flags exist with the defaults above; kong rejects an unknown method; `Validate()` rejects an
       unsupported method per CA (ZeroSSL never `tls-alpn-01`), a missing `--acme-dns-provider` only when a CA
       uses `dns-01`, and a malformed `--acme-http-listen` only when a CA uses `http-01`.
 
-### [ ] Task 1.1 — Flags and validation
+### [x] Task 1.1 — Flags and validation
 
-- [ ] **Action** — modify `internal/config/config.go`: add after the `shortlivedLifetime` constant:
+- [x] **Action** — modify `internal/config/config.go`: add after the `shortlivedLifetime` constant:
 
 ```go
 const (
@@ -160,7 +160,7 @@ const (
 )
 ```
 
-- [ ] **Action** — modify `internal/config/config.go`: replace the `ACMEDNSProvider` field and add the new fields
+- [x] **Action** — modify `internal/config/config.go`: replace the `ACMEDNSProvider` field and add the new fields
   directly after it (before the blank line that precedes the DNS-01 tuning block):
 
 ```go
@@ -172,7 +172,7 @@ const (
 	ACMEHTTPListen       string `name:"acme-http-listen" default:":80" help:"Public HTTP-01 challenge listener; bound only when a CA uses http-01."`
 ```
 
-- [ ] **Action** — modify `internal/config/config.go`: add the method (value receiver, like `Validate`):
+- [x] **Action** — modify `internal/config/config.go`: add the method (value receiver, like `Validate`):
 
 ```go
 func (c ServeCmd) UsesChallenge(method string) bool {
@@ -180,7 +180,7 @@ func (c ServeCmd) UsesChallenge(method string) bool {
 }
 ```
 
-- [ ] **Action** — modify `internal/config/config.go` `Validate()`: delete the `{"--acme-dns-provider", c.ACMEDNSProvider},`
+- [x] **Action** — modify `internal/config/config.go` `Validate()`: delete the `{"--acme-dns-provider", c.ACMEDNSProvider},`
   entry from the required-flags table, and insert directly after that table's loop:
 
 ```go
@@ -207,7 +207,7 @@ func (c ServeCmd) UsesChallenge(method string) bool {
 ```
 
 Definition of Done:
-- [ ] `validCfg` in `internal/config/config_test.go` (and every other valid-config fixture there) sets
+- [x] `validCfg` in `internal/config/config_test.go` (and every other valid-config fixture there) sets
       `ACMEChallengeLE: ChallengeTLSALPN01, ACMEChallengeGTS: ChallengeTLSALPN01, ACMEChallengeZeroSSL: ChallengeHTTP01, ACMEHTTPListen: ":80"`.
 
 Tests (`internal/config`):
@@ -228,18 +228,18 @@ Tests (`internal/config`):
 The material both listeners answer from, shared by every replica.
 
 Acceptance criteria:
-- [ ] Every new Valkey key is written with its TTL in the same command (`SET … EX` / `SET … NX EX`).
-- [ ] Every challenge-store error wraps `ErrChallengeStore` (so issuance can classify it as local).
-- [ ] The challenge certificate has key usage exactly `digitalSignature`, an ECDSA P-256 key, a critical
+- [x] Every new Valkey key is written with its TTL in the same command (`SET … EX` / `SET … NX EX`).
+- [x] Every challenge-store error wraps `ErrChallengeStore` (so issuance can classify it as local).
+- [x] The challenge certificate has key usage exactly `digitalSignature`, an ECDSA P-256 key, a critical
       `1.3.6.1.5.5.7.1.31` extension whose value is the DER OCTET STRING of SHA-256(keyAuthorization), and
       exactly one DNS SAN.
-- [ ] The HTTP-01 handler answers only `GET`/`HEAD` `/.well-known/acme-challenge/<token>` for a stored
+- [x] The HTTP-01 handler answers only `GET`/`HEAD` `/.well-known/acme-challenge/<token>` for a stored
       `(host, token)` (200 with the key authorization); a challenge-store error is 503; every other request is
       404 and calls `onMiss`.
 
-### [ ] Task 2.1 — Challenge certificate
+### [x] Task 2.1 — Challenge certificate
 
-- [ ] **Action** — create `internal/acme/challenge_cert.go` (the exact shape GTS production accepted on 2026-10-11):
+- [x] **Action** — create `internal/acme/challenge_cert.go` (the exact shape GTS production accepted on 2026-10-11):
 
 ```go
 package acme
@@ -294,7 +294,7 @@ func challengeCertificate(domain, keyAuth string) (*tls.Certificate, error) {
 ```
 
 Definition of Done:
-- [ ] The file imports nothing from `github.com/go-acme/lego`.
+- [x] The file imports nothing from `github.com/go-acme/lego`.
 
 Tests (`internal/acme`):
 
@@ -304,9 +304,9 @@ Tests (`internal/acme`):
 | `TestChallengeCertificate_Shape` | ECDSA P-256 key; exactly one DNS SAN equal to the domain; the extension is critical and its value equals `asn1.Marshal(sha256(keyAuth))` | |
 | `TestChallengeCertificate_TLS13Handshake` | a `tls.Server` with the certificate + `NextProtos [acme-tls/1]` completes a TLS 1.3 handshake with a client offering only `acme-tls/1`; the client sees the extension | `net.Pipe` |
 
-### [ ] Task 2.2 — Valkey challenge store
+### [x] Task 2.2 — Valkey challenge store
 
-- [ ] **Action** — create `internal/acme/challenge_store.go`:
+- [x] **Action** — create `internal/acme/challenge_store.go`:
 
 ```go
 package acme
@@ -452,7 +452,7 @@ func (s *ChallengeStore) deleteIfValue(ctx context.Context, key, want string) er
 ```
 
 Definition of Done:
-- [ ] No `Eval`, `Watch`, `TxPipelined` or `MULTI` anywhere in the file.
+- [x] No `Eval`, `Watch`, `TxPipelined` or `MULTI` anywhere in the file.
 
 Tests (`internal/acme`, miniredis):
 
@@ -467,9 +467,9 @@ Tests (`internal/acme`, miniredis):
 | `TestChallengeStore_ErrorsWrapChallengeStore` | a closed miniredis yields errors satisfying `errors.Is(err, ErrChallengeStore)` from get/put/delete/lock (no false hit) | `mr.Close()` before the call |
 | `TestChallengeStore_LockSelf` | first lock ok with TTL `selfLockTTL`; second returns ok=false; unlock releases (also after the lock ctx is cancelled); a stale unlock (token replaced) does not delete the new holder; with Valkey unreachable the unlock returns an error within `selfUnlockTimeout` + 1 s | unreachable case: `mr.Close()` before unlock |
 
-### [ ] Task 2.3 — Lego providers
+### [x] Task 2.3 — Lego providers
 
-- [ ] **Action** — create `internal/acme/challenge_providers.go`:
+- [x] **Action** — create `internal/acme/challenge_providers.go`:
 
 ```go
 package acme
@@ -508,7 +508,7 @@ func (p *httpProvider) CleanUp(ctx context.Context, domain, token, keyAuth strin
 ```
 
 Definition of Done:
-- [ ] `*ChallengeStore` satisfies `TLSALPNChallenges` and `HTTPChallenges` (compile-time assertions in the tests).
+- [x] `*ChallengeStore` satisfies `TLSALPNChallenges` and `HTTPChallenges` (compile-time assertions in the tests).
 
 Tests (`internal/acme`, hand-written fakes):
 
@@ -517,9 +517,9 @@ Tests (`internal/acme`, hand-written fakes):
 | `TestTLSALPNProvider_PresentCleanUp` | Present/CleanUp forward (domain, keyAuth) and propagate errors | |
 | `TestHTTPProvider_PresentCleanUp` | same for (domain, token, keyAuth) | |
 
-### [ ] Task 2.4 — HTTP-01 handler
+### [x] Task 2.4 — HTTP-01 handler
 
-- [ ] **Action** — create `internal/acme/challenge_http.go`:
+- [x] **Action** — create `internal/acme/challenge_http.go`:
 
 ```go
 package acme
@@ -608,7 +608,7 @@ func validChallengeToken(token string) bool {
   satisfies gosec G705 (verified against the repo lint config during plan review).
 
 Definition of Done:
-- [ ] No Info/Warn/Error log call in the file (every log line is Debug); `*ChallengeStore` satisfies `HTTPKeyAuths`
+- [x] No Info/Warn/Error log call in the file (every log line is Debug); `*ChallengeStore` satisfies `HTTPKeyAuths`
       (compile-time assertion in the tests).
 
 Tests (`internal/acme`, httptest + a fake `HTTPKeyAuths` + a capturing slog handler):
@@ -627,15 +627,15 @@ Each CA's lego client uses the configured method; DNS-01 behaves exactly as befo
 problem never cools a CA down.
 
 Acceptance criteria:
-- [ ] `tls-alpn-01` registers the custom TLS-ALPN-01 provider; `http-01` the custom HTTP-01 provider; `dns-01`
+- [x] `tls-alpn-01` registers the custom TLS-ALPN-01 provider; `http-01` the custom HTTP-01 provider; `dns-01`
       (and an empty method) the existing DNS-01 path unchanged; any other value fails client construction.
-- [ ] The DNS provider is resolved only when a CA uses `dns-01`.
-- [ ] An issuance error wrapping `ErrChallengeStore` stops the chain with a retryable error (Retry-After
+- [x] The DNS provider is resolved only when a CA uses `dns-01`.
+- [x] An issuance error wrapping `ErrChallengeStore` stops the chain with a retryable error (Retry-After
       `localChallengeRetry`) and sets NO per-CA cooldown / failure streak.
 
-### [ ] Task 3.1 — `NewLegoClient`
+### [x] Task 3.1 — `NewLegoClient`
 
-- [ ] **Action** — modify `internal/acme/lego_client.go` `LegoConfig`: add after the `DNSSkipPropagationCheck`
+- [x] **Action** — modify `internal/acme/lego_client.go` `LegoConfig`: add after the `DNSSkipPropagationCheck`
   field:
 
 ```go
@@ -644,7 +644,7 @@ Acceptance criteria:
 	HTTP      HTTPChallenges
 ```
 
-- [ ] **Action** — modify `internal/acme/lego_client.go` `NewLegoClient`: replace the block from
+- [x] **Action** — modify `internal/acme/lego_client.go` `NewLegoClient`: replace the block from
   `cfg.applyDNSResolvers()` through the end of the DNS-01 `switch` with:
 
 ```go
@@ -681,18 +681,18 @@ Acceptance criteria:
 	}
 ```
 
-- [ ] **Action** — modify `internal/acme/lego_client.go`: in the comment above `NewLegoClient`
+- [x] **Action** — modify `internal/acme/lego_client.go`: in the comment above `NewLegoClient`
   (`// NewLegoClient constructs and registers (or EAB-registers) the per-CA account and wires the DNS-01` /
   `// provider. Network-touching; exercised by the Pebble-backed integration tier.`) REMOVE the now-wrong words
   ` and wires the DNS-01` and `provider` (it now wires the per-CA method; the period after `provider` stays) and
   re-flow the two lines without adding a word, giving
   `// NewLegoClient constructs and registers (or EAB-registers) the per-CA account. Network-touching;` /
   `// exercised by the Pebble-backed integration tier.`
-- [ ] **Action** — modify `internal/acme/issuer.go`: in the package comment REMOVE the now-wrong `DNS-01, ` from
+- [x] **Action** — modify `internal/acme/issuer.go`: in the package comment REMOVE the now-wrong `DNS-01, ` from
   `spillover, DNS-01, the split renewal timing` (DNS-01 is no longer the only method).
 
 Definition of Done:
-- [ ] `grep -n 'tlsalpn01\.' internal/acme/*.go` shows no use of lego's `ChallengeCert`, `ChallengeBlocks` or
+- [x] `grep -n 'tlsalpn01\.' internal/acme/*.go` shows no use of lego's `ChallengeCert`, `ChallengeBlocks` or
       `NewProviderServer`.
 
 Tests (`internal/acme`):
@@ -706,9 +706,9 @@ Tests (`internal/acme`):
 The positive registrations (the right provider per method, per CA) are proven end to end by US6 / US7, which
 assert which listener answered.
 
-### [ ] Task 3.2 — `buildACMEChain`
+### [x] Task 3.2 — `buildACMEChain`
 
-- [ ] **Action** — modify `internal/server/acmewire.go` `buildACMEChain`: change the signature to
+- [x] **Action** — modify `internal/server/acmewire.go` `buildACMEChain`: change the signature to
   `func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.ChallengeStore, rec acme.Recorder, logger *slog.Logger) (acmeChain, error)`;
   delete the `dnsProvider, err := acme.DNSProviderByName(...)` call and its `Warn` block at the top; replace the
   three `acme.LegoConfig` literals and the `return` with:
@@ -750,17 +750,17 @@ assert which listener answered.
 	return acme.NewChain(chainCfg, le, gts, zerossl), nil
 ```
 
-- [ ] **Action** — modify `internal/server/acmewire.go`: in the comment above `buildACMEChain` REMOVE the now-overbroad
+- [x] **Action** — modify `internal/server/acmewire.go`: in the comment above `buildACMEChain` REMOVE the now-overbroad
   `the DNS-01 provider selected by` and `--acme-dns-provider, ` (the DNS-01 provider is resolved only when a CA uses
   `dns-01`), leaving `… chain from config: per-CA accounts whose keys are persisted …`.
-- [ ] **Action** — modify `internal/server/server.go` `Run`: after the `lim := limit.NewLimiter(...)` statement add
+- [x] **Action** — modify `internal/server/server.go` `Run`: after the `lim := limit.NewLimiter(...)` statement add
   `chal := acme.NewChallengeStore(rdb, acme.ChallengeTTL)` (add the `internal/acme` import), and change the chain
   construction to `chain, err := buildACMEChain(cfg, lim, chal, rec, logger)`; in the comment above it REMOVE the
   now-overbroad `; DNS-01 provider selected by --acme-dns-provider`, leaving
   `// ACME chain (lazy self-healing lego clients). An` / `// existing-but-unreadable account key aborts startup …`.
 
 Definition of Done:
-- [ ] `buildACMEChain` resolves the DNS provider only inside the `UsesChallenge(config.ChallengeDNS01)` branch; its
+- [x] `buildACMEChain` resolves the DNS provider only inside the `UsesChallenge(config.ChallengeDNS01)` branch; its
       only production call site passes `chal`.
 
 Tests (`internal/server`):
@@ -771,9 +771,9 @@ Tests (`internal/server`):
 | `TestBuildACMEChain_CorruptAccountKeyAborts` (existing, acmewire_test.go) | updated to the new signature; behaviour unchanged | same |
 | `TestBuildACMEChain_DNSProviderOnlyWhenUsed` | with no `dns-01` an unknown `--acme-dns-provider` produces no Warn; with `dns-01` it Warns | capture the logger |
 
-### [ ] Task 3.3 — Local challenge errors bypass the CA cooldown
+### [x] Task 3.3 — Local challenge errors bypass the CA cooldown
 
-- [ ] **Action** — modify `internal/acme/issuer.go`: add `ClassLocal = "local"` to the class constants, and after
+- [x] **Action** — modify `internal/acme/issuer.go`: add `ClassLocal = "local"` to the class constants, and after
   `permanent`:
 
 ```go
@@ -782,7 +782,7 @@ func local(retry time.Duration, err error) *IssuerError {
 }
 ```
 
-- [ ] **Action** — modify `internal/acme/lego_client.go`: add `const localChallengeRetry = 30 * time.Second` and
+- [x] **Action** — modify `internal/acme/lego_client.go`: add `const localChallengeRetry = 30 * time.Second` and
   make the first statement of `classifyLego`:
 
 ```go
@@ -791,10 +791,10 @@ func local(retry time.Duration, err error) *IssuerError {
 	}
 ```
 
-- [ ] **Action** — modify `internal/acme/chain.go`: in the comment above `run` REMOVE the now-overbroad
+- [x] **Action** — modify `internal/acme/chain.go`: in the comment above `run` REMOVE the now-overbroad
   ` and applying reactive cooldown/backoff on failure` and `, other repeated failures get exponential backoff`
   (local challenge-store errors and a done context set no cooldown/backoff); pure removal, the rest stays.
-- [ ] **Action** — modify `internal/acme/chain.go` `run`: make the first statement inside the `for _, ca := range cas {`
+- [x] **Action** — modify `internal/acme/chain.go` `run`: make the first statement inside the `for _, ca := range cas {`
   loop (before the existing cooldown comment):
 
 ```go
@@ -817,7 +817,7 @@ func local(retry time.Duration, err error) *IssuerError {
 ```
 
 Definition of Done:
-- [ ] No caller outside `internal/acme` ever receives an error of class `ClassLocal` (the chain converts it); once
+- [x] No caller outside `internal/acme` ever receives an error of class `ClassLocal` (the chain converts it); once
       `ctx` is done `run` calls no further `obtain`, `ACMEIssue` or cooldown/backoff method.
 
 Tests (`internal/acme`):
@@ -835,15 +835,15 @@ Tests (`internal/acme`):
 A validator's `acme-tls/1` handshake is answered at the edge from Valkey; it never reaches a phone.
 
 Acceptance criteria:
-- [ ] After the ban → conn-rate → max-clients → ClientHello checks, a ClientHello whose first ALPN protocol is
+- [x] After the ban → conn-rate → max-clients → ClientHello checks, a ClientHello whose first ALPN protocol is
       `acme-tls/1` is answered locally (any SNI, reserved hosts included) and never routed or spliced.
-- [ ] No pending challenge (or a store error) → `no-route` recorded, connection closed, nothing logged above
+- [x] No pending challenge (or a store error) → `no-route` recorded, connection closed, nothing logged above
       Debug; a failed or stalled handshake is closed after `--handshake-timeout` and releases its
       `--max-clients` slot.
 
-### [ ] Task 4.1 — Edge surface
+### [x] Task 4.1 — Edge surface
 
-- [ ] **Action** — modify `internal/edge/edge.go`: add `"crypto/tls"` and `"log/slog"` to the imports; add the
+- [x] **Action** — modify `internal/edge/edge.go`: add `"crypto/tls"` and `"log/slog"` to the imports; add the
   consumer interface after `Recorder`:
 
 ```go
@@ -852,7 +852,7 @@ type ACMEChallenges interface {
 }
 ```
 
-- [ ] **Action** — modify `internal/edge/edge.go`: add `Logger *slog.Logger` as the last field of `Config`; add
+- [x] **Action** — modify `internal/edge/edge.go`: add `Logger *slog.Logger` as the last field of `Config`; add
   `chal ACMEChallenges` to `Edge` after `logs`; change `New` to take it after `logs` and store it:
 
 ```go
@@ -867,7 +867,7 @@ func New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool
 }
 ```
 
-- [ ] **Action** — modify `internal/edge/accept.go`: add after `release`:
+- [x] **Action** — modify `internal/edge/accept.go`: add after `release`:
 
 ```go
 func (e *Edge) Admit() bool { return e.admit() }
@@ -875,16 +875,16 @@ func (e *Edge) Admit() bool { return e.admit() }
 func (e *Edge) Release() { e.release() }
 ```
 
-- [ ] **Action** — modify `internal/server/server.go` `Run`: in the `edge.New(...)` call add `Logger: logger` as the
+- [x] **Action** — modify `internal/server/server.go` `Run`: in the `edge.New(...)` call add `Logger: logger` as the
   last `edge.Config` field and pass `chal` between the `&edgeLogSink{…}` argument and `edgeAddr`.
 
 Definition of Done:
-- [ ] Every `New(...)` / `Config{...}` construction in `internal/edge` tests passes a non-nil `ACMEChallenges` and
+- [x] Every `New(...)` / `Config{...}` construction in `internal/edge` tests passes a non-nil `ACMEChallenges` and
       `Logger`; the `server.Run` call passes `logger` and `chal`.
 
-### [ ] Task 4.2 — Interception
+### [x] Task 4.2 — Interception
 
-- [ ] **Action** — create `internal/edge/acme.go`:
+- [x] **Action** — create `internal/edge/acme.go`:
 
 ```go
 package edge
@@ -922,7 +922,7 @@ func (e *Edge) serveACMEChallenge(ctx context.Context, conn net.Conn, info Clien
 }
 ```
 
-- [ ] **Action** — modify `internal/edge/accept.go` `handleConn`: insert directly after the
+- [x] **Action** — modify `internal/edge/accept.go` `handleConn`: insert directly after the
   `peekClientHello` error block (before the reserved-SNI comment + `switch`):
 
 ```go
@@ -933,7 +933,7 @@ func (e *Edge) serveACMEChallenge(ctx context.Context, conn net.Conn, info Clien
 ```
 
 Definition of Done:
-- [ ] The `acme-tls/1` branch sits after the ban / conn-rate / max-clients / ClientHello checks and before the
+- [x] The `acme-tls/1` branch sits after the ban / conn-rate / max-clients / ClientHello checks and before the
       reserved-SNI dispatch; its max-clients slot is released by `handleConn`'s existing deferred release.
 
 Tests (`internal/edge`, fake `ACMEChallenges` + fake Router/LocalDialer + capturing slog handler):
@@ -956,19 +956,19 @@ The process binds `:80` when needed, issues reserved-host certificates after its
 serializes reserved-host issuance across replicas.
 
 Acceptance criteria:
-- [ ] `:80` (`--acme-http-listen`) binds only when a CA uses `http-01` and serves ONLY the ACME challenge handler;
+- [x] `:80` (`--acme-http-listen`) binds only when a CA uses `http-01` and serves ONLY the ACME challenge handler;
       its connections are checked off the accept loop (ban → conn-rate, fail-open → the edge's `--max-clients`
       counter); keep-alives are disabled; an unmatched request records `acme-http-miss`; it drains on shutdown
       and its goroutines are joined before the final flushes.
-- [ ] A valid reserved-host disk cache is served from the moment the listeners bind; issuance runs after the
+- [x] A valid reserved-host disk cache is served from the moment the listeners bind; issuance runs after the
       bind; a degraded host is retried every minute; renewal stays hourly.
-- [ ] Reserved-host issuance takes the per-host cluster lock (wait budget and issuance budget separate); a lock
+- [x] Reserved-host issuance takes the per-host cluster lock (wait budget and issuance budget separate); a lock
       error issues without it (fail-open, logged); an issuance abandoned at its deadline does not release the
       lock; a shutdown (while waiting or while issuing) releases a held lock and logs no lock/issuance problem.
 
-### [ ] Task 5.1 — Reserved-host certificates
+### [x] Task 5.1 — Reserved-host certificates
 
-- [ ] **Action** — modify `internal/server/reserved.go`: add after the `shouldRenewFunc` type:
+- [x] **Action** — modify `internal/server/reserved.go`: add after the `shouldRenewFunc` type:
 
 ```go
 type selfLocker interface {
@@ -983,7 +983,7 @@ const (
 )
 ```
 
-- [ ] **Action** — modify `internal/server/reserved.go` `reservedCerts`: delete the `renewMargin time.Duration`
+- [x] **Action** — modify `internal/server/reserved.go` `reservedCerts`: delete the `renewMargin time.Duration`
   field; add after `shouldRenew`:
 
 ```go
@@ -993,13 +993,13 @@ const (
 	lockPoll     time.Duration
 ```
 
-- [ ] **Action** — modify `internal/server/reserved.go`: in the `reservedCerts` type comment REMOVE the now-wrong
+- [x] **Action** — modify `internal/server/reserved.go`: in the `reservedCerts` type comment REMOVE the now-wrong
   `no CA can issue AND ` from `when no CA can issue AND no usable cache exists it starts DEGRADED` (every start
   without a usable cache is degraded until issuance lands); the rest of the comment stays.
-- [ ] **Action** — modify `internal/server/reserved_test.go`: in `TestReservedCerts_RenewsExpiringCache` REMOVE the
+- [x] **Action** — modify `internal/server/reserved_test.go`: in `TestReservedCerts_RenewsExpiringCache` REMOVE the
   now-wrong ` but inside the renew margin` from `// Cached pair is still valid but inside the renew margin → must be renewed at startup.`
   (the `shouldRenew` fake now decides; the `renewMargin` field is gone).
-- [ ] **Action** — modify `internal/server/reserved.go`: replace `newReservedCerts`, `ensure`, `runRenewal` and
+- [x] **Action** — modify `internal/server/reserved.go`: replace `newReservedCerts`, `ensure`, `runRenewal` and
   `maybeRenew` (with their comments) with the code below. The `// newReservedCerts builds the manager.` line is
   the existing comment with its now-wrong remainder REMOVED (it no longer issues at construction nor runs
   before the bind); the `ensure` and `runRenewal` comments go with the deleted functions.
@@ -1143,7 +1143,7 @@ func (rc *reservedCerts) acquire(ctx context.Context, host string) (func() error
 ```
 
 Definition of Done:
-- [ ] `grep -n 'renewMargin\|runRenewal\|func (rc \*reservedCerts) ensure' internal/server/reserved.go` returns nothing.
+- [x] `grep -n 'renewMargin\|runRenewal\|func (rc \*reservedCerts) ensure' internal/server/reserved.go` returns nothing.
 
 Tests (`internal/server`, fake `selfIssuer` / `shouldRenewFunc` / `selfLocker`; tiny `lockWait` / `issueTimeout` /
 `lockPoll` set on the struct):
@@ -1167,9 +1167,9 @@ Tests (`internal/server`, fake `selfIssuer` / `shouldRenewFunc` / `selfLocker`; 
 | `TestReservedCerts_ShutdownDuringIssuanceReleasesLock` | ctx cancelled while obtain blocks → unlock called, no Warn record | fake obtain honours ctx |
 | persist / legacy / corrupt-bundle tests (existing) | unchanged | |
 
-### [ ] Task 5.2 — Accept guard for the `:80` ACME listener
+### [x] Task 5.2 — Accept guard for the `:80` ACME listener
 
-- [ ] **Action** — create `internal/server/acmehttp.go` (used ONLY by the `:80` ACME challenge listener):
+- [x] **Action** — create `internal/server/acmehttp.go` (used ONLY by the `:80` ACME challenge listener):
 
 ```go
 package server
@@ -1324,7 +1324,7 @@ func (c *slotConn) Close() error {
 ```
 
 Definition of Done:
-- [ ] `Accept` never performs I/O beyond the channel receive; every Valkey call runs in a tracked per-connection
+- [x] `Accept` never performs I/O beyond the channel receive; every Valkey call runs in a tracked per-connection
       goroutine; `newGuardedListener` is referenced only by the `:80` ACME wiring in `server.Run`.
 
 Tests (`internal/server`):
@@ -1339,12 +1339,12 @@ Tests (`internal/server`):
 | `TestConnRateAllow` (table) | limiter allows → true; limiter denies → false; limiter error → true (fail-open); the call uses scope `conn-rate`, the configured rate and a 1 s window | hand-written fake `connRateLimiter` |
 | `TestGuardListener_WaitJoinsGoroutines` | after Close, `Wait` returns only once a blocked `allow` has returned; `Wait` returns at its ctx deadline while `allow` stays blocked | `allow` blocks on a test channel |
 
-### [ ] Task 5.3 — `server.Run`
+### [x] Task 5.3 — `server.Run`
 
-- [ ] **Action** — modify `internal/observ/recorder.go`: append `"acme-http-miss"` to `RejectReasons` (after
+- [x] **Action** — modify `internal/observ/recorder.go`: append `"acme-http-miss"` to `RejectReasons` (after
   `"acme-failed"`); in its comment REMOVE the now-wrong ` (enroll, edge, phoneconn, acme)` (the `:80` guard in
   `internal/server` is now also a writer).
-- [ ] **Action** — modify `internal/server/server.go` `Run`:
+- [x] **Action** — modify `internal/server/server.go` `Run`:
   - replace the reserved-certs construction statement (its `// Reserved-host certs (…)` comment line stays) with:
 
 ```go
@@ -1399,14 +1399,14 @@ Tests (`internal/server`):
   - in the drain: after `_ = rawLn.Close()` add `if acmeHTTPLn != nil { _ = acmeHTTPLn.Close() }`; after
     `_ = internalSrv.Shutdown(sctx)` add `if acmeHTTPSrv != nil { _ = acmeHTTPSrv.Shutdown(sctx) }`; after the
     `ed.Wait(sctx)` line add `if guarded != nil { guarded.Wait(sctx) }` (before `g.Wait()` and the final flushes).
-- [ ] **Action** — modify `internal/server/server.go`: in the `// Bind the public + mesh listeners LAST` comment
+- [x] **Action** — modify `internal/server/server.go`: in the `// Bind the public + mesh listeners LAST` comment
   REMOVE the now-wrong `(reserved-cert` and `issuance) ` fragments (reserved-cert issuance no longer precedes the
   bind); the rest stays.
-- [ ] **Action** — modify `internal/server/serve.go`: in the `serveTLS` comment REMOVE the now-wrong enumeration
+- [x] **Action** — modify `internal/server/serve.go`: in the `serveTLS` comment REMOVE the now-wrong enumeration
   ` internal (metrics/healthz/admin)` (the plain listener is now also the HTTP-01 one), leaving
   `ln is a tls.Listener for the TLS servers (enroll/control/mesh), or the plain` / `// listener.` followed by the
   unchanged rest.
-- [ ] **Action** — modify `internal/server/server_test.go` `TestRun_Lifecycle`: the reserved-host issuance now
+- [x] **Action** — modify `internal/server/server_test.go` `TestRun_Lifecycle`: the reserved-host issuance now
   writes `lock:acme-self:*` keys at startup, so "any key exists" no longer proves the heartbeat landed; replace the
   `waitUntil` predicate with one that is true only once a `node:` key exists (its existing comment stays accurate):
 
@@ -1424,7 +1424,7 @@ Tests (`internal/server`):
   and add `"strings"` to that file's imports.
 
 Definition of Done:
-- [ ] `server.Run` binds `--acme-http-listen` only when `cfg.UsesChallenge(config.ChallengeHTTP01)`; the HTTP-01
+- [x] `server.Run` binds `--acme-http-listen` only when `cfg.UsesChallenge(config.ChallengeHTTP01)`; the HTTP-01
       server is shut down and its guard joined in the drain before the final flushes.
 
 Tests (`internal/metrics/metrics_test.go`):
@@ -1449,24 +1449,24 @@ Pebble validates HTTP-01 / TLS-ALPN-01 against tunneld's real listeners, includi
 replica that did not start the order; the existing tiers keep passing under the new startup order.
 
 Acceptance criteria:
-- [ ] Integration: enroll + public-cert issuance + frontend roundtrip succeed with LE/GTS on `tls-alpn-01`
+- [x] Integration: enroll + public-cert issuance + frontend roundtrip succeed with LE/GTS on `tls-alpn-01`
       (ZeroSSL `http-01`) and with all CAs on `http-01`; each case proves the configured method answered and the
       other did not.
-- [ ] E2E: the same with the orders started on replica A and every validation answered by replica B (A answers
+- [x] E2E: the same with the orders started on replica A and every validation answered by replica B (A answers
       none).
-- [ ] Every pre-existing integration / e2e configuration pins `dns-01` explicitly, waits until BOTH reserved hosts
+- [x] Every pre-existing integration / e2e configuration pins `dns-01` explicitly, waits until BOTH reserved hosts
       serve a certificate, and still passes.
-- [ ] The startup contract test asserts the NEW order; `:80` is unbound without `http-01`, refuses keep-alive,
+- [x] The startup contract test asserts the NEW order; `:80` is unbound without `http-01`, refuses keep-alive,
       counts `acme-http-miss`, and drains on shutdown; a valid cache is served while issuance is pending.
 
-### [ ] Task 6.1 — Shared test harness (`internal/tunneltest`)
+### [x] Task 6.1 — Shared test harness (`internal/tunneltest`)
 
-- [ ] **Action** — modify `internal/tunneltest/containers.go`: change the build constraint to
+- [x] **Action** — modify `internal/tunneltest/containers.go`: change the build constraint to
   `//go:build integration || e2e || staging`; in the header comment REMOVE the now-wrong
   ` for the integration (//go:build integration) and e2e (//go:build e2e)` + `tiers` (the staging tier uses it
   too) and ` (user decision: the automated tiers are hermetic)` (the staging tier reaches real staging CAs),
   re-flowing the remaining words.
-- [ ] **Action** — modify `internal/tunneltest/containers.go`: add `HostIP string`, `HTTPPort int`, `TLSPort int`
+- [x] **Action** — modify `internal/tunneltest/containers.go`: add `HostIP string`, `HTTPPort int`, `TLSPort int`
   at the end of `PebbleEnv`; add the import `"github.com/moby/moby/client"` (`bytes`, `encoding/json`, `net` are
   already imported); add:
 
@@ -1543,7 +1543,7 @@ func freePortOn(t *testing.T, ip string) int {
 }
 ```
 
-- [ ] **Action** — modify `internal/tunneltest/containers.go` `StartPebble`: change the signature to
+- [x] **Action** — modify `internal/tunneltest/containers.go` `StartPebble`: change the signature to
   `func StartPebble(t *testing.T, opts ...PebbleOption) *PebbleEnv`; at the top apply the options into a
   `var setup pebbleSetup` (`t.Fatalf` on an option error); after `nw := newNetwork(t)` compute:
 
@@ -1568,7 +1568,7 @@ func freePortOn(t *testing.T, ip string) int {
   `Cmd` (`"-config", pebbleConfig`), set `Files: files` on the Pebble request, and return
   `HostIP: hostIP, HTTPPort: httpPort, TLSPort: tlsPort` in the `PebbleEnv`. Calls without options behave exactly
   as before.
-- [ ] **Action** — create `internal/tunneltest/acme.go`:
+- [x] **Action** — create `internal/tunneltest/acme.go`:
 
 ```go
 //go:build integration || e2e || staging
@@ -1643,19 +1643,19 @@ func (c *LogCounter) Count(msg string) int {
 }
 ```
 
-- [ ] **Action** — run `go mod tidy` (the new direct import moves `github.com/moby/moby/client` to a direct
+- [x] **Action** — run `go mod tidy` (the new direct import moves `github.com/moby/moby/client` to a direct
   requirement).
 
 Definition of Done:
-- [ ] `go.mod` lists `github.com/moby/moby/client` without `// indirect`; no other `go.mod` line changes.
+- [x] `go.mod` lists `github.com/moby/moby/client` without `// indirect`; no other `go.mod` line changes.
 
-### [ ] Task 6.2 — Existing harnesses: DNS-01 pin + reserved-host readiness
+### [x] Task 6.2 — Existing harnesses: DNS-01 pin + reserved-host readiness
 
-- [ ] **Action** — modify `internal/server/integration_test.go`: add `internalAddr string` and `acmeHTTPAddr string`
+- [x] **Action** — modify `internal/server/integration_test.go`: add `internalAddr string` and `acmeHTTPAddr string`
   to `itEnv` (after `edgeAddr`); in `itServeConfig` add to the returned literal
   `ACMEChallengeLE: config.ChallengeDNS01, ACMEChallengeGTS: config.ChallengeDNS01, ACMEChallengeZeroSSL: config.ChallengeDNS01,`
   (every integration config built from it — including `drain_startup_integration_test.go`'s — inherits the pin).
-- [ ] **Action** — modify `internal/server/integration_test.go`: move the tail of `startIntegrationServer` (from
+- [x] **Action** — modify `internal/server/integration_test.go`: move the tail of `startIntegrationServer` (from
   `ctx, cancel := context.WithCancel(...)` to the `return &itEnv{...}`) into the helper below (the moved code keeps
   its existing `// drain cancels …` comment; the old `// Readiness: …` comment and its Valkey-keys `waitBool` block
   are deleted with the code they described — the reserved-host wait replaces them); make `startIntegrationServer`
@@ -1729,7 +1729,7 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 ```
 
   Add `"log/slog"` to the file's imports.
-- [ ] **Action** — modify `e2e/e2e_test.go`: replace `replicaOpts` (its comment and the existing field comments
+- [x] **Action** — modify `e2e/e2e_test.go`: replace `replicaOpts` (its comment and the existing field comments
   stay) with:
 
 ```go
@@ -1754,7 +1754,7 @@ type replicaOpts struct {
 }
 ```
 
-- [ ] **Action** — modify `e2e/e2e_test.go`: in the `startReplica` comment REMOVE the now-wrong
+- [x] **Action** — modify `e2e/e2e_test.go`: in the `startReplica` comment REMOVE the now-wrong
   ` (internal /healthz is 200)` (readiness also requires both reserved hosts); in the `runReplicaOnce` comment
   REMOVE the now-wrong ` on fresh freeAddr ports` (the edge may be a fixed Pebble validation address); replace the
   body of `runReplicaOnce` with (its inner comments are the existing ones, kept; the final `t.Fatal` message drops
@@ -1887,11 +1887,11 @@ type replicaOpts struct {
 ```
 
 Definition of Done:
-- [ ] Every e2e and integration test that enrolls runs after both reserved hosts serve a certificate.
+- [x] Every e2e and integration test that enrolls runs after both reserved hosts serve a certificate.
 
-### [ ] Task 6.3 — Startup contract
+### [x] Task 6.3 — Startup contract
 
-- [ ] **Action** — modify `internal/server/drain_startup_integration_test.go`: rewrite
+- [x] **Action** — modify `internal/server/drain_startup_integration_test.go`: rewrite
   `TestIntegration_StartupBindsAfterConstruction` (user-approved with this plan; its doc comment and inline
   comments describe the old contract and are deleted with it) as
   `TestIntegration_ListenersServeWhileReservedIssuancePending`, and add
@@ -1903,7 +1903,7 @@ Definition of Done:
   now holds post-bind issuance), leaving `… blocks in its TLS handshake.`
 
 Definition of Done:
-- [ ] `TestIntegration_StartupBindsAfterConstruction` no longer exists; the three tests below exist in
+- [x] `TestIntegration_StartupBindsAfterConstruction` no longer exists; the three tests below exist in
       `drain_startup_integration_test.go`; the mesh-bind-failure comment reads `// Unreachable ACME (port 1).`; the
       `hangACMEListener` comment no longer mentions server construction.
 
@@ -1915,9 +1915,9 @@ Tests (`internal/server/drain_startup_integration_test.go`, `//go:build integrat
 | `TestIntegration_ReservedCacheServedWhileIssuancePending` | a still-valid but renewal-due `bundle.json` for both hosts, written into `<ACMEAccountDir>/self/<host>/` before `Run`, is served (`ServesCertificate` true, the served leaf equals the cached one) while the first `run` pass is blocked renewing against the hanging directories (the hang listener has received a connection) | bundle from a self-signed cert per host + `store.CertInfo{NotBefore: now-150h, NotAfter: now+10h}` (no CA → the chain's fixed floor NotBefore + 160 h − 48 h is already past, so the renewal starts at once, with no network call to decide it) |
 | `TestIntegration_ACMEHTTPListenerOnlyWhenUsed` | with no CA on `http-01`, once `:443` accepts TCP a dial to `ACMEHTTPListen` is refused | `itServeConfig` (dns-01) + hanging ACME; `ACMEHTTPListen = freeAddr(t)` |
 
-### [ ] Task 6.4 — New method coverage
+### [x] Task 6.4 — New method coverage
 
-- [ ] **Action** — modify `internal/server/integration_test.go`: add `"strconv"` to the imports and add the helper
+- [x] **Action** — modify `internal/server/integration_test.go`: add `"strconv"` to the imports and add the helper
   (shared by the new tests):
 
 ```go
@@ -1952,11 +1952,11 @@ func startChallengeServer(t *testing.T, method string, mutate ...func(*config.Se
 }
 ```
 
-- [ ] **Action** — create `internal/server/challenge_integration_test.go` (`//go:build integration`, package
+- [x] **Action** — create `internal/server/challenge_integration_test.go` (`//go:build integration`, package
   `server`) and add to `e2e/e2e_test.go` the e2e test, per the tables.
 
 Definition of Done:
-- [ ] `startChallengeServer` is used by every test in `challenge_integration_test.go`; each roundtrip test (integration
+- [x] `startChallengeServer` is used by every test in `challenge_integration_test.go`; each roundtrip test (integration
       and e2e) asserts both "challenge served" counts.
 
 Tests (`internal/server/challenge_integration_test.go`):
@@ -1982,18 +1982,18 @@ Tests (`e2e/e2e_test.go`):
 The same flows against Let's Encrypt staging and GTS staging, on every CI run.
 
 Acceptance criteria:
-- [ ] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
+- [x] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
       methods via the reverse tunnel, proving which method answered; it skips (not fails) when
       `TUNNELD_STAGING_SSH_KEY` is empty.
-- [ ] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
+- [x] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
       repository, a log, or CI output; in CI they — and the SSH username — exist only as GitHub secrets, on the
       workstation only in `~/.secrets` (mode 600).
-- [ ] A dead tunnel frees the node's 80/443 within ~2 min; concurrent runs (CI or local) wait for each other
+- [x] A dead tunnel frees the node's 80/443 within ~2 min; concurrent runs (CI or local) wait for each other
       instead of failing or being cancelled.
 
-### [ ] Task 7.1 — Remote endpoint, DNS and secrets (operations)
+### [x] Task 7.1 — Remote endpoint, DNS and secrets (operations)
 
-- [ ] **Action** — read-only pre-checks BEFORE any change; if any fails, STOP and ask the user:
+- [x] **Action** — read-only pre-checks BEFORE any change; if any fails, STOP and ask the user:
   - from the workstation, CAA for `<staging-domain>` and every parent name up to the registered domain
     (`dig +short CAA <name>`): no CAA record, or records authorizing `letsencrypt.org` and `pki.goog` without a
     `validationmethods` parameter that excludes `tls-alpn-01` / `http-01`;
@@ -2005,18 +2005,18 @@ Acceptance criteria:
     from any source, and `sshd -T -C user=root,host=x,addr=203.0.113.10,laddr=<staging-node>,lport=22` (an
     arbitrary non-workstation source) still shows `permitrootlogin` other than `no`, `allowtcpforwarding yes` (or
     `remote`), and no `allowusers` / `allowgroups` / `denyusers` entry that would refuse root from that source.
-- [ ] **Action** — on the workstation, generate the dedicated key (never printed):
+- [x] **Action** — on the workstation, generate the dedicated key (never printed):
   `ssh-keygen -q -t ed25519 -N '' -C tunneld-acme-staging -f ~/.secrets/tunneld-staging-ssh`; write
   `~/.secrets/tunneld-staging.env` (mode 600) with `TUNNELD_STAGING_SSH_HOST=<staging-node>`,
   `TUNNELD_STAGING_SSH_USER=root` and `TUNNELD_STAGING_DOMAIN=<staging-domain>`.
-- [ ] **Action** — on `<staging-node>`, add the public key under a dead-man restore (SSH must never be lost):
+- [x] **Action** — on `<staging-node>`, add the public key under a dead-man restore (SSH must never be lost):
   `cp -a /root/.ssh/authorized_keys /root/.ssh/authorized_keys.bak`; arm
   `systemd-run --unit=staging-authkeys-rollback --on-active=180 /bin/cp -a /root/.ssh/authorized_keys.bak /root/.ssh/authorized_keys`;
   append a newline first when the file does not end with one (`[ -z "$(tail -c1 /root/.ssh/authorized_keys)" ] || echo >> /root/.ssh/authorized_keys`),
   then append the public key (passed through stdin); verify FRESH root logins from the workstation with the
   existing key AND with `-o IdentitiesOnly=yes -i ~/.secrets/tunneld-staging-ssh`; only then
   `systemctl stop staging-authkeys-rollback.timer` and `rm /root/.ssh/authorized_keys.bak`.
-- [ ] **Action** — on `<staging-node>`, add the sshd drop-in under the dead-man procedure (SSH must never be
+- [x] **Action** — on `<staging-node>`, add the sshd drop-in under the dead-man procedure (SSH must never be
   lost): arm `systemd-run --unit=staging-sshd-rollback --on-active=180 /bin/sh -c 'rm -f /etc/ssh/sshd_config.d/10-acme-staging.conf && systemctl reload ssh'`
   FIRST; write `/etc/ssh/sshd_config.d/10-acme-staging.conf`:
 
@@ -2029,34 +2029,34 @@ ClientAliveCountMax 4
   then `sshd -t && systemctl reload ssh`; verify a FRESH root SSH login from the workstation (existing key) and
   `sshd -T | grep -E '^(gatewayports|clientaliveinterval|clientalivecountmax) '` shows `clientspecified` / `30` /
   `4`; only then `systemctl stop staging-sshd-rollback.timer`.
-- [ ] **Action** — on the workstation: `ssh-keyscan -t ed25519 <staging-node> > ~/.secrets/tunneld-staging-known-hosts`
+- [x] **Action** — on the workstation: `ssh-keyscan -t ed25519 <staging-node> > ~/.secrets/tunneld-staging-known-hosts`
   (mode 600) and confirm its key equals the node's `/etc/ssh/ssh_host_ed25519_key.pub` (read over the existing root
   SSH).
-- [ ] **Action** — from the workstation with the Cloudflare API token in `~/.secrets` (never on the node): create
+- [x] **Action** — from the workstation with the Cloudflare API token in `~/.secrets` (never on the node): create
   `*.<staging-domain>` `A <staging-node>`, proxied false, TTL 300 (no other record touched).
-- [ ] **Action** — copy `<gts-staging-account-key>` from `<test-node>` to `~/.secrets/gts-staging-account.key`
+- [x] **Action** — copy `<gts-staging-account-key>` from `<test-node>` to `~/.secrets/gts-staging-account.key`
   (mode 600) through SSH stdout, never printed; confirm it is an EC P-256 key without printing it:
   `openssl pkey -in ~/.secrets/gts-staging-account.key -noout -text | grep -q 'ASN1 OID: prime256v1'`.
-- [ ] **Action** — on the workstation, generate the Let's Encrypt staging account key (never printed):
+- [x] **Action** — on the workstation, generate the Let's Encrypt staging account key (never printed):
   `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ~/.secrets/le-staging-account.key` (mode
   600); the first staging run registers it, every later run re-uses that account.
-- [ ] **Action** — set the GitHub Actions secrets with `gh secret set <NAME>` reading each value from stdin (never
+- [x] **Action** — set the GitHub Actions secrets with `gh secret set <NAME>` reading each value from stdin (never
   on a command line or printed): `TUNNELD_STAGING_SSH_HOST`, `TUNNELD_STAGING_SSH_USER`, `TUNNELD_STAGING_DOMAIN`
   (from `~/.secrets/tunneld-staging.env`), `TUNNELD_STAGING_SSH_KEY` (the private key file),
   `TUNNELD_STAGING_SSH_KNOWN_HOSTS` (the known-hosts file), `TUNNELD_STAGING_GTS_ACCOUNT_KEY` (the GTS account key
   file), `TUNNELD_STAGING_LE_ACCOUNT_KEY` (the LE account key file).
 
 Definition of Done:
-- [ ] `gh secret list` shows the seven names.
-- [ ] **Manual Test** — smoke test from the workstation with the new key
+- [x] `gh secret list` shows the seven names.
+- [x] **Manual Test** — smoke test from the workstation with the new key
       (`ssh -N -F /dev/null -o BatchMode=yes -o ExitOnForwardFailure=yes -o IdentitiesOnly=yes -i ~/.secrets/tunneld-staging-ssh -R 0.0.0.0:80:127.0.0.1:<local port> root@<staging-node>`
       with a local HTTP listener on `<local port>`): `curl http://x.<staging-domain>/` reaches the local listener;
       after `kill -STOP` of the ssh client (a vanished peer: no FIN, no keepalive replies), `ss -ltnH 'sport = :80'`
       on the node is empty within 3 minutes; then `kill -KILL` the stopped client.
 
-### [ ] Task 7.2 — Staging test
+### [x] Task 7.2 — Staging test
 
-- [ ] **Action** — create `staging/staging_test.go` (`//go:build staging`, package `staging_test`) per the table.
+- [x] **Action** — create `staging/staging_test.go` (`//go:build staging`, package `staging_test`) per the table.
 
 Tests (`staging/staging_test.go`):
 
@@ -2104,12 +2104,12 @@ Setup notes (whole file):
 - Each case shuts its server down before the next starts.
 
 Definition of Done:
-- [ ] The first statement of `TestStaging_ACMEValidation` skips when `TUNNELD_STAGING_SSH_KEY` is empty; no
+- [x] The first statement of `TestStaging_ACMEValidation` skips when `TUNNELD_STAGING_SSH_KEY` is empty; no
       `t.Log*` call prints an environment value.
 
-### [ ] Task 7.3 — Makefile and CI
+### [x] Task 7.3 — Makefile and CI
 
-- [ ] **Action** — modify `Makefile`: add `test-staging` to `.PHONY`; add the target and include it in `test-all`;
+- [x] **Action** — modify `Makefile`: add `test-staging` to `.PHONY`; add the target and include it in `test-all`;
   add a fourth lint pass `golangci-lint run --build-tags=staging ./...` after the e2e pass; in the lint comment
   REMOVE the now-wrong `Three ` and `, so all three are required` (there are four passes; pure removal — the
   comment then starts with `passes, one per build-tag set:`):
@@ -2120,7 +2120,7 @@ test-staging:
 ```
 
   `test-all: test-unit test-integration test-e2e test-staging`.
-- [ ] **Action** — modify `.github/workflows/ci.yml`: in `static-checks` add, after `lint (e2e tags)`:
+- [x] **Action** — modify `.github/workflows/ci.yml`: in `static-checks` add, after `lint (e2e tags)`:
 
 ```yaml
       - name: lint (staging tags)
@@ -2157,7 +2157,7 @@ test-staging:
 ```
 
 Definition of Done:
-- [ ] The Makefile `lint` target has four `golangci-lint run` lines and `ci.yml` four lint steps; the job timeout
+- [x] The Makefile `lint` target has four `golangci-lint run` lines and `ci.yml` four lint steps; the job timeout
       (60 min) exceeds the inner `go test -timeout 50m`.
 
 ---
@@ -2172,12 +2172,12 @@ Acceptance criteria:
 - [ ] `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md` and `.claude/rules/project.md`
       carry the exact text below.
 
-### [ ] Task 8.1 — Deployment files
+### [x] Task 8.1 — Deployment files
 
-- [ ] **Action** — modify `deploy/docker-compose.yml` tunneld service: `ports: ["443:443", "80:80"]`; in its
+- [x] **Action** — modify `deploy/docker-compose.yml` tunneld service: `ports: ["443:443", "80:80"]`; in its
   trailing comment REMOVE the now-wrong `the ONLY published port: the raw SNI edge. ` (the rest — mesh and internal
   never published — stays).
-- [ ] **Action** — modify `deploy/tunneld.env.example`: change `TUNNELD_ACME_DNS_PROVIDER=cloudflare` to
+- [x] **Action** — modify `deploy/tunneld.env.example`: change `TUNNELD_ACME_DNS_PROVIDER=cloudflare` to
   `TUNNELD_ACME_DNS_PROVIDER=` and `CF_DNS_API_TOKEN=changeme` to `CF_DNS_API_TOKEN=`, and add after them:
 
 ```
@@ -2187,12 +2187,12 @@ TUNNELD_ACME_CHALLENGE_ZEROSSL=http-01
 ```
 
 Definition of Done:
-- [ ] The compose tunneld `ports` list is `["443:443", "80:80"]`; `deploy/tunneld.env.example` contains no new
+- [x] The compose tunneld `ports` list is `["443:443", "80:80"]`; `deploy/tunneld.env.example` contains no new
       comment line.
 
-### [ ] Task 8.2 — Documentation
+### [x] Task 8.2 — Documentation
 
-- [ ] **Action** — modify `docs/ARCHITECTURE.md`:
+- [x] **Action** — modify `docs/ARCHITECTURE.md`:
   - §1: replace `ALL construction — reserved-host cert` / `issuance included — completes BEFORE the `:443` and
     `:9443` listeners bind: a socket is never bound while` / `unserved (a cold-start issuance delays readiness, never
     leaves an accepting-but-dead port).` with:
@@ -2269,7 +2269,7 @@ Definition of Done:
     `join["join public handlers (Edge.Wait): splice + end-event enqueue + slot release returned"]` to
     `join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]`.
   - §10: append `The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01`).`
-- [ ] **Action** — modify `docs/PROJECT.md`:
+- [x] **Action** — modify `docs/PROJECT.md`:
   - "Never publish" paragraph: replace `— only the raw edge `:443` is` / `public;` with
     `— only the raw edge `:443` and, when a CA uses HTTP-01, the ACME challenge listener `:80` are` / `public;`.
   - ACME bullet: replace `with automatic spillover,` / `DNS-01, and short-lived certs` with
@@ -2286,12 +2286,12 @@ Definition of Done:
   - §7 Standard commands: replace ``test-integration`, `test-e2e`, `test-scripts`,` with
     ``test-integration`, `test-e2e`, `test-staging`, `test-scripts`,`, and replace `The integration` / `and e2e tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble).` with
     `The integration,` / `e2e and staging tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble); the staging tier also reaches Let's Encrypt staging + GTS staging through a reverse SSH tunnel and skips without `TUNNELD_STAGING_SSH_KEY`.`
-- [ ] **Action** — modify `docs/PROTOCOL.md`:
+- [x] **Action** — modify `docs/PROTOCOL.md`:
   - intro: replace `routes on` / `SNI, and splices` with
     `routes on` / `SNI (a ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation answered locally by tunneld, never spliced), and splices`.
   - §6: append the bullet
     `- A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME validation addressed to tunneld: it is answered locally with tunneld's challenge certificate and NEVER spliced to a phone.`
-- [ ] **Action** — modify `README.md`:
+- [x] **Action** — modify `README.md`:
   - replace deployment step 4 (`4. **DNS + ACME**: …` through `… as an operator DNS step.`) with:
 
 ```markdown
@@ -2311,7 +2311,7 @@ Definition of Done:
     `check on every ingress edge (public `:443`, the HTTP-01 `:80` listener, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/country ban can fail HTTP-01 / TLS-ALPN-01 issuance.`
   - The step-3 shell line (`… + the lego DNS-provider secret`) stays: the env file is still where that secret goes
     when `dns-01` is used.
-- [ ] **Action** — modify `.claude/rules/project.md`:
+- [x] **Action** — modify `.claude/rules/project.md`:
   - Tech Stack ACME row notes: `LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, per-CA cooldown/backoff retry-after, self-heal.`
   - Tech Stack integration row notes: `Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e` / `staging`); needs Docker. The `staging` tier also uses real LE / GTS staging through a reverse SSH tunnel.`
   - Tech Stack edge row notes: replace `one `tunneld` on :443,` with `one `tunneld` on :443 (+ :80 for ACME HTTP-01),`.
@@ -2343,7 +2343,7 @@ Definition of Done:
     `e2e (`//go:build e2e`) = two in-process replicas + shared testcontainers; staging (`//go:build staging`, `staging/`) = the real server against Let's Encrypt staging + GTS staging through a reverse SSH tunnel (every CI run; skips without the key).`
 
 Definition of Done:
-- [ ] `grep -rn 'DNS-01' docs/PROJECT.md docs/ARCHITECTURE.md README.md .claude/rules/project.md` shows no sentence
+- [x] `grep -rn 'DNS-01' docs/PROJECT.md docs/ARCHITECTURE.md README.md .claude/rules/project.md` shows no sentence
       that still presents DNS-01 as the only method; every replaced string above is gone from its file.
 
 ### [ ] Task 8.3 — Ground-up double-check + quality gates
@@ -2374,3 +2374,12 @@ Definition of Done:
 
 Definition of Done:
 - [ ] Every checkbox above is `[x]`; all gates green on the final code.
+
+## Deviations
+
+- **Decision 8 / Task 7.1 — staging domain placement.** The plan described `<staging-domain>` as a sub-zone of the
+  deployment's tunnel zone. The user chose (2026-10-11) a name directly under the registered domain instead, so the
+  staging tier does not depend on the still-unconfirmed tunnel zone. Decision 8 is updated; the value stays a secret.
+- **Task 7.1 — DNS record metadata.** The wildcard A record was created with a Cloudflare record comment naming its
+  purpose (the CI ACME staging tier), so it is identifiable among the zone's other records. No other record was
+  touched.
