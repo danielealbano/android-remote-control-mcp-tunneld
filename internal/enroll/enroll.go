@@ -331,11 +331,10 @@ func signError(err error) *Error {
 }
 
 // csrMatchesTunnel reports whether csr requests EXACTLY <name>.<tunnelDomain> and NOTHING else. lego
-// derives the ACME order identifiers from the WHOLE CSR (CN + every SAN), and the DNS-01 provider is
-// scoped to the entire tunnel zone — so any additional identifier (another tenant's name, a reserved
-// host, a wildcard) would be satisfiable and MISISSUED. Equality, not containment: the CN must be
-// empty or the required FQDN, the SAN list must be exactly {want} (or empty when the CN carries it),
-// and no other identifier type (IP/email/URI SANs) may be present.
+// derives the ACME order identifiers from the WHOLE CSR (CN + every SAN) — so any additional identifier
+// (another tenant's name, a reserved host) would be satisfiable and MISISSUED. Equality, not containment:
+// the CN must be empty or the required FQDN, the SAN list must be exactly {want} (or empty when the CN
+// carries it), and no other identifier type (IP/email/URI SANs) may be present.
 func csrMatchesTunnel(csr *x509.CertificateRequest, name, tunnelDomain string) bool {
 	want := name + "." + tunnelDomain
 	if csr.Subject.CommonName != "" && csr.Subject.CommonName != want {
