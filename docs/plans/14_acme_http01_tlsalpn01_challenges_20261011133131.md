@@ -808,7 +808,7 @@ func local(retry time.Duration, err error) *IssuerError {
 
 ```go
 		if ctx.Err() != nil {
-			return nil, store.CertInfo{}, err
+			return nil, store.CertInfo{}, transient(ctx.Err())
 		}
 		var ie *IssuerError
 		if asIssuerError(err, &ie) && ie.Class == ClassLocal {
@@ -826,7 +826,7 @@ Tests (`internal/acme`):
 |---|---|---|
 | `TestClassifyLego_ChallengeStoreIsLocal` | an error wrapping `ErrChallengePending` (and a lego-style multi-error around it) classifies `ClassLocal` with Retry `localChallengeRetry` | build the wrap with `fmt.Errorf("…%w", …)` + `errors.Join` |
 | `TestChain_LocalErrorSkipsCooldown` | a CA failing with a local error: chain returns `ClassRateLimited` with Retry 30 s, stops (next CA not called), `CACooldown` / failure streak untouched, no `ACMEIssue(…, "fail")` | fake `caIssuer`s + miniredis limiter + recorder fake |
-| `TestChain_StopsWhenContextDone` (table: ctx cancelled before the call; ctx cancelled while the first CA's obtain runs) | no (further) CA `obtain`, no `ACMEIssue`, no cooldown / failure streak set; the returned error satisfies `errors.Is(err, context.Canceled)` | same fakes; the first CA's fake cancels the ctx and returns `transient(ctx.Err())` |
+| `TestChain_StopsWhenContextDone` (table: ctx cancelled before the call; ctx cancelled while the first CA's obtain runs; a local error returned while the ctx is cancelled) | no (further) CA `obtain`, no `ACMEIssue`, no cooldown / failure streak set; the returned error satisfies `errors.Is(err, context.Canceled)` | same fakes; the first CA's fake cancels the ctx and returns `transient(ctx.Err())` |
 
 ---
 
@@ -2383,3 +2383,11 @@ Definition of Done:
 - **Task 7.1 — DNS record metadata.** The wildcard A record was created with a Cloudflare record comment naming its
   purpose (the CI ACME staging tier), so it is identifiable among the zone's other records. No other record was
   touched.
+- **Task 3.3 — context-done branch.** The planned `return nil, store.CertInfo{}, err` in `chain.run`'s context-done
+  branch could hand a `ClassLocal` error to a caller outside `internal/acme` when a challenge-store failure
+  coincided with cancellation, contradicting the task's DoD. The branch now returns `transient(ctx.Err())`
+  (still `errors.Is(err, context.Canceled)`), and `TestChain_StopsWhenContextDone` gained that case (code review).
+- **Out-of-plan comment removal — `internal/enroll/enroll.go`.** The `csrMatchesTunnel` comment presented a
+  zone-wide DNS-01 provider (and wildcards) as the reason extra identifiers were satisfiable; with per-CA methods
+  DNS-01 is optional and off by default, so the now-wrong part was removed (pure removal, re-flowed) under the
+  user's comment rule (code review).
