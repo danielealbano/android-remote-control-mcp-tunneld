@@ -95,10 +95,12 @@ Decisions made while planning (consistent with the discussion; surfaced at the p
    `ops@free.example.com` (Boulder's `policy.ValidEmail` accepts it; GTS staging accepted it when re-registering
    the reused account on 2026-10-11). Both staging CAs use a persisted account key — the reused GTS account and
    one LE staging account key generated once on the workstation (a seventh secret) — so runs create no new ACME
-   accounts (LE staging allows 50 new accounts per IP per 3 h, and CI runner IPs are not ours). The test discards
-   tunneld's, lego's and ssh's output and redacts secrets from failure messages.
+   accounts (LE staging allows 50 new accounts per IP per 3 h, and CI runner IPs are not ours). The test streams
+   tunneld's, lego's and ssh's output to the test output line by line with the secrets redacted, and redacts them
+   from failure messages.
 9. **Method assertions:** every Pebble and staging test proves which method answered by counting tunneld's
-   Debug "challenge served" log records with an in-memory counting logger (records are counted, never printed).
+   Debug "challenge served" log records with a counting log handler that forwards every record to the test's
+   output handler.
 10. **Deployment example:** `TUNNELD_ACME_DNS_PROVIDER` and `CF_DNS_API_TOKEN` are left EMPTY in
     `deploy/tunneld.env.example` (the default methods need no DNS credential in the internet-facing process).
 11. **Ban/geo engine and validators:** HTTP-01 / TLS-ALPN-01 validation connections pass through the ban/geo
@@ -567,7 +569,9 @@ func HTTPChallengeHandler(keyAuths HTTPKeyAuths, onMiss func(clientIP string), l
 		}
 		logger.Debug("acme http-01 challenge served", "domain", host, "ip", ip)
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = io.WriteString(w, html.EscapeString(keyAuth))
+		if _, err := io.WriteString(w, html.EscapeString(keyAuth)); err != nil {
+			logger.Debug("acme http-01 challenge response write failed", "domain", host, "ip", ip, "err", err)
+		}
 	})
 }
 
@@ -827,6 +831,8 @@ Tests (`internal/acme`):
 | `TestClassifyLego_ChallengeStoreIsLocal` | an error wrapping `ErrChallengePending` (and a lego-style multi-error around it) classifies `ClassLocal` with Retry `localChallengeRetry` | build the wrap with `fmt.Errorf("…%w", …)` + `errors.Join` |
 | `TestChain_LocalErrorSkipsCooldown` | a CA failing with a local error: chain returns `ClassRateLimited` with Retry 30 s, stops (next CA not called), `CACooldown` / failure streak untouched, no `ACMEIssue(…, "fail")` | fake `caIssuer`s + miniredis limiter + recorder fake |
 | `TestChain_StopsWhenContextDone` (table: ctx cancelled before the call; ctx cancelled while the first CA's obtain runs; a local error returned while the ctx is cancelled) | no (further) CA `obtain`, no `ACMEIssue`, no cooldown / failure streak set; the returned error satisfies `errors.Is(err, context.Canceled)` | same fakes; the first CA's fake cancels the ctx and returns `transient(ctx.Err())` |
+| `TestChain_LogsEachCAFailure` | every failed CA order is logged at Warn as `acme CA order failed` with `ca`, `name`, `class` and the error text, and the spillover still reaches the next CA | `rateLimited` LE, `transient` GTS, succeeding ZeroSSL; buffer-backed text handler |
+| `TestChain_LogsBookkeepingErrors` (table: failed, rate-limited and successful order) | with Valkey down, each best-effort cooldown/streak error is logged (`cooldown check`, `failure-streak bump`, `cooldown write`, `failure-streak reset`) and the order outcome is unchanged | miniredis closed after the chain is built |
 
 ---
 
@@ -892,6 +898,7 @@ package edge
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"strings"
 	"time"
@@ -900,8 +907,12 @@ import (
 const acmeTLS1Protocol = "acme-tls/1"
 
 func (e *Edge) serveACMEChallenge(ctx context.Context, conn net.Conn, info ClientHelloInfo, ip string) {
-	defer func() { _ = conn.Close() }()
 	domain := strings.ToLower(info.SNI)
+	defer func() {
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			e.cfg.Logger.Debug("acme tls-alpn-01 challenge close failed", "domain", domain, "ip", ip, "err", err)
+		}
+	}()
 	cert, ok, err := e.chal.TLSALPNCertificate(ctx, domain)
 	if err != nil {
 		e.cfg.Logger.Debug("acme tls-alpn-01 challenge lookup failed", "domain", domain, "ip", ip, "err", err)
@@ -913,7 +924,10 @@ func (e *Edge) serveACMEChallenge(ctx context.Context, conn net.Conn, info Clien
 	tc := tls.Server(conn, &tls.Config{
 		Certificates: []tls.Certificate{*cert}, NextProtos: []string{acmeTLS1Protocol}, MinVersion: tls.VersionTLS12,
 	})
-	_ = tc.SetDeadline(time.Now().Add(e.cfg.HandshakeTimeout))
+	if err := tc.SetDeadline(time.Now().Add(e.cfg.HandshakeTimeout)); err != nil {
+		e.cfg.Logger.Debug("acme tls-alpn-01 challenge deadline failed", "domain", domain, "ip", ip, "err", err)
+		return
+	}
 	if err := tc.HandshakeContext(ctx); err != nil {
 		e.cfg.Logger.Debug("acme tls-alpn-01 challenge handshake failed", "domain", domain, "ip", ip, "err", err)
 		return
@@ -1177,6 +1191,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/netip"
 	"sync"
@@ -1192,10 +1207,14 @@ type connRateLimiter interface {
 	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)
 }
 
-func connRateAllow(lim connRateLimiter, rate int) func(context.Context, netip.Addr) bool {
+func connRateAllow(lim connRateLimiter, rate int, logger *slog.Logger) func(context.Context, netip.Addr) bool {
 	return func(ctx context.Context, ip netip.Addr) bool {
 		ok, _, err := lim.Allow(ctx, "conn-rate", ip, rate, time.Second)
-		return err != nil || ok
+		if err != nil {
+			logger.Debug("acme-http conn-rate check failed (allowing)", "ip", ip, "err", err)
+			return true
+		}
+		return ok
 	}
 }
 
@@ -1206,6 +1225,7 @@ type guardedListener struct {
 	admit   func() bool
 	release func()
 	reject  func(reason, tunnelName, clientIP string)
+	logger  *slog.Logger
 	conns   chan net.Conn
 	closed  chan struct{}
 	once    sync.Once
@@ -1214,9 +1234,9 @@ type guardedListener struct {
 
 func newGuardedListener(ctx context.Context, ln net.Listener, ban func(netip.Addr) bool,
 	allow func(context.Context, netip.Addr) bool, admit func() bool, release func(),
-	reject func(reason, tunnelName, clientIP string)) *guardedListener {
+	reject func(reason, tunnelName, clientIP string), logger *slog.Logger) *guardedListener {
 	l := &guardedListener{
-		ln: ln, ban: ban, allow: allow, admit: admit, release: release, reject: reject,
+		ln: ln, ban: ban, allow: allow, admit: admit, release: release, reject: reject, logger: logger,
 		conns: make(chan net.Conn), closed: make(chan struct{}),
 	}
 	l.wg.Add(1)
@@ -1236,6 +1256,7 @@ func (l *guardedListener) acceptLoop(ctx context.Context) {
 				return
 			}
 			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			l.logger.Warn("acme-http accept failed (backing off)", "backoff", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-l.closed:
@@ -1260,24 +1281,24 @@ func (l *guardedListener) check(ctx context.Context, c net.Conn) {
 	ip, perr := netip.ParseAddr(host)
 	if perr == nil && l.ban(ip) {
 		l.reject("ban", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	if perr == nil && !l.allow(ctx, ip) {
 		l.reject("conn-rate", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	if !l.admit() {
 		l.reject("max-clients", "", host)
-		_ = c.Close()
+		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
 	sc := &slotConn{Conn: c, release: l.release}
 	select {
 	case l.conns <- sc:
 	case <-l.closed:
-		_ = sc.Close()
+		closeLogged(l.logger, "acme-http pending conn", sc)
 	}
 }
 
@@ -1333,10 +1354,10 @@ Tests (`internal/server`):
 |---|---|---|
 | `TestGuardListener_Order` (table) | banned → `ban` (allow never called); over-rate → `conn-rate` (admit never called); admit false → `max-clients`; each closed | loopback listener + dialer |
 | `TestGuardListener_SlowRateCheckDoesNotBlockAccept` | while one connection's `allow` blocks, a second connection is accepted promptly | `allow` blocks on a test channel |
-| `TestGuardListener_AcceptErrorBackoff` | with a listener whose `Accept` always fails (non-`net.ErrClosed`), successive attempts are ≥ 5 ms apart (no hot spin) and `Close` during the backoff ends the loop (`Wait` returns) | fake `net.Listener` recording `Accept` times |
+| `TestGuardListener_AcceptErrorBackoff` | with a listener whose `Accept` always fails (non-`net.ErrClosed`), successive attempts are ≥ 5 ms apart (no hot spin) and `Close` during the backoff ends the loop (`Wait` returns); the accept error is logged at Warn | fake `net.Listener` recording `Accept` times |
 | `TestGuardListener_SlotReleasedOnClose` | the shared slot frees exactly once on (double) Close | count admit/release |
 | `TestGuardListener_Close` | `Accept` returns `net.ErrClosed` after Close; pending checks close their conns and release their slots | |
-| `TestConnRateAllow` (table) | limiter allows → true; limiter denies → false; limiter error → true (fail-open); the call uses scope `conn-rate`, the configured rate and a 1 s window | hand-written fake `connRateLimiter` |
+| `TestConnRateAllow` (table) | limiter allows → true; limiter denies → false; limiter error → true (fail-open) and logged; the call uses scope `conn-rate`, the configured rate and a 1 s window | hand-written fake `connRateLimiter` |
 | `TestGuardListener_WaitJoinsGoroutines` | after Close, `Wait` returns only once a blocked `allow` has returned; `Wait` returns at its ctx deadline while `allow` stays blocked | `allow` blocks on a test channel |
 
 ### [x] Task 5.3 — `server.Run`
@@ -1375,9 +1396,9 @@ Tests (`internal/server`):
 	if acmeHTTPSrv != nil {
 		acmeHTTPLn, err = net.Listen("tcp", cfg.ACMEHTTPListen)
 		if err != nil {
-			_ = rawLn.Close()
-			_ = meshLn.Close()
-			_ = internalLn.Close()
+			closeLogged(logger, "raw listener", rawLn)
+			closeLogged(logger, "mesh listener", meshLn)
+			closeLogged(logger, "internal listener", internalLn)
 			return fmt.Errorf("acme http listen %s: %w", cfg.ACMEHTTPListen, err)
 		}
 	}
@@ -1388,16 +1409,17 @@ Tests (`internal/server`):
 ```go
 	var guarded *guardedListener
 	if acmeHTTPSrv != nil {
-		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate),
-			ed.Admit, ed.Release, rec.Reject)
+		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate, logger),
+			ed.Admit, ed.Release, rec.Reject, logger)
 		g.Go(func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") })
 	}
 ```
 
   - replace `g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })` with
     `g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })`;
-  - in the drain: after `_ = rawLn.Close()` add `if acmeHTTPLn != nil { _ = acmeHTTPLn.Close() }`; after
-    `_ = internalSrv.Shutdown(sctx)` add `if acmeHTTPSrv != nil { _ = acmeHTTPSrv.Shutdown(sctx) }`; after the
+  - in the drain: after the raw-listener close add
+    `if acmeHTTPLn != nil { closeLogged(logger, "acme-http listener", acmeHTTPLn) }`; after the internal server's
+    shutdown add `if acmeHTTPSrv != nil { shutdownLogged(sctx, logger, "acme-http", acmeHTTPSrv) }`; after the
     `ed.Wait(sctx)` line add `if guarded != nil { guarded.Wait(sctx) }` (before `g.Wait()` and the final flushes).
 - [x] **Action** — modify `internal/server/server.go`: in the `// Bind the public + mesh listeners LAST` comment
   REMOVE the now-wrong `(reserved-cert` and `issuance) ` fragments (reserved-cert issuance no longer precedes the
@@ -1615,31 +1637,45 @@ func WaitReservedHosts(t *testing.T, edgeAddr string, hosts []string, timeout ti
 }
 
 type LogCounter struct {
+	state *logCounts
+	next  slog.Handler
+}
+
+type logCounts struct {
 	mu     sync.Mutex
 	counts map[string]int
 }
 
-func NewLogCounter() *LogCounter { return &LogCounter{counts: map[string]int{}} }
+func NewLogCounter(next slog.Handler) *LogCounter {
+	return &LogCounter{state: &logCounts{counts: map[string]int{}}, next: next}
+}
 
 func (c *LogCounter) Logger() *slog.Logger { return slog.New(c) }
 
 func (c *LogCounter) Enabled(context.Context, slog.Level) bool { return true }
 
-func (c *LogCounter) Handle(_ context.Context, r slog.Record) error {
-	c.mu.Lock()
-	c.counts[r.Message]++
-	c.mu.Unlock()
-	return nil
+func (c *LogCounter) Handle(ctx context.Context, r slog.Record) error {
+	c.state.mu.Lock()
+	c.state.counts[r.Message]++
+	c.state.mu.Unlock()
+	if !c.next.Enabled(ctx, r.Level) {
+		return nil
+	}
+	return c.next.Handle(ctx, r)
 }
 
-func (c *LogCounter) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *LogCounter) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &LogCounter{state: c.state, next: c.next.WithAttrs(attrs)}
+}
 
-func (c *LogCounter) WithGroup(string) slog.Handler { return c }
+func (c *LogCounter) WithGroup(name string) slog.Handler {
+	return &LogCounter{state: c.state, next: c.next.WithGroup(name)}
+}
 
 func (c *LogCounter) Count(msg string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.counts[msg]
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	return c.state.counts[msg]
 }
 ```
 
@@ -1801,7 +1837,7 @@ type replicaOpts struct {
 	if opts.challengeZeroSSL != "" {
 		challengeZeroSSL = opts.challengeZeroSSL
 	}
-	logger := discardLogger()
+	logger := testOutputLogger()
 	if opts.logger != nil {
 		logger = opts.logger
 	}
@@ -1942,7 +1978,7 @@ func startChallengeServer(t *testing.T, method string, mutate ...func(*config.Se
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("config invalid: %v", err)
 		}
-		logs := tunneltest.NewLogCounter()
+		logs := tunneltest.NewLogCounter(testLogger().Handler())
 		if env, ok := runIntegrationServer(t, cfg, pebble, logs.Logger(), redisURL, s3URL, access, secret); ok {
 			return env, logs
 		}
@@ -2070,12 +2106,13 @@ Tests (`staging/staging_test.go`):
 Setup notes (whole file):
 - Skip with `t.Skip` when `TUNNELD_STAGING_SSH_KEY` is empty; when it is set, every other `TUNNELD_STAGING_*`
   variable MUST be non-empty (else `t.Fatal` naming the variable, never its value).
-- Nothing secret is printed: `server.Run` gets a fresh `tunneltest.LogCounter` logger per case (records counted,
-  never printed); `os.Stderr` is swapped for a pipe drained into `io.Discard` before the first `server.Run`
-  (lego's log output is bound to `os.Stderr` when the chain is built) and restored in `t.Cleanup`; ssh's stdout
-  goes to `io.Discard` and its stderr into an in-memory buffer that is never printed; every error passed to
-  `t.Fatal`/`t.Error` first has the host, user and domain replaced by `<staging-node>` / `<staging-user>` /
-  `<staging-domain>`.
+- Nothing secret is printed, and no output is discarded: a redacting writer replaces the host, user and domain
+  with `<staging-node>` / `<staging-user>` / `<staging-domain>` line by line and writes to `os.Stdout`; before the
+  first `server.Run`, `os.Stderr` and the standard `log` output are swapped for a pipe copied through it (lego's
+  log output is bound to `os.Stderr` when the chain is built), restored and flushed in `t.Cleanup` (each error
+  reported); `server.Run` gets a fresh `tunneltest.LogCounter` per case whose next handler is a Debug text handler
+  on the redacting writer; ssh's stdout and every stderr line (prefixed `ssh: `) go to the redacting writer; every
+  error passed to `t.Fatal`/`t.Error` is redacted the same way, and a timed-out wait reports its last error.
 - Valkey + MinIO from `tunneltest` (bucket via `EnsureS3Bucket`); one free local edge port and one free local
   HTTP-01 port (on `127.0.0.1`) reused by every case; `t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")`; an
   internal CA written to `t.TempDir()` the way `e2e/e2e_test.go` `writeCA` does.
@@ -2090,7 +2127,7 @@ Setup notes (whole file):
   `strings.TrimRight(value, "\r\n") + "\n"` (GitHub secrets and `$(cat …)` strip the trailing newline OpenSSH
   needs to load the key);
   `ssh -v -N -F /dev/null -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<tmp> -o IdentitiesOnly=yes -o ConnectTimeout=10 -o ControlMaster=no -o ControlPath=none -o ServerAliveInterval=15 -i <tmp key> -R 0.0.0.0:443:127.0.0.1:<edge> -R 0.0.0.0:80:127.0.0.1:<http> <user>@<host>`,
-  killed in `t.Cleanup`. Its stderr (`-v` debug output, kept in memory, never printed) is read line by line: the
+  killed in `t.Cleanup`. Its stderr (`-v` debug output, streamed redacted as above) is read line by line: the
   tunnel is established once both `remote forward success for: listen 0.0.0.0:443` and
   `remote forward success for: listen 0.0.0.0:80` appear (≤ 60 s). A `remote port forwarding failed` line (80/443
   held by another run; ssh then exits) logs `t.Log("remote forward ports busy; retrying in 15s")` and retries every
@@ -2391,3 +2428,22 @@ Definition of Done:
   zone-wide DNS-01 provider (and wildcards) as the reason extra identifiers were satisfiable; with per-CA methods
   DNS-01 is optional and off by default, so the now-wrong part was removed (pure removal, re-flowed) under the
   user's comment rule (code review).
+- **Never-discard-logs-or-errors rule (user mandate, 2026-10-11) — Decisions 8/9, Tasks 2.4, 3.3, 4.2, 5.2, 5.3,
+  6.1, 6.2, 6.4, 7.2.** The user ruled that logs and errors are never discarded: errors are handled, returned or
+  classified, and an unexpected one is at least logged; output that may hold secrets is redacted, not dropped.
+  Applied in this PR (the user chose to include the pre-existing spots it touches):
+  - `chain.run` / `handleFailure` log each CA's order failure (`acme CA order failed`, with `ca`, `name`, `class`,
+    `err`) and each best-effort Valkey cooldown/streak error instead of dropping them; `ChainConfig.Logger`
+    (defaulting to `slog.Default()`, as `Recorder` defaults to a no-op) is set by `buildACMEChain`. This exposed
+    the staging LE failure cause, which the aggregated "all issuance CAs are rate-limited" error hid.
+  - The HTTP-01 handler logs a failed response write; the TLS-ALPN-01 interception logs a failed close or
+    deadline (returning on the latter); the `:80` guard logs a conn-rate limiter error (still fail-open), a
+    backed-off accept error at Warn, and failed closes; `server.Run` logs failed listener closes, server
+    shutdowns, the Valkey client close and the admin JSON encode error (`closeLogged` / `shutdownLogged`).
+  - `tunneltest.LogCounter` forwards every record to a next handler; the test loggers in `internal/ban`,
+    `internal/metrics`, `internal/edge`, `internal/server` and `e2e` write Debug text to stderr instead of
+    discarding (`discardLogger` → `testOutputLogger` in `e2e`); the staging test streams redacted output (Task 7.2).
+  - New test code checks the errors it used to drop (deadlines, store lookups, stub encodes, body drains, the
+    tunnel client's `Run`).
+  - Tests: `TestChain_LogsEachCAFailure` and `TestChain_LogsBookkeepingErrors` added to Task 3.3;
+    `TestConnRateAllow` and `TestGuardListener_AcceptErrorBackoff` assert the new log lines (Task 5.2).
