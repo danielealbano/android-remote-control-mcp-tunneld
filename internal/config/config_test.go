@@ -658,6 +658,7 @@ func TestKongDefaults_ACMEChallenge(t *testing.T) {
 	t.Setenv("TUNNELD_S_3_ENDPOINT", "http://localhost:9000")
 	t.Setenv("TUNNELD_S_3_ACCESS_KEY", "access")
 	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
 
