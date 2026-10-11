@@ -139,8 +139,8 @@ func TestIntegration_ACMEHTTPNoKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first request: %v", err)
 	}
-	if !resp.Close || resp.Header.Get("Connection") != "close" {
-		t.Fatalf("the response must carry Connection: close (Close=%v header=%q)", resp.Close, resp.Header.Get("Connection"))
+	if !resp.Close {
+		t.Fatal("the response must carry Connection: close")
 	}
 	if _, err := rawHTTP(t, conn, br, "GET /.well-known/acme-challenge/unknown HTTP/1.1", itEnrollHost); err == nil {
 		t.Fatal("a second request on the same connection must fail (keep-alives are off)")
