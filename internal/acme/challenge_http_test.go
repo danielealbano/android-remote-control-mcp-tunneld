@@ -49,11 +49,8 @@ type fakeKeyAuths struct {
 }
 
 func (f *fakeKeyAuths) HTTPKeyAuth(_ context.Context, domain, token string) (string, bool, error) {
-	if f.err != nil {
-		return "", false, f.err
-	}
 	v, ok := f.values[domain+"|"+token]
-	return v, ok, nil
+	return v, ok, f.err
 }
 
 func serveChallenge(t *testing.T, keyAuths HTTPKeyAuths, method, host, target string) (*httptest.ResponseRecorder, []string, *recordingHandler) {
@@ -143,7 +140,7 @@ func TestHTTPChallengeHandler_Misses(t *testing.T) {
 
 func TestHTTPChallengeHandler_StoreError(t *testing.T) {
 	t.Parallel()
-	keyAuths := &fakeKeyAuths{err: errors.New("valkey down")}
+	keyAuths := &fakeKeyAuths{values: map[string]string{"a.example.test|tok": "tok.thumb"}, err: errors.New("valkey down")}
 	rr, misses, rec := serveChallenge(t, keyAuths, http.MethodGet, "a.example.test", "/.well-known/acme-challenge/tok")
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rr.Code)
@@ -151,7 +148,7 @@ func TestHTTPChallengeHandler_StoreError(t *testing.T) {
 	if len(misses) != 0 {
 		t.Fatalf("onMiss called on a store error: %v", misses)
 	}
-	if strings.Contains(rr.Body.String(), "tok.") {
+	if strings.Contains(rr.Body.String(), "tok.thumb") {
 		t.Fatalf("body leaks a key authorization: %q", rr.Body.String())
 	}
 	if above := rec.aboveDebug(); len(above) != 0 {

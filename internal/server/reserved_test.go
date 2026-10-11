@@ -146,25 +146,25 @@ func (f *fakeLocker) LockSelf(ctx context.Context, _ string) (func() error, bool
 	f.calls++
 	call := f.calls
 	f.mu.Unlock()
-	noop := func() error { return nil }
-	switch {
-	case f.blockUntilDone:
-		<-ctx.Done()
-		return noop, false, ctx.Err()
-	case f.err != nil:
-		return noop, false, f.err
-	case f.alwaysBusy || call <= f.busyFor:
-		return noop, false, nil
-	}
-	if f.cancelOnLock != nil {
-		f.cancelOnLock()
-	}
-	return func() error {
+	unlock := func() error {
 		f.mu.Lock()
 		f.unlocks++
 		f.mu.Unlock()
 		return nil
-	}, true, nil
+	}
+	switch {
+	case f.blockUntilDone:
+		<-ctx.Done()
+		return unlock, false, ctx.Err()
+	case f.err != nil:
+		return unlock, false, f.err
+	case f.alwaysBusy || call <= f.busyFor:
+		return unlock, false, nil
+	}
+	if f.cancelOnLock != nil {
+		f.cancelOnLock()
+	}
+	return unlock, true, nil
 }
 
 func (f *fakeLocker) unlockCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.unlocks }
