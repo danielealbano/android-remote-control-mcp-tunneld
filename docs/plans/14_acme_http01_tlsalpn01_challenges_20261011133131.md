@@ -135,7 +135,7 @@ account registered there (PKCS#8 EC); both values are in the operator's private 
 - [x] **US5 — Server assembly: HTTP-01 listener, startup order, cluster lock**
 - [x] **US6 — Hermetic Pebble coverage for both methods**
 - [x] **US7 — Real-CA staging tier**
-- [ ] **US8 — Deployment, documentation, ground-up verification**
+- [x] **US8 — Deployment, documentation, ground-up verification**
 
 ---
 
@@ -2167,9 +2167,9 @@ Definition of Done:
 The deployment exposes `:80`, and the canonical docs describe the new behaviour.
 
 Acceptance criteria:
-- [ ] Compose publishes `80:80`; the env example sets the three methods and leaves the DNS provider and its token
+- [x] Compose publishes `80:80`; the env example sets the three methods and leaves the DNS provider and its token
       empty.
-- [ ] `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md` and `.claude/rules/project.md`
+- [x] `docs/ARCHITECTURE.md`, `docs/PROJECT.md`, `docs/PROTOCOL.md`, `README.md` and `.claude/rules/project.md`
       carry the exact text below.
 
 ### [x] Task 8.1 — Deployment files
@@ -2346,34 +2346,34 @@ Definition of Done:
 - [x] `grep -rn 'DNS-01' docs/PROJECT.md docs/ARCHITECTURE.md README.md .claude/rules/project.md` shows no sentence
       that still presents DNS-01 as the only method; every replaced string above is gone from its file.
 
-### [ ] Task 8.3 — Ground-up double-check + quality gates
+### [x] Task 8.3 — Ground-up double-check + quality gates
 
-- [ ] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds NO
+- [x] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds NO
   comment line to hand-written code in any language (Go, YAML, Makefile, systemd units, sshd drop-ins, env files;
   exempt: action `# vX.Y.Z` tags) and every REMOVE instruction is applied.
   `grep -rn 'tlsalpn01\.\(ChallengeCert\|ChallengeBlocks\|NewProviderServer\)' --include='*.go' .` returns nothing;
   `grep -rn 'Eval\|TxPipelined\|Watch(' internal/acme/challenge_store.go` returns nothing;
   `grep -rn 'newGuardedListener' --include='*.go' internal/` shows only `acmehttp.go`, its test and the `:80` wiring in
   `server.go`.
-- [ ] **Action** — connect the Realme T70 (single adb device), then run every gate ONCE with output captured
+- [x] **Action** — connect the Realme T70 (single adb device), then run every gate ONCE with output captured
   (agent.md §5), fix anything surfaced, and re-run: `make lint` (four tag sets), `make vet`, `make govulncheck`,
   `make build`, `make test-unit`, `make test-integration`, `make test-e2e` (MUST show `TestE2E_DeviceAttestation`
   and `TestE2E_ReferenceTunnelApp` PASS), `make test-scripts`, `make compose-config`, `make mermaid-check`
   (validates the changed §9 chart and every other chart), `make tidy` + `git diff --exit-code -- go.mod go.sum`.
-- [ ] **Action** — run `make test-staging` with NO `TUNNELD_STAGING_*` variable set
+- [x] **Action** — run `make test-staging` with NO `TUNNELD_STAGING_*` variable set
   (`make test-staging 2>&1 | tee /tmp/p14-test-staging-skip.log | tail -5`): the test reports SKIP, not FAIL.
-- [ ] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
+- [x] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
   proving the busy-port wait (**Manual Test**): hold the node's 80/443 with the Task 7.1 smoke-test tunnel (both `-R 0.0.0.0:80` and
   `-R 0.0.0.0:443`), start the command below, confirm `/tmp/p14-test-staging.log` shows
   `remote forward ports busy; retrying in 15s`, then close the smoke tunnel so the run proceeds:
   `bash -c 'set -a; . ~/.secrets/tunneld-staging.env; set +a; TUNNELD_STAGING_SSH_KEY="$(cat ~/.secrets/tunneld-staging-ssh)" TUNNELD_STAGING_SSH_KNOWN_HOSTS="$(cat ~/.secrets/tunneld-staging-known-hosts)" TUNNELD_STAGING_GTS_ACCOUNT_KEY="$(cat ~/.secrets/gts-staging-account.key)" TUNNELD_STAGING_LE_ACCOUNT_KEY="$(cat ~/.secrets/le-staging-account.key)" make test-staging' 2>&1 | tee /tmp/p14-test-staging.log | tail -20`.
-- [ ] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
+- [x] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
   secrets, not skip).
-- [ ] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
+- [x] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
   repository (`git grep` for each value read from `~/.secrets`, values never printed) or in the CI logs of the run.
 
 Definition of Done:
-- [ ] Every checkbox above is `[x]`; all gates green on the final code.
+- [x] Every checkbox above is `[x]`; all gates green on the final code.
 
 ## Deviations
 
