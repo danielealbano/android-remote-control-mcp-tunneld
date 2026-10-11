@@ -1418,7 +1418,7 @@ Tests (`internal/server`):
   - replace `g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })` with
     `g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })`;
   - in the drain: after the raw-listener close add
-    `if acmeHTTPLn != nil { closeLogged(logger, "acme-http listener", acmeHTTPLn) }`; after the internal server's
+    `if guarded != nil { closeLogged(logger, "acme-http listener", guarded) }`; after the internal server's
     shutdown add `if acmeHTTPSrv != nil { shutdownLogged(sctx, logger, "acme-http", acmeHTTPSrv) }`; after the
     `ed.Wait(sctx)` line add `if guarded != nil { guarded.Wait(sctx) }` (before `g.Wait()` and the final flushes).
 - [x] **Action** — modify `internal/server/server.go`: in the `// Bind the public + mesh listeners LAST` comment
@@ -1460,6 +1460,13 @@ Tests (`internal/server/server_test.go`):
 | Test | Verifies | Setup notes |
 |---|---|---|
 | `TestRun_ACMEHTTPBindFailureIsFatal` | with a CA on `http-01` and `ACMEHTTPListen` already in use, `Run` returns an error containing `acme http listen`, and the internal listener's address can be bound again afterwards (no leaked listener) | as `TestRun_InternalBindFailureIsFatal`: `lifecycleConfig` + `ACMEChallengeZeroSSL: config.ChallengeHTTP01` + an occupied `ACMEHTTPListen`; `InternalListen` set to a probed free address so it can be re-bound |
+
+Tests (`internal/server/serve_test.go`):
+
+| Test | Verifies | Setup notes |
+|---|---|---|
+| `TestCloseLogged` (table) | a clean close and an already-closed (`net.ErrClosed`) close log nothing; any other close error is logged at Warn | `io.Closer` func fake; buffer-backed text handler |
+| `TestShutdownLogged` (table) | a `Shutdown` whose listener close reports `net.ErrClosed` logs nothing; any other close error is logged at Warn | real `http.Server` on a loopback listener whose `Close` returns the case's error; one request first so `Serve` tracks it |
 
 The `server.Run` wiring is covered by US6.
 
@@ -2018,10 +2025,10 @@ Tests (`e2e/e2e_test.go`):
 The same flows against Let's Encrypt staging and GTS staging, on every CI run.
 
 Acceptance criteria:
-- [x] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
+- [ ] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
       methods via the reverse tunnel, proving which method answered; it skips (not fails) when
       `TUNNELD_STAGING_SSH_KEY` is empty.
-- [x] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
+- [ ] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
       repository, a log, or CI output; in CI they — and the SSH username — exist only as GitHub secrets, on the
       workstation only in `~/.secrets` (mode 600).
 - [x] A dead tunnel frees the node's 80/443 within ~2 min; concurrent runs (CI or local) wait for each other
@@ -2102,6 +2109,7 @@ Tests (`staging/staging_test.go`):
 | `TestStaging_ACMEValidation/le-http-01` | the same via HTTP-01 (served counts reversed) | as above (incl. the LE account key), all three `http-01` |
 | `TestStaging_ACMEValidation/gts-tls-alpn-01` | GTS staging via TLS-ALPN-01; `Identity.CA == "gts"`; served counts as in `le-tls-alpn-01` | LE and ZeroSSL dirs `https://127.0.0.1:1/dir` (LE spills to GTS); GTS dir `https://dv.acme-v02.test-api.pki.goog/directory`; `<account-dir>/accounts/gts.key` written (0600) from `TUNNELD_STAGING_GTS_ACCOUNT_KEY`; no EAB |
 | `TestStaging_ACMEValidation/gts-http-01` | GTS staging via HTTP-01 (served counts reversed) | as above, all `http-01` |
+| `TestStagingEnv_Redact` (table) | host, user and domain are replaced; SSH key fingerprints (`SHA256:…`) and the remote OpenSSH version (`remote software version …`, `compat_banner: match: … pat`) are redacted; the local version string and words merely containing the user are kept | placeholder `TUNNELD_STAGING_*` values via `t.Setenv`; runs without the staging node |
 
 Setup notes (whole file):
 - Skip with `t.Skip` when `TUNNELD_STAGING_SSH_KEY` is empty; when it is set, every other `TUNNELD_STAGING_*`
@@ -2112,7 +2120,9 @@ Setup notes (whole file):
   log output is bound to `os.Stderr` when the chain is built), restored and flushed in `t.Cleanup` (each error
   reported); `server.Run` gets a fresh `tunneltest.LogCounter` per case whose next handler is a Debug text handler
   on the redacting writer; ssh's stdout and every stderr line (prefixed `ssh: `) go to the redacting writer; every
-  error passed to `t.Fatal`/`t.Error` is redacted the same way, and a timed-out wait reports its last error.
+  error passed to `t.Fatal`/`t.Error` is redacted the same way, and a timed-out wait reports its last error. The
+  redaction also replaces SSH key fingerprints (`SHA256:…`) and the node's OpenSSH version (`remote software
+  version …`, `compat_banner: match: … pat`), which `ssh -v` prints and would identify the node.
 - Valkey + MinIO from `tunneltest` (bucket via `EnsureS3Bucket`); one free local edge port and one free local
   HTTP-01 port (on `127.0.0.1`) reused by every case; `t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")`; an
   internal CA written to `t.TempDir()` the way `e2e/e2e_test.go` `writeCA` does.
@@ -2383,7 +2393,7 @@ Definition of Done:
 - [x] `grep -rn 'DNS-01' docs/PROJECT.md docs/ARCHITECTURE.md README.md .claude/rules/project.md` shows no sentence
       that still presents DNS-01 as the only method; every replaced string above is gone from its file.
 
-### [x] Task 8.3 — Ground-up double-check + quality gates
+### [ ] Task 8.3 — Ground-up double-check + quality gates
 
 - [x] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds NO
   comment line to hand-written code in any language (Go, YAML, Makefile, systemd units, sshd drop-ins, env files;
@@ -2399,18 +2409,18 @@ Definition of Done:
   (validates the changed §9 chart and every other chart), `make tidy` + `git diff --exit-code -- go.mod go.sum`.
 - [x] **Action** — run `make test-staging` with NO `TUNNELD_STAGING_*` variable set
   (`make test-staging 2>&1 | tee /tmp/p14-test-staging-skip.log | tail -5`): the test reports SKIP, not FAIL.
-- [x] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
+- [ ] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
   proving the busy-port wait (**Manual Test**): hold the node's 80/443 with the Task 7.1 smoke-test tunnel (both `-R 0.0.0.0:80` and
   `-R 0.0.0.0:443`), start the command below, confirm `/tmp/p14-test-staging.log` shows
   `remote forward ports busy; retrying in 15s`, then close the smoke tunnel so the run proceeds:
   `bash -c 'set -a; . ~/.secrets/tunneld-staging.env; set +a; TUNNELD_STAGING_SSH_KEY="$(cat ~/.secrets/tunneld-staging-ssh)" TUNNELD_STAGING_SSH_KNOWN_HOSTS="$(cat ~/.secrets/tunneld-staging-known-hosts)" TUNNELD_STAGING_GTS_ACCOUNT_KEY="$(cat ~/.secrets/gts-staging-account.key)" TUNNELD_STAGING_LE_ACCOUNT_KEY="$(cat ~/.secrets/le-staging-account.key)" make test-staging' 2>&1 | tee /tmp/p14-test-staging.log | tail -20`.
-- [x] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
+- [ ] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
   secrets, not skip).
-- [x] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
+- [ ] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
   repository (`git grep` for each value read from `~/.secrets`, values never printed) or in the CI logs of the run.
 
 Definition of Done:
-- [x] Every checkbox above is `[x]`; all gates green on the final code.
+- [ ] Every checkbox above is `[x]`; all gates green on the final code.
 
 ## Deviations
 
@@ -2447,3 +2457,20 @@ Definition of Done:
     tunnel client's `Run`).
   - Tests: `TestChain_LogsEachCAFailure` and `TestChain_LogsBookkeepingErrors` added to Task 3.3;
     `TestConnRateAllow` and `TestGuardListener_AcceptErrorBackoff` assert the new log lines (Task 5.2).
+- **Task 5.3 — drain closes the `:80` listener once (code review).** Logging the drain's `Shutdown` errors exposed a
+  race: `serveTLS`'s cancel goroutine and the drain both closed the same listener, so a clean drain could log
+  `use of closed network connection`, and the drain closed `acmeHTTPLn` underneath `guarded`. The drain now closes
+  `guarded` (which closes `acmeHTTPLn`), `shutdownLogged` treats `net.ErrClosed` as a clean shutdown, and
+  `serveTLS` closes its listener through `closeLogged`. Tests: `TestCloseLogged`, `TestShutdownLogged`.
+- **Task 7.2 — SSH identity redaction (code review).** Streaming `ssh -v` exposed the node's host-key fingerprint,
+  the CI key's fingerprint and the node's OpenSSH version in the public CI log; the redaction now covers them, and
+  `TestStagingEnv_Redact` pins it.
+- **Tasks 6.3 / 6.4 test helpers — errors surfaced (code review).** `metricLineValue` returns its scrape/parse error
+  and `waitMetric` reports the last value and error on timeout; `presentedLeaf` includes the dial error; the
+  integration echo phone logs a failed handshake or echo.
+- **Task 8.3 — staging gate red on the final code.** Let's Encrypt staging rejects every order since 2026-10-11
+  ~20:00 UTC with `During secondary validation: DNS problem: networking error looking up A/AAAA` (from CI and from
+  the workstation); the GTS cases pass. The local-staging, CI and CI-log actions, the Definition of Done and the US7
+  acceptance criteria for LE issuance and for no node identity in CI output (the host-key fingerprint was in run
+  38174566109's log, see the SSH identity redaction entry) are unchecked until `test-staging` is green and its log
+  clean on the final code.
