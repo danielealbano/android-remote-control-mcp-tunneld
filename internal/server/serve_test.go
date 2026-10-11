@@ -10,9 +10,11 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -229,5 +231,78 @@ func TestBridgeCopyReturnsPromptlyOnPhoneEOF(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("bridgeCopy stalled on an abrupt phone close (must not wait for the entry idle timeout)")
+	}
+}
+
+type closeErrListener struct {
+	net.Listener
+	err error
+}
+
+func (l *closeErrListener) Close() error { return errors.Join(l.Listener.Close(), l.err) }
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+func TestCloseLogged(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantLogged bool
+	}{
+		{name: "clean close", err: nil, wantLogged: false},
+		{name: "already closed", err: &net.OpError{Op: "close", Net: "tcp", Err: net.ErrClosed}, wantLogged: false},
+		{name: "unexpected close error", err: errors.New("close failed"), wantLogged: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf syncBuffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			closeLogged(logger, "probe", closerFunc(func() error { return tc.err }))
+			if logged := strings.Contains(buf.String(), `msg="close failed" what=probe`); logged != tc.wantLogged {
+				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLogged, buf.String())
+			}
+		})
+	}
+}
+
+func TestShutdownLogged(t *testing.T) {
+	tests := []struct {
+		name       string
+		closeErr   error
+		wantLogged bool
+	}{
+		{name: "listener already closed is a clean shutdown", closeErr: &net.OpError{Op: "close", Net: "tcp", Err: net.ErrClosed}, wantLogged: false},
+		{name: "unexpected listener close error is logged", closeErr: errors.New("close failed"), wantLogged: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), ReadHeaderTimeout: time.Second}
+			served := make(chan error, 1)
+			go func() { served <- srv.Serve(&closeErrListener{Listener: ln, err: tc.closeErr}) }()
+			resp, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://" + ln.Addr().String() + "/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var buf syncBuffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			shutdownLogged(ctx, logger, "probe", srv)
+			if err := <-served; !errors.Is(err, http.ErrServerClosed) {
+				t.Fatalf("Serve returned %v, want http.ErrServerClosed", err)
+			}
+			if logged := strings.Contains(buf.String(), `msg="server shutdown did not complete cleanly" which=probe`); logged != tc.wantLogged {
+				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLogged, buf.String())
+			}
+		})
 	}
 }

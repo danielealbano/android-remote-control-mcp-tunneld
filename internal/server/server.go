@@ -331,8 +331,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	closeLogged(logger, "raw listener", rawLn)
-	if acmeHTTPLn != nil {
-		closeLogged(logger, "acme-http listener", acmeHTTPLn)
+	if guarded != nil {
+		closeLogged(logger, "acme-http listener", guarded)
 	}
 	phoneMgr.CloseAll(store.CloseServerShutdown)
 	shutdownLogged(sctx, logger, "enroll", enrollSrv)

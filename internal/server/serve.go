@@ -36,7 +36,7 @@ func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 // cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
 // normal drain signals and stay non-fatal (the drain's srv.Shutdown bounds in-flight requests).
 func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger, which string) error {
-	go func() { <-ctx.Done(); _ = ln.Close() }()
+	go func() { <-ctx.Done(); closeLogged(logger, which+" listener", ln) }()
 	err := srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("listener exited", "which", which, "err", err)
@@ -52,7 +52,7 @@ func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 }
 
 func shutdownLogged(ctx context.Context, logger *slog.Logger, which string, srv *http.Server) {
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("server shutdown did not complete cleanly", "which", which, "err", err)
 	}
 }
