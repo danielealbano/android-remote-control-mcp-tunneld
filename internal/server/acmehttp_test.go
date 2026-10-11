@@ -64,7 +64,7 @@ func newProbedGuard(t *testing.T, ban func(netip.Addr) bool, allow func(context.
 		func() bool { p.admits.Add(1); return admit() },
 		func() { p.releases.Add(1) }, p.reject, testLogger())
 	t.Cleanup(func() {
-		_ = g.Close()
+		closeOrLog(t, g)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		g.Wait(ctx)
@@ -78,7 +78,7 @@ func dialGuard(t *testing.T, g *guardedListener) net.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	t.Cleanup(func() { closeOrLog(t, c) })
 	return c
 }
 
@@ -150,7 +150,7 @@ func TestGuardListener_SlowRateCheckDoesNotBlockAccept(t *testing.T) {
 	}()
 	select {
 	case c := <-accepted:
-		_ = c.Close()
+		closeOrLog(t, c)
 	case <-time.After(2 * time.Second):
 		t.Fatal("a slow rate check on one connection blocked accepting the next")
 	}
@@ -245,7 +245,7 @@ func TestGuardListener_AcceptErrorBackoff(t *testing.T) {
 			t.Fatalf("accept retry %d came after %s, want at least 5ms (no hot spin)", i, gap)
 		}
 	}
-	_ = g.Close()
+	closeOrLog(t, g)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
@@ -266,8 +266,8 @@ func TestGuardListener_SlotReleasedOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = c.Close()
-	_ = c.Close()
+	closeOrLog(t, c)
+	closeOrLog(t, c)
 	if n := p.releases.Load(); n != 1 {
 		t.Fatalf("slot released %d times, want exactly 1", n)
 	}
@@ -304,9 +304,9 @@ func TestGuardListener_WaitJoinsGoroutines(t *testing.T) {
 	g := newGuardedListener(context.Background(), ln, func(netip.Addr) bool { return false }, allow,
 		func() bool { return true }, func() {}, func(string, string, string) {}, testLogger())
 	c := dialGuard(t, g)
-	defer func() { _ = c.Close() }()
+	defer closeOrLog(t, c)
 	<-entered
-	_ = g.Close()
+	closeOrLog(t, g)
 
 	short, cancelShort := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancelShort()

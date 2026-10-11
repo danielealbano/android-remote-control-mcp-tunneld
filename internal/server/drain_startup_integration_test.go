@@ -195,7 +195,7 @@ func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) 
 		if err != nil {
 			return false
 		}
-		_ = c.Close()
+		closeOrLog(t, c)
 		return true
 	}) {
 		t.Fatal(":443 must accept TCP while reserved-host issuance is still pending")
@@ -217,14 +217,16 @@ func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an unrouted SNI must be closed, not served")
 	}
-	_ = raw.Close()
+	closeOrLog(t, raw)
 	if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`,
 		func(v float64) bool { return v >= 1 }); !met {
 		t.Fatalf("an unrouted SNI must be recorded as no-route (no-route = %v, last scrape error: %v)", v, err)
 	}
 
-	if tunneltest.ServesCertificate(cfg.Listen, itEnrollHost) || tunneltest.ServesCertificate(cfg.Listen, itControlHost) {
-		t.Fatal("reserved hosts must present no certificate while their issuance is pending")
+	for _, host := range []string{itEnrollHost, itControlHost} {
+		if ok, err := tunneltest.ServesCertificate(t, cfg.Listen, host); ok || err == nil {
+			t.Fatalf("%s must present no certificate while its issuance is pending (presented=%v, probe error=%v)", host, ok, err)
+		}
 	}
 	stop()
 }
@@ -252,7 +254,7 @@ func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
 func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 	cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
 	if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
-		_ = c.Close()
+		closeOrLog(t, c)
 		t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
 	}
 	stop()

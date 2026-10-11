@@ -20,7 +20,7 @@ func newTestChallengeStore(t *testing.T) (*ChallengeStore, *miniredis.Miniredis,
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { closeOrLog(t, rdb) })
 	return NewChallengeStore(rdb, ChallengeTTL), mr, rdb
 }
 

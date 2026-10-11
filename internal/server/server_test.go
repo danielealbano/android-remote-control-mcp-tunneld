@@ -217,7 +217,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = occupied.Close() }()
+	defer closeOrLog(t, occupied)
 	cfg.ACMEHTTPListen = occupied.Addr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -236,7 +236,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the internal listener leaked after the ACME HTTP-01 bind failure: %v", err)
 	}
-	_ = rebound.Close()
+	closeOrLog(t, rebound)
 }
 
 func waitUntil(t *testing.T, d time.Duration, cond func() bool) {

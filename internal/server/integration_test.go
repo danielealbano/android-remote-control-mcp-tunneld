@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -194,7 +195,12 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 	go func() { done <- Run(ctx, cfg, logger, "it") }()
 
 	deadline := time.Now().Add(120 * time.Second)
-	for !tunneltest.ServesCertificate(cfg.Listen, cfg.EnrollHost) || !tunneltest.ServesCertificate(cfg.Listen, cfg.ControlHost) {
+	for {
+		enrollOK, enrollErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.EnrollHost)
+		controlOK, controlErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.ControlHost)
+		if enrollOK && controlOK {
+			break
+		}
 		select {
 		case runErr := <-done:
 			cancel()
@@ -204,8 +210,8 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 		}
 		if time.Now().After(deadline) {
 			cancel()
-			<-done
-			t.Fatal("integration server never served both reserved-host certificates")
+			runErr := <-done
+			t.Fatalf("integration server never served both reserved-host certificates (last probe: %v; run: %v)", errors.Join(enrollErr, controlErr), runErr)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

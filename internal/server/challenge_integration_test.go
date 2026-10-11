@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -35,7 +36,11 @@ func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {
 	backend := func(s io.ReadWriteCloser) {
 		streams.Add(1)
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
-		defer func() { _ = conn.Close() }()
+		defer func() {
+			if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				testLogger().Warn("echo phone close failed", "fqdn", fqdn, "err", err)
+			}
+		}()
 		if err := conn.Handshake(); err != nil {
 			testLogger().Warn("echo phone handshake failed", "fqdn", fqdn, "err", err)
 			return
@@ -113,7 +118,7 @@ func TestIntegration_TLSALPNNeverSpliced(t *testing.T) {
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an acme-tls/1 handshake with no pending challenge must be closed")
 	}
-	_ = raw.Close()
+	closeOrLog(t, raw)
 
 	if v, met, err := waitMetric(10*time.Second, env.internalAddr, `tunneld_rejections_total{reason="no-route"}`,
 		func(v float64) bool { return v > noRouteBefore }); !met {
@@ -148,7 +153,7 @@ func TestIntegration_ACMEHTTPNoKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer closeOrLog(t, conn)
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +181,7 @@ func TestIntegration_ACMEHTTPMissCounted(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp, err := rawHTTP(t, conn, bufio.NewReader(conn), requestLine, itEnrollHost)
-		_ = conn.Close()
+		closeOrLog(t, conn)
 		if err != nil {
 			t.Fatalf("%s: %v", requestLine, err)
 		}
@@ -196,7 +201,7 @@ func TestIntegration_ACMEHTTPListenerDrains(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	if c, err := net.DialTimeout("tcp", env.acmeHTTPAddr, 2*time.Second); err == nil {
-		_ = c.Close()
+		closeOrLog(t, c)
 		t.Fatal("the HTTP-01 listener must be closed after the drain")
 	}
 }

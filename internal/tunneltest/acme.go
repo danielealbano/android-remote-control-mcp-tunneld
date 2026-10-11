@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-func ServesCertificate(edgeAddr, host string) bool {
+func ServesCertificate(t *testing.T, edgeAddr, host string) (bool, error) {
+	t.Helper()
 	var presented bool
 	d := &net.Dialer{Timeout: 2 * time.Second}
 	conn, err := tls.DialWithDialer(d, "tcp", edgeAddr, &tls.Config{
@@ -22,19 +23,26 @@ func ServesCertificate(edgeAddr, host string) bool {
 			return nil
 		},
 	})
-	if err == nil {
-		_ = conn.Close()
+	if err != nil {
+		return presented, err
 	}
-	return presented
+	if err := conn.Close(); err != nil {
+		t.Logf("close the %s certificate probe: %v", host, err)
+	}
+	return presented, nil
 }
 
 func WaitReservedHosts(t *testing.T, edgeAddr string, hosts []string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for _, host := range hosts {
-		for !ServesCertificate(edgeAddr, host) {
+		for {
+			ok, err := ServesCertificate(t, edgeAddr, host)
+			if ok {
+				break
+			}
 			if time.Now().After(deadline) {
-				t.Fatalf("reserved host %s served no certificate within %s", host, timeout)
+				t.Fatalf("reserved host %s served no certificate within %s (last probe: %v)", host, timeout, err)
 			}
 			time.Sleep(200 * time.Millisecond)
 		}

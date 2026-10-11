@@ -151,7 +151,7 @@ func testChallengeStore(t *testing.T) *acme.ChallengeStore {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { closeOrLog(t, rdb) })
 	return acme.NewChallengeStore(rdb, acme.ChallengeTTL)
 }
 

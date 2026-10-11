@@ -99,10 +99,10 @@ func selfSignedChallengeCert(t *testing.T, domain string) *tls.Certificate {
 func captureClientHello(t *testing.T, sni string, alpn ...string) []byte {
 	t.Helper()
 	c1, c2 := net.Pipe()
-	defer func() { _ = c2.Close() }()
+	defer closeOrLog(t, c1)
+	handshake := make(chan error, 1)
 	go func() {
-		_ = tls.Client(c1, &tls.Config{ServerName: sni, NextProtos: alpn, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}).Handshake()
-		_ = c1.Close()
+		handshake <- tls.Client(c1, &tls.Config{ServerName: sni, NextProtos: alpn, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}).Handshake()
 	}()
 	hdr := make([]byte, 5)
 	if _, err := io.ReadFull(c2, hdr); err != nil {
@@ -111,6 +111,10 @@ func captureClientHello(t *testing.T, sni string, alpn ...string) []byte {
 	body := make([]byte, binary.BigEndian.Uint16(hdr[3:5]))
 	if _, err := io.ReadFull(c2, body); err != nil {
 		t.Fatalf("read ClientHello record: %v", err)
+	}
+	closeOrLog(t, c2)
+	if err := <-handshake; err == nil {
+		t.Fatal("the ClientHello capture handshake must not complete")
 	}
 	return append(hdr, body...)
 }
@@ -155,7 +159,7 @@ func TestEdge_ACMETLSALPN_Serves(t *testing.T) {
 	if cs.NegotiatedProtocol != acmeTLS1Protocol || string(cs.PeerCertificates[0].Raw) != string(te.chal.cert.Certificate[0]) {
 		t.Fatalf("protocol %q / unexpected certificate", cs.NegotiatedProtocol)
 	}
-	_ = cli.Close()
+	closeOrLog(t, cli)
 	waitDone(t, done, 5*time.Second)
 	if got := te.chal.lookups(); len(got) != 1 || got[0] != "a.example.test" {
 		t.Fatalf("challenge lookups = %v, want [a.example.test]", got)
@@ -214,7 +218,7 @@ func TestEdge_ACMETLSALPN_HandshakeFailure(t *testing.T) {
 			if err := acmeClient(client, "a.example.test", true).Handshake(); err == nil {
 				t.Error("a verifying client must reject the self-signed challenge certificate")
 			}
-			_ = client.Close()
+			closeOrLog(t, client)
 		}},
 		{name: "client stalls", bounded: true, drive: func(t *testing.T, client net.Conn) {
 			if _, err := client.Write(captureClientHello(t, "a.example.test", acmeTLS1Protocol)); err != nil {
@@ -232,7 +236,7 @@ func TestEdge_ACMETLSALPN_HandshakeFailure(t *testing.T) {
 			te.e.cfg.Logger = slog.New(logs)
 			te.chal.cert = selfSignedChallengeCert(t, "a.example.test")
 			client, server := net.Pipe()
-			t.Cleanup(func() { _ = client.Close() })
+			t.Cleanup(func() { closeOrLog(t, client) })
 			done := runHandleConn(te, ipConn{Conn: server, peer: "198.51.100.22"})
 			tc.drive(t, client)
 			wait := 5 * time.Second
@@ -260,7 +264,7 @@ func TestEdge_ACMETLSALPN_ReservedHost(t *testing.T) {
 	if err := cli.Handshake(); err != nil {
 		t.Fatalf("acme-tls/1 handshake for the enroll host: %v", err)
 	}
-	_ = cli.Close()
+	closeOrLog(t, cli)
 	waitDone(t, done, 5*time.Second)
 	if n := len(te.e.enrollLn.ch); n != 0 {
 		t.Fatalf("an ACME validation for the enroll host was pushed to the enroll listener (%d queued)", n)

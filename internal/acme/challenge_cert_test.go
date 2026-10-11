@@ -77,8 +77,8 @@ func TestChallengeCertificate_TLS13Handshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	srvConn, cliConn := net.Pipe()
-	defer func() { _ = srvConn.Close() }()
-	defer func() { _ = cliConn.Close() }()
+	defer closeOrLog(t, srvConn)
+	defer closeOrLog(t, cliConn)
 	srvErr := make(chan error, 1)
 	go func() {
 		srv := tls.Server(srvConn, &tls.Config{Certificates: []tls.Certificate{*cert}, NextProtos: []string{"acme-tls/1"}, MinVersion: tls.VersionTLS12})

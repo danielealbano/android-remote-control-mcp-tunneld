@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -297,4 +298,11 @@ func containsStr(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func closeOrLog(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Logf("close %T: %v", c, err)
+	}
 }

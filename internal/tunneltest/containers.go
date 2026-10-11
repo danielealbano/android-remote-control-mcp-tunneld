@@ -262,7 +262,11 @@ func networkGateway(t *testing.T, nw *testcontainers.DockerNetwork) string {
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
-	defer func() { _ = cli.Close() }()
+	defer func() {
+		if err := cli.Close(); err != nil {
+			t.Logf("close the docker client: %v", err)
+		}
+	}()
 	res, err := cli.NetworkInspect(ctx, nw.ID, client.NetworkInspectOptions{})
 	if err != nil {
 		t.Fatalf("inspect network %s: %v", nw.Name, err)
