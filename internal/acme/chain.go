@@ -103,7 +103,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			return pemChain, info, nil
 		}
 		if ctx.Err() != nil {
-			return nil, store.CertInfo{}, err
+			return nil, store.CertInfo{}, transient(ctx.Err())
 		}
 		var ie *IssuerError
 		if asIssuerError(err, &ie) && ie.Class == ClassLocal {

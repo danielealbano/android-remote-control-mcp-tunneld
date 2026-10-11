@@ -333,12 +333,16 @@ func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
 type cancellingCA struct {
 	caID   string
 	cancel context.CancelFunc
+	err    error
 	calls  int
 }
 
 func (c *cancellingCA) obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
 	c.calls++
 	c.cancel()
+	if c.err != nil {
+		return nil, store.CertInfo{}, c.err
+	}
 	return nil, store.CertInfo{}, transient(ctx.Err())
 }
 
@@ -380,6 +384,22 @@ func TestChain_StopsWhenContextDone(t *testing.T) {
 		}
 		if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
 			t.Fatalf("an interrupted attempt must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("local error while the ctx is cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		le := &cancellingCA{caID: CALetsEncrypt, cancel: cancel, err: local(localChallengeRetry, ErrChallengePending)}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		var ie *IssuerError
+		if !errors.Is(err, context.Canceled) || !errors.As(err, &ie) || ie.Class == ClassLocal {
+			t.Fatalf("error = %v, want a context.Canceled error that is not of class %s", err, ClassLocal)
+		}
+		if gts.calls != 0 || len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+			t.Fatalf("an interrupted attempt must record nothing: gts=%d issues=%v cooldowns=%v", gts.calls, rec.issues, rec.cooldowns)
 		}
 		assertNoCAFailureState(t, lim, CALetsEncrypt)
 	})
