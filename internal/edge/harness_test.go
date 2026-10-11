@@ -239,14 +239,12 @@ type fakeACMEChallenges struct {
 	cert    *tls.Certificate
 	err     error
 	domains []string
-	ctxs    []context.Context
 }
 
-func (f *fakeACMEChallenges) TLSALPNCertificate(ctx context.Context, domain string) (*tls.Certificate, bool, error) {
+func (f *fakeACMEChallenges) TLSALPNCertificate(_ context.Context, domain string) (*tls.Certificate, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.domains = append(f.domains, domain)
-	f.ctxs = append(f.ctxs, ctx)
 	if f.err != nil {
 		return nil, false, f.err
 	}
