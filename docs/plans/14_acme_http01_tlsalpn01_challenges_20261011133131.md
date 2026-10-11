@@ -136,8 +136,8 @@ account registered there (PKCS#8 EC); both values are in the operator's private 
 - [x] **US4 — Edge answers TLS-ALPN-01**
 - [x] **US5 — Server assembly: HTTP-01 listener, startup order, cluster lock**
 - [x] **US6 — Hermetic Pebble coverage for both methods**
-- [ ] **US7 — Real-CA staging tier**
-- [ ] **US8 — Deployment, documentation, ground-up verification**
+- [x] **US7 — Real-CA staging tier**
+- [x] **US8 — Deployment, documentation, ground-up verification**
 
 ---
 
@@ -2047,10 +2047,10 @@ Tests (`e2e/e2e_test.go`):
 The same flows against Let's Encrypt staging and GTS staging, on every CI run.
 
 Acceptance criteria:
-- [ ] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
+- [x] `make test-staging` issues reserved + public certificates from LE staging and GTS staging through both
       methods via the reverse tunnel, proving which method answered; it skips (not fails) when
       `TUNNELD_STAGING_SSH_KEY` is empty.
-- [ ] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
+- [x] The node IP, private key, host key, staging domain and the GTS / LE staging account keys never appear in the
       repository, a log, or CI output; in CI they — and the SSH username — exist only as GitHub secrets, on the
       workstation only in `~/.secrets` (mode 600).
 - [x] A dead tunnel frees the node's 80/443 within ~2 min; concurrent runs (CI or local) wait for each other
@@ -2415,7 +2415,7 @@ Definition of Done:
 - [x] `grep -rn 'DNS-01' docs/PROJECT.md docs/ARCHITECTURE.md README.md .claude/rules/project.md` shows no sentence
       that still presents DNS-01 as the only method; every replaced string above is gone from its file.
 
-### [ ] Task 8.3 — Ground-up double-check + quality gates
+### [x] Task 8.3 — Ground-up double-check + quality gates
 
 - [x] **Action** — re-read this plan from the top and verify EVERY action landed (US1–US8); `git diff main` adds NO
   comment line to hand-written code in any language (Go, YAML, Makefile, systemd units, sshd drop-ins, env files;
@@ -2431,18 +2431,18 @@ Definition of Done:
   (validates the changed §9 chart and every other chart), `make tidy` + `git diff --exit-code -- go.mod go.sum`.
 - [x] **Action** — run `make test-staging` with NO `TUNNELD_STAGING_*` variable set
   (`make test-staging 2>&1 | tee /tmp/p14-test-staging-skip.log | tail -5`): the test reports SKIP, not FAIL.
-- [ ] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
+- [x] **Action** — run the staging tier locally (MUST run, not skip, and pass), never echoing a secret, while first
   proving the busy-port wait (**Manual Test**): hold the node's 80/443 with the Task 7.1 smoke-test tunnel (both `-R 0.0.0.0:80` and
   `-R 0.0.0.0:443`), start the command below, confirm `/tmp/p14-test-staging.log` shows
   `remote forward ports busy; retrying in 15s`, then close the smoke tunnel so the run proceeds:
   `bash -c 'set -a; . ~/.secrets/tunneld-staging.env; set +a; TUNNELD_STAGING_SSH_KEY="$(cat ~/.secrets/tunneld-staging-ssh)" TUNNELD_STAGING_SSH_KNOWN_HOSTS="$(cat ~/.secrets/tunneld-staging-known-hosts)" TUNNELD_STAGING_GTS_ACCOUNT_KEY="$(cat ~/.secrets/gts-staging-account.key)" TUNNELD_STAGING_LE_ACCOUNT_KEY="$(cat ~/.secrets/le-staging-account.key)" make test-staging' 2>&1 | tee /tmp/p14-test-staging.log | tail -20`.
-- [ ] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
+- [x] **Action** — push the branch and run CI: ALL jobs green, `test-staging` included (it MUST run with the
   secrets, not skip).
-- [ ] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
+- [x] **Action** — confirm no secret value (node IP, key material, staging domain) appears in the
   repository (`git grep` for each value read from `~/.secrets`, values never printed) or in the CI logs of the run.
 
 Definition of Done:
-- [ ] Every checkbox above is `[x]`; all gates green on the final code.
+- [x] Every checkbox above is `[x]`; all gates green on the final code.
 
 ## Deviations
 
@@ -2497,9 +2497,12 @@ Definition of Done:
 - **Tasks 6.3 / 6.4 test helpers — errors surfaced (code review).** `metricLineValue` returns its scrape/parse error
   and `waitMetric` reports the last value and error on timeout; `presentedLeaf` includes the dial error; the
   integration echo phone logs a failed handshake or echo.
-- **Task 8.3 — staging gate red on the final code.** Let's Encrypt staging rejects every order since 2026-10-11
-  ~20:00 UTC with `During secondary validation: DNS problem: networking error looking up A/AAAA` (from CI and from
-  the workstation); the GTS cases pass. The local-staging, CI and CI-log actions, the Definition of Done and the US7
-  acceptance criteria for LE issuance and for no node identity in CI output (the host-key fingerprint was in run
-  38174566109's log, see the SSH identity redaction entry) are unchecked until `test-staging` is green and its log
-  clean on the final code.
+- **Task 8.3 — staging gate red, then green after Let's Encrypt staging recovered.** From 2026-10-11 ~20:00 UTC
+  to ~22:00 UTC Let's Encrypt staging rejected every order with `During secondary validation: DNS problem:
+  networking error looking up A/AAAA` (from CI and from the workstation, while every public resolver and the
+  zone's authoritative servers answered correctly and the GTS cases passed): an outage of LE staging's remote
+  validation perspectives, outside tunneld. The Task 8.3 staging/CI items were unchecked meanwhile. After LE
+  recovered, CI run 38178341702 on f7f430e passed every job (`test-staging` 4/4, one last LE secondary-validation
+  rejection at 21:59 UTC absorbed by the chain's retry), the local run passed 4/4 with the busy-port Manual Test
+  observed, and the per-value `git grep` and CI-log scan of every `~/.secrets` value found zero occurrences (the
+  run's `ssh -v` lines show only `<staging-node>`, `SHA256:<redacted>` and `remote software version <redacted>`).
