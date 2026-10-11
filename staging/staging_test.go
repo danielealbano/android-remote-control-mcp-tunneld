@@ -52,6 +52,8 @@ type stagingEnv struct {
 	key, knownHosts    string
 	gtsKey, leKey      string
 	userRE             *regexp.Regexp
+	fingerprintRE      *regexp.Regexp
+	remoteVersionRE    *regexp.Regexp
 }
 
 func loadStagingEnv(t *testing.T) *stagingEnv {
@@ -73,13 +75,17 @@ func loadStagingEnv(t *testing.T) *stagingEnv {
 		domain: vals["TUNNELD_STAGING_DOMAIN"], key: vals["TUNNELD_STAGING_SSH_KEY"],
 		knownHosts: vals["TUNNELD_STAGING_SSH_KNOWN_HOSTS"],
 		gtsKey:     vals["TUNNELD_STAGING_GTS_ACCOUNT_KEY"], leKey: vals["TUNNELD_STAGING_LE_ACCOUNT_KEY"],
-		userRE: regexp.MustCompile(`\b` + regexp.QuoteMeta(vals["TUNNELD_STAGING_SSH_USER"]) + `\b`),
+		userRE:          regexp.MustCompile(`\b` + regexp.QuoteMeta(vals["TUNNELD_STAGING_SSH_USER"]) + `\b`),
+		fingerprintRE:   regexp.MustCompile(`SHA256:[A-Za-z0-9+/=]+`),
+		remoteVersionRE: regexp.MustCompile(`(remote software version|compat_banner: match:) .*?( pat |$)`),
 	}
 }
 
 func (e *stagingEnv) redact(s string) string {
 	s = strings.ReplaceAll(s, e.domain, "<staging-domain>")
 	s = strings.ReplaceAll(s, e.host, "<staging-node>")
+	s = e.fingerprintRE.ReplaceAllString(s, "SHA256:<redacted>")
+	s = e.remoteVersionRE.ReplaceAllString(s, "$1 <redacted>$2")
 	return e.userRE.ReplaceAllString(s, "<staging-user>")
 }
 
@@ -509,6 +515,32 @@ func writeAccountKey(t *testing.T, accountDir, caID, value string) {
 		t.Fatal(err)
 	}
 	writeSecretFile(t, dir, caID+".key", value)
+}
+
+func TestStagingEnv_Redact(t *testing.T) {
+	for name, value := range map[string]string{
+		"TUNNELD_STAGING_SSH_HOST": "192.0.2.10", "TUNNELD_STAGING_SSH_USER": "root", "TUNNELD_STAGING_SSH_KEY": "changeme",
+		"TUNNELD_STAGING_SSH_KNOWN_HOSTS": "changeme", "TUNNELD_STAGING_DOMAIN": "staging.example.test",
+		"TUNNELD_STAGING_GTS_ACCOUNT_KEY": "changeme", "TUNNELD_STAGING_LE_ACCOUNT_KEY": "changeme",
+	} {
+		t.Setenv(name, value)
+	}
+	env := loadStagingEnv(t)
+	tests := []struct{ in, want string }{
+		{in: "debug1: Authenticating to 192.0.2.10:22 as 'root'", want: "debug1: Authenticating to <staging-node>:22 as '<staging-user>'"},
+		{in: "issued e1a2b3c4.staging.example.test", want: "issued e1a2b3c4.<staging-domain>"},
+		{in: "debug1: Server host key: ssh-ed25519 SHA256:Ab+/09xYz=", want: "debug1: Server host key: ssh-ed25519 SHA256:<redacted>"},
+		{in: "debug1: Offering public key: /tmp/id ED25519 SHA256:Ab+/09xYz explicit", want: "debug1: Offering public key: /tmp/id ED25519 SHA256:<redacted> explicit"},
+		{in: "debug1: Remote protocol version 2.0, remote software version OpenSSH_9.9p1 Distro-1", want: "debug1: Remote protocol version 2.0, remote software version <redacted>"},
+		{in: "debug1: compat_banner: match: OpenSSH_9.9p1 Distro-1 pat OpenSSH* compat 0x04000000", want: "debug1: compat_banner: match: <redacted> pat OpenSSH* compat 0x04000000"},
+		{in: "debug1: Local version string SSH-2.0-OpenSSH_9.6p1", want: "debug1: Local version string SSH-2.0-OpenSSH_9.6p1"},
+		{in: "/rooted/path", want: "/rooted/path"},
+	}
+	for _, tc := range tests {
+		if got := env.redact(tc.in); got != tc.want {
+			t.Errorf("redact(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
 }
 
 func TestStaging_ACMEValidation(t *testing.T) {
