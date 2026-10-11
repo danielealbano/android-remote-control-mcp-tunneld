@@ -136,8 +136,8 @@ account registered there (PKCS#8 EC); both values are in the operator's private 
 - [x] **US4 — Edge answers TLS-ALPN-01**
 - [x] **US5 — Server assembly: HTTP-01 listener, startup order, cluster lock**
 - [x] **US6 — Hermetic Pebble coverage for both methods**
-- [x] **US7 — Real-CA staging tier**
-- [x] **US8 — Deployment, documentation, ground-up verification**
+- [ ] **US7 — Real-CA staging tier**
+- [ ] **US8 — Deployment, documentation, ground-up verification**
 
 ---
 
@@ -812,10 +812,15 @@ func local(retry time.Duration, err error) *IssuerError {
 
 ```go
 		if ctx.Err() != nil {
-			return nil, store.CertInfo{}, transient(ctx.Err())
+			return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", ctx.Err(), err))
 		}
+		class := ClassTransient
 		var ie *IssuerError
-		if asIssuerError(err, &ie) && ie.Class == ClassLocal {
+		if asIssuerError(err, &ie) {
+			class = ie.Class
+		}
+		c.cfg.Logger.Warn("acme CA order failed", "ca", ca.id(), "name", name, "class", class, "err", err)
+		if class == ClassLocal {
 			return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 		}
 ```
@@ -1544,7 +1549,11 @@ func networkGateway(t *testing.T, nw *testcontainers.DockerNetwork) string {
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
-	defer func() { _ = cli.Close() }()
+	defer func() {
+		if err := cli.Close(); err != nil {
+			t.Logf("close the docker client: %v", err)
+		}
+	}()
 	res, err := cli.NetworkInspect(ctx, nw.ID, client.NetworkInspectOptions{})
 	if err != nil {
 		t.Fatalf("inspect network %s: %v", nw.Name, err)
@@ -1614,7 +1623,8 @@ import (
 	"time"
 )
 
-func ServesCertificate(edgeAddr, host string) bool {
+func ServesCertificate(t *testing.T, edgeAddr, host string) (bool, error) {
+	t.Helper()
 	var presented bool
 	d := &net.Dialer{Timeout: 2 * time.Second}
 	conn, err := tls.DialWithDialer(d, "tcp", edgeAddr, &tls.Config{
@@ -1624,19 +1634,26 @@ func ServesCertificate(edgeAddr, host string) bool {
 			return nil
 		},
 	})
-	if err == nil {
-		_ = conn.Close()
+	if err != nil {
+		return presented, err
 	}
-	return presented
+	if err := conn.Close(); err != nil {
+		t.Logf("close the %s certificate probe: %v", host, err)
+	}
+	return presented, nil
 }
 
 func WaitReservedHosts(t *testing.T, edgeAddr string, hosts []string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for _, host := range hosts {
-		for !ServesCertificate(edgeAddr, host) {
+		for {
+			ok, err := ServesCertificate(t, edgeAddr, host)
+			if ok {
+				break
+			}
 			if time.Now().After(deadline) {
-				t.Fatalf("reserved host %s served no certificate within %s", host, timeout)
+				t.Fatalf("reserved host %s served no certificate within %s (last probe: %v)", host, timeout, err)
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
@@ -1717,7 +1734,12 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 	go func() { done <- Run(ctx, cfg, logger, "it") }()
 
 	deadline := time.Now().Add(120 * time.Second)
-	for !tunneltest.ServesCertificate(cfg.Listen, cfg.EnrollHost) || !tunneltest.ServesCertificate(cfg.Listen, cfg.ControlHost) {
+	for {
+		enrollOK, enrollErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.EnrollHost)
+		controlOK, controlErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.ControlHost)
+		if enrollOK && controlOK {
+			break
+		}
 		select {
 		case runErr := <-done:
 			cancel()
@@ -1727,8 +1749,8 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 		}
 		if time.Now().After(deadline) {
 			cancel()
-			<-done
-			t.Fatal("integration server never served both reserved-host certificates")
+			runErr := <-done
+			t.Fatalf("integration server never served both reserved-host certificates (last probe: %v; run: %v)", errors.Join(enrollErr, controlErr), runErr)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -2432,8 +2454,10 @@ Definition of Done:
   touched.
 - **Task 3.3 — context-done branch.** The planned `return nil, store.CertInfo{}, err` in `chain.run`'s context-done
   branch could hand a `ClassLocal` error to a caller outside `internal/acme` when a challenge-store failure
-  coincided with cancellation, contradicting the task's DoD. The branch now returns `transient(ctx.Err())`
-  (still `errors.Is(err, context.Canceled)`), and `TestChain_StopsWhenContextDone` gained that case (code review).
+  coincided with cancellation, contradicting the task's DoD. The branch now returns
+  `transient(fmt.Errorf("%w (CA order: %v)", ctx.Err(), err))` (still `errors.Is(err, context.Canceled)`; the
+  interrupted order's error is carried as text, never as a reachable class, per the never-discard rule), and
+  `TestChain_StopsWhenContextDone` gained that case and asserts the carried text (code review).
 - **Out-of-plan comment removal — `internal/enroll/enroll.go`.** The `csrMatchesTunnel` comment presented a
   zone-wide DNS-01 provider (and wildcards) as the reason extra identifiers were satisfiable; with per-CA methods
   DNS-01 is optional and off by default, so the now-wrong part was removed (pure removal, re-flowed) under the
@@ -2454,7 +2478,12 @@ Definition of Done:
     `internal/metrics`, `internal/edge`, `internal/server` and `e2e` write Debug text to stderr instead of
     discarding (`discardLogger` → `testOutputLogger` in `e2e`); the staging test streams redacted output (Task 7.2).
   - New test code checks the errors it used to drop (deadlines, store lookups, stub encodes, body drains, the
-    tunnel client's `Run`).
+    tunnel client's `Run`). Its probe and cleanup closes go through a per-package `closeOrLog(t, c)` test helper
+    (`internal/acme`, `internal/edge`, `internal/server`) that logs any close error other than `net.ErrClosed`;
+    closes in goroutines that can outlive the test log through the slog test logger; `captureClientHello`
+    asserts its expected handshake failure; `tunneltest.ServesCertificate` takes `t` and returns the probe error,
+    which `WaitReservedHosts` and `runIntegrationServer` report on timeout (with the server's `Run` result); the
+    Docker client close in `networkGateway` is logged.
   - Tests: `TestChain_LogsEachCAFailure` and `TestChain_LogsBookkeepingErrors` added to Task 3.3;
     `TestConnRateAllow` and `TestGuardListener_AcceptErrorBackoff` assert the new log lines (Task 5.2).
 - **Task 5.3 — drain closes the `:80` listener once (code review).** Logging the drain's `Shutdown` errors exposed a
