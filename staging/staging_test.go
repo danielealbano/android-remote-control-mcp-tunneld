@@ -253,16 +253,25 @@ func startTunnel(t *testing.T, env *stagingEnv, out io.Writer, keyPath, knownHos
 		}
 	case <-time.After(60 * time.Second):
 		killErr := cmd.Process.Kill()
-		<-exited
+		waitExited(t, env, exited)
 		if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 			return nil, nil, tunnelFailed, fmt.Errorf("remote forwards not confirmed within 60s; kill ssh: %w", killErr)
 		}
 		return nil, nil, tunnelFailed, errors.New("remote forwards not confirmed within 60s")
 	}
 	if outcome == tunnelBusy {
-		<-exited
+		waitExited(t, env, exited)
 	}
 	return cmd, exited, outcome, nil
+}
+
+func waitExited(t *testing.T, env *stagingEnv, exited <-chan error) {
+	t.Helper()
+	err := <-exited
+	var ee *exec.ExitError
+	if err != nil && !errors.As(err, &ee) {
+		t.Logf("ssh wait: %s", env.redact(err.Error()))
+	}
 }
 
 func openTunnel(t *testing.T, env *stagingEnv, out io.Writer, edgePort, httpPort int) {
@@ -279,7 +288,7 @@ func openTunnel(t *testing.T, env *stagingEnv, out io.Writer, edgePort, httpPort
 				if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 					t.Errorf("stop the ssh tunnel: %v", err)
 				}
-				<-exited
+				waitExited(t, env, exited)
 			})
 			return
 		case tunnelBusy:
