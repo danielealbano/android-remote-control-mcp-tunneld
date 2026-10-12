@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
@@ -54,11 +53,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// matches the lowercased SNI at the edge (an uppercase prefix would otherwise no-route every tunnel).
 	cfg.NamePrefix = strings.ToLower(cfg.NamePrefix)
 
-	redisOpts, err := redis.ParseURL(cfg.RedisURL)
+	redisConn, err := config.ParseRedisURL(cfg.RedisURL)
 	if err != nil {
 		return err
 	}
-	rdb := redis.NewClient(redisOpts)
+	rdb := redisConn.NewClient()
 	defer closeLogged(logger, "valkey client", rdb)
 
 	nodeID := newNodeID()

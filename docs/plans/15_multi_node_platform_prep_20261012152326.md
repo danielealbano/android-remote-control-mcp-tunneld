@@ -9,30 +9,30 @@ intentionally HIGH-LEVEL (work to do + acceptance criteria, no code). Deployment
 domains, keys, storage provider) are NOT part of the repo and NOT part of this plan. No release tag is
 created by this plan.
 
-## [ ] US1 — Valkey Sentinel support
+## [x] US1 — Valkey Sentinel support
 
 Why: the deployment runs a redundant Valkey behind Sentinel; tunneld today connects to one node only.
 
-- [ ] A `--redis-url` whose query carries `master_name=` makes tunneld use the go-redis Sentinel failover
+- [x] A `--redis-url` whose query carries `master_name=` makes tunneld use the go-redis Sentinel failover
       client (`ParseFailoverURL` + `NewFailoverClient`, go-redis v9.23.0): the URL host and repeated `addr=`
       are the sentinels, the URL `user:password@` authenticates to the SENTINELS, and the `username=` /
       `password=` query parameters authenticate to the MASTER.
-- [ ] Any other `--redis-url` behaves exactly as today; an unparseable URL (plain or Sentinel) still fails
+- [x] Any other `--redis-url` behaves exactly as today; an unparseable URL (plain or Sentinel) still fails
       fast at startup.
 
-### [ ] Task 1.1 — Valkey client selection
+### [x] Task 1.1 — Valkey client selection
 
-- [ ] `internal/config`: one shared plain-vs-Sentinel `--redis-url` parser, used by BOTH
+- [x] `internal/config`: one shared plain-vs-Sentinel `--redis-url` parser, used by BOTH
       `ServeCmd.Validate()` (today it calls `redis.ParseURL`, which rejects `master_name`) and `server.Run`
       (`internal/server` already imports `internal/config`); the `--redis-url` help text documents the
       Sentinel form and where each credential goes.
-- [ ] `internal/server/server.go`: build the single-node or Sentinel failover client through that parser.
-- [ ] Tests: unit — parser (plain URL, Sentinel URL, Sentinel URL with `password=`, malformed plain and
+- [x] `internal/server/server.go`: build the single-node or Sentinel failover client through that parser.
+- [x] Tests: unit — parser (plain URL, Sentinel URL, Sentinel URL with `password=`, malformed plain and
       Sentinel URLs) and `Validate()` accepting a Sentinel URL / rejecting a malformed one; integration —
       tunneld against a testcontainers Valkey master + Sentinel.
-- [ ] Docs: `docs/ARCHITECTURE.md` §10 (Configuration).
+- [x] Docs: `docs/ARCHITECTURE.md` §10 (Configuration).
 
-DoD: [ ] a Sentinel URL passes `Validate()` and connects through the master Sentinel reports; a plain URL is
+DoD: [x] a Sentinel URL passes `Validate()` and connects through the master Sentinel reports; a plain URL is
 unchanged.
 
 ## [ ] US2 — Connection logs batched as JSONL
@@ -128,4 +128,7 @@ DoD: [ ] the release config uses `dockers_v2` only.
 
 ## Deviations
 
-(none yet)
+- Task 1.1: besides unparseable URLs, the shared parser rejects a Sentinel URL with an empty `master_name`,
+  with `route_by_latency` / `route_randomly` (go-redis `NewFailoverClient` panics on them — they need the
+  cluster client) and with `replica_only` (it routes every command to read-only replicas; tunneld writes).
+  Why: these are startup-fatal or write-breaking misconfigurations, so they fail fast in `Validate()`.

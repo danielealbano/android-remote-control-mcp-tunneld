@@ -103,6 +103,32 @@ func StartValkey(t *testing.T) string {
 	return "redis://" + endpoint(t, c, "6379/tcp")
 }
 
+func StartValkeySentinel(t *testing.T) (sentinelURL, masterURL string) {
+	t.Helper()
+	const masterName = "tunneld"
+	master := startContainer(t, testcontainers.ContainerRequest{
+		Image:        valkeyImage,
+		ExposedPorts: []string{"6379/tcp"},
+		WaitingFor:   wait.ForListeningPort("6379/tcp"),
+	})
+	ip, err := master.ContainerIP(context.Background())
+	if err != nil {
+		t.Fatalf("valkey master container ip: %v", err)
+	}
+	conf := fmt.Sprintf("port 26379\nsentinel monitor %s %s 6379 1\n", masterName, ip)
+	sentinel := startContainer(t, testcontainers.ContainerRequest{
+		Image:        valkeyImage,
+		ExposedPorts: []string{"26379/tcp"},
+		Files: []testcontainers.ContainerFile{{
+			Reader: strings.NewReader(conf), ContainerFilePath: "/data/sentinel.conf", FileMode: 0o644,
+		}},
+		Cmd:        []string{"valkey-server", "/data/sentinel.conf", "--sentinel"},
+		WaitingFor: wait.ForLog("+monitor master " + masterName),
+	})
+	return "redis://" + endpoint(t, sentinel, "26379/tcp") + "?master_name=" + masterName,
+		"redis://" + net.JoinHostPort(ip, "6379")
+}
+
 // StartMinIO starts an ephemeral MinIO instance and returns (endpointURL, accessKey, secretKey). Use
 // EnsureS3Bucket to create the target bucket.
 func StartMinIO(t *testing.T) (url, access, secret string) {

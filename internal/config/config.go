@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
-	"github.com/redis/go-redis/v9"
 )
 
 // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
@@ -51,7 +50,7 @@ type ServeCmd struct {
 	MeshCertTTL   time.Duration `name:"mesh-cert-ttl" default:"24h" help:"Lifetime of a node's self-issued mesh-role cert."`
 	MaxClients    int           `name:"max-clients" default:"10000" help:"Per-node ceiling on ALL concurrent inbound connections (memory bound), enforced at the edge accept loop."`
 
-	RedisURL string `name:"redis-url" default:"redis://localhost:6379/0" help:"Valkey/Redis connection URL (control plane)."`
+	RedisURL string `name:"redis-url" default:"redis://localhost:6379/0" help:"Valkey/Redis connection URL (control plane). A master_name= query parameter selects Valkey Sentinel: the URL host and repeated addr= are the sentinels, the URL user:password authenticates to the sentinels, and username= / password= authenticate to the master."`
 
 	// --- Internal CA ---
 	CACert       string        `name:"ca-cert" help:"Internal CA certificate (PEM). Required for serve."`
@@ -191,7 +190,7 @@ func (c ServeCmd) Validate() error {
 	if strings.EqualFold(c.EnrollHost, c.ControlHost) {
 		return fmt.Errorf("--enroll-host and --control-host must differ (SNI dispatch would hide the control plane), both %q", c.EnrollHost)
 	}
-	if _, err := redis.ParseURL(c.RedisURL); err != nil {
+	if _, err := ParseRedisURL(c.RedisURL); err != nil {
 		return fmt.Errorf("--redis-url is not parseable: %w", err)
 	}
 	for _, req := range []struct{ name, v string }{
