@@ -238,7 +238,7 @@ func TestParseLine_ExtraTokensRejected(t *testing.T) {
 func TestExpandCountries_SkipsMalformedRow(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeBan(t, dir, "dbip.csv", "garbage-line\n1.0.0.0,notanip,XX\n1.0.0.0,1.0.0.255,XX\n")
-	prefixes, err := ExpandCountries(csv, map[string]struct{}{"XX": {}})
+	prefixes, _, err := ExpandCountries(csv, map[string]struct{}{"XX": {}})
 	if err != nil {
 		t.Fatalf("malformed rows must be skipped, not fatal: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestExpandCountries_SkipsMalformedRow(t *testing.T) {
 func TestExpandCountries_AbsentWantedCodeIsLegal(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeBan(t, dir, "dbip.csv", dbipFixture) // has XX/YY/ZZ
-	prefixes, err := ExpandCountries(csv, map[string]struct{}{"QQ": {}})
+	prefixes, _, err := ExpandCountries(csv, map[string]struct{}{"QQ": {}})
 	if err != nil {
 		t.Fatalf("a valid CSV whose wanted code is absent must be legal (no error): %v", err)
 	}
@@ -294,7 +294,9 @@ func TestWatcher_DetectsDeletionAndEqualMtime(t *testing.T) {
 	// Replace with an OLDER mtime (the old max-mtime watcher would miss this).
 	writeBan(t, dir, "bans.txt", "ip 2.2.2.2\n")
 	older := time.Now().Add(-time.Hour)
-	_ = os.Chtimes(f, older, older)
+	if err := os.Chtimes(f, older, older); err != nil {
+		t.Fatal(err)
+	}
 	w.tick(cb)
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Errorf("an older-mtime replacement must reload, count = %d", reloads)
@@ -368,7 +370,9 @@ func TestWatchLoadErrorKeepsPreviousSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(2 * time.Second)
-	_ = os.Chtimes(f, future, future)
+	if err := os.Chtimes(f, future, future); err != nil {
+		t.Fatal(err)
+	}
 	w.tick(cb)
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Errorf("load error must NOT fire onReload, count = %d", reloads)
