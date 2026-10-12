@@ -22,6 +22,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // TestEdge_HandleTunnel_QuotaAdmissionRefusal covers the admission-time quota gate: an exhausted
@@ -31,7 +32,7 @@ func TestEdge_HandleTunnel_QuotaAdmissionRefusal(t *testing.T) {
 	te := newTestEdge(t, cfg, nil, nil)
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40, time.Hour) // 4-byte day cap
 	// Exhaust the day window (in direction) before the new stream arrives.
 	if _, _, _, err := te.e.lim.Charge(context.Background(), "abcdef012345", "in", 10); err != nil {
@@ -124,7 +125,7 @@ func TestEdge_PacedCopy_TrafficErrorFailsOpen(t *testing.T) {
 	te := newTestEdge(t, cfg, nil, nil)
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour)
 	mr.Close() // every Valkey call now errors
 
@@ -152,7 +153,7 @@ func chargeStubEdge(t *testing.T, action limit.ChargeAction, wait time.Duration,
 	te := newTestEdge(t, cfg, nil, nil)
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = &countingLimiter{
 		Limiter:      limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour),
 		chargeAction: action, chargeWait: wait, chargeWindow: window, chargeErr: chargeErr,
@@ -300,10 +301,12 @@ func TestEdge_Splice_IdleTimeout(t *testing.T) {
 // ClientHello is cut off at --handshake-timeout.
 func TestPeekClientHelloTimesOutOnTrickle(t *testing.T) {
 	client, server := net.Pipe()
-	defer func() { _ = client.Close() }()
-	defer func() { _ = server.Close() }()
+	defer tunneltest.CloseOrLog(t, client)
+	defer tunneltest.CloseOrLog(t, server)
 	go func() {
-		_, _ = client.Write([]byte{0x16, 0x03, 0x01}) // partial record header, then silence
+		if _, err := client.Write([]byte{0x16, 0x03, 0x01}); err != nil { // partial record header, then silence
+			tunneltest.Logger().Debug("trickle write ended", "err", err)
+		}
 	}()
 
 	start := time.Now()
@@ -687,7 +690,13 @@ func TestHandleConn_SNICaseInsensitive(t *testing.T) {
 	te.e.handleConn(context.Background(), newScriptConn("203.0.113.40", hello))
 
 	accepted := make(chan net.Conn, 1)
-	go func() { c, _ := te.e.EnrollListener().Accept(); accepted <- c }()
+	go func() {
+		c, err := te.e.EnrollListener().Accept()
+		if err != nil {
+			tunneltest.Logger().Warn("enroll listener accept failed", "err", err)
+		}
+		accepted <- c
+	}()
 	select {
 	case c := <-accepted:
 		if c == nil {
@@ -717,7 +726,7 @@ func TestHandleTunnel_FailOpenNeverReleases(t *testing.T) {
 
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	cl := &countingLimiter{
 		Limiter:    limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour),
 		acquireErr: errors.New("valkey down"),

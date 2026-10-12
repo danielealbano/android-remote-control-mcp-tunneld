@@ -115,10 +115,17 @@ func (e *Edge) Wait(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
+		e.cfg.Logger.Warn("drain deadline reached before every public handler returned", "err", ctx.Err())
 	}
 }
 
 var errNoOwner = errors.New("edge: no owner for tunnel")
+
+func closeLogged(logger *slog.Logger, what string, c io.Closer) {
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		logger.Debug("close failed", "what", what, "err", err)
+	}
+}
 
 // PhoneEventSink writes public connection-log events (kept minimal to avoid an import cycle; server.Run
 // passes the store).
@@ -143,7 +150,7 @@ func New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool
 	return &Edge{
 		cfg: cfg, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,
 		lim: lim, logs: logs, chal: chal,
-		enrollLn: newChanListener(addr), controlLn: newChanListener(addr), now: time.Now,
+		enrollLn: newChanListener(addr, cfg.Logger), controlLn: newChanListener(addr, cfg.Logger), now: time.Now,
 	}
 }
 
@@ -153,7 +160,12 @@ func (e *Edge) ControlListener() net.Listener { return e.controlLn }
 
 // Serve runs the accept loop on ln until ctx is done.
 func (e *Edge) Serve(ctx context.Context, ln net.Listener) {
-	go func() { <-ctx.Done(); _ = ln.Close(); _ = e.enrollLn.Close(); _ = e.controlLn.Close() }()
+	go func() {
+		<-ctx.Done()
+		closeLogged(e.cfg.Logger, "edge listener", ln)
+		closeLogged(e.cfg.Logger, "enroll listener", e.enrollLn)
+		closeLogged(e.cfg.Logger, "control listener", e.controlLn)
+	}()
 	e.acceptLoop(ctx, ln)
 }
 
@@ -161,6 +173,7 @@ func (e *Edge) Serve(ctx context.Context, ln net.Listener) {
 func (e *Edge) connRate(ctx context.Context, ip netip.Addr) bool {
 	ok, _, err := e.lim.Allow(ctx, "conn-rate", ip, e.cfg.ConnRate, time.Second)
 	if err != nil {
+		e.cfg.Logger.Debug("conn-rate check failed (allowing)", "ip", ip, "err", err)
 		return true // fail-open on a control-plane error (never a hard outage)
 	}
 	return ok

@@ -3,7 +3,9 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"strings"
@@ -35,12 +37,13 @@ func (c *peekConn) Read(p []byte) (int, error) {
 type chanListener struct {
 	ch     chan net.Conn
 	addr   net.Addr
+	logger *slog.Logger
 	closed chan struct{}
 	once   sync.Once
 }
 
-func newChanListener(addr net.Addr) *chanListener {
-	return &chanListener{ch: make(chan net.Conn, 64), addr: addr, closed: make(chan struct{})}
+func newChanListener(addr net.Addr, logger *slog.Logger) *chanListener {
+	return &chanListener{ch: make(chan net.Conn, 64), addr: addr, logger: logger, closed: make(chan struct{})}
 }
 
 func (l *chanListener) Accept() (net.Conn, error) {
@@ -61,15 +64,21 @@ func (l *chanListener) push(c net.Conn) {
 	select {
 	case l.ch <- c:
 	case <-l.closed:
-		_ = c.Close()
+		closeLogged(l.logger, "reserved-host conn", c)
 	}
 }
 
 // peekClientHello reads the first TLS record (the ClientHello) from conn within the handshake deadline
 // and returns it plus a peekConn that replays it.
-func peekClientHello(conn net.Conn, deadline time.Duration) (ClientHelloInfo, *peekConn, error) {
-	_ = conn.SetReadDeadline(time.Now().Add(deadline))
-	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+func peekClientHello(conn net.Conn, deadline time.Duration) (info ClientHelloInfo, pc *peekConn, err error) {
+	if err := conn.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+		return ClientHelloInfo{}, nil, fmt.Errorf("set handshake deadline: %w", err)
+	}
+	defer func() {
+		if rerr := conn.SetReadDeadline(time.Time{}); rerr != nil {
+			info, pc, err = ClientHelloInfo{}, nil, errors.Join(err, fmt.Errorf("clear handshake deadline: %w", rerr))
+		}
+	}()
 
 	var hdr [5]byte
 	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
@@ -84,11 +93,11 @@ func peekClientHello(conn net.Conn, deadline time.Duration) (ClientHelloInfo, *p
 	if _, err := io.ReadFull(conn, record[5:]); err != nil {
 		return ClientHelloInfo{}, nil, err
 	}
-	info, err := parseClientHello(record)
+	parsed, err := parseClientHello(record)
 	if err != nil {
 		return ClientHelloInfo{}, nil, err
 	}
-	return info, &peekConn{Conn: conn, prefix: record}, nil
+	return parsed, &peekConn{Conn: conn, prefix: record}, nil
 }
 
 // acceptLoop accepts raw TCP connections and hands each to handleConn (which applies the accept-time
@@ -107,6 +116,7 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 			} else if delay *= 2; delay > time.Second {
 				delay = time.Second
 			}
+			e.cfg.Logger.Warn("edge accept failed (backing off)", "backoff", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -160,22 +170,27 @@ func (c *heldConn) NetConn() net.Conn { return c.Conn }
 func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 	ip := peerAddr(conn)
 	addr, addrErr := netip.ParseAddr(ip)
+	if addrErr != nil {
+		e.cfg.Logger.Debug("unparseable peer address (refused)", "peer", ip, "err", addrErr)
+		closeLogged(e.cfg.Logger, "rejected conn", conn)
+		return
+	}
 
 	// Accept-time checks in the documented order: ban FIRST, then the per-IP rate, then the global
 	// --max-clients ceiling (a banned IP must be recorded as banned even on a saturated node).
-	if addrErr == nil && e.ban != nil && e.ban(addr) {
+	if e.ban != nil && e.ban(addr) {
 		e.rec.Reject("ban", "", ip)
-		_ = conn.Close()
+		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
-	if addrErr == nil && !e.connRate(ctx, addr) {
+	if !e.connRate(ctx, addr) {
 		e.rec.Reject("conn-rate", "", ip)
-		_ = conn.Close()
+		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
 	if !e.admit() {
 		e.rec.Reject("max-clients", "", ip)
-		_ = conn.Close()
+		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
 	released := false
@@ -187,8 +202,9 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
 	if err != nil {
+		e.cfg.Logger.Debug("client hello peek failed", "ip", ip, "err", err)
 		e.rec.Reject("handshake-timeout", "", ip)
-		_ = conn.Close()
+		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
 	if info.ALPN == acmeTLS1Protocol {
