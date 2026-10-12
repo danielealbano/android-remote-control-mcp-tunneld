@@ -31,8 +31,8 @@ func TestParseRedisURL_Variants(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ParseRedisURL(%q) error = %v, wantErr %v", tc.url, err, tc.wantErr)
 			}
-			if err == nil && c.Sentinel() != tc.wantSentinel {
-				t.Fatalf("Sentinel() = %v, want %v", c.Sentinel(), tc.wantSentinel)
+			if err == nil && (c.failover != nil) != tc.wantSentinel {
+				t.Fatalf("sentinel = %v, want %v", c.failover != nil, tc.wantSentinel)
 			}
 		})
 	}
@@ -81,18 +81,47 @@ func TestValidate_RedisURLSentinel(t *testing.T) {
 	}
 }
 
-func TestParseRedisURL_ErrorOmitsCredentials(t *testing.T) {
-	for _, u := range []string{
-		"redis://user:s3cr3t-pw@valkey.example.test:6379/0\x7f",
-		"redis://user:s3cr3t-pw@s1.example.test:26379?master_name=tunneld&addr=no-port",
-		"redis://user:s3cr3t-pw@valkey.example.test:6379/not-a-db",
-	} {
-		_, err := ParseRedisURL(u)
-		if err == nil {
-			t.Fatalf("ParseRedisURL(%q) must fail", u)
-		}
-		if strings.Contains(err.Error(), "s3cr3t-pw") {
-			t.Fatalf("a --redis-url parse error must not carry the password, got %q", err)
-		}
+func TestParseRedisURL_ErrorRedactsCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "control character", url: "redis://user:Secr3tPa-ssw0rd@valkey.example.test:6379/0\x7f"},
+		{name: "slash in userinfo password", url: "redis://user:Secr3tPa/ssw0rd@valkey.example.test:6379/0"},
+		{name: "question mark in userinfo password", url: "redis://user:Secr3tPa?ssw0rd@valkey.example.test:6379/0"},
+		{name: "hash in userinfo password", url: "redis://user:Secr3tPa#ssw0rd@valkey.example.test:6379/0"},
+		{name: "bad escape in userinfo password", url: "redis://user:Secr3tPa%zzssw0rd@valkey.example.test:6379/0"},
+		{name: "ampersand in master password", url: "redis://s1.example.test:26379?master_name=tunneld&password=Secr3tPa&ssw0rd"},
+		{name: "bad escape in master password", url: "redis://valkey.example.test:6379/0?password=Secr3tPa%zzssw0rd"},
+		{name: "sentinel bad addr", url: "redis://user:Secr3tPa-ssw0rd@s1.example.test:26379?master_name=tunneld&addr=no-port"},
+		{name: "plain bad db", url: "redis://user:Secr3tPa-ssw0rd@valkey.example.test:6379/not-a-db"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseRedisURL(tc.url)
+			if err == nil {
+				t.Fatalf("ParseRedisURL(%q) must fail", tc.url)
+			}
+			msg := err.Error()
+			for _, frag := range []string{"Secr3tPa", "ssw0rd", "%zz", "Secr", "3tP", "w0rd"} {
+				if strings.Contains(msg, frag) {
+					t.Fatalf("a --redis-url error must not carry any part of the password, got %q", msg)
+				}
+			}
+			if !strings.HasPrefix(msg, "--redis-url: ") || len(msg) <= len("--redis-url: ") {
+				t.Fatalf("the redacted cause must still be emitted with its context, got %q", msg)
+			}
+		})
+	}
+}
+
+func TestRedactURLSecrets_KeepsNonSecretCause(t *testing.T) {
+	got := redactURLSecrets(`redis: unexpected option: dial_timeoutt`, "redis://user:Secr3tPa@s1.example.test:26379?master_name=t&dial_timeoutt=3")
+	if got != `redis: unexpected option: dial_timeoutt` {
+		t.Fatalf("a cause with no secret must be emitted unchanged, got %q", got)
+	}
+	got = redactURLSecrets(`invalid port ":Secr3tPa" after host`, "redis://user:Secr3tPa/x@h:1")
+	if got != `invalid port ":[redacted]" after host` {
+		t.Fatalf("only the secret token may be replaced, got %q", got)
 	}
 }

@@ -17,8 +17,8 @@ Why: the deployment runs a redundant Valkey behind Sentinel; tunneld today conne
       client (`ParseFailoverURL` + `NewFailoverClient`, go-redis v9.23.0): the URL host and repeated `addr=`
       are the sentinels, the URL `user:password@` authenticates to the SENTINELS, and the `username=` /
       `password=` query parameters authenticate to the MASTER.
-- [x] Any other `--redis-url` behaves exactly as today; an unparseable URL (plain or Sentinel) still fails
-      fast at startup.
+- [x] Any other `--redis-url` behaves exactly as today (except that a malformed query is now rejected — see
+      Deviations); an unparseable URL (plain or Sentinel) still fails fast at startup.
 
 ### [x] Task 1.1 — Valkey client selection
 
@@ -135,4 +135,11 @@ DoD: [x] the release config uses `dockers_v2` only.
 - Task 1.1 (found in the Task 5 ground-up re-read): `net/url` parse errors embed the whole URL, so a
   malformed `--redis-url` printed its password in the startup error (go-redis's own parser did the same
   before). The shared parser now returns only the underlying parse cause; a unit test asserts no parse error
-  carries the password. Why: secrets must never be logged.
+  carries the password. Why: secrets must never be logged. Code review then showed `net/url` and go-redis
+  also echo password FRAGMENTS (an unescaped `/`, `?`, `#`, `&` or `%` splits them into other fields), so
+  every parse error is now emitted with each token that overlaps the URL's userinfo or a `password=` value
+  replaced by `[redacted]` (the redacted cause is kept, never dropped), prefixed with `--redis-url:`.
+- Task 1.1: a plain (non-Sentinel) `--redis-url` with a malformed query pair (e.g. a bad `%`-escape) is now
+  REJECTED; go-redis's own parser silently dropped such pairs. Why: the shared parser must read the query
+  strictly to detect `master_name`, and silently dropping a malformed setting is a discarded error — fail
+  fast in `Validate()` instead.

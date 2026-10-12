@@ -191,7 +191,7 @@ func (c ServeCmd) Validate() error {
 		return fmt.Errorf("--enroll-host and --control-host must differ (SNI dispatch would hide the control plane), both %q", c.EnrollHost)
 	}
 	if _, err := ParseRedisURL(c.RedisURL); err != nil {
-		return fmt.Errorf("--redis-url is not parseable: %w", err)
+		return err
 	}
 	for _, req := range []struct{ name, v string }{
 		{"--mesh-advertise", c.MeshAdvertise},
