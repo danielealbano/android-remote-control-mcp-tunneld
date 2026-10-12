@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -111,7 +112,9 @@ func TestLoadRejectsBadCAMaterial(t *testing.T) {
 	}
 	dir := t.TempDir()
 	badCert := filepath.Join(dir, "bad.pem")
-	_ = os.WriteFile(badCert, []byte("not a pem"), 0o600)
+	if err := os.WriteFile(badCert, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	_, key := genCAMaterial(t, true)
 	_, keyPath := writeCAFiles(t, mustDER(t, key, true), key)
 	if _, err := Load(badCert, keyPath, testValidity); err == nil {
@@ -180,7 +183,10 @@ func TestSignIdentityIgnoresCSRSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	block, _ := pem.Decode(leafPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cert.Subject.CommonName != "servername" {
 		t.Errorf("CN = %q, want servername (CSR CN discarded)", cert.Subject.CommonName)
 	}
@@ -191,11 +197,17 @@ func TestSignIdentityIgnoresCSRSubject(t *testing.T) {
 
 func TestSignIdentityRejectsNonP256Key(t *testing.T) {
 	ca := newTestCA(t)
-	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ca.SignIdentity(csrFor(t, rsaKey), "n123456789"); err != ErrUnsupportedKeyType {
 		t.Errorf("RSA CSR: err = %v, want ErrUnsupportedKeyType", err)
 	}
-	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ca.SignIdentity(csrFor(t, p384), "n123456789"); err != ErrUnsupportedKeyType {
 		t.Errorf("P-384 CSR: err = %v, want ErrUnsupportedKeyType", err)
 	}
@@ -203,9 +215,15 @@ func TestSignIdentityRejectsNonP256Key(t *testing.T) {
 
 func TestFingerprintStableAndPrefixed(t *testing.T) {
 	ca := newTestCA(t)
-	leafPEM, _ := ca.SignIdentity(csrFor(t, p256Key(t)), "fp12345678")
+	leafPEM, err := ca.SignIdentity(csrFor(t, p256Key(t)), "fp12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
 	block, _ := pem.Decode(leafPEM)
-	cert, _ := x509.ParseCertificate(block.Bytes)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f1 := Fingerprint(cert)
 	f2 := Fingerprint(cert)
 	if f1 != f2 {
@@ -238,7 +256,10 @@ func TestGenerateName_ReservesEnrollLabel(t *testing.T) {
 }
 
 func TestGenerateName_ReservedSkipAndExhaustion(t *testing.T) {
-	produced, _ := generateName("", 10, constReader(0))
+	produced, err := generateName("", 10, constReader(0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := generateName("", 10, constReader(0), produced); err == nil {
 		t.Fatal("when the only producible name is reserved, all attempts collide → exhaustion error")
 	}
@@ -291,5 +312,22 @@ func TestSignMeshRoleMarker(t *testing.T) {
 	}
 	if got := cert.NotAfter.Sub(cert.NotBefore); got < 47*time.Hour || got > 50*time.Hour {
 		t.Fatalf("mesh cert validity must be ~the requested TTL, got %s", got)
+	}
+}
+
+func TestKeyFingerprint(t *testing.T) {
+	fp, err := KeyFingerprint(&p256Key(t).PublicKey)
+	if err != nil || !strings.HasPrefix(fp, "sha256:") || len(fp) != len("sha256:")+64 {
+		t.Fatalf("KeyFingerprint(P-256) = (%q, %v), want a sha256: digest", fp, err)
+	}
+	if fp, err := KeyFingerprint(struct{}{}); err == nil || fp != "" {
+		t.Fatalf("KeyFingerprint(unsupported) = (%q, %v), want an error", fp, err)
+	}
+}
+
+func TestParsePrivateKeyPEM_ReportsBothEncodings(t *testing.T) {
+	_, err := parsePrivateKeyPEM(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("garbage")}))
+	if err == nil || !strings.Contains(err.Error(), "parse as SEC1") || !strings.Contains(err.Error(), "parse as PKCS#8") {
+		t.Fatalf("an unparseable key must report both decode attempts, got %v", err)
 	}
 }
