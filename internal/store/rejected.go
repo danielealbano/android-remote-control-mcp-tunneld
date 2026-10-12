@@ -27,7 +27,7 @@ func RejectedKey(ev RejectedEnrollment) string {
 	var r [2]byte
 	// crypto/rand.Read never returns a short read; on the impossible error a zero suffix is harmless
 	// (the timestamp already disambiguates) and this helper stays error-free for call sites.
-	_, _ = rand.Read(r[:])
+	rand.Read(r[:])
 	return fmt.Sprintf("rejected-enroll/%04d/%02d/%02d/%s-%s.json",
 		ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), hex.EncodeToString(r[:]))
 }

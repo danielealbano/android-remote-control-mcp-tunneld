@@ -42,7 +42,7 @@ func NewAsyncConnLog(inner ConnLogStore, onDrop func(), logger *slog.Logger, opt
 		onDrop = func() {}
 	}
 	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
+		logger = slog.Default()
 	}
 	a := &AsyncConnLog{inner: inner, onDrop: onDrop, logger: logger,
 		backoffBase: defaultAsyncLogBackoff, ch: make(chan Event, asyncLogQueue)}
