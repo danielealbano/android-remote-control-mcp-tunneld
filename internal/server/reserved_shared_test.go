@@ -114,15 +114,17 @@ func TestReservedCerts_MissOrdersAndPublishesBeforeUnlock(t *testing.T) {
 	rc := newTestReserved(t.TempDir(), []string{sharedHost}, iss.obtain, neverRenew, lock, testLogger())
 	rc.shared = cs
 
+	before := time.Until(info.NotAfter)
 	rc.issue(context.Background(), rc.hosts[sharedHost])
+	after := time.Until(info.NotAfter)
 	if iss.callCount() != 1 {
 		t.Fatalf("a shared-store miss must order exactly once, got %d", iss.callCount())
 	}
 	if !publishedAtUnlock {
 		t.Fatal("the issued cert must be published to Valkey BEFORE the lock is released")
 	}
-	if ttl, want := mr.TTL("acme:self-cert:"+sharedHost), time.Until(info.NotAfter); ttl > want || ttl < want-time.Minute {
-		t.Fatalf("the shared cert TTL must run until NotAfter, ttl = %v want ≈ %v", ttl, want)
+	if ttl := mr.TTL("acme:self-cert:" + sharedHost); ttl > before || ttl < after-time.Second {
+		t.Fatalf("the shared cert TTL must run until NotAfter, ttl = %v want between %v and %v", ttl, after-time.Second, before)
 	}
 	raw, ok, err := cs.SelfCert(context.Background(), sharedHost)
 	if err != nil || !ok {
