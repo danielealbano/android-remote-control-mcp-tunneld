@@ -30,7 +30,10 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		}
 		// Byte-exactness: re-encoding the decoded payload yields identical bytes.
 		if tc.payload != nil {
-			want, _ := json.Marshal(tc.payload)
+			want, err := json.Marshal(tc.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !bytes.Equal(body, want) {
 				t.Errorf("payload bytes mismatch for %d: got %s want %s", tc.ct, body, want)
 			}
