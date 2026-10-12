@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/signal"
 	"syscall"
@@ -33,14 +34,25 @@ func main() {
 	)
 	switch kctx.Command() {
 	case "version":
-		fmt.Println("tunneld", version)
+		_, err := fmt.Println("tunneld", version)
+		kctx.FatalIfErrorf(err)
 		return
 	case "serve":
-		logger, closeLogs, err := logging.New(cli.Serve.Log)
-		kctx.FatalIfErrorf(err)
-		defer func() { _ = closeLogs() }()
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		kctx.FatalIfErrorf(runServe(ctx, cli.Serve, logger, version))
+		kctx.FatalIfErrorf(serve(cli.Serve))
 	}
+}
+
+func serve(cfg config.ServeCmd) (err error) {
+	logger, closeLogs, err := logging.New(cfg.Log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := closeLogs(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close log sinks: %w", cerr))
+		}
+	}()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return runServe(ctx, cfg, logger, version)
 }
