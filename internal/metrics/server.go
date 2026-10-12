@@ -40,18 +40,33 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := rdb.Ping(r.Context()).Err(); err != nil {
-			http.Error(w, "redis unavailable", http.StatusServiceUnavailable)
+			http.Error(w, "redis unavailable: "+err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+		if _, err := w.Write([]byte("ok")); err != nil {
+			log.Debug("healthz response write failed", "err", err)
+		}
 	})
 	// GET /api/v1/admin/tunnels/list?cursor=&count= → ONE SCAN step: {names, cursor}. No backend ranking;
 	// the client drives pagination by feeding the returned cursor back (cursor "0" = iteration complete).
 	mux.HandleFunc("/api/v1/admin/tunnels/list", func(w http.ResponseWriter, r *http.Request) {
-		cursor, _ := strconv.ParseUint(r.URL.Query().Get("cursor"), 10, 64)
+		var cursor uint64
+		if v := r.URL.Query().Get("cursor"); v != "" {
+			c, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				http.Error(w, "bad cursor", http.StatusBadRequest)
+				return
+			}
+			cursor = c
+		}
 		count := int64(defaultTunnelCount)
-		if c, err := strconv.Atoi(r.URL.Query().Get("count")); err == nil && c > 0 {
+		if v := r.URL.Query().Get("count"); v != "" {
+			c, err := strconv.Atoi(v)
+			if err != nil || c <= 0 {
+				http.Error(w, "bad count", http.StatusBadRequest)
+				return
+			}
 			count = int64(c)
 		}
 		if count > maxTunnelCount {
@@ -64,10 +79,12 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
+		if err := json.NewEncoder(w).Encode(struct {
 			Names  []string `json:"names"`
 			Cursor string   `json:"cursor"`
-		}{Names: names, Cursor: strconv.FormatUint(next, 10)})
+		}{Names: names, Cursor: strconv.FormatUint(next, 10)}); err != nil {
+			log.Debug("admin tunnels list response write failed", "err", err)
+		}
 	})
 	// POST /api/v1/admin/tunnels/stats {names:[…]} → per-name merged stats (live tunnels only).
 	mux.HandleFunc("/api/v1/admin/tunnels/stats", func(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +116,9 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(stats)
+		if err := json.NewEncoder(w).Encode(stats); err != nil {
+			log.Debug("admin tunnels stats response write failed", "err", err)
+		}
 	})
 	mux.HandleFunc("/api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Request) {
 		nodes, err := nodeSrc.Nodes(r.Context())
@@ -109,7 +128,9 @@ func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc Tunn
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(nodes)
+		if err := json.NewEncoder(w).Encode(nodes); err != nil {
+			log.Debug("admin nodes response write failed", "err", err)
+		}
 	})
 	return mux
 }

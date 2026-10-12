@@ -33,7 +33,10 @@ func TestE2EFamiliesExportedNoTunnelLabels(t *testing.T) {
 	}
 
 	// No metric family carries a tunnel-name label (cardinality): the quota tunnel name must NOT leak.
-	mfs, _ := m.Registry().Gather()
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mf := range mfs {
 		for _, metric := range mf.GetMetric() {
 			for _, lp := range metric.GetLabel() {

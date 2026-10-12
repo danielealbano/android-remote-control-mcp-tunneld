@@ -17,6 +17,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/caplog"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -95,7 +96,7 @@ func setup(t *testing.T) (*Metrics, *PromRecorder, *fakeTunnelSrc, *miniredis.Mi
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	m := NewMetrics()
 	rec := NewPromRecorder(m, caplog.New(testLog()), newFakeSink(), testLog())
 	return m, rec, &fakeTunnelSrc{}, mr, rdb
@@ -162,7 +163,11 @@ func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
 	rec.Bytes("t1", "in", 500)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = rec.RunFlusher(ctx, 20*time.Millisecond) }()
+	go func() {
+		if err := rec.RunFlusher(ctx, 20*time.Millisecond); err != nil && ctx.Err() == nil {
+			testLog().Warn("flusher failed", "err", err)
+		}
+	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if in, _ := sink.got("t1"); in == 500 {
@@ -191,6 +196,9 @@ func TestHealthz503WhenRedisDown(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("healthz (redis down) = %d, want 503", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.HasPrefix(body, "redis unavailable: ") || len(strings.TrimSpace(body)) <= len("redis unavailable:") {
+		t.Errorf("healthz (redis down) body must carry the Valkey error, got %q", body)
 	}
 }
 
@@ -457,5 +465,56 @@ func TestHandler_AdminNodes(t *testing.T) {
 	h.ServeHTTP(rr2, httptest.NewRequest("GET", "/api/v1/admin/nodes", nil))
 	if rr2.Code != http.StatusInternalServerError {
 		t.Errorf("/api/v1/admin/nodes with source error = %d, want 500", rr2.Code)
+	}
+}
+
+func TestAdminTunnelsList_RejectsMalformedParams(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
+	tests := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "defaults", query: "", want: http.StatusOK},
+		{name: "malformed cursor", query: "?cursor=abc", want: http.StatusBadRequest},
+		{name: "malformed count", query: "?count=x", want: http.StatusBadRequest},
+		{name: "zero count", query: "?count=0", want: http.StatusBadRequest},
+		{name: "negative count", query: "?count=-3", want: http.StatusBadRequest},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels/list"+tc.query, nil))
+			if rr.Code != tc.want {
+				t.Fatalf("list%s = %d, want %d (body %q)", tc.query, rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestRegisterLogSinkErrors(t *testing.T) {
+	m := NewMetrics()
+	if err := m.RegisterLogSinkErrors(func() float64 { return 5 }); err != nil {
+		t.Fatal(err)
+	}
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got float64 = -1
+	for _, mf := range mfs {
+		if mf.GetName() == "tunneld_log_sink_errors_total" {
+			got = mf.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	if got != 5 {
+		t.Fatalf("tunneld_log_sink_errors_total = %v, want 5", got)
+	}
+	if err := m.RegisterLogSinkErrors(func() float64 { return 0 }); err == nil {
+		t.Fatal("a second registration must be refused")
+	}
+	if err := NewMetrics().RegisterLogSinkErrors(nil); err == nil {
+		t.Fatal("a nil counter must be refused")
 	}
 }

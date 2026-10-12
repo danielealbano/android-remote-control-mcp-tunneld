@@ -9,6 +9,8 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
+
+	"errors"
 )
 
 // perConnMemEstimateBytes is the steady-state per-connection heap estimate a bridged public connection
@@ -105,6 +107,15 @@ func NewMetrics() *Metrics {
 // Registry returns the custom registry (mounted at /metrics; the default registry exposes none of
 // these families).
 func (m *Metrics) Registry() *prometheus.Registry { return m.reg }
+
+func (m *Metrics) RegisterLogSinkErrors(count func() float64) error {
+	if count == nil {
+		return errors.New("metrics: nil log sink error counter")
+	}
+	return m.reg.Register(prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name: "tunneld_log_sink_errors_total", Help: "Log records a log sink failed to write.",
+	}, count))
+}
 
 // ConnLogDropped returns the dropped-connection-log-events counter (wired to the async conn-log
 // writer's drop callback in server.Run).
