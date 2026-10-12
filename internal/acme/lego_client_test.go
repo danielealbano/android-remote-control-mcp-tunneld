@@ -3,7 +3,14 @@ package acme
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -145,5 +152,71 @@ func TestLegoConfig_ApplyDNSResolvers(t *testing.T) {
 	LegoConfig{DNSResolvers: []string{"127.0.0.1:53"}}.applyDNSResolvers()
 	if dns01.DefaultClient() == prev {
 		t.Fatal("configured resolvers must replace lego's default DNS client")
+	}
+}
+
+func acmeDirectoryStub(t *testing.T) string {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"newNonce": srv.URL + "/nonce", "newAccount": srv.URL + "/account", "newOrder": srv.URL + "/order",
+		}); err != nil {
+			t.Errorf("directory stub encode: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGO_CA_CERTIFICATES", caFile)
+	return srv.URL + "/directory"
+}
+
+func TestNewLegoClient_UnsupportedChallenge(t *testing.T) {
+	_, err := NewLegoClient(context.Background(), LegoConfig{
+		CAID: CALetsEncrypt, DirectoryURL: acmeDirectoryStub(t), Challenge: "dns-02",
+	})
+	if err == nil {
+		t.Fatal("an unknown challenge method must fail client construction")
+	}
+	if !strings.Contains(err.Error(), CALetsEncrypt) || !strings.Contains(err.Error(), "dns-02") {
+		t.Fatalf("error must name the CA and the method, got %v", err)
+	}
+}
+
+func TestNewLegoClient_ChallengeNeedsStore(t *testing.T) {
+	for _, method := range []string{"tls-alpn-01", "http-01"} {
+		t.Run(method, func(t *testing.T) {
+			_, err := NewLegoClient(context.Background(), LegoConfig{
+				CAID: CAGTS, DirectoryURL: acmeDirectoryStub(t), Challenge: method,
+			})
+			if err == nil {
+				t.Fatalf("%s without a challenge store must fail", method)
+			}
+			if !strings.Contains(err.Error(), CAGTS) || !strings.Contains(err.Error(), "needs a challenge store") {
+				t.Fatalf("error must name the CA and the missing challenge store, got %v", err)
+			}
+		})
+	}
+}
+
+func TestClassifyLego_ChallengeStoreIsLocal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "direct", err: fmt.Errorf("[a.example.test] acme: error presenting token: %w", ErrChallengePending)},
+		{name: "multi-error", err: errors.Join(errors.New("other domain"), fmt.Errorf("presenting token: %w", ErrChallengePending))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ie := classifyLego(tc.err)
+			if ie.Class != ClassLocal || ie.Retry != localChallengeRetry {
+				t.Fatalf("class=%s retry=%s, want %s / %s", ie.Class, ie.Retry, ClassLocal, localChallengeRetry)
+			}
+		})
 	}
 }

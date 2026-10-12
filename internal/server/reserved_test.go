@@ -14,10 +14,12 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,48 +32,56 @@ func TestReservedMaybeRenew_LogsShouldRenewError(t *testing.T) {
 	dir := t.TempDir()
 	host := "enroll.example.test"
 	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	seedCache(t, dir, host, certPEM, keyPEM, info)
 	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	failRenew := func(context.Context, store.CertInfo) (bool, time.Time, error) {
 		return false, time.Time{}, errors.New("cooldown state unavailable")
 	}
-	rc := newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, failRenew, 48*time.Hour, logger)
+	rc := newTestReserved(dir, []string{host}, iss.obtain, failRenew, &fakeLocker{}, logger)
+	rc.loadCache()
 	rc.maybeRenew(context.Background(), rc.hosts[host])
 	if !strings.Contains(buf.String(), "renewal check failed") {
 		t.Fatalf("a shouldRenew error must be logged at Warn; log = %q", buf.String())
 	}
+	if iss.callCount() != 0 {
+		t.Fatalf("a failed renewal check must not obtain, got %d calls", iss.callCount())
+	}
 }
 
-// TestReservedEnsure_UsesInjectedClock verifies the renew-margin branch compares against the injected
-// clock (rc.now), not the wall clock: a cache valid by the wall clock but inside the margin by the
-// injected clock must trigger a renewal.
-func TestReservedEnsure_UsesInjectedClock(t *testing.T) {
+func TestReservedCerts_LoadCacheUsesInjectedClock(t *testing.T) {
 	dir := t.TempDir()
 	host := "enroll.example.test"
 	realNow := time.Now()
-	cachedCert, cachedKey, cachedInfo := mintSelfCert(t, host, realNow.Add(100*time.Hour))
+	cachedCert, cachedKey, cachedInfo := mintSelfCert(t, host, realNow.Add(10*time.Hour))
 	seedCache(t, dir, host, cachedCert, cachedKey, cachedInfo)
-	newCert, newKey, newInfo := mintSelfCert(t, host, realNow.Add(400*time.Hour))
-	iss := &countingIssuer{certPEM: newCert, keyPEM: newKey, info: newInfo}
 
-	fakeNow := realNow.Add(60 * time.Hour) // cache NotAfter=+100h is now inside the 48h margin
-	rc := &reservedCerts{
-		dir: filepath.Join(dir, "self"), obtain: iss.obtain, shouldRenew: neverRenew,
-		renewMargin: 48 * time.Hour, logger: testLogger(),
-		now:   func() time.Time { return fakeNow },
-		hosts: map[string]*reservedHost{},
+	rc := newTestReserved(dir, []string{host}, (&countingIssuer{}).obtain, neverRenew, &fakeLocker{}, testLogger())
+	rc.now = func() time.Time { return realNow.Add(20 * time.Hour) }
+	rc.loadCache()
+	if _, err := rc.getCertificateFor(host)(nil); err == nil {
+		t.Fatal("a cache expired by the injected clock must not be served")
 	}
-	rh := &reservedHost{host: host}
-	rc.hosts[host] = rh
-	rc.ensure(context.Background(), rh)
 
-	if iss.callCount() != 1 {
-		t.Fatalf("the margin branch must use the injected clock (renew → 1 obtain), got %d", iss.callCount())
+	rc = newTestReserved(dir, []string{host}, (&countingIssuer{}).obtain, neverRenew, &fakeLocker{}, testLogger())
+	rc.now = func() time.Time { return realNow }
+	rc.loadCache()
+	if _, err := rc.getCertificateFor(host)(nil); err != nil {
+		t.Fatalf("a cache still valid by the injected clock must be served, got %v", err)
 	}
 }
 
-func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func closeOrLog(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Logf("close %T: %v", c, err)
+	}
+}
 
 // mintSelfCert produces a self-signed cert (PEM) + key (PEM) + CertInfo for host with the given NotAfter.
 func mintSelfCert(t *testing.T, host string, notAfter time.Time) (certPEM, keyPEM []byte, info store.CertInfo) {
@@ -120,6 +130,86 @@ func neverRenew(context.Context, store.CertInfo) (bool, time.Time, error) {
 	return false, time.Time{}, nil
 }
 
+func alwaysRenew(context.Context, store.CertInfo) (bool, time.Time, error) {
+	return true, time.Time{}, nil
+}
+
+func newTestReserved(dir string, hosts []string, obtain selfIssuer, shouldRenew shouldRenewFunc, lock selfLocker, logger *slog.Logger) *reservedCerts {
+	rc := newReservedCerts(dir, hosts, obtain, shouldRenew, lock, logger)
+	rc.lockWait, rc.issueTimeout, rc.lockPoll = 200*time.Millisecond, 200*time.Millisecond, 10*time.Millisecond
+	return rc
+}
+
+type fakeLocker struct {
+	mu             sync.Mutex
+	busyFor        int
+	alwaysBusy     bool
+	err            error
+	blockUntilDone bool
+	cancelOnLock   context.CancelFunc
+	calls          int
+	unlocks        int
+}
+
+func (f *fakeLocker) LockSelf(ctx context.Context, _ string) (func() error, bool, error) {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	f.mu.Unlock()
+	unlock := func() error {
+		f.mu.Lock()
+		f.unlocks++
+		f.mu.Unlock()
+		return nil
+	}
+	switch {
+	case f.blockUntilDone:
+		<-ctx.Done()
+		return unlock, false, ctx.Err()
+	case f.err != nil:
+		return unlock, false, f.err
+	case f.alwaysBusy || call <= f.busyFor:
+		return unlock, false, nil
+	}
+	if f.cancelOnLock != nil {
+		f.cancelOnLock()
+	}
+	return unlock, true, nil
+}
+
+func (f *fakeLocker) unlockCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.unlocks }
+
+type blockingIssuer struct {
+	mu        sync.Mutex
+	calls     int
+	calledAt  time.Time
+	deadline  time.Time
+	hasDeadln bool
+}
+
+func (b *blockingIssuer) obtain(ctx context.Context, _ string) ([]byte, []byte, store.CertInfo, error) {
+	b.mu.Lock()
+	b.calls++
+	b.calledAt = time.Now()
+	b.deadline, b.hasDeadln = ctx.Deadline()
+	b.mu.Unlock()
+	<-ctx.Done()
+	return nil, nil, store.CertInfo{}, ctx.Err()
+}
+
+func (b *blockingIssuer) callCount() int { b.mu.Lock(); defer b.mu.Unlock(); return b.calls }
+
+func waitFor(t *testing.T, d time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", d)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // seedCache writes a persisted cert/key/meta triple under dir/self/<host>/.
 func seedCache(t *testing.T, dir, host string, certPEM, keyPEM []byte, info store.CertInfo) {
 	t.Helper()
@@ -138,17 +228,34 @@ func seedCache(t *testing.T, dir, host string, certPEM, keyPEM []byte, info stor
 func TestReservedCerts_CacheReused(t *testing.T) {
 	dir := t.TempDir()
 	host := "enroll.example.test"
-	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour)) // well past the margin
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
 	seedCache(t, dir, host, certPEM, keyPEM, info)
 
 	iss := &countingIssuer{}
-	rc := newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, neverRenew, 48*time.Hour, testLogger())
-
-	if iss.callCount() != 0 {
-		t.Fatalf("a valid cached pair must NOT trigger ObtainSelf, got %d calls", iss.callCount())
+	lock := &fakeLocker{}
+	var checks atomic.Int32
+	notDue := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+		checks.Add(1)
+		return false, time.Time{}, nil
 	}
+	rc := newTestReserved(dir, []string{host}, iss.obtain, notDue, lock, testLogger())
+	rc.loadCache()
 	if _, err := rc.getCertificateFor(host)(nil); err != nil {
 		t.Fatalf("cached cert must be served, got %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rc.run(ctx, time.Hour, time.Hour) }()
+	waitFor(t, 5*time.Second, func() bool { return checks.Load() >= 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	lock.mu.Lock()
+	lockCalls := lock.calls
+	lock.mu.Unlock()
+	if iss.callCount() != 0 || lockCalls != 0 {
+		t.Fatalf("a valid, not-due cached pair must NOT trigger issuance: obtains=%d lock calls=%d", iss.callCount(), lockCalls)
 	}
 }
 
@@ -157,18 +264,30 @@ func TestReservedCerts_ObtainsWhenNoCache(t *testing.T) {
 	host := "connect.example.test"
 	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
 	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+	lock := &fakeLocker{}
+	rc := newTestReserved(dir, []string{host}, iss.obtain, neverRenew, lock, testLogger())
+	rc.loadCache()
 
-	rc := newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, neverRenew, 48*time.Hour, testLogger())
-
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rc.run(ctx, time.Hour, time.Hour) }()
+	// It must have been persisted for reuse across restarts (atomic single-file bundle).
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "self", host, "bundle.json"))
+		return err == nil
+	})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	if iss.callCount() != 1 {
 		t.Fatalf("no cache must trigger exactly one ObtainSelf, got %d", iss.callCount())
 	}
 	if _, err := rc.getCertificateFor(host)(nil); err != nil {
 		t.Fatalf("obtained cert must be served, got %v", err)
 	}
-	// It must have been persisted for reuse across restarts (atomic single-file bundle).
-	if _, err := os.Stat(filepath.Join(dir, "self", host, "bundle.json")); err != nil {
-		t.Fatalf("obtained cert must be persisted: %v", err)
+	if lock.unlockCount() != 1 {
+		t.Fatalf("the cluster lock must be released after issuance, got %d unlocks", lock.unlockCount())
 	}
 }
 
@@ -176,39 +295,249 @@ func TestReservedCerts_DegradedWhenNoCAAndNoCache(t *testing.T) {
 	dir := t.TempDir()
 	host := "enroll.example.test"
 	iss := &countingIssuer{err: context.DeadlineExceeded} // no CA can issue
+	rc := newTestReserved(dir, []string{host}, iss.obtain, neverRenew, &fakeLocker{}, testLogger())
+	rc.loadCache()
+	rc.maybeRenew(context.Background(), rc.hosts[host])
 
-	rc := newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, neverRenew, 48*time.Hour, testLogger())
-
+	if iss.callCount() != 1 {
+		t.Fatalf("a host without a cert must try to obtain once per pass, got %d", iss.callCount())
+	}
 	if _, err := rc.getCertificateFor(host)(nil); err == nil {
 		t.Fatal("with no CA and no cache the reserved host must be degraded (TLS refused)")
 	}
 }
 
 func TestReservedCerts_RenewsExpiringCache(t *testing.T) {
-	dir := t.TempDir()
+	tests := []struct {
+		name      string
+		renewErr  error
+		wantNewer bool
+	}{
+		{name: "renewal succeeds", wantNewer: true},
+		{name: "renewal fails keeps current", renewErr: errors.New("all CAs cooling")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			host := "enroll.example.test"
+			// Cached pair is still valid → must be renewed at startup.
+			oldCert, oldKey, oldInfo := mintSelfCert(t, host, time.Now().Add(10*time.Hour))
+			seedCache(t, dir, host, oldCert, oldKey, oldInfo)
+			newCert, newKey, newInfo := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+			iss := &countingIssuer{certPEM: newCert, keyPEM: newKey, info: newInfo, err: tc.renewErr}
+			rc := newTestReserved(dir, []string{host}, iss.obtain, alwaysRenew, &fakeLocker{}, testLogger())
+			rc.loadCache()
+			rc.maybeRenew(context.Background(), rc.hosts[host])
+
+			if iss.callCount() != 1 {
+				t.Fatalf("a due cached pair must be renewed once in the first pass, got %d", iss.callCount())
+			}
+			if _, err := rc.getCertificateFor(host)(nil); err != nil {
+				t.Fatalf("a cert must still be served, got %v", err)
+			}
+			if got := rc.hosts[host].currentInfo().NotAfter.After(oldInfo.NotAfter); got != tc.wantNewer {
+				t.Fatalf("served NotAfter newer = %v, want %v", got, tc.wantNewer)
+			}
+			if !tc.wantNewer {
+				return
+			}
+			raw, err := os.ReadFile(filepath.Join(dir, "self", host, "bundle.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got certBundle
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !got.Info.NotAfter.After(oldInfo.NotAfter) {
+				t.Fatalf("renewed cert must be re-persisted with a later NotAfter (old=%v new=%v)", oldInfo.NotAfter, got.Info.NotAfter)
+			}
+		})
+	}
+}
+
+func TestReservedCerts_RunRetriesDegradedSooner(t *testing.T) {
+	t.Run("degraded retries at degradedEvery", func(t *testing.T) {
+		iss := &countingIssuer{err: errors.New("no CA")}
+		rc := newTestReserved(t.TempDir(), []string{"enroll.example.test"}, iss.obtain, neverRenew, &fakeLocker{}, testLogger())
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- rc.run(ctx, time.Hour, 20*time.Millisecond) }()
+		waitFor(t, 5*time.Second, func() bool { return iss.callCount() >= 3 })
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("healthy waits renewEvery", func(t *testing.T) {
+		host := "enroll.example.test"
+		certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+		iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+		var checks atomic.Int32
+		notDue := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+			checks.Add(1)
+			return false, time.Time{}, nil
+		}
+		rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, notDue, &fakeLocker{}, testLogger())
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- rc.run(ctx, time.Hour, 20*time.Millisecond) }()
+		waitFor(t, 5*time.Second, func() bool { return iss.callCount() >= 1 })
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if iss.callCount() != 1 || checks.Load() != 0 {
+			t.Fatalf("a healthy host must wait renewEvery before the next pass: obtains=%d renewal checks=%d", iss.callCount(), checks.Load())
+		}
+	})
+}
+
+func TestReservedCerts_WaitsForClusterLock(t *testing.T) {
 	host := "enroll.example.test"
-	// Cached pair is still valid but inside the renew margin → must be renewed at startup.
-	oldCert, oldKey, oldInfo := mintSelfCert(t, host, time.Now().Add(10*time.Hour))
-	seedCache(t, dir, host, oldCert, oldKey, oldInfo)
-	newCert, newKey, newInfo := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
-	iss := &countingIssuer{certPEM: newCert, keyPEM: newKey, info: newInfo}
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+	lock := &fakeLocker{busyFor: 3}
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, lock, testLogger())
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	if iss.callCount() != 1 || lock.unlockCount() != 1 {
+		t.Fatalf("obtains=%d unlocks=%d, want 1/1 once the lock frees", iss.callCount(), lock.unlockCount())
+	}
+}
 
-	_ = newReservedCerts(context.Background(), dir, []string{host}, iss.obtain, neverRenew, 48*time.Hour, testLogger())
-
+func TestReservedCerts_LockErrorFailsOpen(t *testing.T) {
+	host := "enroll.example.test"
+	certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+	lock := &fakeLocker{err: errors.New("valkey down")}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, lock, logger)
+	rc.maybeRenew(context.Background(), rc.hosts[host])
 	if iss.callCount() != 1 {
-		t.Fatalf("an expiring cached pair must be renewed once at startup, got %d", iss.callCount())
+		t.Fatalf("a lock error must still issue, got %d obtains", iss.callCount())
 	}
-	// The persisted bundle must reflect the renewed (far-future) NotAfter.
-	raw, err := os.ReadFile(filepath.Join(dir, "self", host, "bundle.json"))
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(buf.String(), "lock unavailable") {
+		t.Fatalf("a lock error must be logged at Warn; log = %q", buf.String())
 	}
-	var got certBundle
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatal(err)
+	if lock.unlockCount() != 0 {
+		t.Fatal("no unlock may run for a lock that was never held")
 	}
-	if !got.Info.NotAfter.After(oldInfo.NotAfter) {
-		t.Fatalf("renewed cert must be re-persisted with a later NotAfter (old=%v new=%v)", oldInfo.NotAfter, got.Info.NotAfter)
+}
+
+func TestReservedCerts_LockBusyUntilWaitBudget(t *testing.T) {
+	host := "enroll.example.test"
+	iss := &countingIssuer{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, &fakeLocker{alwaysBusy: true}, logger)
+	start := time.Now()
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	if elapsed := time.Since(start); elapsed < rc.lockWait {
+		t.Fatalf("returned after %s, before the %s wait budget", elapsed, rc.lockWait)
+	}
+	if iss.callCount() != 0 {
+		t.Fatalf("a busy lock must not issue, got %d obtains", iss.callCount())
+	}
+	if !strings.Contains(buf.String(), "busy on another node") {
+		t.Fatalf("a busy lock must be logged at Info; log = %q", buf.String())
+	}
+}
+
+func TestReservedCerts_LockErrorAfterWaitBudget(t *testing.T) {
+	host := "enroll.example.test"
+	iss := &countingIssuer{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, &fakeLocker{blockUntilDone: true}, logger)
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	if iss.callCount() != 0 {
+		t.Fatalf("an expired lock wait must not issue, got %d obtains", iss.callCount())
+	}
+	if !strings.Contains(buf.String(), "busy on another node") || strings.Contains(buf.String(), "level=WARN") {
+		t.Fatalf("an expired lock wait must read as busy (Info, no Warn); log = %q", buf.String())
+	}
+}
+
+func TestReservedCerts_AbandonedIssuanceKeepsLock(t *testing.T) {
+	host := "enroll.example.test"
+	iss := &blockingIssuer{}
+	lock := &fakeLocker{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, lock, logger)
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	if lock.unlockCount() != 0 {
+		t.Fatal("an issuance abandoned at its deadline must keep the lock until its TTL")
+	}
+	if !strings.Contains(buf.String(), "abandoned at its deadline") {
+		t.Fatalf("an abandoned issuance must be logged at Warn; log = %q", buf.String())
+	}
+}
+
+func TestReservedCerts_SeparateBudgets(t *testing.T) {
+	host := "enroll.example.test"
+	iss := &blockingIssuer{}
+	lock := &fakeLocker{busyFor: 20}
+	rc := newTestReserved(t.TempDir(), []string{host}, iss.obtain, neverRenew, lock, testLogger())
+	rc.lockWait, rc.issueTimeout = 400*time.Millisecond, 500*time.Millisecond
+	rc.maybeRenew(context.Background(), rc.hosts[host])
+	iss.mu.Lock()
+	defer iss.mu.Unlock()
+	if iss.calls != 1 || !iss.hasDeadln {
+		t.Fatalf("obtain calls=%d deadline=%v, want one call with a deadline", iss.calls, iss.hasDeadln)
+	}
+	if budget := iss.deadline.Sub(iss.calledAt); budget < rc.issueTimeout-20*time.Millisecond {
+		t.Fatalf("obtain got %s after a late lock, want the full %s issuance budget", budget, rc.issueTimeout)
+	}
+}
+
+func TestReservedCerts_ShutdownWhileWaitingForLock(t *testing.T) {
+	t.Run("lock busy", func(t *testing.T) {
+		iss := &countingIssuer{}
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		rc := newTestReserved(t.TempDir(), []string{"enroll.example.test"}, iss.obtain, neverRenew, &fakeLocker{alwaysBusy: true}, logger)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		rc.maybeRenew(ctx, rc.hosts["enroll.example.test"])
+		if iss.callCount() != 0 || buf.Len() != 0 {
+			t.Fatalf("a shutdown while waiting must neither issue nor log: obtains=%d log=%q", iss.callCount(), buf.String())
+		}
+	})
+	t.Run("lock obtained as ctx is cancelled", func(t *testing.T) {
+		iss := &countingIssuer{}
+		ctx, cancel := context.WithCancel(context.Background())
+		lock := &fakeLocker{cancelOnLock: cancel}
+		rc := newTestReserved(t.TempDir(), []string{"enroll.example.test"}, iss.obtain, neverRenew, lock, testLogger())
+		rc.maybeRenew(ctx, rc.hosts["enroll.example.test"])
+		if iss.callCount() != 0 || lock.unlockCount() != 1 {
+			t.Fatalf("obtains=%d unlocks=%d, want 0/1", iss.callCount(), lock.unlockCount())
+		}
+	})
+}
+
+func TestReservedCerts_ShutdownDuringIssuanceReleasesLock(t *testing.T) {
+	iss := &blockingIssuer{}
+	lock := &fakeLocker{}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	rc := newTestReserved(t.TempDir(), []string{"enroll.example.test"}, iss.obtain, neverRenew, lock, logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		rc.maybeRenew(ctx, rc.hosts["enroll.example.test"])
+		close(done)
+	}()
+	waitFor(t, 5*time.Second, func() bool { return iss.callCount() == 1 })
+	cancel()
+	<-done
+	if lock.unlockCount() != 1 {
+		t.Fatalf("a shutdown during issuance must release the lock, got %d unlocks", lock.unlockCount())
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("a shutdown during issuance must not log a Warn; log = %q", buf.String())
 	}
 }
 

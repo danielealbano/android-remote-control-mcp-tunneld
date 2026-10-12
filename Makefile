@@ -1,19 +1,20 @@
 VERSION ?= dev
 GO_PACKAGES = $(shell go list ./...)
 
-.PHONY: build lint vet govulncheck test-unit test-integration test-e2e test-all test-scripts \
+.PHONY: build lint vet govulncheck test-unit test-integration test-e2e test-staging test-all test-scripts \
         tidy compose-config mermaid-check attest-probe tunnel-app
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/tunneld ./cmd/tunneld
 
-# Three passes, one per build-tag set: files behind `//go:build integration` / `//go:build e2e` are
+# passes, one per build-tag set: files behind `//go:build integration` / `//go:build e2e` are
 # INVISIBLE to an untagged run, so a single `golangci-lint run ./...` silently skips every tagged
-# test file. Each pass compiles a different file set, so all three are required.
+# test file. Each pass compiles a different file set.
 lint:
 	golangci-lint run ./...
 	golangci-lint run --build-tags=integration ./...
 	golangci-lint run --build-tags=e2e ./...
+	golangci-lint run --build-tags=staging ./...
 	shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh
 	$(MAKE) compose-config
 
@@ -41,7 +42,10 @@ test-integration:
 test-e2e:
 	go test -tags=e2e -race -count=1 -timeout 20m -v ./e2e/...
 
-test-all: test-unit test-integration test-e2e
+test-staging:
+	go test -tags=staging -race -count=1 -timeout 50m -v ./staging/...
+
+test-all: test-unit test-integration test-e2e test-staging
 
 test-scripts:
 	sh deploy/scripts/scripts_test.sh

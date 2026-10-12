@@ -135,6 +135,10 @@ func (e *Edge) admit() bool {
 
 func (e *Edge) release() { e.clients.Add(-1) }
 
+func (e *Edge) Admit() bool { return e.admit() }
+
+func (e *Edge) Release() { e.release() }
+
 // heldConn keeps the --max-clients slot held for the LIFETIME of a reserved-host (enroll/control)
 // connection handed to a local TLS terminator: the slot releases when the connection closes, so
 // long-lived phone control connections still count toward the global ceiling.
@@ -185,6 +189,10 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 	if err != nil {
 		e.rec.Reject("handshake-timeout", "", ip)
 		_ = conn.Close()
+		return
+	}
+	if info.ALPN == acmeTLS1Protocol {
+		e.serveACMEChallenge(ctx, pc, info, ip)
 		return
 	}
 

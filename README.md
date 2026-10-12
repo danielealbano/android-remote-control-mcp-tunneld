@@ -53,9 +53,13 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    cp deploy/.env.example deploy/.env             # domains, S3 creds, DEPLOY_UID (= id -u), Grafana pw
    cp deploy/tunneld.env.example deploy/tunneld.env # CA/S3/attest/ACME + the lego DNS-provider secret
    ```
-4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host, and
-   set `TUNNELD_ACME_DNS_PROVIDER` + its credential (tunneld runs ACME DNS-01 to issue the phone's public
-   cert). Publish the CAA `issue` records for Let's Encrypt / GTS / ZeroSSL as an operator DNS step.
+4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host. tunneld
+   issues the phone's public cert (and its own reserved-host certs) via ACME, validated per CA
+   (`TUNNELD_ACME_CHALLENGE_LE` / `_GTS` / `_ZEROSSL`; defaults `tls-alpn-01`, `tls-alpn-01`, `http-01`):
+   TLS-ALPN-01 is answered on `:443`, HTTP-01 on `:80` (so `:80` must be reachable when a CA uses it). Set
+   `TUNNELD_ACME_DNS_PROVIDER` + its credential only for a CA set to `dns-01`. Publish the CAA `issue` records
+   for Let's Encrypt / GTS / ZeroSSL as an operator DNS step; if they carry `validationmethods`, allow
+   `tls-alpn-01` (LE, GTS) and `http-01` (ZeroSSL).
 5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
    images are no longer published) the compose creates the bucket automatically. For a real
    provider, set the `S3_*` / `TUNNELD_S_3_*` values and **run a pre-go-live read-after-write probe**
@@ -72,7 +76,7 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    Set that token as `access-token` in `deploy/ntfy-alertmanager/config.scfg`, then restart the bridge so
    it picks up the token: `docker compose -f deploy/docker-compose.yml restart ntfy-alertmanager`.
 
-**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` is
+**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and the ACME HTTP-01 listener `:80` are
 public. The observability UIs (Grafana/Prometheus/Alertmanager/ntfy) bind to `127.0.0.1` only; reach
 them via SSH forward.
 
@@ -124,7 +128,7 @@ tunnel-fingerprint sha256:<hex>
 `country XX` entries are expanded at reload from a DB-IP Country Lite CSV (`--dbip-country-lite-csv`)
 into a longest-prefix-match table (one lookup per connection); a missing CSV skips only the country
 entries. **Country codes in this repo are placeholders (`XX`, `YY`) only.** The ban check is the FIRST
-check on every ingress edge (public, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP.
+check on every ingress edge (public `:443`, the HTTP-01 `:80` listener, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/country ban can fail HTTP-01 / TLS-ALPN-01 issuance.
 
 **Revocation** (there is no CRL — bans are the only revocation): revoke a tunnel or a source by editing
 `deploy/banfiles/bans.txt` on the host (bind-mounted read-only at `/banfiles-manual/bans.txt`); the change

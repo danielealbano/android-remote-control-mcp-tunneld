@@ -7,7 +7,7 @@ frame codec.
 tunneld relays **opaque TLS bytes** and can NEVER read tunnel traffic: external clients establish TLS
 directly with the phone, which holds a publicly-trusted (WebPKI) certificate for its assigned hostname.
 tunneld is the internet edge (raw TCP `:443`), peeks the ClientHello (SNI/ALPN/version/JA4), routes on
-SNI, and splices the encrypted byte stream to the phone over an internal HTTP/2 mesh.
+SNI (a ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation answered locally by tunneld, never spliced), and splices the encrypted byte stream to the phone over an internal HTTP/2 mesh.
 
 ## 1. Identity & authentication
 
@@ -186,3 +186,4 @@ non-POST → `405`, op failure → `502`.
 - `ChunkSize == 16384` is the paced-copy slice size only; HTTP/2 framing and flow control use the
   library defaults (no custom read-limit configuration).
 - No secrets, key material, or tunnel payloads are ever logged.
+- A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME validation addressed to tunneld: it is answered locally with tunneld's challenge certificate and NEVER spliced to a phone.

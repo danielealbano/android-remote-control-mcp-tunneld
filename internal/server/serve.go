@@ -32,17 +32,29 @@ func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 
 // serveTLS runs srv on ln until ctx is cancelled, then closes the listener. ln is a tls.Listener for the
 // TLS servers (enroll/control/mesh), or the plain
-// internal (metrics/healthz/admin) listener. A non-shutdown Serve error is returned so the errgroup
+// listener. A non-shutdown Serve error is returned so the errgroup
 // cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
 // normal drain signals and stay non-fatal (the drain's srv.Shutdown bounds in-flight requests).
 func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger, which string) error {
-	go func() { <-ctx.Done(); _ = ln.Close() }()
+	go func() { <-ctx.Done(); closeLogged(logger, which+" listener", ln) }()
 	err := srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("listener exited", "which", which, "err", err)
 		return err
 	}
 	return nil
+}
+
+func closeLogged(logger *slog.Logger, what string, c io.Closer) {
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		logger.Warn("close failed", "what", what, "err", err)
+	}
+}
+
+func shutdownLogged(ctx context.Context, logger *slog.Logger, which string, srv *http.Server) {
+	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+		logger.Warn("server shutdown did not complete cleanly", "which", which, "err", err)
+	}
 }
 
 // validNameFunc validates a derived CN as EXACTLY a server-generated tunnel name: the configured

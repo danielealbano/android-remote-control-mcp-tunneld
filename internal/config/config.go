@@ -25,6 +25,12 @@ const bandwidthFloorBytesPerSec int64 = 16 * 1024
 // must fit strictly inside it so a renewal is attempted before expiry.
 const shortlivedLifetime = 160 * time.Hour
 
+const (
+	ChallengeDNS01     = "dns-01"
+	ChallengeHTTP01    = "http-01"
+	ChallengeTLSALPN01 = "tls-alpn-01"
+)
+
 // ServeCmd is the configuration surface of `tunneld serve`. kong derives the TUNNELD_* env twin for
 // every flag from its name (main.go: kong.DefaultEnvars("TUNNELD")).
 type ServeCmd struct {
@@ -84,7 +90,12 @@ type ServeCmd struct {
 	ACMEEABZeroSSLKID  string `name:"acme-eab-zerossl-kid" default:"" help:"ZeroSSL EAB key id (secret)."`
 	ACMEEABZeroSSLHMAC string `name:"acme-eab-zerossl-hmac" default:"" help:"ZeroSSL EAB HMAC key (secret)."`
 	ACMEAccountDir     string `name:"acme-account-dir" help:"Directory holding persisted per-CA ACME account keys + reserved-host self-certs. Required for serve."`
-	ACMEDNSProvider    string `name:"acme-dns-provider" help:"lego DNS-01 provider id (e.g. cloudflare, route53). Required for serve."`
+	ACMEDNSProvider    string `name:"acme-dns-provider" help:"lego DNS-01 provider id (e.g. cloudflare, route53). Required when a CA uses dns-01."`
+
+	ACMEChallengeLE      string `name:"acme-challenge-le" default:"tls-alpn-01" enum:"dns-01,http-01,tls-alpn-01" help:"Let's Encrypt validation method: dns-01 | http-01 | tls-alpn-01."`
+	ACMEChallengeGTS     string `name:"acme-challenge-gts" default:"tls-alpn-01" enum:"dns-01,http-01,tls-alpn-01" help:"Google Trust Services validation method: dns-01 | http-01 | tls-alpn-01."`
+	ACMEChallengeZeroSSL string `name:"acme-challenge-zerossl" default:"http-01" enum:"dns-01,http-01" help:"ZeroSSL validation method: dns-01 | http-01 (ZeroSSL has no tls-alpn-01)."`
+	ACMEHTTPListen       string `name:"acme-http-listen" default:":80" help:"Public HTTP-01 challenge listener; bound only when a CA uses http-01."`
 
 	// DNS-01 propagation pre-check tuning (split-horizon / internal-DNS deployments; also the hermetic
 	// ACME test tier).
@@ -127,6 +138,10 @@ type ServeCmd struct {
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Graceful-drain deadline on ctx cancel."`
 
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
+}
+
+func (c ServeCmd) UsesChallenge(method string) bool {
+	return c.ACMEChallengeLE == method || c.ACMEChallengeGTS == method || c.ACMEChallengeZeroSSL == method
 }
 
 // Validate is invoked automatically by kong for the selected `serve` command. It enforces every
@@ -187,10 +202,29 @@ func (c ServeCmd) Validate() error {
 		{"--s3-secret-key", c.S3SecretKey},
 		{"--acme-email", c.ACMEEmail},
 		{"--acme-account-dir", c.ACMEAccountDir},
-		{"--acme-dns-provider", c.ACMEDNSProvider},
 	} {
 		if req.v == "" {
 			return fmt.Errorf("%s is required for serve", req.name)
+		}
+	}
+	for _, ch := range []struct {
+		name, method string
+		allowALPN    bool
+	}{
+		{"--acme-challenge-le", c.ACMEChallengeLE, true},
+		{"--acme-challenge-gts", c.ACMEChallengeGTS, true},
+		{"--acme-challenge-zerossl", c.ACMEChallengeZeroSSL, false},
+	} {
+		if ch.method != ChallengeDNS01 && ch.method != ChallengeHTTP01 && (!ch.allowALPN || ch.method != ChallengeTLSALPN01) {
+			return fmt.Errorf("%s does not support validation method %q", ch.name, ch.method)
+		}
+	}
+	if c.UsesChallenge(ChallengeDNS01) && c.ACMEDNSProvider == "" {
+		return fmt.Errorf("--acme-dns-provider is required when a CA uses dns-01")
+	}
+	if c.UsesChallenge(ChallengeHTTP01) {
+		if _, _, err := net.SplitHostPort(c.ACMEHTTPListen); err != nil {
+			return fmt.Errorf("--acme-http-listen must be host:port or :port, got %q: %w", c.ACMEHTTPListen, err)
 		}
 	}
 	for _, u := range []struct{ name, v string }{

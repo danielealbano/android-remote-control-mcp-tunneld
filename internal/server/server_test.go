@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,7 +155,14 @@ func TestRun_Lifecycle(t *testing.T) {
 
 	// Wait until the node heartbeat has registered this node (proves construction finished and the
 	// schedulers are running) before cancelling.
-	waitUntil(t, 5*time.Second, func() bool { return len(mr.DB(0).Keys()) > 0 })
+	waitUntil(t, 5*time.Second, func() bool {
+		for _, k := range mr.DB(0).Keys() {
+			if strings.HasPrefix(k, "node:") {
+				return true
+			}
+		}
+		return false
+	})
 
 	cancel()
 	select {
@@ -191,6 +199,44 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("Run did not fail on the internal bind")
 	}
+}
+
+func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := lifecycleConfig(t, mr.Addr())
+	cfg.ACMEChallengeZeroSSL = config.ChallengeHTTP01
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.InternalListen = probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOrLog(t, occupied)
+	cfg.ACMEHTTPListen = occupied.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, cfg, testLogger(), "acmehttpbind") }()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "acme http listen") {
+			t.Fatalf("Run must fail on the ACME HTTP-01 bind, got %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not fail on the ACME HTTP-01 bind")
+	}
+	rebound, err := net.Listen("tcp", cfg.InternalListen)
+	if err != nil {
+		t.Fatalf("the internal listener leaked after the ACME HTTP-01 bind failure: %v", err)
+	}
+	closeOrLog(t, rebound)
 }
 
 func waitUntil(t *testing.T, d time.Duration, cond func() bool) {

@@ -59,6 +59,10 @@ func validCfg(t *testing.T) ServeCmd {
 		ACMEGTSValidity:        168 * time.Hour,
 		ACMEAccountDir:         dir,
 		ACMEDNSProvider:        "cloudflare",
+		ACMEChallengeLE:        ChallengeTLSALPN01,
+		ACMEChallengeGTS:       ChallengeTLSALPN01,
+		ACMEChallengeZeroSSL:   ChallengeHTTP01,
+		ACMEHTTPListen:         ":80",
 		ACMECooldownDefault:    time.Hour,
 		ACMEBackoffInitial:     time.Minute,
 		ACMEBackoffMax:         6 * time.Hour,
@@ -159,7 +163,6 @@ func TestValidateRequiresMeshACMEFields(t *testing.T) {
 		func(c *ServeCmd) { c.MeshAdvertise = "" },
 		func(c *ServeCmd) { c.ACMEEmail = "" },
 		func(c *ServeCmd) { c.ACMEAccountDir = "" },
-		func(c *ServeCmd) { c.ACMEDNSProvider = "" },
 	} {
 		c := validCfg(t)
 		mut(&c)
@@ -530,5 +533,166 @@ func TestRemovedLegacyFlagsRejected(t *testing.T) {
 		if !strings.Contains(perr.Error(), "unknown flag") {
 			t.Errorf("removed flag %q must yield an unknown-flag error, got: %v", flag, perr)
 		}
+	}
+}
+
+func TestValidate_ACMEChallenge(t *testing.T) {
+	tests := []struct {
+		name    string
+		mut     func(*ServeCmd)
+		wantErr bool
+	}{
+		{name: "le tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeTLSALPN01 }},
+		{name: "gts tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeTLSALPN01 }},
+		{name: "le http-01", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeHTTP01 }},
+		{name: "gts dns-01", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeDNS01 }},
+		{name: "zerossl dns-01", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeDNS01 }},
+		{name: "zerossl tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeTLSALPN01 }, wantErr: true},
+		{name: "le empty", mut: func(c *ServeCmd) { c.ACMEChallengeLE = "" }, wantErr: true},
+		{name: "gts empty", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = "" }, wantErr: true},
+		{name: "zerossl empty", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = "" }, wantErr: true},
+		{name: "le unknown", mut: func(c *ServeCmd) { c.ACMEChallengeLE = "dns-02" }, wantErr: true},
+		{name: "gts unknown", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = "TLS-ALPN-01" }, wantErr: true},
+		{name: "zerossl unknown", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = "http01" }, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_DNSProviderOnlyWithDNS01(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		mut      func(*ServeCmd)
+		wantErr  bool
+	}{
+		{name: "no dns-01 without provider", mut: func(*ServeCmd) {}},
+		{name: "le dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeDNS01 }, wantErr: true},
+		{name: "gts dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeDNS01 }, wantErr: true},
+		{name: "zerossl dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeDNS01 }, wantErr: true},
+		{name: "le dns-01 with provider", provider: "cloudflare", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeDNS01 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEDNSProvider = tc.provider
+			tc.mut(&c)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ACMEHTTPListen(t *testing.T) {
+	tests := []struct {
+		name    string
+		listen  string
+		zerossl string
+		wantErr bool
+	}{
+		{name: "http-01 with port only", listen: ":80", zerossl: ChallengeHTTP01},
+		{name: "http-01 with host and port", listen: "0.0.0.0:8080", zerossl: ChallengeHTTP01},
+		{name: "http-01 malformed", listen: "not-an-addr", zerossl: ChallengeHTTP01, wantErr: true},
+		{name: "http-01 empty", listen: "", zerossl: ChallengeHTTP01, wantErr: true},
+		{name: "no http-01 malformed ignored", listen: "not-an-addr", zerossl: ChallengeDNS01},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEChallengeZeroSSL = tc.zerossl
+			c.ACMEHTTPListen = tc.listen
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestServeCmd_UsesChallenge(t *testing.T) {
+	tests := []struct {
+		name             string
+		le, gts, zerossl string
+		method           string
+		want             bool
+	}{
+		{name: "le only", le: ChallengeDNS01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeDNS01, want: true},
+		{name: "gts only", le: ChallengeHTTP01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeTLSALPN01, want: true},
+		{name: "zerossl only", le: ChallengeTLSALPN01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeHTTP01, want: true},
+		{name: "none", le: ChallengeTLSALPN01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeDNS01, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ServeCmd{ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl}
+			if got := c.UsesChallenge(tc.method); got != tc.want {
+				t.Errorf("UsesChallenge(%q) = %v, want %v", tc.method, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKongDefaults_ACMEChallenge(t *testing.T) {
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S_3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S_3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+
+	newParser := func(cli any) *kong.Kong {
+		t.Helper()
+		parser, err := kong.New(cli, kong.Name("tunneld"), kong.DefaultEnvars("TUNNELD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parser
+	}
+
+	var cli struct {
+		Serve ServeCmd `cmd:""`
+	}
+	if _, err := newParser(&cli).Parse([]string{"serve"}); err != nil {
+		t.Fatalf("parse with defaults failed: %v", err)
+	}
+	if cli.Serve.ACMEChallengeLE != ChallengeTLSALPN01 || cli.Serve.ACMEChallengeGTS != ChallengeTLSALPN01 ||
+		cli.Serve.ACMEChallengeZeroSSL != ChallengeHTTP01 {
+		t.Errorf("challenge defaults = %q/%q/%q", cli.Serve.ACMEChallengeLE, cli.Serve.ACMEChallengeGTS, cli.Serve.ACMEChallengeZeroSSL)
+	}
+	if cli.Serve.ACMEHTTPListen != ":80" {
+		t.Errorf("acme-http-listen default = %q", cli.Serve.ACMEHTTPListen)
+	}
+
+	var bad struct {
+		Serve ServeCmd `cmd:""`
+	}
+	_, err := newParser(&bad).Parse([]string{"serve", "--acme-challenge-zerossl=tls-alpn-01"})
+	if err == nil {
+		t.Fatal("--acme-challenge-zerossl=tls-alpn-01 must be rejected")
+	}
+	if !strings.Contains(err.Error(), `must be one of "dns-01","http-01" but got "tls-alpn-01"`) {
+		t.Errorf("expected kong's enum error, got: %v", err)
 	}
 }

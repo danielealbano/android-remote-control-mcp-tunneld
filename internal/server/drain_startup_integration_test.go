@@ -4,15 +4,24 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 	"net"
+	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -114,8 +124,7 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	meshAddr := occupied.Addr().String()
 	edgeAddr := freeAddr(t)
 
-	// Unreachable ACME (port 1) → the reserved-cert obtain fails fast and starts degraded, so construction
-	// still reaches the listener binds.
+	// Unreachable ACME (port 1).
 	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, meshAddr,
 		"https://127.0.0.1:1/dir", "https://127.0.0.1:1/dir", "https://127.0.0.1:1/dir", nil)
 	if err := cfg.Validate(); err != nil {
@@ -147,57 +156,190 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	_ = reln.Close()
 }
 
-// TestIntegration_StartupBindsAfterConstruction points all three ACME directory URLs at an in-process
-// accept-and-hang listener, so the reserved-cert obtain (a construction step) blocks. A dial to :443 at
-// +500 ms MUST be connection-refused (nothing bound while construction is in flight); cancelling +
-// releasing the hang then lets construction finish and Run return.
-func TestIntegration_StartupBindsAfterConstruction(t *testing.T) {
+func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) (config.ServeCmd, *hangACMEListener, func()) {
+	t.Helper()
 	redisURL := tunneltest.StartValkey(t)
 	s3URL, access, secret := tunneltest.StartMinIO(t)
 	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 
 	hang := newHangACMEListener(t)
-	defer hang.release()
-	edgeAddr := freeAddr(t)
-
-	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, freeAddr(t), freeAddr(t),
 		hang.url(), hang.url(), hang.url(), nil)
+	for _, m := range mutate {
+		m(&cfg)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, cfg, testLogger(), "it-bind") }()
+	go func() { done <- Run(ctx, cfg, testLogger(), "it-pending") }()
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel()
+			hang.release()
+			select {
+			case <-done:
+			case <-time.After(90 * time.Second):
+				t.Error("Run did not return after cancellation")
+			}
+		})
+	}
+	t.Cleanup(stop)
 
-	// +500 ms: construction is still blocked on the reserved-cert ACME obtain (the directory fetch is held
-	// by the hang listener), so NOTHING is bound — a dial to :443 MUST be connection-refused.
-	time.Sleep(500 * time.Millisecond)
-	probe, derr := net.DialTimeout("tcp", edgeAddr, 500*time.Millisecond)
-	if derr == nil {
-		_ = probe.Close()
-		cancel()
-		hang.release()
-		<-done
-		t.Fatal(":443 was bound while reserved-cert construction was still in flight")
+	if !waitBool(5*time.Second, func() bool {
+		c, err := net.DialTimeout("tcp", cfg.Listen, 500*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		closeOrLog(t, c)
+		return true
+	}) {
+		t.Fatal(":443 must accept TCP while reserved-host issuance is still pending")
 	}
-	if !errors.Is(derr, syscall.ECONNREFUSED) {
-		cancel()
-		hang.release()
-		<-done
-		t.Fatalf("pre-construction dial to :443 must be connection-refused, got %v", derr)
+	return cfg, hang, stop
+}
+
+func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
+	cfg, _, stop := startPendingIssuanceServer(t)
+
+	raw, err := net.DialTimeout("tcp", cfg.Listen, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: "unrouted.other.test", InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err := conn.Handshake(); err == nil {
+		t.Fatal("an unrouted SNI must be closed, not served")
+	}
+	closeOrLog(t, raw)
+	if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`,
+		func(v float64) bool { return v >= 1 }); !met {
+		t.Fatalf("an unrouted SNI must be recorded as no-route (no-route = %v, last scrape error: %v)", v, err)
 	}
 
-	// Cancel + release the hang: the ACME obtain fails fast, construction finishes, and because ctx is
-	// already cancelled Run drains and returns.
-	cancel()
-	hang.release()
-	select {
-	case <-done:
-	case <-time.After(90 * time.Second):
-		t.Fatal("Run did not return after cancellation")
+	for _, host := range []string{itEnrollHost, itControlHost} {
+		if ok, err := tunneltest.ServesCertificate(t, cfg.Listen, host); ok || err == nil {
+			t.Fatalf("%s must present no certificate while its issuance is pending (presented=%v, probe error=%v)", host, ok, err)
+		}
 	}
+	stop()
+}
+
+func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
+	now := time.Now()
+	leaves := map[string][]byte{}
+	cfg, hang, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
+		for _, host := range []string{itEnrollHost, itControlHost} {
+			leaves[host] = writeReservedBundle(t, c.ACMEAccountDir, host, now.Add(-150*time.Hour), now.Add(10*time.Hour))
+		}
+	})
+	if !waitBool(30*time.Second, func() bool { return hang.held() > 0 }) {
+		t.Fatal("the renewal of the due cache never reached the (hanging) ACME directory")
+	}
+	for _, host := range []string{itEnrollHost, itControlHost} {
+		leaf := presentedLeaf(t, cfg.Listen, host)
+		if string(leaf) != string(leaves[host]) {
+			t.Fatalf("%s: the cached certificate must be served while its renewal is pending", host)
+		}
+	}
+	stop()
+}
+
+func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
+	cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
+	if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
+		closeOrLog(t, c)
+		t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
+	}
+	stop()
+}
+
+func writeReservedBundle(t *testing.T, accountDir, host string, notBefore, notAfter time.Time) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
+		NotBefore: notBefore, NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := &reservedCerts{dir: filepath.Join(accountDir, "self"), logger: testLogger(), now: time.Now}
+	rc.persist(host,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		store.CertInfo{NotBefore: notBefore, NotAfter: notAfter})
+	return der
+}
+
+func presentedLeaf(t *testing.T, edgeAddr, host string) []byte {
+	t.Helper()
+	var leaf []byte
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", edgeAddr, &tls.Config{
+		ServerName: host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) > 0 {
+				leaf = cs.PeerCertificates[0].Raw
+			}
+			return nil
+		},
+	})
+	if err == nil {
+		if cerr := conn.Close(); cerr != nil {
+			t.Logf("%s: close the probe connection: %v", host, cerr)
+		}
+	}
+	if leaf == nil {
+		t.Fatalf("%s presented no certificate (dial: %v)", host, err)
+	}
+	return leaf
+}
+
+func metricLineValue(internalAddr, series string) (float64, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + internalAddr + "/metrics")
+	if err != nil {
+		return 0, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err := errors.Join(err, resp.Body.Close()); err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("metrics status %d", resp.StatusCode)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, series+" ") {
+			return strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, series)), 64)
+		}
+	}
+	return 0, nil
+}
+
+func waitMetric(d time.Duration, internalAddr, series string, cond func(float64) bool) (float64, bool, error) {
+	var v float64
+	var err error
+	met := waitBool(d, func() bool {
+		v, err = metricLineValue(internalAddr, series)
+		return err == nil && cond(v)
+	})
+	return v, met, err
 }
 
 // dialFrontend opens a frontend TLS connection to the edge for fqdn (verified against roots) and returns
@@ -238,7 +380,7 @@ func s3GetObject(t *testing.T, endpoint, access, secret, bucket, key string) []b
 }
 
 // hangACMEListener accepts TCP connections and holds them without responding, so an ACME directory fetch
-// pointed at it blocks in its TLS handshake — keeping server construction deliberately in flight.
+// pointed at it blocks in its TLS handshake.
 // release() closes the listener and every held connection, letting the fetch fail fast.
 type hangACMEListener struct {
 	ln    net.Listener
@@ -276,6 +418,12 @@ func (h *hangACMEListener) accept() {
 }
 
 func (h *hangACMEListener) url() string { return "https://" + h.ln.Addr().String() + "/dir" }
+
+func (h *hangACMEListener) held() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.conns)
+}
 
 func (h *hangACMEListener) release() {
 	h.mu.Lock()

@@ -11,12 +11,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -65,14 +68,16 @@ func emptyFile(t *testing.T) string {
 
 // itEnv is a running integration server plus its infra handles.
 type itEnv struct {
-	edgeAddr string
-	pebble   *tunneltest.PebbleEnv
-	s3URL    string
-	s3Access string
-	s3Secret string
-	rdb      *redis.Client
-	st       *store.S3Store
-	drain    func() error // cancels Run and waits for it to return (idempotent; also run by t.Cleanup)
+	edgeAddr     string
+	internalAddr string
+	acmeHTTPAddr string
+	pebble       *tunneltest.PebbleEnv
+	s3URL        string
+	s3Access     string
+	s3Secret     string
+	rdb          *redis.Client
+	st           *store.S3Store
+	drain        func() error // cancels Run and waits for it to return (idempotent; also run by t.Cleanup)
 }
 
 // itServeConfig builds a valid ServeCmd for the integration server against the given infra endpoints.
@@ -104,6 +109,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		ACMEDirLE: acmeDirLE, ACMEDirGTS: acmeDirGTS, ACMEDirZeroSSL: acmeDirZeroSSL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
 		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEChallengeLE: config.ChallengeDNS01, ACMEChallengeGTS: config.ChallengeDNS01, ACMEChallengeZeroSSL: config.ChallengeDNS01,
 		ACMEDNSResolvers: dnsResolvers, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
 		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
@@ -120,8 +126,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 }
 
 // startIntegrationServer stands up Valkey + MinIO + Pebble/challtestsrv + the DNS shim, runs the real
-// server.Run on loopback in attestation-optional mode against Pebble, and waits until it is ready
-// (construction, incl. the reserved-host cert obtain, has finished and the node heartbeat has landed).
+// server.Run on loopback in attestation-optional mode against Pebble, and waits until it is ready.
 func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itEnv {
 	t.Helper()
 	redisURL := tunneltest.StartValkey(t)
@@ -145,9 +150,71 @@ func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itE
 		t.Fatalf("config invalid: %v", err)
 	}
 
+	env, ok := runIntegrationServer(t, cfg, pebble, testLogger(), redisURL, s3URL, access, secret)
+	if !ok {
+		t.Fatal("integration server exited before serving")
+	}
+	return env
+}
+
+func startChallengeServer(t *testing.T, method string, mutate ...func(*config.ServeCmd)) (*itEnv, *tunneltest.LogCounter) {
+	t.Helper()
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+	for range 5 {
+		pebble := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
+		t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
+		cfg := itServeConfig(t, redisURL, s3URL, access, secret,
+			net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.TLSPort)), freeAddr(t),
+			pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, nil)
+		cfg.ACMEDNSProvider = ""
+		cfg.ACMEChallengeLE, cfg.ACMEChallengeGTS, cfg.ACMEChallengeZeroSSL = method, method, config.ChallengeHTTP01
+		cfg.ACMEHTTPListen = net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.HTTPPort))
+		for _, m := range mutate {
+			m(&cfg)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("config invalid: %v", err)
+		}
+		logs := tunneltest.NewLogCounter(testLogger().Handler())
+		if env, ok := runIntegrationServer(t, cfg, pebble, logs.Logger(), redisURL, s3URL, access, secret); ok {
+			return env, logs
+		}
+	}
+	t.Fatal("challenge server never bound Pebble's validation ports after 5 attempts")
+	return nil, nil
+}
+
+func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.PebbleEnv, logger *slog.Logger,
+	redisURL, s3URL, access, secret string) (*itEnv, bool) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Run(ctx, cfg, testLogger(), "it") }()
+	go func() { done <- Run(ctx, cfg, logger, "it") }()
+
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		enrollOK, enrollErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.EnrollHost)
+		controlOK, controlErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.ControlHost)
+		if enrollOK && controlOK {
+			break
+		}
+		select {
+		case runErr := <-done:
+			cancel()
+			t.Logf("integration server exited before serving: %v", runErr)
+			return nil, false
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			runErr := <-done
+			t.Fatalf("integration server never served both reserved-host certificates (last probe: %v; run: %v)", errors.Join(enrollErr, controlErr), runErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 
 	// drain cancels the server and waits for Run to return, AT MOST ONCE: both t.Cleanup and a test that
 	// exercises shutdown explicitly may call it — the second call is a no-op returning the recorded result.
@@ -173,17 +240,6 @@ func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itE
 	opts, _ := redis.ParseURL(redisURL)
 	rdb := redis.NewClient(opts)
 	t.Cleanup(func() { _ = rdb.Close() })
-
-	// Readiness: the node heartbeat writes a key only AFTER construction (which includes the synchronous
-	// reserved-host cert obtain against Pebble) completes. Generous timeout for container warm-up + the
-	// two reserved-cert ACME orders.
-	if !waitBool(120*time.Second, func() bool {
-		keys, _ := rdb.Keys(context.Background(), "*").Result()
-		return len(keys) > 0
-	}) {
-		t.Fatal("server never became ready (reserved-host cert obtain may have failed)")
-	}
-
 	st, err := store.NewS3Store(context.Background(), store.S3Config{
 		Endpoint: s3URL, Region: "us-east-1", Bucket: itBucket,
 		AccessKey: access, SecretKey: secret, ForcePathStyle: true,
@@ -191,7 +247,10 @@ func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itE
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &itEnv{edgeAddr: edgeAddr, pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st, drain: drain}
+	return &itEnv{
+		edgeAddr: cfg.Listen, internalAddr: cfg.InternalListen, acmeHTTPAddr: cfg.ACMEHTTPListen,
+		pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st, drain: drain,
+	}, true
 }
 
 // TestRun_NamePrefixLowercased verifies the runtime server.Run normalization: an UPPERCASE --name-prefix

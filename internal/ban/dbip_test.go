@@ -45,7 +45,7 @@ func TestLoad_GeoBanCarriesCountrySource(t *testing.T) {
 	csv := writeBan(t, dir, "dbip.csv", dbipFixture)
 	f := writeBan(t, dir, "bans.txt", "# header comment\ncountry XX\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, csv, nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, csv, nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	src, ok := e.Match(mustAddr("1.0.0.5"))
@@ -99,7 +99,7 @@ func TestCountryExpandsAndMatches(t *testing.T) {
 	csv := writeBan(t, dir, "dbip.csv", dbipFixture)
 	f := writeBan(t, dir, "bans.txt", "country XX\n")
 	e := NewEngine()
-	if err := e.Load([]string{f}, csv, nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, csv, nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	src, ok := e.Match(mustAddr("1.0.0.5"))
@@ -119,7 +119,7 @@ func TestMissingCSVSkipsCountryOnly(t *testing.T) {
 	f := writeBan(t, dir, "bans.txt", "country XX\nip 5.5.5.5\n")
 	e := NewEngine()
 	// No CSV configured → country entries skipped, ip still enforced.
-	if err := e.Load([]string{f}, "", nil, discardLog()); err != nil {
+	if err := e.Load([]string{f}, "", nil, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := e.Match(mustAddr("5.5.5.5")); !ok {

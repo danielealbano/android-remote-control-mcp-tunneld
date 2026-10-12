@@ -85,10 +85,17 @@ type replicaOpts struct {
 	attestRootURL    string
 	attestStatusURL  string
 	attestSignerFile string
+
+	edgeAddr         string
+	acmeHTTPListen   string
+	challengeLE      string
+	challengeGTS     string
+	challengeZeroSSL string
+	logger           *slog.Logger
 }
 
 // startReplica runs a real server.Run on loopback against the shared infra and returns its public edge
-// address. It waits until the replica is serving (internal /healthz is 200). freeAddr probes-and-closes
+// address. It waits until the replica is serving. freeAddr probes-and-closes
 // ports, so server.Run's bind can lose a race to another process — and the internal-listener bind is now
 // fatal — so a boot that exits before serving is retried with fresh ports (bounded).
 func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
@@ -102,14 +109,21 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 	return ""
 }
 
-// runReplicaOnce attempts one replica boot on fresh freeAddr ports. It returns (edgeAddr, true) once the
+// runReplicaOnce attempts one replica boot. It returns (edgeAddr, true) once the
 // replica is serving, or ("", false) when server.Run exits before becoming ready (a freeAddr port race —
 // the caller retries with fresh ports).
 func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, bool) {
 	t.Helper()
 	edgeAddr := freeAddr(t)
+	if opts.edgeAddr != "" {
+		edgeAddr = opts.edgeAddr
+	}
 	meshAddr := freeAddr(t)
 	internalAddr := freeAddr(t)
+	acmeHTTPListen := freeAddr(t)
+	if opts.acmeHTTPListen != "" {
+		acmeHTTPListen = opts.acmeHTTPListen
+	}
 
 	leDir := inf.pebble.DirectoryURL
 	if opts.acmeDirLE != "" {
@@ -127,6 +141,21 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	bandwidth := "10mbit"
 	if opts.bandwidth != "" {
 		bandwidth = opts.bandwidth
+	}
+
+	challengeLE, challengeGTS, challengeZeroSSL := config.ChallengeDNS01, config.ChallengeDNS01, config.ChallengeDNS01
+	if opts.challengeLE != "" {
+		challengeLE = opts.challengeLE
+	}
+	if opts.challengeGTS != "" {
+		challengeGTS = opts.challengeGTS
+	}
+	if opts.challengeZeroSSL != "" {
+		challengeZeroSSL = opts.challengeZeroSSL
+	}
+	logger := testOutputLogger()
+	if opts.logger != nil {
+		logger = opts.logger
 	}
 
 	// Attestation: default is the dummy unreachable URLs + optional mode. When a real root URL is given,
@@ -156,6 +185,8 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		ACMEDirLE: leDir, ACMEDirGTS: inf.pebble.DirectoryURL, ACMEDirZeroSSL: inf.pebble.DirectoryURL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
 		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEChallengeLE: challengeLE, ACMEChallengeGTS: challengeGTS, ACMEChallengeZeroSSL: challengeZeroSSL,
+		ACMEHTTPListen:   acmeHTTPListen,
 		ACMEDNSResolvers: []string{inf.pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
 		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
@@ -173,7 +204,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- server.Run(ctx, cfg, discardLogger(), "e2e") }()
+	go func() { done <- server.Run(ctx, cfg, logger, "e2e") }()
 
 	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
@@ -195,6 +226,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 					t.Error("replica did not drain within 20s")
 				}
 			})
+			tunneltest.WaitReservedHosts(t, edgeAddr, []string{e2eEnrollHost, e2eControlHost}, 120*time.Second)
 			inf.internal[edgeAddr] = internalAddr
 			return edgeAddr, true
 		}
@@ -202,7 +234,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	}
 	cancel()
 	<-done
-	t.Fatal("replica never became ready (reserved-host cert obtain may have failed)")
+	t.Fatal("replica never became ready")
 	return "", false
 }
 
@@ -464,6 +496,66 @@ func TestE2E_Eviction(t *testing.T) {
 	}
 }
 
+func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
+	const alpnServed, httpServed = "acme tls-alpn-01 challenge served", "acme http-01 challenge served"
+	tests := []struct {
+		method         string
+		served, unused string
+	}{
+		{method: config.ChallengeTLSALPN01, served: alpnServed, unused: httpServed},
+		{method: config.ChallengeHTTP01, served: httpServed, unused: alpnServed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method, func(t *testing.T) {
+			inf := startE2EInfra(t)
+			logsA, logsB := tunneltest.NewLogCounter(testOutputLogger().Handler()), tunneltest.NewLogCounter(testOutputLogger().Handler())
+			var edgeB string
+			for range 5 {
+				p := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
+				inf.pebble = p
+				t.Setenv("LEGO_CA_CERTIFICATES", p.MinicaFile)
+				if addr, ok := inf.runReplicaOnce(t, replicaOpts{
+					edgeAddr:       net.JoinHostPort(p.HostIP, strconv.Itoa(p.TLSPort)),
+					acmeHTTPListen: net.JoinHostPort(p.HostIP, strconv.Itoa(p.HTTPPort)),
+					challengeLE:    tc.method, challengeGTS: tc.method, challengeZeroSSL: config.ChallengeHTTP01,
+					logger: logsB.Logger(),
+				}); ok {
+					edgeB = addr
+					break
+				}
+			}
+			if edgeB == "" {
+				t.Fatal("replica B never bound Pebble's validation ports after 5 attempts")
+			}
+			servedByBBeforeA := logsB.Count(tc.served)
+
+			edgeA := inf.startReplica(t, replicaOpts{
+				challengeLE: tc.method, challengeGTS: tc.method, challengeZeroSSL: config.ChallengeHTTP01,
+				logger: logsA.Logger(),
+			})
+			_, ident := echoPhone(t, inf, edgeA, edgeA)
+			fqdn := ident.Name + "." + e2eTunnelDomain
+			var lastErr error
+			if !waitBool(30*time.Second, func() bool {
+				lastErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+				return lastErr == nil
+			}) {
+				t.Fatalf("frontend roundtrip via replica A never succeeded: %v", lastErr)
+			}
+
+			if logsB.Count(tc.served) <= servedByBBeforeA {
+				t.Fatalf("replica B answered none of replica A's %s validations", tc.method)
+			}
+			if n := logsB.Count(tc.unused); n != 0 {
+				t.Fatalf("replica B answered %d validations with the other method", n)
+			}
+			if a, b := logsA.Count(tc.served), logsA.Count(tc.unused); a != 0 || b != 0 {
+				t.Fatalf("replica A answered validations itself (%d/%d); every validation must reach replica B", a, b)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 func echoOn(conn *tls.Conn) error {
@@ -501,7 +593,9 @@ func emptyFile(t *testing.T) string {
 	return p
 }
 
-func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testOutputLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 func writeCA(t *testing.T) (certPath, keyPath string) {
 	t.Helper()

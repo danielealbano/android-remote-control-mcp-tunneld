@@ -1,9 +1,8 @@
-//go:build integration || e2e
+//go:build integration || e2e || staging
 
-// SHARED testcontainers harness for the integration (//go:build integration) and e2e (//go:build e2e)
-// tiers: ephemeral Valkey, MinIO (a plain-S3 stand-in), and a hermetic ACME test CA (Pebble +
-// pebble-challtestsrv), each registered for teardown via t.Cleanup. It NEVER touches real Let's Encrypt /
-// GTS / ZeroSSL (user decision: the automated tiers are hermetic). Image tags are pinned constants.
+// SHARED testcontainers harness: ephemeral Valkey, MinIO (a plain-S3 stand-in), and a hermetic ACME test
+// CA (Pebble + pebble-challtestsrv), each registered for teardown via t.Cleanup. It NEVER touches real
+// Let's Encrypt / GTS / ZeroSSL. Image tags are pinned constants.
 
 package tunneltest
 
@@ -28,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+	"github.com/moby/moby/client"
 	"github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -213,19 +213,117 @@ type PebbleEnv struct {
 	// ChallMgmtURL is challtestsrv's management API base (http://host:port) used to publish/clear TXT
 	// records (POST /set-txt, /clear-txt).
 	ChallMgmtURL string
+	HostIP       string
+	HTTPPort     int
+	TLSPort      int
+}
+
+type pebbleSetup struct{ hostValidation bool }
+
+type PebbleOption func(*pebbleSetup) error
+
+func WithHostValidation() PebbleOption {
+	return func(s *pebbleSetup) error {
+		s.hostValidation = true
+		return nil
+	}
+}
+
+const pebbleHostConfigPath = "/test/config/pebble-host-validation.json"
+
+func pebbleHostValidationConfig(t *testing.T, httpPort, tlsPort int) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"pebble": map[string]any{
+		"listenAddress":                  "0.0.0.0:14000",
+		"managementListenAddress":        "0.0.0.0:15000",
+		"certificate":                    "test/certs/localhost/cert.pem",
+		"privateKey":                     "test/certs/localhost/key.pem",
+		"httpPort":                       httpPort,
+		"tlsPort":                        tlsPort,
+		"ocspResponderURL":               "",
+		"externalAccountBindingRequired": false,
+		"retryAfter":                     map[string]any{"authz": 3, "order": 5},
+		"keyAlgorithm":                   "ecdsa",
+		"profiles": map[string]any{
+			"default":    map[string]any{"description": "default", "validityPeriod": 7776000},
+			"shortlived": map[string]any{"description": "shortlived", "validityPeriod": 518400},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("pebble host-validation config: %v", err)
+	}
+	return raw
+}
+
+func networkGateway(t *testing.T, nw *testcontainers.DockerNetwork) string {
+	t.Helper()
+	ctx := context.Background()
+	cli, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+	defer func() {
+		if err := cli.Close(); err != nil {
+			t.Logf("close the docker client: %v", err)
+		}
+	}()
+	res, err := cli.NetworkInspect(ctx, nw.ID, client.NetworkInspectOptions{})
+	if err != nil {
+		t.Fatalf("inspect network %s: %v", nw.Name, err)
+	}
+	for _, c := range res.Network.IPAM.Config {
+		if c.Gateway.Is4() {
+			return c.Gateway.String()
+		}
+	}
+	t.Fatalf("network %s has no IPv4 gateway", nw.Name)
+	return ""
+}
+
+func freePortOn(t *testing.T, ip string) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
+	if err != nil {
+		t.Fatalf("free port on %s: %v", ip, err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("release port probe on %s: %v", ip, err)
+	}
+	return port
 }
 
 // StartPebble starts Pebble + pebble-challtestsrv on a shared network and returns a fully-wired
 // PebbleEnv. Pebble validates DNS-01 by querying challtestsrv (via the -dnsserver flag).
-func StartPebble(t *testing.T) *PebbleEnv {
+func StartPebble(t *testing.T, opts ...PebbleOption) *PebbleEnv {
 	t.Helper()
+	var setup pebbleSetup
+	for _, opt := range opts {
+		if err := opt(&setup); err != nil {
+			t.Fatalf("pebble option: %v", err)
+		}
+	}
 	nw := newNetwork(t)
+	defaultIPv4 := "127.0.0.1"
+	pebbleConfig := "/test/config/pebble-config.json"
+	var files []testcontainers.ContainerFile
+	var hostIP string
+	var httpPort, tlsPort int
+	if setup.hostValidation {
+		hostIP = networkGateway(t, nw)
+		httpPort, tlsPort = freePortOn(t, hostIP), freePortOn(t, hostIP)
+		defaultIPv4 = hostIP
+		pebbleConfig = pebbleHostConfigPath
+		files = []testcontainers.ContainerFile{{
+			Reader: bytes.NewReader(pebbleHostValidationConfig(t, httpPort, tlsPort)), ContainerFilePath: pebbleHostConfigPath, FileMode: 0o644,
+		}}
+	}
 
 	// challtestsrv: DNS mock on 8053 (answers Pebble's validation queries) + management API on 8055.
 	chal := startContainer(t, testcontainers.ContainerRequest{
 		Image:          challtestsrvImage,
 		ExposedPorts:   []string{"8053/tcp", "8053/udp", "8055/tcp"},
-		Cmd:            []string{"-defaultIPv6", "", "-defaultIPv4", "127.0.0.1"},
+		Cmd:            []string{"-defaultIPv6", "", "-defaultIPv4", defaultIPv4},
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"challtestsrv"}},
 		WaitingFor: wait.ForAll(
@@ -240,7 +338,8 @@ func StartPebble(t *testing.T) *PebbleEnv {
 	pebble := startContainer(t, testcontainers.ContainerRequest{
 		Image:        pebbleImage,
 		ExposedPorts: []string{"14000/tcp", "15000/tcp"},
-		Cmd:          []string{"-config", "/test/config/pebble-config.json", "-dnsserver", "challtestsrv:8053"},
+		Cmd:          []string{"-config", pebbleConfig, "-dnsserver", "challtestsrv:8053"},
+		Files:        files,
 		Env: map[string]string{
 			"PEBBLE_VA_NOSLEEP":      "1",
 			"PEBBLE_WFE_NONCEREJECT": "0",
@@ -267,6 +366,9 @@ func StartPebble(t *testing.T) *PebbleEnv {
 		IssuingRootsPEM: issuingRootsPEM,
 		DNSResolver:     endpoint(t, chal, "8053/udp"),
 		ChallMgmtURL:    "http://" + endpoint(t, chal, "8055/tcp"),
+		HostIP:          hostIP,
+		HTTPPort:        httpPort,
+		TLSPort:         tlsPort,
 	}
 }
 

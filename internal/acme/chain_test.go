@@ -1,9 +1,16 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,14 +40,33 @@ func (f *fakeCA) shouldRenew(_ context.Context, cur store.CertInfo, now time.Tim
 }
 func (f *fakeCA) id() string { return f.caID }
 
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func closeOrLog(t *testing.T, c io.Closer) {
+	t.Helper()
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Logf("close %T: %v", c, err)
+	}
+}
+
 func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
 	t.Helper()
 	mr := miniredis.RunT(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	return newChainOn(t, mr, cfg, cas...)
+}
+
+func newChainOn(t *testing.T, mr *miniredis.Miniredis, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
+	t.Helper()
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
 	lim := limit.NewLimiter(rdb, 1, 1, 1, time.Hour)
 	lim.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	cfg.Limiter = lim
+	if cfg.Logger == nil {
+		cfg.Logger = testLogger()
+	}
 	if cfg.CooldownDefault == 0 {
 		cfg.CooldownDefault = time.Hour
 	}
@@ -275,5 +301,186 @@ func TestShortRetryAfterHonoredAsIs(t *testing.T) {
 	}
 	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d > 30*time.Second {
 		t.Fatalf("LE cooldown must be the honored 30s, got %s", d)
+	}
+}
+
+type recordingChainRecorder struct {
+	mu        sync.Mutex
+	issues    []string
+	cooldowns []string
+}
+
+func (r *recordingChainRecorder) ACMECooldown(ca string) {
+	r.mu.Lock()
+	r.cooldowns = append(r.cooldowns, ca)
+	r.mu.Unlock()
+}
+
+func (r *recordingChainRecorder) ACMEIssue(ca, result string) {
+	r.mu.Lock()
+	r.issues = append(r.issues, ca+" "+result)
+	r.mu.Unlock()
+}
+
+func (r *recordingChainRecorder) ACMERenew(string, string) {}
+
+func assertNoCAFailureState(t *testing.T, lim *limit.Limiter, ca string) {
+	t.Helper()
+	ctx := context.Background()
+	if cool, err := lim.CACooldown(ctx, ca); err != nil || cool != 0 {
+		t.Fatalf("%s cooldown = %s (err %v), want none", ca, cool, err)
+	}
+	if n, err := lim.BumpCAFailures(ctx, ca, time.Hour); err != nil || n != 1 {
+		t.Fatalf("%s failure streak before this probe = %d (err %v), want 0", ca, n-1, err)
+	}
+}
+
+func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
+	le := &fakeCA{caID: CALetsEncrypt, err: local(localChallengeRetry, ErrChallengePending)}
+	gts := &fakeCA{caID: CAGTS}
+	rec := &recordingChainRecorder{}
+	ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+	_, _, err := ch.Obtain(context.Background(), nil, "name")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassRateLimited || ie.Retry != localChallengeRetry {
+		t.Fatalf("error = %v, want rate-limited with Retry %s", err, localChallengeRetry)
+	}
+	if gts.calls != 0 {
+		t.Fatalf("the chain must stop on a local error, but GTS was called %d times", gts.calls)
+	}
+	if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+		t.Fatalf("a local error must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+	}
+	assertNoCAFailureState(t, lim, CALetsEncrypt)
+}
+
+type cancellingCA struct {
+	caID   string
+	cancel context.CancelFunc
+	err    error
+	calls  int
+}
+
+func (c *cancellingCA) obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	c.calls++
+	c.cancel()
+	if c.err != nil {
+		return nil, store.CertInfo{}, c.err
+	}
+	return nil, store.CertInfo{}, transient(ctx.Err())
+}
+
+func (c *cancellingCA) shouldRenew(context.Context, store.CertInfo, time.Time) (bool, time.Time, error) {
+	return false, time.Time{}, nil
+}
+
+func (c *cancellingCA) id() string { return c.caID }
+
+func TestChain_StopsWhenContextDone(t *testing.T) {
+	t.Run("cancelled before the call", func(t *testing.T) {
+		le := &fakeCA{caID: CALetsEncrypt}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if le.calls != 0 || gts.calls != 0 || len(rec.issues) != 0 {
+			t.Fatalf("no CA may be tried: le=%d gts=%d issues=%v", le.calls, gts.calls, rec.issues)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("cancelled while the first CA runs", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		le := &cancellingCA{caID: CALetsEncrypt, cancel: cancel}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if le.calls != 1 || gts.calls != 0 {
+			t.Fatalf("only the in-flight CA may have run: le=%d gts=%d", le.calls, gts.calls)
+		}
+		if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+			t.Fatalf("an interrupted attempt must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("local error while the ctx is cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		le := &cancellingCA{caID: CALetsEncrypt, cancel: cancel, err: local(localChallengeRetry, ErrChallengePending)}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		_, _, err := ch.Obtain(ctx, nil, "name")
+		var ie *IssuerError
+		if !errors.Is(err, context.Canceled) || !errors.As(err, &ie) || ie.Class == ClassLocal {
+			t.Fatalf("error = %v, want a context.Canceled error that is not of class %s", err, ClassLocal)
+		}
+		if !strings.Contains(err.Error(), ErrChallengePending.Error()) {
+			t.Fatalf("error = %v, want the interrupted CA order's error carried in its text", err)
+		}
+		if gts.calls != 0 || len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+			t.Fatalf("an interrupted attempt must record nothing: gts=%d issues=%v cooldowns=%v", gts.calls, rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+}
+
+func TestChain_LogsEachCAFailure(t *testing.T) {
+	var buf bytes.Buffer
+	le := &fakeCA{caID: CALetsEncrypt, err: rateLimited(0, errors.New("le refused the order"))}
+	gts := &fakeCA{caID: CAGTS, err: transient(errors.New("gts unreachable"))}
+	zs := &fakeCA{caID: CAZeroSSL}
+	ch, _ := newChain(t, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))}, le, gts, zs)
+	if _, _, err := ch.Obtain(context.Background(), nil, "name"); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`msg="acme CA order failed" ca=letsencrypt name=name class=rate-limited err="acme: rate limited: le refused the order"`,
+		`msg="acme CA order failed" ca=gts name=name class=transient err="acme: transient: gts unreachable"`,
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Fatalf("log is missing %s; log = %q", want, buf.String())
+		}
+	}
+}
+
+func TestChain_LogsBookkeepingErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want []string
+	}{
+		{name: "failed order", err: transient(errors.New("down")), want: []string{
+			"acme CA cooldown check failed", "acme CA failure-streak bump failed", "acme CA cooldown write failed",
+		}},
+		{name: "rate-limited order", err: rateLimited(time.Minute, errors.New("slow down")), want: []string{
+			"acme CA cooldown check failed", "acme CA cooldown write failed",
+		}},
+		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			mr := miniredis.RunT(t)
+			ch, _ := newChainOn(t, mr, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))},
+				&fakeCA{caID: CALetsEncrypt, err: tc.err})
+			mr.Close()
+			_, _, err := ch.Obtain(context.Background(), nil, "name")
+			if (err == nil) != (tc.err == nil) {
+				t.Fatalf("Obtain error = %v, want error %v", err, tc.err != nil)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), `msg="`+want) {
+					t.Fatalf("log is missing %q; log = %q", want, buf.String())
+				}
+			}
+		})
 	}
 }

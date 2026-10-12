@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +20,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func testLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 // fakeNodeSrc is a NodeSource test double for the /api/v1/admin/nodes handler.
 type fakeNodeSrc struct {
@@ -95,7 +97,7 @@ func setup(t *testing.T) (*Metrics, *PromRecorder, *fakeTunnelSrc, *miniredis.Mi
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	m := NewMetrics()
-	rec := NewPromRecorder(m, caplog.New(discardLog()), newFakeSink(), discardLog())
+	rec := NewPromRecorder(m, caplog.New(testLog()), newFakeSink(), testLog())
 	return m, rec, &fakeTunnelSrc{}, mr, rdb
 }
 
@@ -103,7 +105,7 @@ func TestAdminTunnelsHandler(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
 	store.names = []string{"t1", "t2"}
 	store.next = 7
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/tunnels/list?cursor=0&count=100", nil))
@@ -125,7 +127,7 @@ func TestAdminTunnelsHandler(t *testing.T) {
 func TestAdminTunnelsStatsHandler(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
 	store.stats = map[string]admin.TunnelStats{"t1": {Node: "n1", BytesIn: 100, Conc: 2, BwIn: 10}}
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 
 	// POST {names} → merged stats.
 	rr := httptest.NewRecorder()
@@ -173,7 +175,7 @@ func TestRunFlusherCadenceAndFinalFlush(t *testing.T) {
 
 func TestHealthz200WhenRedisUp(t *testing.T) {
 	m, _, store, _, rdb := setup(t)
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != http.StatusOK {
@@ -184,7 +186,7 @@ func TestHealthz200WhenRedisUp(t *testing.T) {
 func TestHealthz503WhenRedisDown(t *testing.T) {
 	m, _, store, mr, rdb := setup(t)
 	mr.Close()
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
 	if rr.Code != http.StatusServiceUnavailable {
@@ -199,7 +201,7 @@ func TestMetricsEndpointExposesFamilies(t *testing.T) {
 	rec.Bytes("t", "in", 10)
 	rec.AttestVerify("ok")
 	rec.QuotaExhausted("t", "day")
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -216,7 +218,7 @@ func TestMetricsEndpointExposesFamilies(t *testing.T) {
 func TestNoPerTunnelMetricLabels(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Bytes("secret-tunnel-name", "in", 100)
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -231,7 +233,7 @@ func TestNoPerTunnelMetricLabels(t *testing.T) {
 func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.MeshPool("10.0.0.2:9443", 4) // populate the mesh-pool gauge
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -251,7 +253,7 @@ func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("stream-cap", "t", "1.1.1.1")
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="stream-cap"} 1`) {
@@ -259,10 +261,26 @@ func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	}
 }
 
+func TestRejectionIncrementsACMEHTTPMiss(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	var buf bytes.Buffer
+	rec := NewPromRecorder(m, caplog.New(testLog()), newFakeSink(), slog.New(slog.NewTextHandler(&buf, nil)))
+	rec.Reject("acme-http-miss", "", "192.0.2.1")
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="acme-http-miss"} 1`) {
+		t.Errorf("acme-http-miss counter not incremented:\n%s", rr.Body.String())
+	}
+	if strings.Contains(buf.String(), "unregistered rejection reason") {
+		t.Errorf("acme-http-miss must be a registered reason; log = %q", buf.String())
+	}
+}
+
 func TestRejectRefusesUnregisteredReason(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("made-up-reason", "t", "1.1.1.1")
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if strings.Contains(rr.Body.String(), "made-up-reason") {
@@ -274,7 +292,7 @@ func TestEnrollmentResultLabelled(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.EnrollmentResult("ok")
 	rec.EnrollmentResult("unauthorized")
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	body := rr.Body.String()
@@ -337,7 +355,7 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 	rec.Reject("no-route", "ATTACKER-CONTROLLED-sni", "203.0.113.7")
 
 	// The reason counter is still incremented (observed via the /metrics endpoint).
-	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, discardLog())
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
 	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="no-route"} 1`) {
@@ -426,7 +444,7 @@ func TestHandler_AdminNodes(t *testing.T) {
 	nodes := &fakeNodeSrc{nodes: map[string]router.NodeInfo{
 		"n1": {Advertise: "10.0.0.1:9443", Hostname: "host-1", Version: "v1"},
 	}}
-	h := Handler(m.Registry(), rdb, store, nodes, discardLog())
+	h := Handler(m.Registry(), rdb, store, nodes, testLog())
 
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/api/v1/admin/nodes", nil))

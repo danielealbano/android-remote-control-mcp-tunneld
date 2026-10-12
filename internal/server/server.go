@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ban"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
@@ -57,7 +58,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 	rdb := redis.NewClient(redisOpts)
-	defer func() { _ = rdb.Close() }()
+	defer closeLogged(logger, "valkey client", rdb)
 
 	nodeID := newNodeID()
 	nodeHost := hostname()
@@ -87,6 +88,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
 	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle,
 		limit.WithLogger(logger), limit.WithPacketCap(int64(cfg.LimitPackets)))
+	chal := acme.NewChallengeStore(rdb, acme.ChallengeTTL)
 
 	// Durable store.
 	st, err := store.NewS3Store(ctx, store.S3Config{
@@ -115,9 +117,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return err
 	}
 
-	// ACME chain (lazy self-healing lego clients; DNS-01 provider selected by --acme-dns-provider). An
+	// ACME chain (lazy self-healing lego clients). An
 	// existing-but-unreadable account key aborts startup (never overwrites it).
-	chain, err := buildACMEChain(cfg, lim, rec, logger)
+	chain, err := buildACMEChain(cfg, lim, chal, rec, logger)
 	if err != nil {
 		return err
 	}
@@ -170,16 +172,18 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout, DialBackTimeout: cfg.LimitDialBackTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
 		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
+		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, edgeAddr)
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
 	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,
 		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, adminCtl)
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
-	reserved := newReservedCerts(ctx, cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, cfg.ACMERenewMargin, logger)
+	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
+		chain.ObtainSelf, chain.ShouldRenew, chal, logger)
+	reserved.loadCache()
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
@@ -215,8 +219,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux}
 
-	// Bind the public + mesh listeners LAST: every fallible construction step above (reserved-cert
-	// issuance) has now succeeded, so no socket is ever left bound
+	var acmeHTTPSrv *http.Server
+	if cfg.UsesChallenge(config.ChallengeHTTP01) {
+		acmeHTTPSrv = &http.Server{
+			Handler:           acme.HTTPChallengeHandler(chal, func(ip string) { rec.Reject("acme-http-miss", "", ip) }, logger),
+			ReadHeaderTimeout: readHeaderTimeout, ReadTimeout: readHeaderTimeout, WriteTimeout: readHeaderTimeout,
+			IdleTimeout: acmeHTTPIdleTimeout, MaxHeaderBytes: acmeHTTPMaxHeaderBytes,
+			DisableGeneralOptionsHandler: true,
+		}
+		acmeHTTPSrv.SetKeepAlivesEnabled(false)
+	}
+
+	// Bind the public + mesh listeners LAST: every fallible construction step above
+	// has now succeeded, so no socket is ever left bound
 	// but unserved. A mesh-bind failure closes the already-bound raw listener before returning.
 	rawLn, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -224,16 +239,26 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 	meshLn, err := net.Listen("tcp", cfg.MeshListen)
 	if err != nil {
-		_ = rawLn.Close() // never leak a bound listener on a construction error
+		closeLogged(logger, "raw listener", rawLn) // never leak a bound listener on a construction error
 		return fmt.Errorf("mesh listen %s: %w", cfg.MeshListen, err)
 	}
 	// The internal (metrics/healthz/admin) listener binds HERE too — a bind failure must be fatal, not a
 	// silent Warn that leaves health checking and metrics dead forever.
 	internalLn, err := net.Listen("tcp", cfg.InternalListen)
 	if err != nil {
-		_ = rawLn.Close()
-		_ = meshLn.Close()
+		closeLogged(logger, "raw listener", rawLn)
+		closeLogged(logger, "mesh listener", meshLn)
 		return fmt.Errorf("internal listen %s: %w", cfg.InternalListen, err)
+	}
+	var acmeHTTPLn net.Listener
+	if acmeHTTPSrv != nil {
+		acmeHTTPLn, err = net.Listen("tcp", cfg.ACMEHTTPListen)
+		if err != nil {
+			closeLogged(logger, "raw listener", rawLn)
+			closeLogged(logger, "mesh listener", meshLn)
+			closeLogged(logger, "internal listener", internalLn)
+			return fmt.Errorf("acme http listen %s: %w", cfg.ACMEHTTPListen, err)
+		}
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -256,6 +281,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Edge accept loop.
 	g.Go(func() error { ed.Serve(gctx, rawLn); return nil })
+	var guarded *guardedListener
+	if acmeHTTPSrv != nil {
+		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate, logger),
+			ed.Admit, ed.Release, rec.Reject, logger)
+		g.Go(func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") })
+	}
 
 	// Recorder flusher.
 	g.Go(func() error { return rec.RunFlusher(gctx, 5*time.Second) })
@@ -274,7 +305,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
 	})
 	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
-	g.Go(func() error { return reserved.runRenewal(gctx, renewalScanInterval) })
+	g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })
 	g.Go(func() error {
 		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, nonce: challengeFunc(enrollSvc), logger: logger}
 		return rw.run(gctx, renewalScanInterval)
@@ -299,13 +330,22 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// node is explicitly deregistered last. The route/node TTLs remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
-	_ = rawLn.Close()
+	closeLogged(logger, "raw listener", rawLn)
+	if guarded != nil {
+		closeLogged(logger, "acme-http listener", guarded)
+	}
 	phoneMgr.CloseAll(store.CloseServerShutdown)
-	_ = enrollSrv.Shutdown(sctx)
-	_ = controlSrv.Shutdown(sctx)
-	_ = meshSrv.Shutdown(sctx)
-	_ = internalSrv.Shutdown(sctx)
+	shutdownLogged(sctx, logger, "enroll", enrollSrv)
+	shutdownLogged(sctx, logger, "control", controlSrv)
+	shutdownLogged(sctx, logger, "mesh", meshSrv)
+	shutdownLogged(sctx, logger, "internal", internalSrv)
+	if acmeHTTPSrv != nil {
+		shutdownLogged(sctx, logger, "acme-http", acmeHTTPSrv)
+	}
 	ed.Wait(sctx) // every public handler (splice + end-event enqueue + slot release) has returned
+	if guarded != nil {
+		guarded.Wait(sctx)
+	}
 	werr := g.Wait()
 	asyncLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
 	rec.FinalFlush()      // after ALL producers stopped — no late deltas lost (self-bounded)
@@ -366,7 +406,9 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied})
+		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied}); err != nil {
+			log.Warn("admin "+op+": response write failed", "tunnel", name, "err", err)
+		}
 	}
 }
 

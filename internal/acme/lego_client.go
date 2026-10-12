@@ -56,6 +56,10 @@ type LegoConfig struct {
 	// DNS-01 propagation pre-check tuning (--acme-dns-resolver / --acme-dns-skip-propagation-check).
 	DNSResolvers            []string // recursive nameservers for the propagation pre-check (split-horizon / hermetic test CA)
 	DNSSkipPropagationCheck bool     // drop the authoritative-NS propagation requirement
+
+	Challenge string
+	TLSALPN   TLSALPNChallenges
+	HTTP      HTTPChallenges
 }
 
 // dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
@@ -87,8 +91,8 @@ type legoClient struct {
 
 var _ caIssuer = (*legoClient)(nil)
 
-// NewLegoClient constructs and registers (or EAB-registers) the per-CA account and wires the DNS-01
-// provider. Network-touching; exercised by the Pebble-backed integration tier.
+// NewLegoClient constructs and registers (or EAB-registers) the per-CA account. Network-touching;
+// exercised by the Pebble-backed integration tier.
 func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	key := cfg.AccountKey
 	if key == nil {
@@ -105,17 +109,36 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
 	}
-	cfg.applyDNSResolvers()
-	dnsOpts := cfg.dnsChallengeOpts()
-	switch {
-	case cfg.RawDNS != nil:
-		if err := client.Challenge.SetDNS01Provider(cfg.RawDNS, dnsOpts...); err != nil {
-			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
+	switch challenge.Type(cfg.Challenge) {
+	case challenge.TLSALPN01:
+		if cfg.TLSALPN == nil {
+			return nil, fmt.Errorf("acme: %s: tls-alpn-01 needs a challenge store", cfg.CAID)
 		}
-	case cfg.DNS != nil:
-		if err := client.Challenge.SetDNS01Provider(&legoDNSAdapter{p: cfg.DNS}, dnsOpts...); err != nil {
-			return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
+		if err := client.Challenge.SetTLSALPN01Provider(&tlsALPNProvider{s: cfg.TLSALPN}); err != nil {
+			return nil, fmt.Errorf("acme: set tls-alpn-01 (%s): %w", cfg.CAID, err)
 		}
+	case challenge.HTTP01:
+		if cfg.HTTP == nil {
+			return nil, fmt.Errorf("acme: %s: http-01 needs a challenge store", cfg.CAID)
+		}
+		if err := client.Challenge.SetHTTP01Provider(&httpProvider{s: cfg.HTTP}); err != nil {
+			return nil, fmt.Errorf("acme: set http-01 (%s): %w", cfg.CAID, err)
+		}
+	case challenge.DNS01, "":
+		cfg.applyDNSResolvers()
+		dnsOpts := cfg.dnsChallengeOpts()
+		switch {
+		case cfg.RawDNS != nil:
+			if err := client.Challenge.SetDNS01Provider(cfg.RawDNS, dnsOpts...); err != nil {
+				return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
+			}
+		case cfg.DNS != nil:
+			if err := client.Challenge.SetDNS01Provider(&legoDNSAdapter{p: cfg.DNS}, dnsOpts...); err != nil {
+				return nil, fmt.Errorf("acme: set dns01 (%s): %w", cfg.CAID, err)
+			}
+		}
+	default:
+		return nil, fmt.Errorf("acme: %s: unsupported challenge %q", cfg.CAID, cfg.Challenge)
 	}
 	if cfg.EABKID != "" {
 		reg, err := client.Registration.RegisterWithExternalAccountBinding(ctx, registration.RegisterEABOptions{
@@ -219,11 +242,16 @@ func certInfoFromPEM(caID string, pemChain []byte) (store.CertInfo, error) {
 	}, nil
 }
 
+const localChallengeRetry = 30 * time.Second
+
 // classifyLego maps a lego/ACME error to an IssuerError class. An official rate-limit answer arrives
 // as *acme.RateLimitedError carrying the CA's Retry-After header — that value is HONORED
 // (parsed per RFC 7231), so the chain and the phone are told exactly when the CA will accept a retry;
 // the --acme-cooldown-default applies only when no header was sent.
 func classifyLego(err error) *IssuerError {
+	if errors.Is(err, ErrChallengeStore) {
+		return local(localChallengeRetry, err)
+	}
 	if rle, ok := errors.AsType[*legoacme.RateLimitedError](err); ok {
 		return rateLimited(rle.RetryAfter, err)
 	}
