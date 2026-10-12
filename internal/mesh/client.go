@@ -177,8 +177,7 @@ func (c *Client) newH2Client() *http.Client {
 func requirePeerH2(conn net.Conn) (net.Conn, error) {
 	tc, ok := conn.(*tls.Conn)
 	if !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
-		_ = conn.Close()
-		return nil, errPeerNotHTTP2
+		return nil, errors.Join(errPeerNotHTTP2, conn.Close())
 	}
 	return conn, nil
 }
@@ -206,16 +205,15 @@ func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID 
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		_ = pw.CloseWithError(err)
+		pw.CloseWithError(err)
 		return nil, fmt.Errorf("mesh: dial %s: %w", peer, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		_ = pw.Close()
+		closeErr := errors.Join(resp.Body.Close(), pw.Close())
 		if resp.StatusCode == http.StatusUnprocessableEntity {
-			return nil, ErrDuplicateStream
+			return nil, errors.Join(ErrDuplicateStream, closeErr)
 		}
-		return nil, ErrNoOwner
+		return nil, errors.Join(ErrNoOwner, closeErr)
 	}
 	success = true
 	return &clientStream{pw: pw, resp: resp, p: p}, nil
@@ -231,18 +229,18 @@ type clientStream struct {
 func (s *clientStream) Read(p []byte) (int, error)  { return s.resp.Body.Read(p) }
 func (s *clientStream) Write(p []byte) (int, error) { return s.pw.Write(p) }
 func (s *clientStream) Close() error {
+	var err error
 	s.once.Do(func() {
-		_ = s.pw.Close()
-		_ = s.resp.Body.Close()
+		err = errors.Join(s.pw.Close(), s.resp.Body.Close())
 		s.p.active.Add(-1)
 	})
-	return nil
+	return err
 }
 
 // Control posts a mesh control RPC to peer over the per-peer mTLS H2 pool and returns the decoded
 // response. Short request/response (not a splice); the pool's active-count guards it against reaping
 // for the request's duration.
-func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (ControlResponse, error) {
+func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (_ ControlResponse, err error) {
 	p := c.pool(peer) // active++
 	defer p.active.Add(-1)
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
@@ -260,7 +258,11 @@ func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (
 	if err != nil {
 		return ControlResponse{}, fmt.Errorf("mesh control %s: %w", peer, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("mesh control %s: close response: %w", peer, cerr))
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return ControlResponse{}, fmt.Errorf("mesh control %s: status %d", peer, resp.StatusCode)
 	}

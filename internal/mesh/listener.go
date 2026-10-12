@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -57,11 +58,30 @@ type Handler struct {
 	owns    OwnerCheck
 	bridge  Bridge
 	control Controller
+	logger  *slog.Logger
+}
+
+type HandlerOption func(*Handler) error
+
+func WithHandlerLogger(l *slog.Logger) HandlerOption {
+	return func(h *Handler) error {
+		if l == nil {
+			return errors.New("mesh: nil logger")
+		}
+		h.logger = l
+		return nil
+	}
 }
 
 // NewHandler builds the mesh handler.
-func NewHandler(owns OwnerCheck, bridge Bridge, control Controller) *Handler {
-	return &Handler{owns: owns, bridge: bridge, control: control}
+func NewHandler(owns OwnerCheck, bridge Bridge, control Controller, opts ...HandlerOption) (*Handler, error) {
+	h := &Handler{owns: owns, bridge: bridge, control: control, logger: slog.Default()}
+	for _, o := range opts {
+		if err := o(h); err != nil {
+			return nil, err
+		}
+	}
+	return h, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +111,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 	}
 	var req ControlRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		h.logger.Warn("mesh control request malformed", "err", err)
 		http.Error(w, "bad control request", http.StatusBadRequest)
 		return
 	}
@@ -111,11 +132,14 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		applied, err = h.control.Terminate(r.Context(), req.Tunnel)
 	}
 	if err != nil {
+		h.logger.Warn("mesh control op failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
 		http.Error(w, req.Op+" failed", http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(ControlResponse{Applied: applied})
+	if err := json.NewEncoder(w).Encode(ControlResponse{Applied: applied}); err != nil {
+		h.logger.Debug("mesh control response write failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
+	}
 }
 
 // serveData is the opaque bidirectional splice (docs/PROTOCOL.md §5): the request/response bodies ARE the
@@ -150,6 +174,7 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "duplicate stream", http.StatusUnprocessableEntity)
 			return
 		}
+		h.logger.Debug("mesh dial-back failed", "tunnel", tunnel, "stream", streamID, "err", err)
 		http.Error(w, "dial-back failed", http.StatusBadGateway)
 		return
 	}
@@ -160,7 +185,11 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request) {
 	// Read = request body (client→phone), Write = response body (phone→client).
 	rc := http.NewResponseController(w)
 	cs := &ownerStream{r: r.Body, w: w, flush: flusher.Flush, done: make(chan struct{}),
-		unblock: func() { _ = rc.SetWriteDeadline(time.Now()) }}
+		unblock: func() {
+			if err := rc.SetWriteDeadline(time.Now()); err != nil {
+				h.logger.Debug("mesh stream write-deadline unblock failed", "tunnel", tunnel, "stream", streamID, "err", err)
+			}
+		}}
 	h.bridge.SpliceMesh(ds, cs)
 	<-cs.done
 }
