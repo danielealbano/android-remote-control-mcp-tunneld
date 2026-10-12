@@ -169,7 +169,8 @@ and retries (bounded), so the owner-conditional guarantee is deterministic, not 
 ## 6. Durable S3 state
 
 `internal/store` uses plain `GetObject`/`PutObject`/`DeleteObject` only (no conditional writes): the name
-registry (`names/<name>`), connection logs (`tunnel-logs/<name>/…`), and rejected-enroll evidence
+registry (`names/<name>`), connection logs (JSONL batches `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl`;
+a connection's start and end may land in different batches), and rejected-enroll evidence
 (`rejected-enroll/…`). Name uniqueness is the **write-verify claim**: GET (absent) → PUT a claim nonce
 under a hard timeout (SDK retries disabled) → settle wait (strictly > the PUT timeout) → GET-verify the
 nonce. Object-lifecycle expiration (logs 90d, rejected-enroll 30d) is applied programmatically at
@@ -235,10 +236,13 @@ summary/min) for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel
 attacker-controlled (raw SNI / unrouted name), so it is metric + Debug-line only — it never keys the
 dedup map nor emits a WARN, making log-flooding via that path impossible.
 
-Connection-log writes to S3 are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and never blocks an
-admission, splice, or teardown path. A fixed pool of 8 workers drains a bounded 5000-event queue with
-per-item exponential retry; a full queue drops the newest event and increments
-`tunneld_connlog_dropped_total`. The queue is drained (bounded) at shutdown so `server-shutdown` end
+Connection-log writes to S3 are ASYNC and BATCHED (`store.AsyncConnLog`): enqueue is O(1) and never blocks
+an admission, splice, or teardown path. Events are grouped per tunnel and UTC day into one JSONL batch
+written when it reaches 100 events or 5 minutes after its first event; at most 5000 events are buffered or
+in flight per node, and a full buffer drops the newest event (`tunneld_connlog_dropped_total` +1). A fixed
+pool of 8 workers writes the batches with exponential retry (5 attempts, 1/2/4/8 s); a batch whose retries
+are exhausted is dropped, adds its event count to `tunneld_connlog_dropped_total`, and logs a Warn with the
+tunnel, day, node and error. Every pending batch is written (bounded) at shutdown so `server-shutdown` end
 events land.
 
 A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
@@ -256,7 +260,7 @@ flowchart LR
   phones --> drain["Shutdown enroll / control / mesh / internal / acme-http servers"]
   drain --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
   join --> group["errgroup unwinds: schedulers + watchers on the drain ctx"]
-  group --> queue["drain conn-log queue: server-shutdown end events land"]
+  group --> queue["flush pending conn-log batches: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
   flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
 ```
@@ -264,8 +268,8 @@ flowchart LR
 Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
 (`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload, `admin-terminate` for an admin
 terminate). The ordering is load-bearing:
-the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the async conn-log queue
-is drained, and only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
+the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then every pending conn-log
+batch is written, and only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
 
 ## 10. Configuration
 

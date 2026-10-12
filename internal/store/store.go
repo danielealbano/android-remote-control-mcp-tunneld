@@ -29,6 +29,10 @@ type ConnLogStore interface {
 	PutConnLog(ctx context.Context, ev Event) error // fire-once, immediate
 }
 
+type ConnLogBatchStore interface {
+	PutConnLogBatch(ctx context.Context, b ConnLogBatch) error
+}
+
 // EvidenceStore is the rejected/suspicious-enrollment evidence surface (consumer: enroll).
 type EvidenceStore interface {
 	PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollment) error
@@ -44,7 +48,7 @@ type LifecycleStore interface {
 // Store is the full composition implemented by the S3 backend and the tunneltest fake.
 type Store interface {
 	NameStore
-	ConnLogStore
+	ConnLogBatchStore
 	EvidenceStore
 	LifecycleStore
 }

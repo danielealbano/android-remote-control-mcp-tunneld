@@ -127,7 +127,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
   day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
-- **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (`tunnel-logs/…`), and
+- **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (JSONL batches under
+  `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl` — one per tunnel, UTC day and node,
+  written at 100 events, 5 minutes after the batch's first event, or at shutdown), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
   claim protocol, not storage semantics. **PRE-GO-LIVE**, validate a provider with a read-after-write
@@ -146,7 +148,9 @@ only), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions
 `POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects), both routed to the owner node
 over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
-metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. The compose stack
+metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
+batched per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to a full
+5000-event buffer or to a batch whose write exhausted its retries. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on
 `127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
 Secrets, key material, and tunnel payloads are NEVER logged.

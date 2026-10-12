@@ -106,20 +106,23 @@ func (s *S3Store) DeleteName(ctx context.Context, name string) error {
 	return nil
 }
 
-// PutConnLog writes one connection-log event object.
-func (s *S3Store) PutConnLog(ctx context.Context, ev Event) error {
-	body, err := json.Marshal(ev)
-	if err != nil {
-		return fmt.Errorf("store: marshal conn log: %w", err)
+func (s *S3Store) PutConnLogBatch(ctx context.Context, b ConnLogBatch) error {
+	var body bytes.Buffer
+	enc := json.NewEncoder(&body)
+	for _, ev := range b.Events {
+		if err := enc.Encode(ev); err != nil {
+			return fmt.Errorf("store: marshal conn log: %w", err)
+		}
 	}
-	_, err = s.cli.PutObject(ctx, &s3.PutObjectInput{
+	key := b.Key()
+	_, err := s.cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      &s.bucket,
-		Key:         aws.String(LogKey(ev)),
-		Body:        bytes.NewReader(body),
-		ContentType: aws.String("application/json"),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(body.Bytes()),
+		ContentType: aws.String("application/x-ndjson"),
 	})
 	if err != nil {
-		return fmt.Errorf("store: put conn log: %w", err)
+		return fmt.Errorf("store: put conn log batch %q: %w", key, err)
 	}
 	return nil
 }

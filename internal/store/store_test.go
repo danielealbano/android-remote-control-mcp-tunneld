@@ -114,18 +114,16 @@ func TestNewConnID_Format(t *testing.T) {
 	}
 }
 
-func TestLogKeyLayoutAndSort(t *testing.T) {
-	ev := store.Event{Event: "start", Conn: "aabbccdd", Tunnel: "k7m2x9qwp4",
-		TSStart: time.Date(2026, 8, 17, 14, 12, 33, 482910114, time.UTC)}
-	key := store.LogKey(ev)
-	want := "tunnel-logs/k7m2x9qwp4/2026/08/17/20260817T141233.482910114Z-aabbccdd-start.json"
-	if key != want {
-		t.Errorf("LogKey = %q, want %q", key, want)
+func TestConnLogBatchKeyLayoutAndSort(t *testing.T) {
+	b := store.ConnLogBatch{Tunnel: "k7m2x9qwp4", NodeID: "0a1b2c3d4e5f6a7b",
+		First: time.Date(2026, 8, 17, 14, 12, 33, 482910114, time.FixedZone("x", 3600))}
+	want := "tunnel-logs/k7m2x9qwp4/2026/08/17/20260817T131233.482910114Z-0a1b2c3d4e5f6a7b.jsonl"
+	if got := b.Key(); got != want {
+		t.Errorf("Key = %q, want %q", got, want)
 	}
-	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
-	later := ev
-	later.TSStart = ev.TSStart.Add(time.Second)
-	if store.LogKey(ev) >= store.LogKey(later) {
+	later := b
+	later.First = b.First.Add(time.Second)
+	if b.Key() >= later.Key() {
 		t.Error("keys must sort chronologically")
 	}
 }

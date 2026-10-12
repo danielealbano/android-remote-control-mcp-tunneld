@@ -35,37 +35,37 @@ Why: the deployment runs a redundant Valkey behind Sentinel; tunneld today conne
 DoD: [x] a Sentinel URL passes `Validate()` and connects through the master Sentinel reports; a plain URL is
 unchanged.
 
-## [ ] US2 — Connection logs batched as JSONL
+## [x] US2 — Connection logs batched as JSONL
 
 Why: one S3 object per start/end event is one write per event; batching cuts writes and objects (decision
 recorded with the user).
 
-- [ ] Each node buffers connection-log events per tunnel per UTC day and writes ONE JSONL object (one event
+- [x] Each node buffers connection-log events per tunnel per UTC day and writes ONE JSONL object (one event
       per line) when 100 events are buffered or 5 minutes after the buffer's first event, and at shutdown.
-- [ ] Object key `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts-nanos>-<node-id>.jsonl` — still under
+- [x] Object key `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts-nanos>-<node-id>.jsonl` — still under
       `tunnel-logs/`, so the 90-day lifecycle rule is unchanged. A connection's start and end MAY land in
       different objects.
-- [ ] Unchanged behaviour: enqueue is O(1) and never blocks an admission/splice/teardown path; at most 5000
+- [x] Unchanged behaviour: enqueue is O(1) and never blocks an admission/splice/teardown path; at most 5000
       buffered events per node; a full buffer drops the newest event (`tunneld_connlog_dropped_total` +1);
       a failed write is retried with the current schedule (5 attempts, 1/2/4/8 s backoff); when retries are
       exhausted the batch is dropped, `tunneld_connlog_dropped_total` grows by the number of events it
       carried, and a Warn is logged with the tunnel, day and node identifiers and the final write error; the
       shutdown flush is bounded.
 
-### [ ] Task 2.1 — Batching writer
+### [x] Task 2.1 — Batching writer
 
-- [ ] `internal/store`: replace the per-event object writes of `AsyncConnLog` (and `event.go`'s per-event key)
+- [x] `internal/store`: replace the per-event object writes of `AsyncConnLog` (and `event.go`'s per-event key)
       with the per-tunnel/day batcher.
-- [ ] `internal/server`: wire the node id into the batcher.
-- [ ] Tests: unit — batch key layout + chronological sort (replacing `TestLogKeyLayoutAndSort`), count
+- [x] `internal/server`: wire the node id into the batcher.
+- [x] Tests: unit — batch key layout + chronological sort (replacing `TestLogKeyLayoutAndSort`), count
       trigger, time trigger (fake clock), per-tunnel and day-rollover split, shutdown flush, drop-on-full +
       metric, retry after a failed write, retries-exhausted batch drop (metric by event count + Warn with the
       error); integration — JSONL objects land in MinIO under the exact key; update the integration/e2e
       assertions that read per-event objects.
-- [ ] Docs: `docs/PROJECT.md` §5/§6, `docs/ARCHITECTURE.md` §6/§8 and §9 (shutdown text + its Mermaid chart),
+- [x] Docs: `docs/PROJECT.md` §5/§6, `docs/ARCHITECTURE.md` §6/§8 and §9 (shutdown text + its Mermaid chart),
       `.claude/rules/project.md` (Observability).
 
-DoD: [ ] connection logs land as JSONL batches with the key above; no event path blocks.
+DoD: [x] connection logs land as JSONL batches with the key above; no event path blocks.
 
 ## [ ] US3 — Reserved-host certs shared through Valkey
 

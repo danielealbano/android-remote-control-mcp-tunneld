@@ -181,10 +181,13 @@ MUST NOT be relaxed without explicit user direction.
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
   summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
   value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert.
-- Connection-log S3 writes are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and MUST NEVER block an
-  admission/splice/teardown path; a bounded 5000-event queue + 8 workers + per-item exponential retry
-  drain it; a full queue drops-newest and increments `tunneld_connlog_dropped_total`; shutdown drains
-  the queue (bounded) so `server-shutdown` end events land.
+- Connection-log S3 writes are ASYNC and BATCHED (`store.AsyncConnLog`): enqueue is O(1) and MUST NEVER block
+  an admission/splice/teardown path; events are grouped per tunnel + UTC day into JSONL batches
+  (`tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl`) written at 100 events or 5 min
+  after the first event; at most 5000 events buffered/in flight per node (a full buffer drops-newest,
+  `tunneld_connlog_dropped_total` +1); 8 workers + exponential retry (5 attempts) write the batches, and a
+  batch whose retries are exhausted adds its event count to the metric + a Warn; shutdown writes every
+  pending batch (bounded) so `server-shutdown` end events land.
 - NEVER log secrets, key material, or tunnel payloads.
 
 ### Repository hygiene

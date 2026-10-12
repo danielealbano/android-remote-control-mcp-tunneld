@@ -60,20 +60,24 @@ type Event struct {
 // tsNanosLayout sorts chronologically as a string in an S3 listing.
 const tsNanosLayout = "20060102T150405.000000000Z"
 
-// LogKey is the S3 key for a connection-log event:
-// tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<tsNanos>-<conn8>-<event>.json (conn8 = first 8 conn chars).
-func LogKey(ev Event) string {
-	ts := ev.TSStart
+func (ev Event) at() time.Time {
 	if ev.Event == "end" && !ev.TSEnd.IsZero() {
-		ts = ev.TSEnd
+		return ev.TSEnd.UTC()
 	}
-	ts = ts.UTC()
-	conn8 := ev.Conn
-	if len(conn8) > 8 {
-		conn8 = conn8[:8]
-	}
-	return fmt.Sprintf("tunnel-logs/%s/%04d/%02d/%02d/%s-%s-%s.json",
-		ev.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), conn8, ev.Event)
+	return ev.TSStart.UTC()
+}
+
+type ConnLogBatch struct {
+	Tunnel string
+	NodeID string
+	First  time.Time
+	Events []Event
+}
+
+func (b ConnLogBatch) Key() string {
+	ts := b.First.UTC()
+	return fmt.Sprintf("tunnel-logs/%s/%04d/%02d/%02d/%s-%s.jsonl",
+		b.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), b.NodeID)
 }
 
 // connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure

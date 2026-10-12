@@ -71,6 +71,13 @@ func (s *Store) DeleteName(_ context.Context, name string) error {
 	return nil
 }
 
+func (s *Store) PutConnLogBatch(_ context.Context, b store.ConnLogBatch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ConnLogs = append(s.ConnLogs, b.Events...)
+	return nil
+}
+
 // PutConnLog captures a connection-log event.
 func (s *Store) PutConnLog(_ context.Context, ev store.Event) error {
 	s.mu.Lock()
