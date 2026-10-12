@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,10 +22,10 @@ func TestLegoClient_ObtainRespectsCtxCancel(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block) // release the stranded obtain goroutine on test exit (the result chan is buffered)
 	l := &legoClient{
-		cfg: LegoConfig{CAID: "x"},
+		cfg: LegoConfig{CAID: "x", Logger: testLogger()},
 		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
 			<-block
-			return nil, nil
+			return nil, errors.New("released")
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -48,13 +50,24 @@ func TestLazyCA_ConcurrentResolveSingleBuild(t *testing.T) {
 	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
 		builds.Add(1)
 		return &fakeCA{caID: "x"}, nil
-	})
+	}, testLogger())
 	var wg sync.WaitGroup
+	errs := make(chan error, 8)
 	for range 8 {
 		wg.Add(1)
-		go func() { defer wg.Done(); _, _ = l.resolve(context.Background()) }()
+		go func() {
+			defer wg.Done()
+			_, err := l.resolve(context.Background())
+			errs <- err
+		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+	}
 	if builds.Load() != 1 {
 		t.Fatalf("concurrent resolve must build exactly once, got %d", builds.Load())
 	}
@@ -63,7 +76,7 @@ func TestLazyCA_ConcurrentResolveSingleBuild(t *testing.T) {
 	le := newLazyCA("y", 0, 0, func(context.Context) (caIssuer, error) {
 		errBuilds.Add(1)
 		return nil, errors.New("boom")
-	})
+	}, testLogger())
 	if _, err := le.resolve(context.Background()); err == nil {
 		t.Fatal("a build error must surface")
 	}
@@ -80,7 +93,7 @@ func TestLazyCA_ResolveCancelWhileBuildHangs(t *testing.T) {
 	l := newLazyCA("x", 0, 0, func(context.Context) (caIssuer, error) {
 		<-release
 		return &fakeCA{caID: "x"}, nil
-	})
+	}, testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, err := l.resolve(ctx); done <- err }()
@@ -101,7 +114,7 @@ func TestLazyCA_ShouldRenewNeverTriggersBuild(t *testing.T) {
 	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
 		builds.Add(1)
 		return &fakeCA{caID: "x"}, nil
-	})
+	}, testLogger())
 	cur := store.CertInfo{NotBefore: time.Unix(1_700_000_000, 0)}
 	now := time.Unix(1_700_000_000, 0)
 	_, at, err := l.shouldRenew(context.Background(), cur, now)
@@ -145,7 +158,7 @@ func TestLazyCA_BuildCtxSurvivesCallerButIsBounded(t *testing.T) {
 		got <- ctx
 		<-release
 		return &fakeCA{caID: "x"}, nil
-	})
+	}, testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	resolved := make(chan error, 1)
 	go func() {
@@ -172,7 +185,7 @@ func TestLegoClient_ObtainDetachesCallerCancel(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	l := &legoClient{
-		cfg: LegoConfig{CAID: "x"},
+		cfg: LegoConfig{CAID: "x", Logger: testLogger()},
 		obtainCSR: func(ctx context.Context, _ certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
 			got <- ctx
 			<-release
@@ -195,5 +208,52 @@ func TestLegoClient_ObtainDetachesCallerCancel(t *testing.T) {
 	}
 	if _, ok := octx.Deadline(); ok {
 		t.Fatal("the lego call's ctx must carry no deadline")
+	}
+}
+
+func TestLegoClient_AbandonedOrderOutcomeLogged(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *certificate.Resource
+		err  error
+		want string
+	}{
+		{name: "order failed", err: errors.New("ca said no"), want: "abandoned ACME order failed"},
+		{name: "certificate issued", res: &certificate.Resource{Domains: []string{"n.example.test"}},
+			want: "abandoned ACME order issued a certificate that was discarded"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingHandler{}
+			started := make(chan struct{})
+			release := make(chan struct{})
+			l := &legoClient{
+				cfg: LegoConfig{CAID: "x", Logger: slog.New(rec)},
+				obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+					close(started)
+					<-release
+					return tc.res, tc.err
+				},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+				done <- err
+			}()
+			<-started
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("obtain = %v, want context.Canceled", err)
+			}
+			close(release)
+			deadline := time.Now().Add(2 * time.Second)
+			for !slices.Contains(rec.aboveDebug(), tc.want) {
+				if time.Now().After(deadline) {
+					t.Fatalf("the abandoned outcome was not logged; records = %v", rec.aboveDebug())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -21,6 +22,7 @@ type lazyCA struct {
 	shortlived  time.Duration // configured cert lifetime for the degraded renewal floor
 	renewMargin time.Duration // configured --acme-renew-margin for the degraded renewal floor
 	build       func(ctx context.Context) (caIssuer, error)
+	logger      *slog.Logger
 
 	group singleflight.Group       // dedups concurrent first-use registration
 	inner atomic.Pointer[caIssuer] // fast-path read; nil until first successful build
@@ -31,8 +33,8 @@ var _ caIssuer = (*lazyCA)(nil)
 const lazyBuildTimeout = 2 * time.Minute
 
 // newLazyCA wraps a builder for one CA's client behind lazy, self-healing construction.
-func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ctx context.Context) (caIssuer, error)) *lazyCA {
-	return &lazyCA{caID: caID, shortlived: shortlived, renewMargin: renewMargin, build: build}
+func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ctx context.Context) (caIssuer, error), logger *slog.Logger) *lazyCA {
+	return &lazyCA{caID: caID, shortlived: shortlived, renewMargin: renewMargin, build: build, logger: logger}
 }
 
 // NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing per-CA clients constructed from
@@ -40,10 +42,14 @@ func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ct
 // construction (ACME account registration) is deferred to first use, so startup never blocks on CA
 // reachability and an unreachable CA self-heals once it recovers.
 func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	cas := make([]caIssuer, 0, len(legoCfgs))
 	for _, lc := range legoCfgs {
 		cas = append(cas, newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
-			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }))
+			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }, logger))
 	}
 	return NewChainIssuer(cfg, cas...)
 }
@@ -73,6 +79,7 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 		defer cancel()
 		c, err := l.build(bctx)
 		if err != nil {
+			l.logger.Debug("ACME client build failed (retried on the next use)", "ca", l.caID, "err", err)
 			return nil, err // not cached → retried on the next call
 		}
 		l.inner.Store(&c)

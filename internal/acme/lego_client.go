@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	legoacme "github.com/go-acme/lego/v5/acme"
@@ -60,6 +61,7 @@ type LegoConfig struct {
 	Challenge string
 	TLSALPN   TLSALPNChallenges
 	HTTP      HTTPChallenges
+	Logger    *slog.Logger
 }
 
 // dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
@@ -94,6 +96,9 @@ var _ caIssuer = (*legoClient)(nil)
 // NewLegoClient constructs and registers (or EAB-registers) the per-CA account. Network-touching;
 // exercised by the Pebble-backed integration tier.
 func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	key := cfg.AccountKey
 	if key == nil {
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -162,7 +167,7 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 
 func (l *legoClient) id() string { return l.cfg.CAID }
 
-func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
 	req := certificate.ObtainForCSRRequest{CSR: csr, Bundle: true, Profile: l.cfg.Profile}
 	if l.cfg.Validity > 0 {
 		req.NotAfter = time.Now().Add(l.cfg.Validity)
@@ -174,12 +179,35 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, _
 		err error
 	}
 	ch := make(chan result, 1)
+	var mu sync.Mutex
+	abandoned := false
+	logAbandoned := func(r result) {
+		if r.err != nil {
+			l.cfg.Logger.Warn("abandoned ACME order failed", "ca", l.cfg.CAID, "name", name, "err", r.err)
+			return
+		}
+		l.cfg.Logger.Warn("abandoned ACME order issued a certificate that was discarded", "ca", l.cfg.CAID, "name", name, "domains", r.res.Domains)
+	}
 	go func() {
 		res, err := l.obtainCSR(context.WithoutCancel(ctx), req)
+		mu.Lock()
+		defer mu.Unlock()
+		if abandoned {
+			logAbandoned(result{res, err})
+			return
+		}
 		ch <- result{res, err}
 	}()
 	select {
 	case <-ctx.Done():
+		mu.Lock()
+		abandoned = true
+		select {
+		case r := <-ch:
+			logAbandoned(r)
+		default:
+		}
+		mu.Unlock()
 		return nil, store.CertInfo{}, transient(ctx.Err())
 	case r := <-ch:
 		if r.err != nil {

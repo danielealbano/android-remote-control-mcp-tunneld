@@ -55,7 +55,7 @@ func TestClassifyLegoErrors(t *testing.T) {
 // cert renews at NotAfter − --acme-renew-margin — for a shortlived (~160h) cert that is NotBefore+112h,
 // the same uniform ~4.7-day cadence as the fixed non-LE path.
 func TestShouldRenewLEMarginFloor(t *testing.T) {
-	lc := &legoClient{cfg: LegoConfig{CAID: CALetsEncrypt, UseARI: true,
+	lc := &legoClient{cfg: LegoConfig{CAID: CALetsEncrypt, UseARI: true, Logger: testLogger(),
 		RenewMargin: 48 * time.Hour, Shortlived: 160 * time.Hour}}
 	issued := time.Unix(1_700_000_000, 0)
 	cur := store.CertInfo{CA: CALetsEncrypt, NotBefore: issued, NotAfter: issued.Add(160 * time.Hour)}
@@ -67,7 +67,9 @@ func TestShouldRenewLEMarginFloor(t *testing.T) {
 	if want := issued.Add(112 * time.Hour); !at.Equal(want) {
 		t.Fatalf("renew-at = %s, want NotAfter−margin = %s", at, want)
 	}
-	if due, _, _ := lc.shouldRenew(context.Background(), cur, issued.Add(113*time.Hour)); !due {
+	if due, _, err := lc.shouldRenew(context.Background(), cur, issued.Add(113*time.Hour)); err != nil {
+		t.Fatal(err)
+	} else if !due {
 		t.Fatal("past NotAfter−margin the cert must be due")
 	}
 }

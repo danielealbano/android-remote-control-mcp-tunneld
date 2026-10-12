@@ -9,6 +9,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 var (
@@ -20,7 +22,7 @@ func newTestChallengeStore(t *testing.T) (*ChallengeStore, *miniredis.Miniredis,
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { closeOrLog(t, rdb) })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	return NewChallengeStore(rdb, ChallengeTTL), mr, rdb
 }
 
