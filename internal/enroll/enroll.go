@@ -118,7 +118,7 @@ func NewService(cfg Config) *Service {
 		s.rec = observ.Nop{}
 	}
 	if s.logger == nil {
-		s.logger = slog.New(slog.DiscardHandler)
+		s.logger = slog.Default()
 	}
 	s.nameGen = func() (string, error) {
 		return ca.GenerateName(s.cfg.NamePrefix, s.cfg.NameLength, s.cfg.ExtraReserved...)
@@ -151,6 +151,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	// Consume + validate the single-use nonce. A control-plane error is retryable/internal; a genuinely
 	// absent/replayed nonce is invalid_nonce.
 	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
+		s.logger.Debug("enrollment nonce consume failed", "ip", ip, "err", err)
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
@@ -166,6 +167,9 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	// Generate + write-verify-claim a fresh name.
 	name, claimNonce, err := s.claimName(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("enrollment name claim failed", "ip", ip, "err", err)
+		}
 		return Result{}, &Error{Reason: "name_unavailable", Retryable: true}
 	}
 
@@ -174,6 +178,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	// a rollback failure would orphan the claim in the indefinitely-retained registry, so it is logged.
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
+		s.logSignError(name, ip, err)
 		if derr := s.cfg.Names.DeleteName(ctx, name); derr != nil {
 			s.logger.Warn("claim rollback failed (name orphaned in the registry)", "tunnel", name, "err", derr)
 		}
@@ -192,6 +197,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
 		// A control-plane (Valkey/script) error is retryable and distinct from a genuinely absent/replayed
 		// nonce — do NOT mislabel a Valkey outage as invalid_nonce.
+		if ctx.Err() == nil {
+			s.logger.Warn("issuance nonce consume failed", "tunnel", name, "ip", ip, "err", err)
+		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
@@ -226,6 +234,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		if errors.Is(err, store.ErrNotFound) {
 			return Result{}, &Error{Reason: "name_unknown"}
 		}
+		if ctx.Err() == nil {
+			s.logger.Warn("issuance name record read failed", "tunnel", name, "ip", ip, "err", err)
+		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 
@@ -235,6 +246,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	// heartbeat so a long ACME order keeps it, and self-expires (via its TTL) if this node crashes mid-order.
 	ok, orderID, err := s.cfg.Limiter.IssuanceBegin(ctx, name, s.cfg.IssuePerWeek)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("issuance lock acquire failed", "tunnel", name, "ip", ip, "err", err)
+		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
 	if !ok {
@@ -255,6 +269,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
+		s.logSignError(name, ip, err)
 		return Result{}, signError(err)
 	}
 
@@ -303,6 +318,7 @@ func (s *Service) attestAndBind(ctx context.Context, ip, name string, req Reques
 	if !s.cfg.AttestOptional {
 		res, err := s.cfg.Verifier.Verify(req.AttestChain, req.Nonce, s.now())
 		if err != nil {
+			s.logger.Debug("attestation rejected", "tunnel", name, "ip", ip, "reason", attestReason(err), "err", err)
 			s.rec.AttestVerify(attestReason(err))
 			s.recordRejection(ctx, ip, name, attestReason(err), req)
 			return attest.Result{}, &Error{Reason: "unauthorized"}
@@ -328,6 +344,13 @@ func signError(err error) *Error {
 		return &Error{Reason: "unsupported_key_type"}
 	}
 	return &Error{Reason: "identity_sign_failed"}
+}
+
+func (s *Service) logSignError(name, ip string, err error) {
+	if errors.Is(err, ca.ErrUnsupportedKeyType) {
+		return
+	}
+	s.logger.Error("identity certificate signing failed", "tunnel", name, "ip", ip, "err", err)
 }
 
 // csrMatchesTunnel reports whether csr requests EXACTLY <name>.<tunnelDomain> and NOTHING else. lego
@@ -358,6 +381,7 @@ func csrMatchesTunnel(csr *x509.CertificateRequest, name, tunnelDomain string) b
 // disabled; timeout = abandon this name permanently) → wait settle (strictly > timeout) → GET-verify
 // the nonce. Bounded loop.
 func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err error) {
+	var lastReadErr error
 	for attempt := 0; attempt < 8; attempt++ {
 		cand, err := s.nameGen()
 		if err != nil {
@@ -367,6 +391,10 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		if _, err := s.cfg.Names.GetName(ctx, cand); err == nil {
 			continue
 		} else if !errors.Is(err, store.ErrNotFound) {
+			if ctx.Err() == nil {
+				s.logger.Warn("name claim read failed (trying another name)", "name", cand, "err", err)
+			}
+			lastReadErr = err
 			continue // transient — try a different name
 		}
 
@@ -378,6 +406,9 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		cancel()
 		if putErr != nil {
 			// Timeout/error: abandon this name PERMANENTLY (a retried PUT would be a zombie write).
+			if ctx.Err() == nil {
+				s.logger.Warn("name claim write failed (name abandoned)", "name", cand, "err", putErr)
+			}
 			continue
 		}
 
@@ -402,7 +433,7 @@ func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err e
 		}
 		// Lost the race — new name.
 	}
-	return "", "", errClaimLost
+	return "", "", errors.Join(errClaimLost, lastReadErr)
 }
 
 // recordIdentity writes the Phase-1 registry record (name claimed, bootstrap identity signed, attested
@@ -414,7 +445,11 @@ func (s *Service) recordIdentity(ctx context.Context, name, claimNonce string, r
 		Device: dev,
 	}
 	if req.IdentityCSR != nil {
-		rec.IdentityKeyFP = keyFingerprint(req.IdentityCSR.PublicKey)
+		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
+		if err != nil {
+			s.logger.Warn("identity key fingerprint failed (recorded empty)", "tunnel", name, "err", err)
+		}
+		rec.IdentityKeyFP = fp
 	}
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
 		s.logger.Warn("registry identity record write failed", "tunnel", name, "err", err)
@@ -429,6 +464,9 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	// already read this call) so the claim_nonce + enrolled_at are PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
+		}
 		rec = cur
 	}
 	rec.Schema = 1
@@ -437,7 +475,11 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 		rec.EnrolledAt = s.now().UTC()
 	}
 	if req.IdentityCSR != nil {
-		rec.IdentityKeyFP = keyFingerprint(req.IdentityCSR.PublicKey)
+		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
+		if err != nil {
+			s.logger.Warn("identity key fingerprint failed (recorded empty)", "tunnel", name, "err", err)
+		}
+		rec.IdentityKeyFP = fp
 	}
 	if dev != (store.DeviceInfo{}) {
 		rec.Device = dev // refresh from the renewal's fresh attestation; keep prior when attestation was optional
@@ -452,7 +494,10 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 // rejected-enrollment evidence (best-effort — a store failure is logged and never masks the rejection).
 func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, req Request) {
 	s.rec.Reject(reason, name, ip)
-	pkg, digest := claimedIdentity(req.AttestChain)
+	pkg, digest, err := claimedIdentity(req.AttestChain)
+	if err != nil {
+		s.logger.Debug("rejected-enrollment claimed identity unparseable (recorded empty)", "reason", reason, "src_ip", ip, "err", err)
+	}
 	ev := store.RejectedEnrollment{
 		TS:              s.now().UTC(),
 		SrcIP:           ip,
@@ -472,14 +517,21 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
+		s.logger.Debug("unparseable peer address (refused)", "peer", ip, "err", err)
 		return &Error{Reason: "bad_source_ip"}
 	}
 	okMin, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
+	if err != nil {
+		s.logger.Debug("enroll rate check failed (allowing)", "window", "enroll-min", "ip", ip, "err", err)
+	}
 	if err == nil && !okMin {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
 	okHour, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
+	if err != nil {
+		s.logger.Debug("enroll rate check failed (allowing)", "window", "enroll-hour", "ip", ip, "err", err)
+	}
 	if err == nil && !okHour {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
@@ -494,14 +546,21 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
+		s.logger.Debug("unparseable peer address (refused)", "peer", ip, "err", err)
 		return &Error{Reason: "bad_source_ip"}
 	}
 	overMin, ra, err := s.cfg.Limiter.Over(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
+	if err != nil {
+		s.logger.Debug("enroll rate pre-check failed (allowing)", "window", "enroll-min", "ip", ip, "err", err)
+	}
 	if err == nil && overMin {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
 	overHour, ra, err := s.cfg.Limiter.Over(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
+	if err != nil {
+		s.logger.Debug("enroll rate pre-check failed (allowing)", "window", "enroll-hour", "ip", ip, "err", err)
+	}
 	if err == nil && overHour {
 		s.rec.Reject("enroll-limit", "", ip)
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
@@ -511,7 +570,7 @@ func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 
 func newClaimNonce() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:]) // crypto/rand.Read never fails (it panics internally on a broken source)
+	rand.Read(b[:]) // crypto/rand.Read never fails (it panics internally on a broken source)
 	return hex.EncodeToString(b[:])
 }
 
@@ -534,7 +593,7 @@ func publicKeyEqual(a, b crypto.PublicKey) bool {
 
 // keyFingerprint delegates to the shared ca.KeyFingerprint so the registry and the phone conn-log
 // events always compute the SAME key identifier.
-func keyFingerprint(pub crypto.PublicKey) string { return ca.KeyFingerprint(pub) }
+func keyFingerprint(pub crypto.PublicKey) (string, error) { return ca.KeyFingerprint(pub) }
 
 // classifyIssuerError maps an ACME/issuer error to a structured user-facing Error, using the
 // ClassifiedIssuerError interface so no acme import is needed.
@@ -576,17 +635,17 @@ func attestReason(err error) string {
 }
 
 // claimedIdentity best-effort extracts the claimed package + first signer digest from a submitted
-// chain (for rejection evidence), tolerating an unparseable KeyDescription.
-func claimedIdentity(chain []*x509.Certificate) (pkg, digestHex string) {
+// chain (for rejection evidence).
+func claimedIdentity(chain []*x509.Certificate) (pkg, digestHex string, err error) {
 	if len(chain) == 0 {
-		return "", ""
+		return "", "", nil
 	}
 	kd, err := attest.ParseKeyDescription(chain[0])
 	if err != nil {
-		return "", ""
+		return "", "", err
 	}
 	if len(kd.SignatureDigests) > 0 {
 		digestHex = hex.EncodeToString(kd.SignatureDigests[0])
 	}
-	return kd.Package, digestHex
+	return kd.Package, digestHex, nil
 }

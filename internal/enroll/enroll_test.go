@@ -74,19 +74,32 @@ func (rateLimitedErr) RetryAfter() time.Duration { return time.Hour }
 
 func testCA(t *testing.T) *ca.CA {
 	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: bigOne(), Subject: pkix.Name{CommonName: "Test Internal CA"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(100 * 24 * time.Hour),
 		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
 	}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "ca.pem")
 	keyPath := filepath.Join(dir, "ca-key.pem")
-	keyDER, _ := x509.MarshalECPrivateKey(key)
-	_ = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
-	_ = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	c, err := ca.Load(certPath, keyPath, 4380*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -96,12 +109,18 @@ func testCA(t *testing.T) *ca.CA {
 
 func newCSR(t *testing.T) (*x509.CertificateRequest, crypto.PublicKey) {
 	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "whatever"}}, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _ := x509.ParseCertificateRequest(der)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return csr, &key.PublicKey
 }
 
@@ -109,7 +128,7 @@ func newService(t *testing.T, cfg Config) (*Service, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	cfg.RDB = rdb
 	cfg.Limiter = limit.NewLimiter(rdb, 125000, 1<<40, 1<<40, time.Hour)
 	if cfg.NameLength == 0 {
@@ -158,14 +177,20 @@ func doEnroll(t *testing.T, svc *Service, idCSR *x509.CertificateRequest) string
 // newTLSCSR builds a public-cert CSR requesting exactly fqdn (CN + SAN).
 func newTLSCSR(t *testing.T, fqdn string) *x509.CertificateRequest {
 	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn},
 	}, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _ := x509.ParseCertificateRequest(der)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return csr
 }
 
@@ -308,7 +333,9 @@ func TestClaimZombiePutLoserRedraws(t *testing.T) {
 			return
 		}
 		injected = true
-		_ = st.PutName(context.Background(), name, store.NameRecord{Schema: 1, ClaimNonce: "competitor-nonce"})
+		if err := st.PutName(context.Background(), name, store.NameRecord{Schema: 1, ClaimNonce: "competitor-nonce"}); err != nil {
+			t.Errorf("inject the competitor claim: %v", err)
+		}
 	}
 	nonce := mintNonce(t, svc)
 	res, ee := svc.Enroll(context.Background(), "3.3.3.3", Request{Nonce: nonce, IdentityCSR: idCSR})

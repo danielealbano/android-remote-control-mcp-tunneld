@@ -65,12 +65,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (fail closed — the ban gate is the first effective security check on this ingress edge).
 	addr, perr := netip.ParseAddr(ip)
 	if perr != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
+		h.svc.logger.Debug("enroll unparseable peer address (refused)", "peer", ip, "err", perr)
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
 		return
 	}
 	if h.ban != nil && h.ban(addr) {
 		h.rec.Reject("ban", "", ip)
-		writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
+		h.writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
 		return
 	}
 	switch {
@@ -92,41 +93,42 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 		if e.Reason == "enroll_rate" {
 			status = http.StatusTooManyRequests
 		}
-		writeErr(w, e, status)
+		h.writeErr(w, e, status)
 		return
 	}
 	nonce, err := h.svc.Nonce(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
+		h.svc.logger.Debug("enrollment nonce mint failed", "ip", ip, "err", err)
+		h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
-	writeJSON(w, http.StatusOK, nonceResponse{Nonce: hex.EncodeToString(nonce)})
+	h.writeJSON(w, http.StatusOK, nonceResponse{Nonce: hex.EncodeToString(nonce)})
 }
 
 func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_request"})
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_request"})
 		return
 	}
 	var req enrollRequestBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_json"})
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_json"})
 		return
 	}
 	nonce, err := decodeHex(req.Nonce)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_nonce"})
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_nonce"})
 		return
 	}
 	chain, err := parsePEMChain([]byte(req.AttestChainPEM))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_attestation_chain"})
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_attestation_chain"})
 		return
 	}
 	idCSR, err := parseCSR([]byte(req.IdentityCSR))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_identity_csr"})
+		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_identity_csr"})
 		return
 	}
 
@@ -135,7 +137,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	// unbounded keys). Enroll below still runs the authoritative consuming check.
 	if e := h.svc.enrollLimitCheck(r.Context(), ip); e != nil {
 		h.rec.EnrollmentResult(e.Reason)
-		writeErr(w, e, statusForError(e))
+		h.writeErr(w, e, statusForError(e))
 		return
 	}
 
@@ -144,8 +146,9 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	// while a name claimed without a deliverable response would be orphaned).
 	issueNonce, nerr := h.svc.Nonce(r.Context())
 	if nerr != nil {
+		h.svc.logger.Debug("issuance nonce mint failed", "ip", ip, "err", nerr)
 		h.rec.EnrollmentResult("internal")
-		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
+		h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 
@@ -157,12 +160,12 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	})
 	if ee != nil {
 		h.rec.EnrollmentResult(ee.Reason)
-		writeErr(w, ee, statusForError(ee))
+		h.writeErr(w, ee, statusForError(ee))
 		return
 	}
 
 	h.rec.EnrollmentResult("ok")
-	writeJSON(w, http.StatusOK, enrollResponse{
+	h.writeJSON(w, http.StatusOK, enrollResponse{
 		Name:         res.Name,
 		IdentityCert: string(res.IdentityCert),
 		IssueNonce:   hex.EncodeToString(issueNonce),
@@ -181,18 +184,20 @@ func statusForError(e *Error) int {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.svc.logger.Debug("enrollment response write failed", "status", status, "err", err)
+	}
 }
 
-func writeErr(w http.ResponseWriter, e *Error, status int) {
+func (h *Handler) writeErr(w http.ResponseWriter, e *Error, status int) {
 	resp := errorResponse{Reason: e.Reason, Retryable: e.Retryable}
 	if e.RetryAfter > 0 {
 		resp.RetryAfter = int64(e.RetryAfter.Seconds())
 	}
-	writeJSON(w, status, resp)
+	h.writeJSON(w, status, resp)
 }
 
 func peerIP(r *http.Request) string {

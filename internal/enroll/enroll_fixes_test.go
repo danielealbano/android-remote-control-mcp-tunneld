@@ -54,7 +54,11 @@ func TestEnrollRecordsDeviceScalars(t *testing.T) {
 	}); ee != nil {
 		t.Fatalf("issue failed: %v", ee)
 	}
-	rec, _ = st.GetName(context.Background(), name)
+	got, err := st.GetName(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = got
 	if rec.Device != dev {
 		t.Fatalf("issue must keep the freshly-attested device scalars, got %+v", rec.Device)
 	}
@@ -72,7 +76,10 @@ func TestEnrollUnsupportedKeyType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rsaCSR, _ := x509.ParseCertificateRequest(der)
+	rsaCSR, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
@@ -192,9 +199,18 @@ func TestSignFailureRollsBack(t *testing.T) {
 	st := tunneltest.NewStore()
 	// A CSR whose signature verifies but whose key the CA refuses (RSA) forces the sign failure AFTER
 	// the claim; key binding is bypassed via a matching attested key.
-	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-	der, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "x"}}, rsaKey)
-	rsaCSR, _ := x509.ParseCertificateRequest(der)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "x"}}, rsaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaCSR, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc, _ := newService(t, Config{
 		CA: testCA(t), Names: st, Evidence: st,
 		Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
@@ -235,7 +251,9 @@ func TestClaimCollisionDrawsNewName(t *testing.T) {
 	if res.Name != "fresh0name0" {
 		t.Fatalf("a colliding candidate must be redrawn, got %q", res.Name)
 	}
-	if rec, _ := st.GetName(context.Background(), "taken0name0"); rec.ClaimNonce != "other" {
+	if rec, err := st.GetName(context.Background(), "taken0name0"); err != nil {
+		t.Fatal(err)
+	} else if rec.ClaimNonce != "other" {
 		t.Fatal("the competitor's claim must stand")
 	}
 }
@@ -463,7 +481,10 @@ func multiSANCSR(t *testing.T, cn string, sans []string) *x509.CertificateReques
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _ := x509.ParseCertificateRequest(der)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return csr
 }
 

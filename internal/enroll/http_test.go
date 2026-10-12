@@ -73,7 +73,7 @@ func TestHandlerDecodeErrors(t *testing.T) {
 			// Decode failures follow the SAME documented JSON error schema as service errors.
 			var er errorResponse
 			if err := json.Unmarshal(rr.Body.Bytes(), &er); err != nil || er.Reason != tc.wantReason {
-				t.Fatalf("want structured %q error, got %s", tc.wantReason, rr.Body.String())
+				t.Fatalf("want structured %q error, got %s (decode error: %v)", tc.wantReason, rr.Body.String(), err)
 			}
 		})
 	}
@@ -92,7 +92,10 @@ func TestHandlerStructuredError(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	body := func() []byte {
-		b, _ := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
+		b, err := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
+		if err != nil {
+			t.Fatal(err)
+		}
 		return b
 	}
 	// Exhaust the per-IP minute limit, then expect the structured enroll_rate error with 503.
@@ -108,7 +111,7 @@ func TestHandlerStructuredError(t *testing.T) {
 	}
 	var er errorResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &er); err != nil || er.Reason != "enroll_rate" || !er.Retryable {
-		t.Fatalf("want structured enroll_rate retryable error, got %s", rr.Body.String())
+		t.Fatalf("want structured enroll_rate retryable error, got %s (decode error: %v)", rr.Body.String(), err)
 	}
 }
 
@@ -157,7 +160,9 @@ func TestHandleNonce_BadSourceIPIs400(t *testing.T) {
 		t.Fatalf("an unparseable peer IP must answer 400, got %d", rr.Code)
 	}
 	var er errorResponse
-	_ = json.Unmarshal(rr.Body.Bytes(), &er)
+	if err := json.Unmarshal(rr.Body.Bytes(), &er); err != nil {
+		t.Fatal(err)
+	}
 	if er.Reason != "bad_source_ip" {
 		t.Fatalf("reason = %q, want bad_source_ip", er.Reason)
 	}
@@ -172,7 +177,10 @@ func TestServeHTTP_UnparseableIPRejected(t *testing.T) {
 		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
 	h := newTestHandler(t, svc, nil)
 
-	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(mintNonce(t, svc)), IdentityCSR: csrPEM(t, idCSR)})
+	b, err := json.Marshal(enrollRequestBody{Nonce: hexEncode(mintNonce(t, svc)), IdentityCSR: csrPEM(t, idCSR)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "garbage-addr"
 	rr := httptest.NewRecorder()
@@ -195,7 +203,10 @@ func TestHandlerNonceMintedBeforeClaim(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	nonce := mintNonce(t, svc)
-	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
+	b, err := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	mr.Close() // Valkey down: the issue-nonce mint fails (and so would everything after)
 	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.17:5000"
@@ -218,7 +229,10 @@ func TestHandlerHappyPath(t *testing.T) {
 	h := newTestHandler(t, svc, nil)
 
 	nonce := mintNonce(t, svc)
-	b, _ := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
+	b, err := json.Marshal(enrollRequestBody{Nonce: hexEncode(nonce), IdentityCSR: csrPEM(t, idCSR)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.18:5000"
 	rr := httptest.NewRecorder()
@@ -229,7 +243,7 @@ func TestHandlerHappyPath(t *testing.T) {
 	var resp enrollResponse
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil ||
 		resp.Name == "" || resp.IdentityCert == "" || resp.IssueNonce == "" {
-		t.Fatalf("want name + identity cert + issue nonce, got %s", rr.Body.String())
+		t.Fatalf("want name + identity cert + issue nonce, got %s (decode error: %v)", rr.Body.String(), err)
 	}
 }
 
@@ -257,7 +271,10 @@ func TestHandlerOverLimitDoesNotMintNonce(t *testing.T) {
 	}
 	keysBefore := len(mr.Keys())
 
-	b, _ := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
+	b, err := json.Marshal(enrollRequestBody{Nonce: "aabb", IdentityCSR: csrPEM(t, idCSR)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.19:5000"
 	rr := httptest.NewRecorder()
