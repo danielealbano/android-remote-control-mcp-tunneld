@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func TestBuildACMEChain_LegoLogsToStderr(t *testing.T) {
@@ -32,15 +33,15 @@ func TestBuildACMEChain_LegoLogsToStderr(t *testing.T) {
 	t.Cleanup(func() {
 		os.Stderr = prevStderr
 		legolog.SetDefault(prevLog)
-		_ = r.Close()
-		_ = w.Close()
+		tunneltest.CloseOrLog(t, r)
+		tunneltest.CloseOrLog(t, w)
 	})
 	os.Stderr = w
 	if _, err := buildACMEChain(config.ServeCmd{ACMEAccountDir: t.TempDir()}, nil, testChallengeStore(t), nil, testLogger()); err != nil {
 		t.Fatal(err)
 	}
 	legolog.Info("probe")
-	_ = w.Close()
+	tunneltest.CloseOrLog(t, w)
 	out, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +90,10 @@ func TestLoadAccountKey_PKCS8Accepted(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	der, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +102,10 @@ func TestLoadAccountKey_PKCS8Accepted(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(path)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	key, err := loadAccountKey(dir, acme.CAZeroSSL, testLogger())
 	if err != nil {
@@ -107,7 +114,10 @@ func TestLoadAccountKey_PKCS8Accepted(t *testing.T) {
 	if !priv.Equal(key) {
 		t.Error("loaded PKCS#8 key must equal the written key")
 	}
-	after, _ := os.ReadFile(path)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(before) != string(after) {
 		t.Error("a valid existing key must NOT be overwritten")
 	}
@@ -126,7 +136,10 @@ func TestLoadAccountKey_UnparseableIsFatal(t *testing.T) {
 	if _, err := loadAccountKey(dir, acme.CALetsEncrypt, testLogger()); err == nil {
 		t.Fatal("an unparseable existing key must be fatal")
 	}
-	after, _ := os.ReadFile(path)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(after) != string(junk) {
 		t.Error("an unparseable existing key must be left untouched (never overwritten)")
 	}
@@ -151,7 +164,7 @@ func testChallengeStore(t *testing.T) *acme.ChallengeStore {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { closeOrLog(t, rdb) })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	return acme.NewChallengeStore(rdb, acme.ChallengeTTL)
 }
 
@@ -179,5 +192,12 @@ func TestBuildACMEChain_DNSProviderOnlyWhenUsed(t *testing.T) {
 				t.Fatalf("dns provider warning logged = %v, want %v; log = %q", got, tc.wantWarn, buf.String())
 			}
 		})
+	}
+}
+
+func TestParseECPrivateKey_ReportsBothEncodings(t *testing.T) {
+	_, err := parseECPrivateKey(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte("garbage")}))
+	if err == nil || !strings.Contains(err.Error(), "parse as SEC1") || !strings.Contains(err.Error(), "parse as PKCS#8") {
+		t.Fatalf("an unparseable key must report both decode attempts, got %v", err)
 	}
 }

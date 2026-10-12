@@ -21,6 +21,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // writeCA generates a self-signed internal CA (cert + key) to temp files and returns their paths.
@@ -47,7 +48,10 @@ func writeCA(t *testing.T) (certPath, keyPath string) {
 	certPath = filepath.Join(dir, "ca.pem")
 	keyPath = filepath.Join(dir, "ca-key.pem")
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		t.Fatal(err)
@@ -184,7 +188,7 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = occupied.Close() }()
+	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.InternalListen = occupied.Addr().String() // already in use → bind must fail
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -217,7 +221,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeOrLog(t, occupied)
+	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.ACMEHTTPListen = occupied.Addr().String()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -236,7 +240,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the internal listener leaked after the ACME HTTP-01 bind failure: %v", err)
 	}
-	closeOrLog(t, rebound)
+	tunneltest.CloseOrLog(t, rebound)
 }
 
 func waitUntil(t *testing.T, d time.Duration, cond func() bool) {

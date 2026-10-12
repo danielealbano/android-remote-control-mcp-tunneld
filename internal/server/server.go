@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 
@@ -61,7 +62,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	defer closeLogged(logger, "valkey client", rdb)
 
 	nodeID := newNodeID()
-	nodeHost := hostname()
+	nodeHost := hostname(os.Hostname, logger)
 	nodeStart := nodeStartStamp()
 	logger = logger.With("node", nodeID, "version", version)
 
@@ -80,12 +81,36 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	banTunnel := func(name, fp string) bool { _, b := banEng.MatchTunnel(name, fp); return b }
 
 	// Control-plane primitives.
-	reg := router.NewRegistry(rdb, cfg.RouteTTL)
+	reg, err := router.NewRegistry(rdb, cfg.RouteTTL, router.WithLogger(logger))
+	if err != nil {
+		return fmt.Errorf("route registry: %w", err)
+	}
 	// These flags were already parsed + range-checked by cfg.Validate() at startup; a parse error
-	// here is impossible, so the errors are intentionally ignored (same for every mustBytes call).
-	bwRate, _ := config.ParseBitrate(cfg.LimitBandwidth)
-	dayCap, _ := config.ParseByteSize(cfg.LimitTrafficDay)
-	weekCap, _ := config.ParseByteSize(cfg.LimitTrafficWeek)
+	// here is impossible.
+	bwRate, err := config.ParseBitrate(cfg.LimitBandwidth)
+	if err != nil {
+		return fmt.Errorf("--limit-bandwidth: %w", err)
+	}
+	dayCap, err := config.ParseByteSize(cfg.LimitTrafficDay)
+	if err != nil {
+		return fmt.Errorf("--limit-traffic-day: %w", err)
+	}
+	weekCap, err := config.ParseByteSize(cfg.LimitTrafficWeek)
+	if err != nil {
+		return fmt.Errorf("--limit-traffic-week: %w", err)
+	}
+	minRate, err := config.ParseByteSize(cfg.LimitConnMinRate)
+	if err != nil {
+		return fmt.Errorf("--limit-conn-min-rate: %w", err)
+	}
+	protectRate, err := config.ParseByteSize(cfg.LimitConnProtectRate)
+	if err != nil {
+		return fmt.Errorf("--limit-conn-protect-rate: %w", err)
+	}
+	enrollBody, err := config.ParseByteSize(cfg.LimitEnrollBody)
+	if err != nil {
+		return fmt.Errorf("--limit-enroll-body: %w", err)
+	}
 	lim := limit.NewLimiter(rdb, bwRate, dayCap, weekCap, 3*cfg.LimitConnIdle,
 		limit.WithLogger(logger), limit.WithPacketCap(int64(cfg.LimitPackets)))
 	chal := acme.NewChallengeStore(rdb, acme.ChallengeTTL)
@@ -101,6 +126,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Metrics + admin + recorder.
 	m := metrics.NewMetrics()
+	if err := registerLogSinkErrors(m, logger); err != nil {
+		return err
+	}
 	adminTunnels := admin.NewTunnels(reg, lim) // composes routing meta (router) + live windows (limiter)
 	capLogger := caplog.New(logger)
 	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
@@ -135,7 +163,6 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		AttestOptional: cfg.AttestationOptional,
 		Recorder:       rec, Logger: logger,
 	})
-	enrollBody, _ := config.ParseByteSize(cfg.LimitEnrollBody) // pre-validated by cfg.Validate()
 	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody)
 
 	// Phone control plane.
@@ -171,14 +198,18 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
 		Concurrent: cfg.LimitConcurrent, HandshakeTimeout: cfg.HandshakeTimeout, DialBackTimeout: cfg.LimitDialBackTimeout,
 		IdleTimeout: cfg.LimitConnIdle, MinGrace: cfg.LimitConnMinGrace, EvictIdle: cfg.LimitConnEvictIdle,
-		MinRate: mustBytes(cfg.LimitConnMinRate), ProtectRate: mustBytes(cfg.LimitConnProtectRate),
+		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
 		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
-	meshHandler := mesh.NewHandler(phoneMgr.OwnsConn,
-		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout}, adminCtl)
+	meshHandler, err := mesh.NewHandler(phoneMgr.OwnsConn,
+		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout, logger: logger}, adminCtl,
+		mesh.WithHandlerLogger(logger))
+	if err != nil {
+		return fmt.Errorf("mesh handler: %w", err)
+	}
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
@@ -412,5 +443,17 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 	}
 }
 
-// mustBytes parses a byte-size flag ALREADY validated by cfg.Validate() — a parse error is impossible.
-func mustBytes(s string) int64 { n, _ := config.ParseByteSize(s); return n }
+type sinkErrorCounter interface {
+	SinkErrors() uint64
+}
+
+func registerLogSinkErrors(m *metrics.Metrics, logger *slog.Logger) error {
+	c, ok := logger.Handler().(sinkErrorCounter)
+	if !ok {
+		return nil
+	}
+	if err := m.RegisterLogSinkErrors(func() float64 { return float64(c.SinkErrors()) }); err != nil {
+		return fmt.Errorf("register the log sink error metric: %w", err)
+	}
+	return nil
+}

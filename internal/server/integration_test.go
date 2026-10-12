@@ -53,7 +53,7 @@ func freeAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
+	tunneltest.CloseOrLog(t, ln)
 	return addr
 }
 
@@ -237,9 +237,12 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 		}
 	})
 
-	opts, _ := redis.ParseURL(redisURL)
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rdb := redis.NewClient(opts)
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	st, err := store.NewS3Store(context.Background(), store.S3Config{
 		Endpoint: s3URL, Region: "us-east-1", Bucket: itBucket,
 		AccessKey: access, SecretKey: secret, ForcePathStyle: true,
@@ -293,11 +296,14 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	phoneTLS := phoneServerTLS(t, ident)
 	backend := func(s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
-		defer func() { _ = conn.Close() }()
+		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
 			return
 		}
-		_, _ = io.Copy(conn, conn)
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
 	}
 	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
@@ -305,7 +311,11 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
-	go func() { _ = c.Run(runCtx) }()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
 
 	// Once the phone binds, a frontend TLS roundtrip through the edge must succeed.
 	var lastErr error
@@ -379,13 +389,15 @@ func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = raw.Close() }()
-	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+	defer tunneltest.CloseLogged(raw)
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err != nil {
 		return fmt.Errorf("handshake: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer tunneltest.CloseLogged(conn)
 	msg := []byte("e2e-roundtrip-hello")
 	if _, err := conn.Write(msg); err != nil {
 		return fmt.Errorf("write: %w", err)
@@ -499,6 +511,7 @@ func TestIntegration_Registry(t *testing.T) {
 			go func() {
 				nonce, nerr := svc.Nonce(context.Background())
 				if nerr != nil {
+					testLogger().Warn("nonce mint failed", "err", nerr)
 					out <- result{err: &enroll.Error{Reason: "nonce"}}
 					return
 				}
@@ -535,7 +548,7 @@ func newRedis(t *testing.T, url string) *redis.Client {
 		t.Fatal(err)
 	}
 	c := redis.NewClient(opts)
-	t.Cleanup(func() { _ = c.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, c) })
 	return c
 }
 
@@ -562,24 +575,39 @@ func loadCA(t *testing.T) *ca.CA {
 
 func identityCSR(t *testing.T) *x509.CertificateRequest {
 	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "phone"}}, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	csr, _ := x509.ParseCertificateRequest(der)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return csr
 }
 
 func dummyAttChain(t *testing.T) ([]*x509.Certificate, []byte) {
 	t.Helper()
-	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "att"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
 	}
-	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	c, _ := x509.ParseCertificate(der)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return []*x509.Certificate{c}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 

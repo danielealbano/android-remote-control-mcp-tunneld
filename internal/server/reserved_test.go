@@ -11,10 +11,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"io"
 	"log/slog"
 	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,13 +74,6 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func closeOrLog(t *testing.T, c io.Closer) {
-	t.Helper()
-	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		t.Logf("close %T: %v", c, err)
-	}
-}
-
 // mintSelfCert produces a self-signed cert (PEM) + key (PEM) + CertInfo for host with the given NotAfter.
 func mintSelfCert(t *testing.T, host string, notAfter time.Time) (certPEM, keyPEM []byte, info store.CertInfo) {
 	t.Helper()
@@ -101,7 +92,10 @@ func mintSelfCert(t *testing.T, host string, notAfter time.Time) (certPEM, keyPE
 		t.Fatal(err)
 	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, _ := x509.MarshalECPrivateKey(key)
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	info = store.CertInfo{CA: "letsencrypt", Serial: "1", NotBefore: tmpl.NotBefore, NotAfter: notAfter}
 	return certPEM, keyPEM, info
@@ -217,7 +211,10 @@ func seedCache(t *testing.T, dir, host string, certPEM, keyPEM []byte, info stor
 	if err := os.MkdirAll(hd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta, _ := json.Marshal(info)
+	meta, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, data := range map[string][]byte{"cert.pem": certPEM, "key.pem": keyPEM, "meta.json": meta} {
 		if err := os.WriteFile(filepath.Join(hd, name), data, 0o600); err != nil {
 			t.Fatal(err)
@@ -272,10 +269,17 @@ func TestReservedCerts_ObtainsWhenNoCache(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- rc.run(ctx, time.Hour, time.Hour) }()
 	// It must have been persisted for reuse across restarts (atomic single-file bundle).
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(dir, "self", host, "bundle.json"))
-		return err == nil
-	})
+	var statErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, statErr = os.Stat(filepath.Join(dir, "self", host, "bundle.json")); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bundle.json was never persisted: %v", statErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -578,6 +582,54 @@ func TestReservedCerts_LoadLegacyTriple(t *testing.T) {
 	}
 	if gotInfo.NotAfter.IsZero() {
 		t.Fatal("legacy load must recover NotAfter")
+	}
+}
+
+func TestReservedCerts_CacheLoadLogging(t *testing.T) {
+	host := "enroll.example.test"
+	tests := []struct {
+		name     string
+		seed     func(t *testing.T, dir string)
+		wantOK   bool
+		wantWarn string
+	}{
+		{name: "missing cache", seed: func(*testing.T, string) {}, wantOK: false},
+		{name: "corrupt bundle", seed: func(t *testing.T, dir string) {
+			hd := filepath.Join(dir, "self", host)
+			if err := os.MkdirAll(hd, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(hd, "bundle.json"), []byte(`{"cert_pem":`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantOK: false, wantWarn: "reserved-host cert bundle unparseable"},
+		{name: "corrupt legacy meta", seed: func(t *testing.T, dir string) {
+			certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
+			seedCache(t, dir, host, certPEM, keyPEM, info)
+			if err := os.WriteFile(filepath.Join(dir, "self", host, "meta.json"), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, wantOK: true, wantWarn: "reserved-host legacy meta unparseable"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.seed(t, dir)
+			var buf syncBuffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			rc := &reservedCerts{dir: filepath.Join(dir, "self"), logger: logger, now: time.Now}
+			cert, info, ok := rc.loadCached(host)
+			if ok != tc.wantOK || (ok && (cert == nil || info.NotAfter.IsZero())) {
+				t.Fatalf("loadCached ok=%v cert=%v NotAfter=%v, want ok=%v", ok, cert != nil, info.NotAfter, tc.wantOK)
+			}
+			warned := strings.Contains(buf.String(), "level=WARN")
+			if tc.wantWarn == "" && warned {
+				t.Fatalf("a missing cache must not warn; log = %q", buf.String())
+			}
+			if tc.wantWarn != "" && (!warned || !strings.Contains(buf.String(), tc.wantWarn)) {
+				t.Fatalf("want a Warn %q; log = %q", tc.wantWarn, buf.String())
+			}
+		})
 	}
 }
 

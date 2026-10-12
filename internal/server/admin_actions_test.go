@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // newTestRegistry builds a router.Registry backed by an in-process miniredis.
@@ -19,8 +20,12 @@ func newTestRegistry(t *testing.T) *router.Registry {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	return router.NewRegistry(rdb, 30*time.Second)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
 }
 
 // recordingLocal is a local controller-method stub for the owner-local admin path: it records the tunnel it

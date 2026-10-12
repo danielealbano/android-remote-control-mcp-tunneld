@@ -19,8 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/metrics"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func serveTestCert(t *testing.T) tls.Certificate {
@@ -41,7 +44,11 @@ func serveTestCert(t *testing.T) tls.Certificate {
 func TestServeTLS_ServesHTTP2OnPrebuiltListener(t *testing.T) {
 	t.Parallel()
 	srv := &http.Server{
-		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Proto) }),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := io.WriteString(w, r.Proto); err != nil {
+				testLogger().Warn("test handler write failed", "err", err)
+			}
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 		Protocols:         h2Protocols(),
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{serveTestCert(t)}, MinVersion: tls.VersionTLS12,
@@ -56,8 +63,10 @@ func TestServeTLS_ServesHTTP2OnPrebuiltListener(t *testing.T) {
 	go func() { done <- serveTLS(ctx, srv, tls.NewListener(ln, srv.TLSConfig), testLogger(), "test") }()
 	defer func() {
 		cancel()
-		_ = srv.Close()
-		<-done
+		tunneltest.CloseOrLog(t, srv)
+		if err := <-done; err != nil {
+			t.Errorf("serveTLS: %v", err)
+		}
 	}()
 	tests := []struct {
 		name  string
@@ -79,7 +88,7 @@ func TestServeTLS_ServesHTTP2OnPrebuiltListener(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = resp.Body.Close() }()
+			defer tunneltest.CloseOrLog(t, resp.Body)
 			if resp.Proto != tc.want {
 				t.Fatalf("negotiated %s, want %s", resp.Proto, tc.want)
 			}
@@ -133,11 +142,12 @@ func TestServeInternal_DrainsGracefully(t *testing.T) {
 	go func() {
 		resp, gerr := http.Get("http://" + ln.Addr().String() + "/")
 		if gerr != nil {
+			testLogger().Warn("in-flight request failed", "err", gerr)
 			respCh <- -1
 			return
 		}
 		respCh <- resp.StatusCode
-		_ = resp.Body.Close()
+		tunneltest.CloseLogged(resp.Body)
 	}()
 
 	<-started
@@ -226,7 +236,7 @@ func TestBridgeCopyReturnsPromptlyOnPhoneEOF(t *testing.T) {
 	ds := newEOFThenBlock()    // phone: response direction EOFs at once
 	client := newBlockingRWC() // entry: request-body read blocks forever
 	done := make(chan struct{})
-	go func() { bridgeCopy(ds, client); close(done) }()
+	go func() { bridgeCopy(ds, client, testLogger()); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
@@ -302,6 +312,47 @@ func TestShutdownLogged(t *testing.T) {
 			}
 			if logged := strings.Contains(buf.String(), `msg="server shutdown did not complete cleanly" which=probe`); logged != tc.wantLogged {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLogged, buf.String())
+			}
+		})
+	}
+}
+
+func TestRegisterLogSinkErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		logger     func(t *testing.T) *slog.Logger
+		registered bool
+	}{
+		{name: "fan-out logger", registered: true, logger: func(t *testing.T) *slog.Logger {
+			l, closeAll, err := logging.New([]string{"output=std;level=error"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if cerr := closeAll(); cerr != nil {
+					t.Errorf("close log sinks: %v", cerr)
+				}
+			})
+			return l.With("node", "n1")
+		}},
+		{name: "plain logger", registered: false, logger: func(*testing.T) *slog.Logger { return testLogger() }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := metrics.NewMetrics()
+			if err := registerLogSinkErrors(m, tc.logger(t)); err != nil {
+				t.Fatal(err)
+			}
+			mfs, err := m.Registry().Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, mf := range mfs {
+				found = found || mf.GetName() == "tunneld_log_sink_errors_total"
+			}
+			if found != tc.registered {
+				t.Fatalf("tunneld_log_sink_errors_total registered = %v, want %v", found, tc.registered)
 			}
 		})
 	}

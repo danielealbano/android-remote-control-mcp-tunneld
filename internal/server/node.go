@@ -3,27 +3,26 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"os"
+	"log/slog"
 	"strings"
 	"time"
 )
 
-// osHostname is a seam for tests.
-var osHostname = os.Hostname
-
 // newNodeID returns a random 8-byte hex node identity.
 func newNodeID() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 
 // hostname returns the OS hostname, falling back to a random node id when unavailable (connection-log
 // restart detection only needs a stable-per-process value).
-func hostname() string {
-	h, err := osHostname()
+func hostname(lookup func() (string, error), logger *slog.Logger) string {
+	h, err := lookup()
 	if err != nil || h == "" {
-		return "node-" + newNodeID()[:6]
+		fallback := "node-" + newNodeID()[:6]
+		logger.Warn("OS hostname unavailable (using a random node name)", "fallback", fallback, "err", err)
+		return fallback
 	}
 	return h
 }

@@ -91,12 +91,17 @@ func (l *guardedListener) check(ctx context.Context, c net.Conn) {
 		host = c.RemoteAddr().String()
 	}
 	ip, perr := netip.ParseAddr(host)
-	if perr == nil && l.ban(ip) {
+	if perr != nil {
+		l.logger.Debug("acme-http unparseable peer address (refused)", "peer", host, "err", perr)
+		closeLogged(l.logger, "acme-http rejected conn", c)
+		return
+	}
+	if l.ban(ip) {
 		l.reject("ban", "", host)
 		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
-	if perr == nil && !l.allow(ctx, ip) {
+	if !l.allow(ctx, ip) {
 		l.reject("conn-rate", "", host)
 		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
@@ -140,6 +145,7 @@ func (l *guardedListener) Wait(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
+		l.logger.Warn("acme-http drain deadline reached before every accept check returned", "err", ctx.Err())
 	}
 }
 
