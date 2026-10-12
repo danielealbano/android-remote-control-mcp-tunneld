@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -81,12 +82,12 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 		CurrentTime:   now,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}); err != nil {
-		return Result{}, ErrChainUntrusted
+		return Result{}, fmt.Errorf("%w: %w", ErrChainUntrusted, err)
 	}
 
 	kd, err := ParseKeyDescription(leaf)
 	if err != nil {
-		return Result{}, ErrChainUntrusted
+		return Result{}, fmt.Errorf("%w: %w", ErrChainUntrusted, err)
 	}
 
 	// (2) Challenge equals the server-issued nonce.

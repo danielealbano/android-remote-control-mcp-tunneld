@@ -35,6 +35,7 @@ type chainParams struct {
 	dropIntermediate   bool
 	noRootOfTrust      bool // omit rootOfTrust from BOTH authorization lists
 	rootInSoftwareOnly bool // place rootOfTrust in softwareEnforced instead of teeEnforced
+	malformedOSVersion bool
 }
 
 func defaultParams() chainParams {
@@ -63,7 +64,10 @@ type fakeCA struct {
 
 func newFakeCA(t *testing.T) *fakeCA {
 	t.Helper()
-	rootKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rootTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: "Fake Attestation Root"},
@@ -77,9 +81,15 @@ func newFakeCA(t *testing.T) *fakeCA {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootCert, _ := x509.ParseCertificate(rootDER)
+	rootCert, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	interKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	interKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	interTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(2),
 		Subject:               pkix.Name{CommonName: "Fake Attestation Intermediate"},
@@ -89,8 +99,14 @@ func newFakeCA(t *testing.T) *fakeCA {
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign,
 	}
-	interDER, _ := x509.CreateCertificate(rand.Reader, interTmpl, rootCert, &interKey.PublicKey, rootKey)
-	interCert, _ := x509.ParseCertificate(interDER)
+	interDER, err := x509.CreateCertificate(rand.Reader, interTmpl, rootCert, &interKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interCert, err := x509.ParseCertificate(interDER)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	return &fakeCA{rootCert: rootCert, rootKey: rootKey, interCert: interCert, interKey: interKey}
 }
@@ -105,7 +121,10 @@ func (ca *fakeCA) rootPool() *x509.CertPool {
 // buildChain returns [leaf, intermediate] and the attested leaf key.
 func (ca *fakeCA) buildChain(t *testing.T, p chainParams) ([]*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
-	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ext := keyDescriptionExtension(t, p)
 	leafTmpl := &x509.Certificate{
 		SerialNumber:    big.NewInt(1234),
@@ -173,6 +192,9 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 	}
 	field704 := ctxTag(t, 704, mustMarshal(t, rot))
 	field705 := ctxTag(t, 705, mustMarshal(t, 160000))
+	if p.malformedOSVersion {
+		field705 = ctxTag(t, 705, mustMarshal(t, "not-an-integer"))
+	}
 	field706 := ctxTag(t, 706, mustMarshal(t, 202607))
 	field718 := ctxTag(t, 718, mustMarshal(t, 202607))
 	field719 := ctxTag(t, 719, mustMarshal(t, 202607))

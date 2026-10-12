@@ -2,8 +2,11 @@ package attest
 
 import (
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +70,9 @@ func TestVerifyRealRealmeT70Chain(t *testing.T) {
 	pemPath := filepath.Join("testdata", "realme_t70_chain.pem")
 	metaPath := filepath.Join("testdata", "realme_t70.json")
 	if _, err := os.Stat(pemPath); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stat real-device fixture: %v", err)
+		}
 		t.Skip("no committed real-device fixture (captured on-device via the adb-gated path)")
 	}
 	pemBytes, err := os.ReadFile(pemPath)
@@ -92,4 +98,33 @@ func TestVerifyRealRealmeT70Chain(t *testing.T) {
 	}
 	_ = metaPath // the committed metadata (challenge + frozen validAt) is loaded by the capture harness
 	_ = time.Now
+}
+
+func TestDecodeInt(t *testing.T) {
+	valid, err := asn1.Marshal(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notInt, err := asn1.Marshal("forty-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name    string
+		in      []byte
+		want    int
+		wantErr bool
+	}{
+		{name: "INTEGER", in: valid, want: 42},
+		{name: "not an INTEGER", in: notInt, wantErr: true},
+		{name: "truncated", in: valid[:1], wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeInt(tc.in)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("decodeInt = (%d, %v), want (%d, error=%v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
 }

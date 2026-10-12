@@ -37,7 +37,9 @@ func TestSignerAllowlistParseAndAllowed(t *testing.T) {
 func TestSignerAllowlistRejectsBadHex(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "bad.txt")
-	_ = os.WriteFile(f, []byte("nothex!!\n"), 0o600)
+	if err := os.WriteFile(f, []byte("nothex!!\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := LoadSignerAllowlist(f, nil); err == nil {
 		t.Error("invalid hex digest should fail to load")
 	}
@@ -68,7 +70,9 @@ func TestSignerAllowlistHotReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Second)
-	_ = os.Chtimes(f, future, future)
+	if err := os.Chtimes(f, future, future); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.After(2 * time.Second)
 	for !a.Allowed("ddeeff") {
@@ -112,7 +116,9 @@ func TestSignerAllowlistReloadFailureLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	future := time.Now().Add(time.Second)
-	_ = os.Chtimes(tmp, future, future)
+	if err := os.Chtimes(tmp, future, future); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(tmp, f); err != nil {
 		t.Fatal(err)
 	}

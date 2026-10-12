@@ -26,7 +26,7 @@ type SignerAllowlist struct {
 // LoadSignerAllowlist reads the file once and returns the allowlist (an unreadable/absent file is an
 // error at startup).
 func LoadSignerAllowlist(path string, logger *slog.Logger) (*SignerAllowlist, error) {
-	a := &SignerAllowlist{path: path, logger: orDiscard(logger)}
+	a := &SignerAllowlist{path: path, logger: orDefault(logger)}
 	if err := a.reload(); err != nil {
 		return nil, err
 	}

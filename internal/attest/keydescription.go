@@ -160,23 +160,31 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 				out.SignatureDigests = append(out.SignatureDigests, d.Bytes)
 			}
 		case tagOSVersion:
-			out.OSVersion = decodeInt(rv.Bytes)
+			if out.OSVersion, err = decodeInt(rv.Bytes); err != nil {
+				return fmt.Errorf("osVersion: %w", err)
+			}
 		case tagPatchLevel:
-			out.OSPatch = decodeInt(rv.Bytes)
+			if out.OSPatch, err = decodeInt(rv.Bytes); err != nil {
+				return fmt.Errorf("osPatchLevel: %w", err)
+			}
 		case tagVendorPatch:
-			out.VendorPatch = decodeInt(rv.Bytes)
+			if out.VendorPatch, err = decodeInt(rv.Bytes); err != nil {
+				return fmt.Errorf("vendorPatchLevel: %w", err)
+			}
 		case tagBootPatch:
-			out.BootPatch = decodeInt(rv.Bytes)
+			if out.BootPatch, err = decodeInt(rv.Bytes); err != nil {
+				return fmt.Errorf("bootPatchLevel: %w", err)
+			}
 		}
 	}
 	return nil
 }
 
-// decodeInt decodes a context-tagged INTEGER's contents (best-effort; 0 on failure).
-func decodeInt(b []byte) int {
+// decodeInt decodes a context-tagged INTEGER's contents.
+func decodeInt(b []byte) (int, error) {
 	var v int
 	if _, err := asn1.Unmarshal(b, &v); err != nil {
-		return 0
+		return 0, err
 	}
-	return v
+	return v, nil
 }
