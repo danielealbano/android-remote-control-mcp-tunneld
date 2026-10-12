@@ -67,19 +67,20 @@ mermaid-check:
 # support/attest-probe/local.properties (gitignored) or ANDROID_HOME — plus the build-tools apksigner.
 # NOT a default quality gate. Regenerates the committed fixtures under fixtures/attest-probe/.
 ANDROID_SDK ?= $(or $(ANDROID_HOME),$(ANDROID_SDK_ROOT),$(HOME)/Android/Sdk)
-APKSIGNER ?= $(shell ls -1 $(ANDROID_SDK)/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+APKSIGNER ?= $(shell printf '%s\n' $(wildcard $(ANDROID_SDK)/build-tools/*/apksigner) | sort -V | tail -1)
 attest-probe:
 	@test -n "$(APKSIGNER)" || { echo "apksigner not found under $(ANDROID_SDK)/build-tools; set ANDROID_HOME"; exit 1; }
 	cd support/attest-probe && ./gradlew assembleDebug
 	mkdir -p fixtures/attest-probe
 	cp support/attest-probe/app/build/outputs/apk/debug/app-debug.apk \
 	    fixtures/attest-probe/attest-probe.apk
-	sha256sum fixtures/attest-probe/attest-probe.apk | awk '{print $$1}' \
-	    > fixtures/attest-probe/attest-probe.apk.sha256
-	{ echo "# Debug signing-cert SHA-256 for the attest-probe APK (regenerate via 'make attest-probe')."; \
-	  $(APKSIGNER) verify --print-certs fixtures/attest-probe/attest-probe.apk \
-	    | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}'; \
-	} > fixtures/attest-probe/signers.allow
+	sum="$$(sha256sum fixtures/attest-probe/attest-probe.apk)" && \
+	    echo "$${sum%% *}" > fixtures/attest-probe/attest-probe.apk.sha256
+	certs="$$($(APKSIGNER) verify --print-certs fixtures/attest-probe/attest-probe.apk)" && \
+	    digest="$$(printf '%s\n' "$$certs" | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}')" && \
+	    { test -n "$$digest" || { echo "no signing-cert digest in the apksigner output" >&2; exit 1; }; } && \
+	    { echo "# Debug signing-cert SHA-256 for the attest-probe APK (regenerate via 'make attest-probe')."; \
+	      echo "$$digest"; } > fixtures/attest-probe/signers.allow
 
 # Builds, signs (debug keystore), and publishes the on-device REFERENCE TUNNEL CLIENT used by the adb-gated
 # TestE2E_ReferenceTunnelApp e2e test (see support/tunnel-app/README.md). Requires the LOCAL Android SDK —
@@ -92,9 +93,10 @@ tunnel-app:
 	mkdir -p fixtures/tunnel-app
 	cp support/tunnel-app/app/build/outputs/apk/debug/app-debug.apk \
 	    fixtures/tunnel-app/tunnel-app.apk
-	sha256sum fixtures/tunnel-app/tunnel-app.apk | awk '{print $$1}' \
-	    > fixtures/tunnel-app/tunnel-app.apk.sha256
-	{ echo "# Debug signing-cert SHA-256 for the tunnel-app APK (regenerate via 'make tunnel-app')."; \
-	  $(APKSIGNER) verify --print-certs fixtures/tunnel-app/tunnel-app.apk \
-	    | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}'; \
-	} > fixtures/tunnel-app/signers.allow
+	sum="$$(sha256sum fixtures/tunnel-app/tunnel-app.apk)" && \
+	    echo "$${sum%% *}" > fixtures/tunnel-app/tunnel-app.apk.sha256
+	certs="$$($(APKSIGNER) verify --print-certs fixtures/tunnel-app/tunnel-app.apk)" && \
+	    digest="$$(printf '%s\n' "$$certs" | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}')" && \
+	    { test -n "$$digest" || { echo "no signing-cert digest in the apksigner output" >&2; exit 1; }; } && \
+	    { echo "# Debug signing-cert SHA-256 for the tunnel-app APK (regenerate via 'make tunnel-app')."; \
+	      echo "$$digest"; } > fixtures/tunnel-app/signers.allow
