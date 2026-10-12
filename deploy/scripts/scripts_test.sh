@@ -84,7 +84,7 @@ t="$(mktemp -d)"
 b="$(mktemp -d)"
 make_stub_curl "$b"
 echo "cidr 9.9.9.0/24" > "$t/droplist.bans"
-STUB_CURL_EXIT=1 PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" 2>/dev/null || true
+STUB_CURL_EXIT=1 PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" || true
 if no_tmp_litter "$t" && grep -q '^cidr 9.9.9.0/24$' "$t/droplist.bans"; then
   pass "droplist failure leaves no temp litter"
 else
@@ -96,7 +96,7 @@ t="$(mktemp -d)"
 b="$(mktemp -d)"
 make_stub_curl "$b"
 echo "cidr 9.9.9.0/24" > "$t/droplist.bans"
-STUB_CURL_EXIT=1 PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" 2>/dev/null || true
+STUB_CURL_EXIT=1 PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" || true
 if grep -q '^cidr 9.9.9.0/24$' "$t/droplist.bans"; then
   pass "droplist failure preserves old file"
 else
@@ -113,7 +113,7 @@ cat > "$t/feed.json" <<'JSON'
 {"type":"metadata","version":1}
 {"other":"field"}
 JSON
-if STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh" 2>/dev/null; then
+if STUB_CURL_SRC="$t/feed.json" PATH="$b:$PATH" OUT_DIR="$t" sh "$DIR/fetch-droplist.sh"; then
   fail "droplist empty result should exit non-zero"
 elif grep -q '^cidr 9.9.9.0/24$' "$t/droplist.bans" && no_tmp_litter "$t"; then
   pass "droplist empty result preserves old file"
@@ -153,8 +153,8 @@ t="$(mktemp -d)"
 sh "$DIR/gen-ca.sh" "$t"
 if openssl x509 -in "$t/ca.pem" -noout -text | grep -q 'CA:TRUE' &&
   openssl x509 -in "$t/ca.pem" -noout -text | grep -q 'Certificate Sign'; then
-  pub_key="$(openssl pkey -in "$t/ca-key.pem" -pubout 2>/dev/null)"
-  pub_crt="$(openssl x509 -in "$t/ca.pem" -pubkey -noout 2>/dev/null)"
+  pub_key="$(openssl pkey -in "$t/ca-key.pem" -pubout)"
+  pub_crt="$(openssl x509 -in "$t/ca.pem" -pubkey -noout)"
   if [ "$pub_key" = "$pub_crt" ]; then
     pass "gen-ca produces a signing CA"
   else
@@ -166,10 +166,10 @@ fi
 
 # --- gen-ca refuses to clobber an existing CA ---
 t="$(mktemp -d)"
-sh "$DIR/gen-ca.sh" "$t" >/dev/null 2>&1
+sh "$DIR/gen-ca.sh" "$t"
 key_before="$(cat "$t/ca-key.pem")"
 crt_before="$(cat "$t/ca.pem")"
-if sh "$DIR/gen-ca.sh" "$t" >/dev/null 2>&1; then
+if sh "$DIR/gen-ca.sh" "$t"; then
   fail "gen-ca clobbered an existing CA (second run should exit non-zero)"
 elif [ "$(cat "$t/ca-key.pem")" = "$key_before" ] && [ "$(cat "$t/ca.pem")" = "$crt_before" ]; then
   pass "gen-ca refuses to clobber an existing CA"
