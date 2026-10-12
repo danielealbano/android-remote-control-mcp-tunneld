@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // TestBridge_BanDuringDialbackEvictsStream verifies the post-trackStream ban re-check: a tunnel banned
@@ -89,7 +90,7 @@ func TestEdge_PacedCopy_QuotaExhaustion(t *testing.T) {
 	// Swap in a limiter with a tiny day cap so Charge kills on the day cap immediately.
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40, time.Hour) // 4-byte day cap
 	te.e.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
 

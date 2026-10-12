@@ -16,6 +16,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -123,25 +124,13 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)}) // string-only fields cannot fail
-	resp, err := post(ctx, hc, "https://"+enrollHost+"/api/v1/enroll", body)
+	body, err := json.Marshal(enrollRequestBody{Nonce: nonce, AttestChainPEM: string(attest), IdentityCSR: string(idCSR)}) // string-only fields cannot fail
+	if err != nil {
+		return nil, fmt.Errorf("enroll: encode request: %w", err)
+	}
+	er, err := postEnroll(ctx, hc, enrollHost, body)
 	if err != nil {
 		return nil, err
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	_ = resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("enroll: read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		var er errorResponse
-		_ = json.Unmarshal(raw, &er)
-		return nil, &EnrollError{Status: resp.StatusCode, Reason: er.Reason, Retryable: er.Retryable,
-			RetryAfter: time.Duration(er.RetryAfter) * time.Second}
-	}
-	var er enrollResponse
-	if err := json.Unmarshal(raw, &er); err != nil {
-		return nil, fmt.Errorf("enroll: decode response: %w", err)
 	}
 
 	// --- Phase 2: cert generation (mTLS POST /api/v1/issue) ---
@@ -189,23 +178,28 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 	if err != nil {
 		return nil, err
 	}
-	body, _ := json.Marshal(issueRequestBody{ // string-only fields cannot fail
+	body, err := json.Marshal(issueRequestBody{ // string-only fields cannot fail
 		Nonce: nonceHex, AttestChainPEM: string(attest), IdentityCSR: string(idCSR), TLSCSR: string(tlsCSR),
 	})
+	if err != nil {
+		return nil, fmt.Errorf("issue: encode request: %w", err)
+	}
 	resp, err := post(ctx, hc, "https://"+controlHost+"/api/v1/issue", body)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("issue: read response: %w", err)
+		err = fmt.Errorf("issue: read response: %w", err)
+	}
+	if cerr := resp.Body.Close(); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("issue: close response: %w", cerr))
+	}
+	if err != nil {
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		var er errorResponse
-		_ = json.Unmarshal(raw, &er)
-		return nil, &EnrollError{Status: resp.StatusCode, Reason: er.Reason, Retryable: er.Retryable,
-			RetryAfter: time.Duration(er.RetryAfter) * time.Second}
+		return nil, errorFromResponse(resp.StatusCode, raw)
 	}
 	var ir issueResponseBody
 	if err := json.Unmarshal(raw, &ir); err != nil {
@@ -234,6 +228,31 @@ func tlsCSRForTunnel(key *ecdsa.PrivateKey, name, tunnelDomain string) ([]byte, 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil
 }
 
+func postEnroll(ctx context.Context, hc *http.Client, enrollHost string, body []byte) (enrollResponse, error) {
+	resp, err := post(ctx, hc, "https://"+enrollHost+"/api/v1/enroll", body)
+	if err != nil {
+		return enrollResponse{}, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		err = fmt.Errorf("enroll: read response: %w", err)
+	}
+	if cerr := resp.Body.Close(); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("enroll: close response: %w", cerr))
+	}
+	if err != nil {
+		return enrollResponse{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return enrollResponse{}, errorFromResponse(resp.StatusCode, raw)
+	}
+	var er enrollResponse
+	if err := json.Unmarshal(raw, &er); err != nil {
+		return enrollResponse{}, fmt.Errorf("enroll: decode response: %w", err)
+	}
+	return er, nil
+}
+
 func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+enrollHost+"/api/v1/enroll/nonce", nil)
 	if err != nil {
@@ -243,10 +262,15 @@ func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
-		return "", fmt.Errorf("enroll: read nonce response: %w", err)
+		err = fmt.Errorf("enroll: read nonce response: %w", err)
+	}
+	if cerr := resp.Body.Close(); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("enroll: close nonce response: %w", cerr))
+	}
+	if err != nil {
+		return "", err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("enroll: nonce status %d", resp.StatusCode)
@@ -256,6 +280,16 @@ func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string
 		return "", err
 	}
 	return nr.Nonce, nil
+}
+
+func errorFromResponse(status int, raw []byte) error {
+	var er errorResponse
+	ee := &EnrollError{Status: status}
+	if err := json.Unmarshal(raw, &er); err != nil {
+		return errors.Join(ee, fmt.Errorf("decode error response: %w", err))
+	}
+	ee.Reason, ee.Retryable, ee.RetryAfter = er.Reason, er.Retryable, time.Duration(er.RetryAfter)*time.Second
+	return ee
 }
 
 func post(ctx context.Context, hc *http.Client, url string, body []byte) (*http.Response, error) {

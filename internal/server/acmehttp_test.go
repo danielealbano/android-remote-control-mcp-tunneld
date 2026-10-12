@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 type syncBuffer struct {
@@ -64,7 +66,7 @@ func newProbedGuard(t *testing.T, ban func(netip.Addr) bool, allow func(context.
 		func() bool { p.admits.Add(1); return admit() },
 		func() { p.releases.Add(1) }, p.reject, testLogger())
 	t.Cleanup(func() {
-		closeOrLog(t, g)
+		tunneltest.CloseOrLog(t, g)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		g.Wait(ctx)
@@ -78,7 +80,7 @@ func dialGuard(t *testing.T, g *guardedListener) net.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { closeOrLog(t, c) })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, c) })
 	return c
 }
 
@@ -144,13 +146,17 @@ func TestGuardListener_SlowRateCheckDoesNotBlockAccept(t *testing.T) {
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, err := g.Accept()
-		if err == nil {
-			accepted <- c
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				tunneltest.Logger().Warn("guarded accept failed", "err", err)
+			}
+			return
 		}
+		accepted <- c
 	}()
 	select {
 	case c := <-accepted:
-		closeOrLog(t, c)
+		tunneltest.CloseOrLog(t, c)
 	case <-time.After(2 * time.Second):
 		t.Fatal("a slow rate check on one connection blocked accepting the next")
 	}
@@ -245,7 +251,7 @@ func TestGuardListener_AcceptErrorBackoff(t *testing.T) {
 			t.Fatalf("accept retry %d came after %s, want at least 5ms (no hot spin)", i, gap)
 		}
 	}
-	closeOrLog(t, g)
+	tunneltest.CloseOrLog(t, g)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
@@ -266,8 +272,8 @@ func TestGuardListener_SlotReleasedOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	closeOrLog(t, c)
-	closeOrLog(t, c)
+	tunneltest.CloseOrLog(t, c)
+	tunneltest.CloseOrLog(t, c)
 	if n := p.releases.Load(); n != 1 {
 		t.Fatalf("slot released %d times, want exactly 1", n)
 	}
@@ -304,9 +310,9 @@ func TestGuardListener_WaitJoinsGoroutines(t *testing.T) {
 	g := newGuardedListener(context.Background(), ln, func(netip.Addr) bool { return false }, allow,
 		func() bool { return true }, func() {}, func(string, string, string) {}, testLogger())
 	c := dialGuard(t, g)
-	defer closeOrLog(t, c)
+	defer tunneltest.CloseOrLog(t, c)
 	<-entered
-	closeOrLog(t, g)
+	tunneltest.CloseOrLog(t, g)
 
 	short, cancelShort := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancelShort()
@@ -323,5 +329,55 @@ func TestGuardListener_WaitJoinsGoroutines(t *testing.T) {
 	g.Wait(long)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Wait did not return once the check finished (%s)", elapsed)
+	}
+}
+
+type unixPeerConn struct{ net.Conn }
+
+func (c unixPeerConn) RemoteAddr() net.Addr { return &net.UnixAddr{Name: "@peer", Net: "unix"} }
+
+type oneConnListener struct {
+	conn   net.Conn
+	once   sync.Once
+	served chan struct{}
+	closed chan struct{}
+	stop   sync.Once
+}
+
+func (l *oneConnListener) Accept() (net.Conn, error) {
+	first := false
+	l.once.Do(func() { first = true; close(l.served) })
+	if first {
+		return l.conn, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *oneConnListener) Close() error {
+	l.stop.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *oneConnListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80} }
+
+func TestGuardListener_UnparseablePeerRefused(t *testing.T) {
+	server, client := net.Pipe()
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, client) })
+	ln := &oneConnListener{conn: unixPeerConn{server}, served: make(chan struct{}), closed: make(chan struct{})}
+	p := &guardProbe{}
+	g := newGuardedListener(context.Background(), ln, func(netip.Addr) bool { return false },
+		func(context.Context, netip.Addr) bool { p.allows.Add(1); return true },
+		func() bool { p.admits.Add(1); return true }, func() { p.releases.Add(1) }, p.reject, testLogger())
+	t.Cleanup(func() {
+		tunneltest.CloseOrLog(t, g)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		g.Wait(ctx)
+	})
+	expectClosedByPeer(t, client)
+	if got := p.rejected(); len(got) != 0 || p.allows.Load() != 0 || p.admits.Load() != 0 {
+		t.Fatalf("an unparseable peer must be refused before any gate: rejects=%v allows=%d admits=%d",
+			got, p.allows.Load(), p.admits.Load())
 	}
 }

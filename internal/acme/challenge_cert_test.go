@@ -10,6 +10,8 @@ import (
 	"net"
 	"slices"
 	"testing"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func parseChallengeLeaf(t *testing.T, cert *tls.Certificate) *x509.Certificate {
@@ -77,8 +79,8 @@ func TestChallengeCertificate_TLS13Handshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	srvConn, cliConn := net.Pipe()
-	defer closeOrLog(t, srvConn)
-	defer closeOrLog(t, cliConn)
+	defer tunneltest.CloseOrLog(t, srvConn)
+	defer tunneltest.CloseOrLog(t, cliConn)
 	srvErr := make(chan error, 1)
 	go func() {
 		srv := tls.Server(srvConn, &tls.Config{Certificates: []tls.Certificate{*cert}, NextProtos: []string{"acme-tls/1"}, MinVersion: tls.VersionTLS12})

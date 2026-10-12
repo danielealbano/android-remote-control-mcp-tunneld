@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,13 +13,13 @@ import (
 	"time"
 )
 
-// orDiscard returns logger, or a sink logger when logger is nil, so the refreshers never nil-deref
-// while remaining usable without an explicit logger in tests.
-func orDiscard(logger *slog.Logger) *slog.Logger {
+// orDefault returns logger, so the refreshers never nil-deref while remaining usable without an explicit
+// logger in tests.
+func orDefault(logger *slog.Logger) *slog.Logger {
 	if logger != nil {
 		return logger
 	}
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.Default()
 }
 
 // RootSet holds the current Google attestation root pool behind an atomic pointer, refreshed with
@@ -34,7 +35,7 @@ type RootSet struct {
 // failure it holds an EMPTY pool (every chain verify fails — fail-closed) and the error reports the
 // failure so the caller can log it; a later Refresh success self-heals the pool.
 func NewRootSet(ctx context.Context, url string, client *http.Client, logger *slog.Logger) (*RootSet, error) {
-	r := &RootSet{url: url, client: client, logger: orDiscard(logger)}
+	r := &RootSet{url: url, client: client, logger: orDefault(logger)}
 	pool, err := r.fetch(ctx)
 	if err != nil {
 		r.pool.Store(x509.NewCertPool()) // fail-closed until Refresh succeeds
@@ -116,7 +117,7 @@ type statusResponse struct {
 // fetch failure it holds no snapshot (Revoked reports true and FetchedAt is zero, so the staleness
 // gate refuses — fail-closed) and the error reports the failure; a later Refresh success self-heals.
 func NewStatusList(ctx context.Context, url string, client *http.Client, logger *slog.Logger) (*StatusList, error) {
-	s := &StatusList{url: url, client: client, logger: orDiscard(logger), now: time.Now}
+	s := &StatusList{url: url, client: client, logger: orDefault(logger), now: time.Now}
 	snap, err := s.fetch(ctx)
 	if err != nil {
 		return s, err
@@ -181,7 +182,7 @@ func (s *StatusList) Refresh(ctx context.Context, every time.Duration) {
 	}
 }
 
-func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+func httpGet(ctx context.Context, client *http.Client, url string) (_ []byte, err error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -193,7 +194,11 @@ func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close response body: %w", cerr))
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}

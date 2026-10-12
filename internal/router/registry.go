@@ -7,6 +7,7 @@ package router
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -45,13 +46,32 @@ const (
 
 // Registry is the Redis-backed routing table.
 type Registry struct {
-	rdb redis.UniversalClient
-	ttl time.Duration
+	rdb    redis.UniversalClient
+	ttl    time.Duration
+	logger *slog.Logger
+}
+
+type Option func(*Registry) error
+
+func WithLogger(l *slog.Logger) Option {
+	return func(r *Registry) error {
+		if l == nil {
+			return errors.New("router: nil logger")
+		}
+		r.logger = l
+		return nil
+	}
 }
 
 // NewRegistry constructs a Registry; ttl is --route-ttl (the phone control heartbeat refreshes at ttl/3).
-func NewRegistry(rdb redis.UniversalClient, ttl time.Duration) *Registry {
-	return &Registry{rdb: rdb, ttl: ttl}
+func NewRegistry(rdb redis.UniversalClient, ttl time.Duration, opts ...Option) (*Registry, error) {
+	r := &Registry{rdb: rdb, ttl: ttl, logger: slog.Default()}
+	for _, o := range opts {
+		if err := o(r); err != nil {
+			return nil, err
+		}
+	}
+	return r, nil
 }
 
 func key(name string) string { return "tunnel:" + name }

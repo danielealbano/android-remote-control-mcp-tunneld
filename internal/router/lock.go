@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // lockTTL bounds a create/delete critical section (a single SET or HGET+DEL — microseconds). It is far
@@ -16,7 +19,7 @@ func lockKey(name string) string { return "lock:" + name }
 // mintToken returns a random lock-holder token (best-effort release checks it).
 func mintToken() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 
@@ -34,8 +37,18 @@ func (r *Registry) acquire(ctx context.Context, name string) (token string, ok b
 // release drops the lock only if we still hold it. Best-effort: a GET+DEL race is negligible because the
 // section is microseconds and the TTL is seconds, and the lock self-expires regardless (posture: no Lua).
 func (r *Registry) release(ctx context.Context, name, token string) {
-	if v, err := r.rdb.Get(ctx, lockKey(name)).Result(); err == nil && v == token {
-		_ = r.rdb.Del(ctx, lockKey(name)).Err()
+	v, err := r.rdb.Get(ctx, lockKey(name)).Result()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+			r.logger.Warn("route lock release check failed (lock expires by TTL)", "tunnel", name, "err", err)
+		}
+		return
+	}
+	if v != token {
+		return
+	}
+	if err := r.rdb.Del(ctx, lockKey(name)).Err(); err != nil && ctx.Err() == nil {
+		r.logger.Warn("route lock release failed (lock expires by TTL)", "tunnel", name, "err", err)
 	}
 }
 

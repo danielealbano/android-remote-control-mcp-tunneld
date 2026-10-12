@@ -140,9 +140,13 @@ func (h *Handler) identity(r *http.Request) (phoneIdentity, bool) {
 	if h.validName != nil && !h.validName(cn) {
 		return phoneIdentity{}, false
 	}
+	keyFP, err := ca.KeyFingerprint(leaf.PublicKey)
+	if err != nil {
+		h.mgr.logger.Warn("phone identity key fingerprint failed (logged empty)", "tunnel", cn, "err", err)
+	}
 	return phoneIdentity{
 		name: cn, fingerprint: ca.Fingerprint(leaf),
-		keyFP: ca.KeyFingerprint(leaf.PublicKey), certSerial: leaf.SerialNumber.Text(16),
+		keyFP: keyFP, certSerial: leaf.SerialNumber.Text(16),
 		notAfter: leaf.NotAfter,
 	}, true
 }
@@ -150,21 +154,25 @@ func (h *Handler) identity(r *http.Request) (phoneIdentity, bool) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Peer-IP ban check FIRST — a newly-banned IP must not keep using an established mTLS identity.
 	ip := peerIP(r)
-	if h.banIP != nil {
-		if addr, err := netip.ParseAddr(ip); err == nil && h.banIP(addr) {
-			h.reject("ban", "", ip)
-			writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
-			return
-		}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		h.mgr.logger.Debug("phone control unparseable peer address (refused)", "peer", ip, "err", err)
+		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_source_ip", "retryable": false})
+		return
+	}
+	if h.banIP != nil && h.banIP(addr) {
+		h.reject("ban", "", ip)
+		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
+		return
 	}
 	id, ok := h.identity(r)
 	if !ok {
-		writeJSON(w, http.StatusForbidden, map[string]any{"reason": "forbidden", "retryable": false})
+		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "forbidden", "retryable": false})
 		return
 	}
 	if h.banTunnel != nil && h.banTunnel(id.name, id.fingerprint) {
 		h.reject("ban", id.name, ip)
-		writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
+		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
 		return
 	}
 	switch r.URL.Path {
@@ -192,21 +200,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the regenerated identity + public certs. POST only.
 func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name, fp string) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
+		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
 		return
 	}
 	if h.onIssue == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
+		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.issueBody))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_request", "retryable": false})
+		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_request", "retryable": false})
 		return
 	}
 	var req IssueRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_json", "retryable": false})
+		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_json", "retryable": false})
 		return
 	}
 	resp, ierr := h.onIssue(r.Context(), name, fp, peerIP(r), req)
@@ -222,10 +230,10 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name, fp st
 		if ierr.RetryAfter > 0 {
 			body["retry_after_seconds"] = int64(ierr.RetryAfter.Seconds())
 		}
-		writeJSON(w, status, body)
+		h.writeJSON(w, status, body)
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 // peerIP returns the connecting phone's IP (host part of RemoteAddr).
@@ -238,10 +246,12 @@ func peerIP(r *http.Request) string {
 }
 
 // writeJSON writes v as a JSON response with the given status.
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		h.mgr.logger.Debug("phone control response write failed", "status", status, "err", err)
+	}
 }
 
 // livenessMissedPings is how many consecutive PING intervals may elapse without a PONG before the
@@ -289,6 +299,9 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 		if errors.Is(err, router.ErrNameHeldByOther) {
 			http.Error(w, "bind conflict", http.StatusConflict)
 		} else {
+			if ctx.Err() == nil {
+				h.mgr.logger.Warn("phone route bind failed", "tunnel", c.name, "conn", c.connID, "err", err)
+			}
 			http.Error(w, "bind failed (retry)", http.StatusServiceUnavailable)
 		}
 		return
@@ -310,6 +323,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 			return
 		case frame := <-c.send:
 			if _, err := w.Write(frame); err != nil {
+				h.mgr.logger.Debug("phone control write failed", "tunnel", c.name, "conn", c.connID, "err", err)
 				return
 			}
 			flusher.Flush()
@@ -323,8 +337,13 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 				c.close("liveness-timeout")
 				return
 			}
-			pf, _ := wire.EncodeControl(wire.CtrlPing, nil) // nil payload cannot fail to marshal
+			pf, err := wire.EncodeControl(wire.CtrlPing, nil) // nil payload cannot fail to marshal
+			if err != nil {
+				h.mgr.logger.Error("phone control PING encode failed", "tunnel", c.name, "conn", c.connID, "err", err)
+				return
+			}
 			if _, err := w.Write(pf); err != nil {
+				h.mgr.logger.Debug("phone control write failed", "tunnel", c.name, "conn", c.connID, "err", err)
 				return
 			}
 			flusher.Flush()
@@ -339,6 +358,7 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {
 		frame, err := readControlFrame(body)
 		if err != nil {
+			h.mgr.logger.Debug("phone control read ended", "tunnel", c.name, "conn", c.connID, "err", err)
 			// A wire-protocol violation (oversize frame) is distinct from a graceful EOF / transport
 			// close: attribute it to protocol-error so forensics can tell a misbehaving phone from an
 			// ordinary disconnect.
@@ -351,6 +371,7 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 		}
 		typ, _, derr := wire.DecodeControl(frame)
 		if derr != nil {
+			h.mgr.logger.Debug("phone control frame malformed", "tunnel", c.name, "conn", c.connID, "err", derr)
 			c.close("protocol-error")
 			return
 		}
@@ -378,7 +399,11 @@ func (h *Handler) serveData(w http.ResponseWriter, r *http.Request, name string)
 	done := make(chan struct{})
 	rc := http.NewResponseController(w)
 	ds := &httpDataStream{r: r.Body, w: w, flush: flusher.Flush, done: done,
-		unblock: func() { _ = rc.SetWriteDeadline(time.Now()) }}
+		unblock: func() {
+			if err := rc.SetWriteDeadline(time.Now()); err != nil {
+				h.mgr.logger.Debug("data stream write-deadline unblock failed", "tunnel", name, "stream", streamID, "err", err)
+			}
+		}}
 	if !h.mgr.deliverStream(name, streamID, ds) {
 		http.Error(w, "no such stream", http.StatusNotFound)
 		return

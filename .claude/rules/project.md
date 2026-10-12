@@ -108,7 +108,8 @@ MUST NOT be relaxed without explicit user direction.
 - The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
   edge is the internet edge — there is no proxy and no `--client-ip-header`).
 - **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, the ACME HTTP-01 `:80` listener, `/api/v1/enroll`,
-  `/api/v1/control`), keyed on that IP. **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
+  `/api/v1/control`), keyed on that IP. A peer address that does not parse as an IP cannot be ban-checked, so
+  every ingress edge REFUSES it before the ban gate (fail closed, Debug-logged). **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
   only the raw edge `:443` and the ACME HTTP-01 listener `:80` are public.
 - The public edge answers a ClientHello whose first ALPN protocol is `acme-tls/1` locally (TLS-ALPN-01), then dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
   `--control-host` → local termination; anything else → close (`no-route`). Caps are UNIFORM — NO

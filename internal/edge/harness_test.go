@@ -3,7 +3,6 @@ package edge
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // scriptConn is a net.Conn that serves a fixed prefix (a peeked ClientHello) then blocks reads until
@@ -274,7 +274,7 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	lim := limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour) // generous caps unless a test overrides via keys
 
 	rec := &recRecorder{}
@@ -298,11 +298,4 @@ func containsStr(ss []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func closeOrLog(t *testing.T, c io.Closer) {
-	t.Helper()
-	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		t.Logf("close %T: %v", c, err)
-	}
 }

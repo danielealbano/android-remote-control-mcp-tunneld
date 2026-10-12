@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // blockingWriter blocks every Write (holding httpDataStream.mu) until release is closed, and signals
@@ -33,14 +35,16 @@ func TestHTTPDataStream_CloseUnblocksBlockedWrite(t *testing.T) {
 
 	writeReturned := make(chan struct{})
 	go func() {
-		_, _ = ds.Write([]byte("hello"))
+		if _, err := ds.Write([]byte("hello")); err != nil {
+			tunneltest.Logger().Debug("blocked write released", "err", err)
+		}
 		close(writeReturned)
 	}()
 	<-bw.entered // the Write now holds d.mu, blocked in the writer
 
 	closeReturned := make(chan struct{})
 	go func() {
-		_ = ds.Close()
+		tunneltest.CloseLogged(ds)
 		close(closeReturned)
 	}()
 

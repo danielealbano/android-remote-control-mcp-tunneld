@@ -42,4 +42,5 @@ dependencies {
     implementation("io.ktor:ktor-server-netty:3.6.0") { // no explicit netty-* / conscrypt-android dep
         exclude(group = "io.netty", module = "netty-codec-native-quic")
     }
+    implementation("org.slf4j:slf4j-jdk14:2.0.20")
 }

@@ -1,10 +1,17 @@
 package edge
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func baseConfig() Config {
@@ -83,7 +90,7 @@ func TestEdge_HandleConn_ReservedSNI_Local(t *testing.T) {
 			t.Fatalf("pushed ConnMeta must carry SNI+JA4, got %+v", mc.meta)
 		}
 		before := te.e.clients.Load()
-		_ = c.Close()
+		tunneltest.CloseOrLog(t, c)
 		if got := te.e.clients.Load(); got != before-1 {
 			t.Fatalf("closing the pushed conn must release its max-clients slot (%d -> %d)", before, got)
 		}
@@ -119,5 +126,82 @@ func TestEdge_HandleTunnel_RouteBan_Close(t *testing.T) {
 	}
 	if !containsStr(te.rec.rejectReasons(), "ban") {
 		t.Fatalf("want ban reject, got %v", te.rec.rejectReasons())
+	}
+}
+
+type unixPeerConn struct{ *scriptConn }
+
+func (c unixPeerConn) RemoteAddr() net.Addr { return &net.UnixAddr{Name: "@peer", Net: "unix"} }
+
+func TestEdge_UnparseablePeerRefused(t *testing.T) {
+	te := newTestEdge(t, baseConfig(), func(netip.Addr) bool {
+		t.Error("the ban gate must not be consulted for an unparseable peer")
+		return false
+	}, nil)
+	sc := newScriptConn("198.51.100.30", captureClientHello(t, "enroll.example.test", "h2"))
+	te.e.handleConn(context.Background(), unixPeerConn{sc})
+	if !sc.isClosed() {
+		t.Fatal("a connection whose peer address is not an IP must be closed")
+	}
+	if len(te.rec.rejects) != 0 || len(te.e.enrollLn.ch) != 0 {
+		t.Fatalf("it must be refused before any gate or dispatch: rejects=%v queued=%d", te.rec.rejects, len(te.e.enrollLn.ch))
+	}
+}
+
+type deadlineFailConn struct {
+	net.Conn
+	failClear bool
+}
+
+func (c *deadlineFailConn) SetReadDeadline(t time.Time) error {
+	if t.IsZero() == c.failClear {
+		return errInjectedEdge
+	}
+	return nil
+}
+
+var errInjectedEdge = errors.New("injected deadline failure")
+
+func TestPeekClientHello_DeadlineErrorsReturned(t *testing.T) {
+	tests := []struct {
+		name      string
+		failClear bool
+		want      string
+	}{
+		{name: "set deadline fails", want: "set handshake deadline"},
+		{name: "clear deadline fails", failClear: true, want: "clear handshake deadline"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := net.Pipe()
+			tunneltest.CloseOrLog(t, b)
+			defer tunneltest.CloseOrLog(t, a)
+			_, pc, err := peekClientHello(&deadlineFailConn{Conn: a, failClear: tc.failClear}, time.Second)
+			if pc != nil || !errors.Is(err, errInjectedEdge) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("peekClientHello = (%v, %v), want the %q error", pc, err, tc.want)
+			}
+		})
+	}
+}
+
+type failOnceListener struct {
+	net.Listener
+	calls int
+}
+
+func (l *failOnceListener) Accept() (net.Conn, error) {
+	l.calls++
+	if l.calls == 1 {
+		return nil, errors.New("too many open files")
+	}
+	return nil, net.ErrClosed
+}
+
+func TestEdge_AcceptLoop_LogsAcceptFailure(t *testing.T) {
+	var buf bytes.Buffer
+	e := &Edge{cfg: Config{Logger: slog.New(slog.NewTextHandler(&buf, nil))}}
+	e.acceptLoop(context.Background(), &failOnceListener{})
+	if !strings.Contains(buf.String(), `msg="edge accept failed (backing off)" backoff=5ms err="too many open files"`) {
+		t.Fatalf("an accept failure must be logged with its backoff; log = %q", buf.String())
 	}
 }

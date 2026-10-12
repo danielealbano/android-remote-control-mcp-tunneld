@@ -2,6 +2,8 @@ package ban
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"time"
@@ -152,6 +154,9 @@ func (w *watcher) statePath(p string) fileState {
 	}
 	fi, err := os.Stat(p)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			w.log.Warn("ban input file stat failed (treated as missing)", "file", p, "err", err)
+		}
 		return fileState{exists: false}
 	}
 	return fileState{exists: true, modTime: fi.ModTime(), size: fi.Size()}

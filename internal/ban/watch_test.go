@@ -2,6 +2,8 @@ package ban
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,5 +90,31 @@ func TestWatcher_SingleLoadNoDoubleExpansion(t *testing.T) {
 	}
 	if e.current.Load() != snapAfterInitial {
 		t.Error("an unchanged tick must NOT swap in a new snapshot (no re-load / re-expansion)")
+	}
+}
+
+func TestWatcher_StatPath_LogsUnexpectedStatError(t *testing.T) {
+	dir := t.TempDir()
+	notDir := writeBan(t, dir, "plain.txt", "")
+	tests := []struct {
+		name    string
+		path    string
+		wantLog bool
+	}{
+		{name: "absent file is silent", path: filepath.Join(dir, "absent.txt")},
+		{name: "stat failure is logged", path: filepath.Join(notDir, "child"), wantLog: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			log, buf := captureLog()
+			w := &watcher{log: log}
+			if st := w.statePath(tc.path); st.exists {
+				t.Fatalf("statePath(%q) must report the file as missing", tc.path)
+			}
+			logged := strings.Contains(buf.String(), `msg="ban input file stat failed (treated as missing)"`)
+			if logged != tc.wantLog {
+				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
+			}
+		})
 	}
 }

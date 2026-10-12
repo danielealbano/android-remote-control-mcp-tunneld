@@ -86,6 +86,7 @@ func TestVerifyNegativeMatrix(t *testing.T) {
 		{"leaf-only chain", func(p *chainParams) { p.leafOnly = true }, false, ErrChainUntrusted},
 		{"dropped intermediate", func(p *chainParams) { p.dropIntermediate = true }, false, ErrChainUntrusted},
 		{"duplicated chain", func(p *chainParams) { p.duplicateLeaf = true }, false, ErrChainUntrusted},
+		{"malformed osVersion", func(p *chainParams) { p.malformedOSVersion = true }, false, ErrChainUntrusted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

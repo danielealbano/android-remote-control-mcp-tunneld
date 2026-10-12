@@ -14,6 +14,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // TestMeshCert_InitialMintFatal verifies a failing initial mint makes newMeshCertHolder return an error
@@ -79,15 +80,20 @@ func TestMeshCert_RotationRetriesOnBackoff(t *testing.T) {
 func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	reg := router.NewRegistry(rdb, time.Minute)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
 	logger := testLogger()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		_ = heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", "host-t", "v-test", "2026-08-21T00:00:00Z", 30*time.Millisecond, logger)
+		if err := heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", "host-t", "v-test", "2026-08-21T00:00:00Z", 30*time.Millisecond, logger); err != nil && ctx.Err() == nil {
+			logger.Warn("heartbeat loop failed", "err", err)
+		}
 		close(done)
 	}()
 
@@ -95,7 +101,10 @@ func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			_, ok, _ := reg.LookupNode(context.Background(), "node-t")
+			_, ok, err := reg.LookupNode(context.Background(), "node-t")
+			if err != nil {
+				t.Fatal(err)
+			}
 			if ok == want {
 				return
 			}

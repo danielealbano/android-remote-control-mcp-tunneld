@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -129,18 +130,21 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	name, ok := e.tunnelName(info.SNI)
 	if !ok {
 		e.rec.Reject("no-route", info.SNI, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 	nodeID, fp, connID, ok, err := e.router.LookupRoute(ctx, name)
+	if err != nil {
+		e.cfg.Logger.Debug("route lookup failed", "tunnel", name, "err", err)
+	}
 	if err != nil || !ok {
 		e.rec.Reject("no-route", name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 	if e.banTun != nil && e.banTun(name, fp) {
 		e.rec.Reject("ban", name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 
@@ -148,13 +152,16 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// streams are closed by the splice's Charge accounting). A control-plane error fails open,
 	// like connRate — never a hard outage.
 	dayOver, weekOver, qerr := e.lim.TrafficExhausted(ctx, name)
+	if qerr != nil {
+		e.cfg.Logger.Debug("traffic quota check failed (allowing)", "tunnel", name, "err", qerr)
+	}
 	if qerr == nil && (dayOver || weekOver) {
 		reason := "quota-day"
 		if weekOver {
 			reason = "quota-week"
 		}
 		e.rec.Reject(reason, name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 
@@ -167,30 +174,36 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
 	acq, aerr := e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
 	if aerr != nil {
+		e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 		acq = true
 	} else if !acq && e.evictLeastActive(name) {
 		acq, aerr = e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
 		if aerr != nil {
+			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 			acq = true
 		}
 	}
 	if !acq {
 		e.rec.Reject("stream-cap", name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 	// Release-once: fires only when a slot was REALLY acquired (a fail-open admission must not DECR a
 	// slot it never took) and at most once (the saturation evictor releases the victim's slot
-	// synchronously so the retry can admit). The release error stays intentionally ignored: the global
+	// synchronously so the retry can admit). The global
 	// conc:{name} counter self-heals at its TTL, so a transient Valkey failure at worst delays freeing
-	// one slot — and there is no logger on the edge's hot path.
+	// one slot.
 	slotHeld := aerr == nil
 	var slotOnce sync.Once
 	releaseSlot := func() {
 		if slotHeld {
 			// Release against the connID the slot was acquired with: if the tunnel re-bound meanwhile, the
 			// counter's owner changed and this release is a no-op (the old session's slots were reset).
-			slotOnce.Do(func() { _ = e.lim.ReleaseStream(context.Background(), name, connID) })
+			slotOnce.Do(func() {
+				if err := e.lim.ReleaseStream(context.Background(), name, connID); err != nil {
+					e.cfg.Logger.Debug("stream-cap release failed", "tunnel", name, "err", err)
+				}
+			})
 		}
 	}
 	defer releaseSlot()
@@ -205,10 +218,13 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	}
 	if ferr != nil {
 		n2, fp2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
+		if lerr != nil {
+			e.cfg.Logger.Debug("route re-lookup failed", "tunnel", name, "err", lerr)
+		}
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) {
 			if e.banTun != nil && e.banTun(name, fp2) {
 				e.rec.Reject("ban", name, peerAddr(client))
-				_ = client.Close()
+				closeLogged(e.cfg.Logger, "public client", client)
 				return
 			}
 			fp = fp2 // the splice now targets the re-bound route: the active stream must carry ITS fingerprint (ban sweeps match on it)
@@ -217,8 +233,9 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		}
 	}
 	if ferr != nil {
+		e.cfg.Logger.Debug("open far side failed", "tunnel", name, "err", ferr)
 		e.rec.Reject("no-route", name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 	defer closeFar()
@@ -237,7 +254,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// release run on this early return, and the client socket is closed like every sibling rejection.
 	if e.banTun != nil && e.banTun(name, fp) {
 		e.rec.Reject("ban", name, peerAddr(client))
-		_ = client.Close()
+		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 
@@ -263,7 +280,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		end.BytesOut = atomic.LoadInt64(&as.bytesOut)
 		e.logs.PutConnLogPublic(context.Background(), end)
 	}
-	_ = client.Close()
+	closeLogged(e.cfg.Logger, "public client", client)
 }
 
 // isDuplicateStream reports whether opening the far side failed because the minted stream id was
@@ -305,18 +322,21 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID strin
 		if err != nil {
 			return nil, nil, err
 		}
-		return ds, func() { _ = ds.Close() }, nil
+		return ds, func() { closeLogged(e.cfg.Logger, "phone data stream", ds) }, nil
 	}
 	// Mesh: resolve the owner's advertise address.
 	adv, ok, err := e.router.LookupNode(ctx, nodeID)
-	if err != nil || !ok {
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", errNoOwner, err)
+	}
+	if !ok {
 		return nil, nil, errNoOwner
 	}
 	ms, err := e.mesh.OpenStream(ctx, adv, name, connID, streamID)
 	if err != nil {
 		return nil, nil, err
 	}
-	return ms, func() { _ = ms.Close() }, nil
+	return ms, func() { closeLogged(e.cfg.Logger, "mesh stream", ms) }, nil
 }
 
 // splice copies bytes both directions with byte accounting (day/week traffic) + bandwidth pacing +
@@ -330,7 +350,10 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	setReason := func(r string) { reasonOnce.Do(func() { reason = r }) }
 	var closeOnce sync.Once
 	closeBoth := func() {
-		closeOnce.Do(func() { _ = far.Close(); _ = client.Close() })
+		closeOnce.Do(func() {
+			closeLogged(e.cfg.Logger, "far side", far)
+			closeLogged(e.cfg.Logger, "public client", client)
+		})
 	}
 
 	done := make(chan struct{}, 2)
@@ -456,7 +479,9 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			// forward; Wait → pace out the rest of the (near) window then forward; Kill → the tunnel exceeded
 			// a day/week cap whose reset is too far to wait out. A Valkey error yields Proceed (fail-open —
 			// never kill a live stream on a control-plane blip).
-			if action, wait, win, cerr := e.lim.Charge(ctx, name, dir, int64(nr)); cerr == nil {
+			if action, wait, win, cerr := e.lim.Charge(ctx, name, dir, int64(nr)); cerr != nil {
+				e.cfg.Logger.Debug("traffic charge failed (proceeding)", "tunnel", name, "dir", dir, "err", cerr)
+			} else {
 				switch action {
 				case limit.ChargeWait:
 					select {
@@ -469,6 +494,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 				}
 			}
 			if _, ew := dst.Write(buf[:nr]); ew != nil {
+				e.cfg.Logger.Debug("splice write failed", "tunnel", name, "dir", dir, "err", ew)
 				return copyWriteErr
 			}
 			atomic.AddInt64(counter, int64(nr))
@@ -477,6 +503,9 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			as.recent.Add(int64(nr))
 		}
 		if er != nil {
+			if !errors.Is(er, io.EOF) {
+				e.cfg.Logger.Debug("splice read ended with an error", "tunnel", name, "dir", dir, "err", er)
+			}
 			return copySrcEOF
 		}
 	}

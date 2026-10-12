@@ -65,7 +65,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		AccountKey: leKey,
 		Profile:    cfg.ACMELEProfile, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		UseARI:    true,
-		Challenge: cfg.ACMEChallengeLE, TLSALPN: chal, HTTP: chal,
+		Challenge: cfg.ACMEChallengeLE, TLSALPN: chal, HTTP: chal, Logger: logger,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	gts := acme.LegoConfig{
@@ -73,7 +73,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		AccountKey: gtsKey,
 		Validity:   cfg.ACMEGTSValidity, RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		EABKID: cfg.ACMEEABGTSKID, EABHMAC: cfg.ACMEEABGTSHMAC,
-		Challenge: cfg.ACMEChallengeGTS, TLSALPN: chal, HTTP: chal,
+		Challenge: cfg.ACMEChallengeGTS, TLSALPN: chal, HTTP: chal, Logger: logger,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	zerossl := acme.LegoConfig{
@@ -81,7 +81,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		AccountKey:  zerosslKey,
 		RenewMargin: cfg.ACMERenewMargin, Shortlived: shortlivedLifetime,
 		EABKID: cfg.ACMEEABZeroSSLKID, EABHMAC: cfg.ACMEEABZeroSSLHMAC,
-		Challenge: cfg.ACMEChallengeZeroSSL, TLSALPN: chal, HTTP: chal,
+		Challenge: cfg.ACMEChallengeZeroSSL, TLSALPN: chal, HTTP: chal, Logger: logger,
 		DNSResolvers: cfg.ACMEDNSResolvers, DNSSkipPropagationCheck: cfg.ACMEDNSSkipPropagationCheck,
 	}
 	if cfg.UsesChallenge(config.ChallengeDNS01) {
@@ -127,10 +127,13 @@ func loadAccountKey(dir, caID string, logger *slog.Logger) (crypto.Signer, error
 		logger.Warn("acme account dir create failed; using an ephemeral account key", "ca", caID, "err", merr)
 		return key, nil
 	}
-	if der, merr := x509.MarshalECPrivateKey(key); merr == nil {
-		if werr := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); werr != nil {
-			logger.Warn("acme account key persist failed; using an ephemeral account key", "ca", caID, "err", werr)
-		}
+	der, merr := x509.MarshalECPrivateKey(key)
+	if merr != nil {
+		logger.Warn("acme account key encode failed; using an ephemeral account key", "ca", caID, "err", merr)
+		return key, nil
+	}
+	if werr := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); werr != nil {
+		logger.Warn("acme account key persist failed; using an ephemeral account key", "ca", caID, "err", werr)
 	}
 	return key, nil
 }
@@ -141,12 +144,13 @@ func parseECPrivateKey(pemRaw []byte) (*ecdsa.PrivateKey, error) {
 	if block == nil {
 		return nil, errors.New("no PEM block")
 	}
-	if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-		return k, nil
+	k1, sec1Err := x509.ParseECPrivateKey(block.Bytes)
+	if sec1Err == nil {
+		return k1, nil
 	}
 	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(fmt.Errorf("parse as SEC1: %w", sec1Err), fmt.Errorf("parse as PKCS#8: %w", err))
 	}
 	ec, ok := k.(*ecdsa.PrivateKey)
 	if !ok {

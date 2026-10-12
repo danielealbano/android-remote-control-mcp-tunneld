@@ -59,7 +59,7 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 func nameKey(name string) string { return "names/" + name }
 
 // GetName reads and decodes the registry object; NoSuchKey → ErrNotFound.
-func (s *S3Store) GetName(ctx context.Context, name string) (NameRecord, error) {
+func (s *S3Store) GetName(ctx context.Context, name string) (_ NameRecord, err error) {
 	out, err := s.cli.GetObject(ctx, &s3.GetObjectInput{Bucket: &s.bucket, Key: aws.String(nameKey(name))})
 	if err != nil {
 		if isNotFound(err) {
@@ -67,7 +67,11 @@ func (s *S3Store) GetName(ctx context.Context, name string) (NameRecord, error) 
 		}
 		return NameRecord{}, fmt.Errorf("store: get name %q: %w", name, err)
 	}
-	defer func() { _ = out.Body.Close() }()
+	defer func() {
+		if cerr := out.Body.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("store: close name %q body: %w", name, cerr))
+		}
+	}()
 	var rec NameRecord
 	if err := json.NewDecoder(out.Body).Decode(&rec); err != nil {
 		return NameRecord{}, fmt.Errorf("store: decode name %q: %w", name, err)

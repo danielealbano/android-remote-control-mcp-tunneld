@@ -7,14 +7,20 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func newReg(t *testing.T) (*Registry, *miniredis.Miniredis) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	return NewRegistry(rdb, 30*time.Second), mr
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg, mr
 }
 
 func TestBindRouteThenLookup(t *testing.T) {
@@ -30,7 +36,9 @@ func TestBindRouteThenLookup(t *testing.T) {
 	if node != "nodeA" || fp != "sha256:fp1" || cid != "conn1" {
 		t.Errorf("lookup = (%q,%q,%q), want (nodeA, sha256:fp1, conn1)", node, fp, cid)
 	}
-	if _, _, _, ok, _ := reg.LookupRoute(ctx, "missing"); ok {
+	if _, _, _, ok, err := reg.LookupRoute(ctx, "missing"); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Error("unbound name must not resolve")
 	}
 }
@@ -38,7 +46,9 @@ func TestBindRouteThenLookup(t *testing.T) {
 func TestBindRouteRejectsDifferentFingerprint(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "sha256:fp1", "conn1")
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "sha256:fp1", "conn1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := reg.BindRoute(ctx, "abc", "nodeB", "sha256:DIFFERENT", "conn2"); err != ErrNameHeldByOther {
 		t.Errorf("different fingerprint bind: err = %v, want ErrNameHeldByOther", err)
 	}
@@ -58,7 +68,9 @@ func TestRegistry_BindRoute_ConnIDCollisionRerolls(t *testing.T) {
 	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn2"); err != nil {
 		t.Fatalf("distinct connID bind: %v", err)
 	}
-	if _, _, cid, ok, _ := reg.LookupRoute(ctx, "abc"); !ok || cid != "conn2" {
+	if _, _, cid, ok, err := reg.LookupRoute(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	} else if !ok || cid != "conn2" {
 		t.Errorf("route connID = %q ok=%v, want conn2", cid, ok)
 	}
 }
@@ -66,7 +78,9 @@ func TestRegistry_BindRoute_ConnIDCollisionRerolls(t *testing.T) {
 func TestHeartbeatRefreshesTTL(t *testing.T) {
 	reg, mr := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil {
+		t.Fatal(err)
+	}
 	mr.FastForward(20 * time.Second) // TTL now ~10s
 	res, err := reg.Heartbeat(ctx, "abc", "conn1")
 	if err != nil || res != HeartbeatRefreshed {
@@ -80,11 +94,15 @@ func TestHeartbeatRefreshesTTL(t *testing.T) {
 func TestUnbindRemovesRoute(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := reg.Unbind(ctx, "abc", "conn1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, ok, _ := reg.LookupRoute(ctx, "abc"); ok {
+	if _, _, _, ok, err := reg.LookupRoute(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Error("route must be gone after unbind")
 	}
 }
@@ -93,7 +111,9 @@ func TestUnbindIsConnConditional(t *testing.T) {
 	ctx := context.Background()
 	for _, node2 := range []string{"nodeB", "nodeA"} { // another node AND the same node
 		reg, _ := newReg(t)
-		_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
+		if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil {
+			t.Fatal(err)
+		}
 		if err := reg.BindRoute(ctx, "abc", node2, "fp", "conn2"); err != nil {
 			t.Fatal(err)
 		}
@@ -101,7 +121,10 @@ func TestUnbindIsConnConditional(t *testing.T) {
 		if err := reg.Unbind(ctx, "abc", "conn1"); err != nil {
 			t.Fatal(err)
 		}
-		node, _, _, ok, _ := reg.LookupRoute(ctx, "abc")
+		node, _, _, ok, err := reg.LookupRoute(ctx, "abc")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !ok || node != node2 {
 			t.Errorf("node2=%s: after stale unbind, route = (%q, ok=%v), want %s", node2, node, ok, node2)
 		}
@@ -111,8 +134,12 @@ func TestUnbindIsConnConditional(t *testing.T) {
 func TestHeartbeatIsConnConditional(t *testing.T) {
 	reg, mr := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
-	_ = reg.BindRoute(ctx, "abc", "nodeB", "fp", "conn2") // rebind to conn2
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.BindRoute(ctx, "abc", "nodeB", "fp", "conn2"); err != nil { // rebind to conn2
+		t.Fatal(err)
+	}
 	ttlBefore := mr.TTL("tunnel:abc")
 	res, err := reg.Heartbeat(ctx, "abc", "conn1") // stale conn heartbeat
 	if err != nil {
@@ -121,7 +148,10 @@ func TestHeartbeatIsConnConditional(t *testing.T) {
 	if res != HeartbeatNotOwner {
 		t.Errorf("stale heartbeat = %v, want HeartbeatNotOwner", res)
 	}
-	node, _, _, _, _ := reg.LookupRoute(ctx, "abc")
+	node, _, _, _, err := reg.LookupRoute(ctx, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if node != "nodeB" {
 		t.Errorf("owner changed by stale heartbeat: %q", node)
 	}
@@ -142,7 +172,9 @@ func TestBindRouteIfAbsentOrOwner_ThreeState(t *testing.T) {
 	if res, err := reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeB", "fp", "conn2"); err != nil || res != SelfHealNotOwner {
 		t.Fatalf("different connID (same fp) → not-owner: res=%v err=%v", res, err)
 	}
-	if node, _, _, _, _ := reg.LookupRoute(ctx, "abc"); node != "nodeA" {
+	if node, _, _, _, err := reg.LookupRoute(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	} else if node != "nodeA" {
 		t.Errorf("a not-owner self-heal must not clobber the route: node=%q", node)
 	}
 	if res, err := reg.BindRouteIfAbsentOrOwner(ctx, "abc", "nodeC", "DIFFERENT", "conn3"); res != SelfHealConflict || err != ErrNameHeldByOther {
@@ -153,11 +185,17 @@ func TestBindRouteIfAbsentOrOwner_ThreeState(t *testing.T) {
 func TestHeartbeatDistinguishesMissingFromNotOwner(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	if res, _ := reg.Heartbeat(ctx, "gone", "conn1"); res != HeartbeatMissing {
+	if res, err := reg.Heartbeat(ctx, "gone", "conn1"); err != nil {
+		t.Fatal(err)
+	} else if res != HeartbeatMissing {
 		t.Errorf("missing route heartbeat = %v, want HeartbeatMissing", res)
 	}
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn2")
-	if res, _ := reg.Heartbeat(ctx, "abc", "conn1"); res != HeartbeatNotOwner {
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn2"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := reg.Heartbeat(ctx, "abc", "conn1"); err != nil {
+		t.Fatal(err)
+	} else if res != HeartbeatNotOwner {
 		t.Errorf("other-owner heartbeat = %v, want HeartbeatNotOwner", res)
 	}
 }

@@ -5,9 +5,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
-	"io"
 	"log/slog"
-	"net"
 	"os"
 	"strings"
 	"sync"
@@ -19,6 +17,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 type fakeCA struct {
@@ -44,13 +43,6 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func closeOrLog(t *testing.T, c io.Closer) {
-	t.Helper()
-	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		t.Logf("close %T: %v", c, err)
-	}
-}
-
 func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
 	t.Helper()
 	mr := miniredis.RunT(t)
@@ -60,7 +52,7 @@ func newChain(t *testing.T, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *li
 func newChainOn(t *testing.T, mr *miniredis.Miniredis, cfg ChainConfig, cas ...caIssuer) (*chainIssuer, *limit.Limiter) {
 	t.Helper()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	lim := limit.NewLimiter(rdb, 1, 1, 1, time.Hour)
 	lim.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	cfg.Limiter = lim
@@ -110,7 +102,9 @@ func TestCooldownSkipsCA(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour)
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	_, info, err := ch.Obtain(context.Background(), nil, "t")
 	if err != nil || info.CA != CAGTS {
 		t.Fatalf("cooling LE should be skipped, got %+v %v", info, err)
@@ -124,8 +118,12 @@ func TestRateLimitedSetsCooldown(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt, err: rateLimited(0, nil)}
 	gts := &fakeCA{caID: CAGTS}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_, _, _ = ch.Obtain(context.Background(), nil, "t")
-	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d <= 0 {
+	if _, _, err := ch.Obtain(context.Background(), nil, "t"); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := lim.CACooldown(context.Background(), CALetsEncrypt); err != nil {
+		t.Fatal(err)
+	} else if d <= 0 {
 		t.Error("LE should be cooling after a rate-limited answer")
 	}
 }
@@ -134,8 +132,12 @@ func TestAllCoolingReturnsRetryable(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, 2*time.Hour)
-	_ = lim.SetCACooldown(context.Background(), CAGTS, 30*time.Minute)
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, 2*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := lim.SetCACooldown(context.Background(), CAGTS, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
 	_, _, err := ch.Obtain(context.Background(), nil, "t")
 	var ie *IssuerError
 	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
@@ -164,7 +166,9 @@ func TestRenewSpillsWhenLECooling(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour) // LE has an active retry-after
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour); err != nil { // LE has an active retry-after
+		t.Fatal(err)
+	}
 	_, info, err := ch.Renew(context.Background(), nil, "t", store.CertInfo{CA: CAGTS})
 	if err != nil || info.CA != CAGTS {
 		t.Fatalf("a cooling LE should be skipped and renewal spill to GTS, got %+v %v", info, err)
@@ -183,7 +187,9 @@ func TestRateLimitedSpillsAndSetsRetryAfter(t *testing.T) {
 	if err != nil || info.CA != CAGTS {
 		t.Fatalf("rate-limited LE should spill to GTS, got %+v %v", info, err)
 	}
-	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d < 29*time.Minute || d > 30*time.Minute {
+	if d, err := lim.CACooldown(context.Background(), CALetsEncrypt); err != nil {
+		t.Fatal(err)
+	} else if d < 29*time.Minute || d > 30*time.Minute {
 		t.Errorf("LE cooldown must honor the 30m Retry-After AS-IS (not the 1h default), got %s", d)
 	}
 	if gts.calls != 1 {
@@ -194,7 +200,9 @@ func TestRateLimitedSpillsAndSetsRetryAfter(t *testing.T) {
 func TestAllCoolingMessageIsQuotaExhausted(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	ch, lim := newChain(t, ChainConfig{}, le)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour)
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour); err != nil {
+		t.Fatal(err)
+	}
 	_, _, err := ch.Obtain(context.Background(), nil, "t")
 	if err == nil || !strings.Contains(err.Error(), "quota exhausted, retry later") {
 		t.Fatalf("all-cooling error should be the quota-exhausted message, got %v", err)
@@ -207,11 +215,15 @@ func TestShouldRenewFixedCadence(t *testing.T) {
 	cur := store.CertInfo{CA: CAGTS, NotBefore: time.Unix(1_700_000_000, 0)}
 	// now = NotBefore + 111h → not yet.
 	ch.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0).Add(111 * time.Hour) })
-	if due, _, _ := ch.ShouldRenew(context.Background(), cur); due {
+	if due, _, err := ch.ShouldRenew(context.Background(), cur); err != nil {
+		t.Fatal(err)
+	} else if due {
 		t.Error("should not renew before 112h")
 	}
 	ch.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0).Add(113 * time.Hour) })
-	if due, _, _ := ch.ShouldRenew(context.Background(), cur); !due {
+	if due, _, err := ch.ShouldRenew(context.Background(), cur); err != nil {
+		t.Fatal(err)
+	} else if !due {
 		t.Error("should renew after 112h")
 	}
 }
@@ -234,7 +246,9 @@ func TestObtainSelfSelfCert(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour) // LE cooling → GTS
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, time.Hour); err != nil { // LE cooling → GTS
+		t.Fatal(err)
+	}
 
 	certPEM, keyPEM, info, err := ch.ObtainSelf(context.Background(), "enroll.example.test")
 	if err != nil {
@@ -248,7 +262,9 @@ func TestObtainSelfSelfCert(t *testing.T) {
 	}
 	// The per-tunnel issuance counter is untouched (it is keyed on tunnel names in enroll, not here): a
 	// fresh Begin against cap 1 still admits, which it could not if ObtainSelf had committed a success.
-	if ok, _, _ := lim.IssuanceBegin(context.Background(), "enroll.example.test", 1); !ok {
+	if ok, _, err := lim.IssuanceBegin(context.Background(), "enroll.example.test", 1); err != nil {
+		t.Fatal(err)
+	} else if !ok {
 		t.Fatal("ObtainSelf must not consume the per-tunnel issuance counter")
 	}
 }
@@ -276,7 +292,9 @@ func TestMixedPreCoolingAndInRunFailurePicksShortest(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS, err: transient(nil)}
 	ch, lim := newChain(t, ChainConfig{}, le, gts)
-	_ = lim.SetCACooldown(context.Background(), CALetsEncrypt, 30*time.Minute) // pre-cooling
+	if err := lim.SetCACooldown(context.Background(), CALetsEncrypt, 30*time.Minute); err != nil { // pre-cooling
+		t.Fatal(err)
+	}
 	_, _, err := ch.Obtain(context.Background(), nil, "t")
 	var ie *IssuerError
 	if !asIssuerError(err, &ie) || ie.Retry != time.Minute {
@@ -299,7 +317,9 @@ func TestShortRetryAfterHonoredAsIs(t *testing.T) {
 	if ie.Retry != 30*time.Second {
 		t.Fatalf("Retry-After must be the shortest honored CA hint (30s), got %s", ie.Retry)
 	}
-	if d, _ := lim.CACooldown(context.Background(), CALetsEncrypt); d > 30*time.Second {
+	if d, err := lim.CACooldown(context.Background(), CALetsEncrypt); err != nil {
+		t.Fatal(err)
+	} else if d > 30*time.Second {
 		t.Fatalf("LE cooldown must be the honored 30s, got %s", d)
 	}
 }

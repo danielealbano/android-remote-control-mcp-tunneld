@@ -31,9 +31,11 @@ func (l *Limiter) AcquireStream(ctx context.Context, name, connID string, maxN i
 		}
 		if c > int64(maxN) { // over cap → roll back this slot (DEL a fresh reset, else DECR)
 			if c == 1 {
-				_ = l.rdb.Del(ctx, concKey(name)).Err()
-			} else {
-				_ = l.rdb.HIncrBy(ctx, concKey(name), "count", -1).Err()
+				if err := l.rdb.Del(ctx, concKey(name)).Err(); err != nil {
+					l.logger.Debug("stream-cap rollback failed (counter self-heals at its TTL)", "tunnel", name, "err", err)
+				}
+			} else if err := l.rdb.HIncrBy(ctx, concKey(name), "count", -1).Err(); err != nil {
+				l.logger.Debug("stream-cap rollback failed (counter self-heals at its TTL)", "tunnel", name, "err", err)
 			}
 			admit = false
 			return nil

@@ -16,6 +16,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 const (
@@ -118,7 +119,7 @@ func TestIntegration_TLSALPNNeverSpliced(t *testing.T) {
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an acme-tls/1 handshake with no pending challenge must be closed")
 	}
-	closeOrLog(t, raw)
+	tunneltest.CloseOrLog(t, raw)
 
 	if v, met, err := waitMetric(10*time.Second, env.internalAddr, `tunneld_rejections_total{reason="no-route"}`,
 		func(v float64) bool { return v > noRouteBefore }); !met {
@@ -153,7 +154,7 @@ func TestIntegration_ACMEHTTPNoKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer closeOrLog(t, conn)
+	defer tunneltest.CloseOrLog(t, conn)
 	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +182,7 @@ func TestIntegration_ACMEHTTPMissCounted(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp, err := rawHTTP(t, conn, bufio.NewReader(conn), requestLine, itEnrollHost)
-		closeOrLog(t, conn)
+		tunneltest.CloseOrLog(t, conn)
 		if err != nil {
 			t.Fatalf("%s: %v", requestLine, err)
 		}
@@ -201,7 +202,7 @@ func TestIntegration_ACMEHTTPListenerDrains(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	if c, err := net.DialTimeout("tcp", env.acmeHTTPAddr, 2*time.Second); err == nil {
-		closeOrLog(t, c)
+		tunneltest.CloseOrLog(t, c)
 		t.Fatal("the HTTP-01 listener must be closed after the drain")
 	}
 }

@@ -2,6 +2,9 @@ package ban
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,7 +16,7 @@ const dbipFixture = "1.0.0.0,1.0.0.255,XX\n" +
 func TestExpandCountriesDirect(t *testing.T) {
 	dir := t.TempDir()
 	csv := writeBan(t, dir, "dbip.csv", dbipFixture)
-	prefixes, err := ExpandCountries(csv, map[string]struct{}{"XX": {}})
+	prefixes, _, err := ExpandCountries(csv, map[string]struct{}{"XX": {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +36,7 @@ func TestExpandCountriesDirect(t *testing.T) {
 		t.Error("XX range must cover 1.0.0.5")
 	}
 	// Empty csvPath → error (caller warns-and-skips country entries).
-	if _, err := ExpandCountries("", map[string]struct{}{"XX": {}}); err == nil {
+	if _, _, err := ExpandCountries("", map[string]struct{}{"XX": {}}); err == nil {
 		t.Error("empty csvPath must error")
 	}
 }
@@ -71,21 +74,21 @@ func TestLoad_GeoBanCarriesCountrySource(t *testing.T) {
 func TestExpandCountries_SemanticsPreserved(t *testing.T) {
 	dir := t.TempDir()
 	// absent path (empty) → error
-	if _, err := ExpandCountries("", map[string]struct{}{"XX": {}}); err == nil {
+	if _, _, err := ExpandCountries("", map[string]struct{}{"XX": {}}); err == nil {
 		t.Error("empty csvPath must error")
 	}
 	// nonexistent file → error
-	if _, err := ExpandCountries(dir+"/nope.csv", map[string]struct{}{"XX": {}}); err == nil {
+	if _, _, err := ExpandCountries(dir+"/nope.csv", map[string]struct{}{"XX": {}}); err == nil {
 		t.Error("a nonexistent CSV must error")
 	}
 	// present-but-zero-parseable-rows → error
 	bad := writeBan(t, dir, "bad.csv", "not,an,ip\nrow,at,all\n")
-	if _, err := ExpandCountries(bad, map[string]struct{}{"XX": {}}); err == nil {
+	if _, _, err := ExpandCountries(bad, map[string]struct{}{"XX": {}}); err == nil {
 		t.Error("a zero-row CSV must error")
 	}
 	// valid CSV, absent wanted code → empty (non-nil) map, no error
 	good := writeBan(t, dir, "good.csv", dbipFixture)
-	out, err := ExpandCountries(good, map[string]struct{}{"QQ": {}})
+	out, _, err := ExpandCountries(good, map[string]struct{}{"QQ": {}})
 	if err != nil {
 		t.Fatalf("absent wanted code must be legal: %v", err)
 	}
@@ -127,5 +130,48 @@ func TestMissingCSVSkipsCountryOnly(t *testing.T) {
 	}
 	if _, ok := e.Match(mustAddr("1.0.0.5")); ok {
 		t.Error("country entries must be skipped when the CSV is absent")
+	}
+}
+
+func TestExpandCountries_ReadErrorIsReturned(t *testing.T) {
+	_, _, err := ExpandCountries(t.TempDir(), map[string]struct{}{"XX": {}})
+	if err == nil || !strings.Contains(err.Error(), "read dbip csv") {
+		t.Fatalf("a non-parse read error must be returned (not skipped as a malformed row), got %v", err)
+	}
+}
+
+func TestExpandCountries_CountsSkippedRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dbip.csv")
+	rows := "203.0.113.0,203.0.113.255,XX\n" +
+		"not-an-ip,203.0.113.255,XX\n" +
+		"short,row\n" +
+		"198.51.100.255,198.51.100.0,XX\n" +
+		"\"unterminated,198.51.100.1,XX\n"
+	if err := os.WriteFile(path, []byte(rows), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, skipped, err := ExpandCountries(path, map[string]struct{}{"XX": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out["XX"]) == 0 {
+		t.Fatal("the valid row must still expand")
+	}
+	want := SkippedRows{Malformed: 2, BadAddress: 1, InvalidRange: 1}
+	if skipped != want || skipped.Total() != 4 {
+		t.Fatalf("skipped = %+v (total %d), want %+v", skipped, skipped.Total(), want)
+	}
+}
+
+func TestLoad_WarnsOnSkippedCSVRows(t *testing.T) {
+	dir := t.TempDir()
+	csv := writeBan(t, dir, "dbip.csv", dbipFixture+"not-an-ip,1.0.0.255,XX\n")
+	f := writeBan(t, dir, "bans.txt", "country XX\n")
+	log, buf := captureLog()
+	if err := NewEngine().Load([]string{f}, csv, nil, log); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `msg="dbip csv rows skipped"`) || !strings.Contains(buf.String(), "bad_address=1") {
+		t.Fatalf("skipped CSV rows must be logged with their counts; log = %q", buf.String())
 	}
 }

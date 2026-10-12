@@ -66,7 +66,12 @@ func TestE2E_DeviceAttestation(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", attestProbePkg).Run()
+		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", attestProbePkg).CombinedOutput()
+		if err != nil {
+			t.Logf("adb cleanup failed: %v: %s", err, out)
+		} else if msg := strings.TrimSpace(string(out)); msg != "" {
+			t.Logf("adb cleanup: %s", msg)
+		}
 	})
 	// install -r keeps app data, so clear any stale result files from a prior interrupted run.
 	adbRunAs(t, serial, attestProbePkg, "rm -f files/done files/error files/chain.pem")
@@ -117,11 +122,19 @@ func TestE2E_DeviceAttestation(t *testing.T) {
 func attestDeviceSerial(t *testing.T) (string, bool) {
 	t.Helper()
 	if _, err := exec.LookPath("adb"); err != nil {
+		t.Logf("adb not usable (treating the device as absent): %v", err)
 		return "", false
 	}
-	out, err := exec.Command("adb", "devices").Output()
+	var stderr bytes.Buffer
+	cmd := exec.Command("adb", "devices")
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
+		t.Logf("adb devices failed (treating the device as absent): %v: %s", err, stderr.String())
 		return "", false
+	}
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		t.Logf("adb devices stderr: %s", msg)
 	}
 	var serials []string
 	for _, line := range strings.Split(string(out), "\n")[1:] {
@@ -162,7 +175,10 @@ func adbCtx(t *testing.T, serial string, timeout time.Duration, args ...string) 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("adb %s failed: %v\n%s", strings.Join(full, " "), err, stderr.String())
+		t.Fatalf("adb %s failed: %v\nstdout: %s\nstderr: %s", strings.Join(full, " "), err, stdout.String(), stderr.String())
+	}
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		t.Logf("adb %s stderr: %s", strings.Join(full, " "), msg)
 	}
 	return stdout.Bytes()
 }

@@ -51,11 +51,14 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	phoneTLS := phoneServerTLS(t, ident)
 	backend := func(s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
-		defer func() { _ = conn.Close() }()
+		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
 			return
 		}
-		_, _ = io.Copy(conn, conn)
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
 	}
 	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
@@ -63,16 +66,22 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	}
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
-	go func() { _ = c.Run(runCtx) }()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
 
 	// Wait for the phone to bind, then open a LIVE public splice and keep it open across the drain.
+	var rtErr error
 	if !waitBool(30*time.Second, func() bool {
-		return frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots) == nil
+		rtErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return rtErr == nil
 	}) {
-		t.Fatal("frontend roundtrip never succeeded (phone never bound)")
+		t.Fatalf("frontend roundtrip never succeeded (phone never bound): %v", rtErr)
 	}
 	live := dialFrontend(t, env.edgeAddr, fqdn, env.pebble.IssuingRoots)
-	defer func() { _ = live.Close() }()
+	defer tunneltest.CloseOrLog(t, live)
 	// One echo confirms a real public splice exists at drain time.
 	if _, err := live.Write([]byte("live")); err != nil {
 		t.Fatalf("live write: %v", err)
@@ -94,7 +103,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 			}
 			var ev store.Event
 			if err := json.Unmarshal(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k), &ev); err != nil {
-				continue
+				t.Fatalf("connection log %s is not valid JSON: %v", k, err)
 			}
 			if ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
 				return true
@@ -120,7 +129,7 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = occupied.Close() }()
+	defer tunneltest.CloseOrLog(t, occupied)
 	meshAddr := occupied.Addr().String()
 	edgeAddr := freeAddr(t)
 
@@ -153,7 +162,7 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cfg.Listen must be rebindable after a failed startup (raw listener leaked): %v", err)
 	}
-	_ = reln.Close()
+	tunneltest.CloseOrLog(t, reln)
 }
 
 func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) (config.ServeCmd, *hangACMEListener, func()) {
@@ -182,7 +191,10 @@ func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) 
 			cancel()
 			hang.release()
 			select {
-			case <-done:
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run: %v", err)
+				}
 			case <-time.After(90 * time.Second):
 				t.Error("Run did not return after cancellation")
 			}
@@ -190,15 +202,17 @@ func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) 
 	}
 	t.Cleanup(stop)
 
+	var dialErr error
 	if !waitBool(5*time.Second, func() bool {
-		c, err := net.DialTimeout("tcp", cfg.Listen, 500*time.Millisecond)
-		if err != nil {
+		var c net.Conn
+		c, dialErr = net.DialTimeout("tcp", cfg.Listen, 500*time.Millisecond)
+		if dialErr != nil {
 			return false
 		}
-		closeOrLog(t, c)
+		tunneltest.CloseOrLog(t, c)
 		return true
 	}) {
-		t.Fatal(":443 must accept TCP while reserved-host issuance is still pending")
+		t.Fatalf(":443 must accept TCP while reserved-host issuance is still pending (last dial error: %v)", dialErr)
 	}
 	return cfg, hang, stop
 }
@@ -217,7 +231,7 @@ func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
 	if err := conn.Handshake(); err == nil {
 		t.Fatal("an unrouted SNI must be closed, not served")
 	}
-	closeOrLog(t, raw)
+	tunneltest.CloseOrLog(t, raw)
 	if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`,
 		func(v float64) bool { return v >= 1 }); !met {
 		t.Fatalf("an unrouted SNI must be recorded as no-route (no-route = %v, last scrape error: %v)", v, err)
@@ -254,7 +268,7 @@ func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
 func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 	cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
 	if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
-		closeOrLog(t, c)
+		tunneltest.CloseOrLog(t, c)
 		t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
 	}
 	stop()
@@ -352,7 +366,7 @@ func dialFrontend(t *testing.T, edgeAddr, fqdn string, roots *x509.CertPool) *tl
 	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err != nil {
-		_ = raw.Close()
+		tunneltest.CloseOrLog(t, raw)
 		t.Fatalf("frontend handshake: %v", err)
 	}
 	return conn
@@ -371,7 +385,7 @@ func s3GetObject(t *testing.T, endpoint, access, secret, bucket, key string) []b
 	if err != nil {
 		t.Fatalf("get object %q: %v", key, err)
 	}
-	defer func() { _ = out.Body.Close() }()
+	defer tunneltest.CloseOrLog(t, out.Body)
 	b, err := io.ReadAll(out.Body)
 	if err != nil {
 		t.Fatalf("read object %q: %v", key, err)
@@ -404,12 +418,15 @@ func (h *hangACMEListener) accept() {
 	for {
 		c, err := h.ln.Accept()
 		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				testLogger().Warn("hanging ACME listener accept failed", "err", err)
+			}
 			return
 		}
 		h.mu.Lock()
 		if h.done {
 			h.mu.Unlock()
-			_ = c.Close()
+			tunneltest.CloseLogged(c)
 			continue
 		}
 		h.conns = append(h.conns, c) // hold open, never respond → the dialer's TLS handshake blocks
@@ -435,8 +452,8 @@ func (h *hangACMEListener) release() {
 	conns := h.conns
 	h.conns = nil
 	h.mu.Unlock()
-	_ = h.ln.Close()
+	tunneltest.CloseLogged(h.ln)
 	for _, c := range conns {
-		_ = c.Close()
+		tunneltest.CloseLogged(c)
 	}
 }

@@ -54,11 +54,15 @@ func TestWindowResetsOnBoundary(t *testing.T) {
 	l, mr := newFrozenLimiter(t)
 	ctx := ctxT(t)
 	for i := range 2 {
-		if ok, _, _ := l.Allow(ctx, "rps", testIP, 2, time.Second); !ok {
+		if ok, _, err := l.Allow(ctx, "rps", testIP, 2, time.Second); err != nil {
+			t.Fatal(err)
+		} else if !ok {
 			t.Fatalf("call %d must be allowed", i+1)
 		}
 	}
-	if ok, _, _ := l.Allow(ctx, "rps", testIP, 2, time.Second); ok {
+	if ok, _, err := l.Allow(ctx, "rps", testIP, 2, time.Second); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Fatal("3rd call must be denied within the window")
 	}
 	// Advance miniredis past the window*2 TTL so the window key expires.
@@ -122,7 +126,10 @@ func TestOverReadOnlyPreGate(t *testing.T) {
 		t.Fatalf("at-limit window must report over with a retry-after (over=%v ra=%v err=%v)", over, ra, err)
 	}
 	// Read-only: Over itself must not have consumed anything — the counter is still exactly 2.
-	over2, _, _ := l.Over(ctx, "enroll-min", ip, 3, time.Minute)
+	over2, _, err := l.Over(ctx, "enroll-min", ip, 3, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if over2 {
 		t.Fatal("Over must not increment the window counter")
 	}

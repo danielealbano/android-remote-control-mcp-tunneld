@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // captureWarn returns a logger writing Warn+Error records into the returned buffer. slog serializes
@@ -64,7 +65,9 @@ func TestAsyncConnLog_EnqueueNonBlocking(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t"})
+		if err := a.PutConnLog(context.Background(), store.Event{Tunnel: "t"}); err != nil {
+			tunneltest.Logger().Warn("enqueue failed", "err", err)
+		}
 		close(done)
 	}()
 	select {
@@ -88,7 +91,9 @@ func TestAsyncConnLog_FullQueueDropsNewest(t *testing.T) {
 	// The 8 workers each pull one item and stall; the 5000-slot buffer then fills. Enqueueing well past
 	// (buffer + workers) guarantees at least one drop, and no enqueue blocks.
 	for range 5000 + 8 + 64 {
-		_ = a.PutConnLog(context.Background(), store.Event{})
+		if err := a.PutConnLog(context.Background(), store.Event{}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if drops.Load() == 0 {
 		t.Fatal("a full queue must drop-newest and fire onDrop")
@@ -106,7 +111,9 @@ func TestAsyncConnLog_RetriesThenDrops(t *testing.T) {
 		inner := &flakyLog{failFirst: 1} // fail attempt 0, succeed attempt 1 (one backoff)
 		var drops atomic.Int64
 		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, nil, store.WithBackoffBase(time.Millisecond))
-		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t"})
+		if err := a.PutConnLog(context.Background(), store.Event{Tunnel: "t"}); err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		a.Drain(ctx)
@@ -127,7 +134,9 @@ func TestAsyncConnLog_RetriesThenDrops(t *testing.T) {
 		var drops atomic.Int64
 		log, buf := captureWarn()
 		a := store.NewAsyncConnLog(inner, func() { drops.Add(1) }, log, store.WithBackoffBase(time.Millisecond))
-		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t", Event: "end"})
+		if err := a.PutConnLog(context.Background(), store.Event{Tunnel: "t", Event: "end"}); err != nil {
+			t.Fatal(err)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		a.Drain(ctx)
@@ -146,7 +155,9 @@ func TestAsyncConnLog_DrainFlushes(t *testing.T) {
 
 	const n = 200
 	for range n {
-		_ = a.PutConnLog(context.Background(), store.Event{Tunnel: "t"})
+		if err := a.PutConnLog(context.Background(), store.Event{Tunnel: "t"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

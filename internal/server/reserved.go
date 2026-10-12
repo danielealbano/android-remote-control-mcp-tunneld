@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -243,31 +244,37 @@ type certBundle struct {
 // persist upgrades them). ok is false if no complete, parseable cache exists.
 func (rc *reservedCerts) loadCached(host string) (*tls.Certificate, store.CertInfo, bool) {
 	dir := rc.hostDir(host)
-	if cert, info, ok := loadBundle(filepath.Join(dir, "bundle.json")); ok {
+	if cert, info, ok := rc.loadBundle(host, filepath.Join(dir, "bundle.json")); ok {
 		return cert, info, true
 	}
-	return loadLegacyTriple(dir)
+	return rc.loadLegacyTriple(host, dir)
 }
 
 // loadBundle reads the atomic single-file cache. A missing, truncated, or unparseable bundle reports
 // absent (ok=false) rather than erroring — the caller then tries the legacy triple / re-obtains.
-func loadBundle(path string) (*tls.Certificate, store.CertInfo, bool) {
+func (rc *reservedCerts) loadBundle(host, path string) (*tls.Certificate, store.CertInfo, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			rc.logger.Warn("reserved-host cert bundle unreadable", "host", host, "err", err)
+		}
 		return nil, store.CertInfo{}, false
 	}
 	var b certBundle
 	if err := json.Unmarshal(raw, &b); err != nil {
+		rc.logger.Warn("reserved-host cert bundle unparseable", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	cert, err := tls.X509KeyPair([]byte(b.CertPEM), []byte(b.KeyPEM))
 	if err != nil {
+		rc.logger.Warn("reserved-host cert bundle holds no usable key pair", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	info := b.Info
 	if info.NotAfter.IsZero() {
-		na, ok := leafNotAfter([]byte(b.CertPEM))
-		if !ok {
+		na, err := leafNotAfter([]byte(b.CertPEM))
+		if err != nil {
+			rc.logger.Warn("reserved-host cert bundle leaf unparseable", "host", host, "err", err)
 			return nil, store.CertInfo{}, false
 		}
 		info.NotAfter = na
@@ -276,29 +283,42 @@ func loadBundle(path string) (*tls.Certificate, store.CertInfo, bool) {
 }
 
 // loadLegacyTriple reads the pre-bundle cert.pem/key.pem/meta.json cache.
-func loadLegacyTriple(dir string) (*tls.Certificate, store.CertInfo, bool) {
+func (rc *reservedCerts) loadLegacyTriple(host, dir string) (*tls.Certificate, store.CertInfo, bool) {
 	certPEM, err := os.ReadFile(filepath.Join(dir, "cert.pem"))
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			rc.logger.Warn("reserved-host legacy cert unreadable", "host", host, "err", err)
+		}
 		return nil, store.CertInfo{}, false
 	}
 	keyPEM, err := os.ReadFile(filepath.Join(dir, "key.pem"))
 	if err != nil {
+		rc.logger.Warn("reserved-host legacy key unreadable", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
+		rc.logger.Warn("reserved-host legacy cache holds no usable key pair", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	info := store.CertInfo{}
-	if metaRaw, merr := os.ReadFile(filepath.Join(dir, "meta.json")); merr == nil {
-		_ = json.Unmarshal(metaRaw, &info)
+	metaRaw, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(metaRaw, &info); err != nil {
+			rc.logger.Warn("reserved-host legacy meta unparseable (using the leaf's NotAfter)", "host", host, "err", err)
+			info = store.CertInfo{}
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		rc.logger.Warn("reserved-host legacy meta unreadable (using the leaf's NotAfter)", "host", host, "err", err)
 	}
 	if info.NotAfter.IsZero() {
-		if na, ok := leafNotAfter(certPEM); ok {
-			info.NotAfter = na
-		} else {
+		na, err := leafNotAfter(certPEM)
+		if err != nil {
+			rc.logger.Warn("reserved-host legacy leaf unparseable", "host", host, "err", err)
 			return nil, store.CertInfo{}, false
 		}
+		info.NotAfter = na
 	}
 	return &cert, info, true
 }
@@ -312,7 +332,11 @@ func (rc *reservedCerts) persist(host string, certPEM, keyPEM []byte, info store
 		rc.logger.Warn("reserved-host cert dir create failed", "host", host, "err", err)
 		return
 	}
-	raw, _ := json.Marshal(certBundle{CertPEM: string(certPEM), KeyPEM: string(keyPEM), Info: info})
+	raw, err := json.Marshal(certBundle{CertPEM: string(certPEM), KeyPEM: string(keyPEM), Info: info})
+	if err != nil {
+		rc.logger.Warn("reserved-host cert bundle encode failed", "host", host, "err", err)
+		return
+	}
 	tmp := filepath.Join(dir, "bundle.json.tmp")
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		rc.logger.Warn("reserved-host cert persist failed", "host", host, "err", err)
@@ -324,14 +348,14 @@ func (rc *reservedCerts) persist(host string, certPEM, keyPEM []byte, info store
 }
 
 // leafNotAfter parses the first certificate block's NotAfter.
-func leafNotAfter(certPEM []byte) (time.Time, bool) {
+func leafNotAfter(certPEM []byte) (time.Time, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
-		return time.Time{}, false
+		return time.Time{}, errors.New("no PEM certificate block")
 	}
 	c, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, err
 	}
-	return c.NotAfter, true
+	return c.NotAfter, nil
 }

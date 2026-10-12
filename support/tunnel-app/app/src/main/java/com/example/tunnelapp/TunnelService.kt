@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
@@ -32,7 +33,7 @@ class TunnelService : Service() {
         when (intent?.getStringExtra("command")) {
             "enroll" -> Thread { doEnroll(intent) }.start()
             "refresh" -> Thread { doRefresh() }.start()
-            "stop" -> Thread { doStop() }.start()
+            "stop" -> Thread { guarded("stop") { doStop() } }.start()
         }
         return START_NOT_STICKY
     }
@@ -74,6 +75,7 @@ class TunnelService : Service() {
     private fun guarded(label: String, block: () -> Unit) = try {
         block()
     } catch (t: Throwable) {
+        Log.e(TAG, "$label failed", t)
         File(filesDir, "error").writeText("$label: $t\n${t.stackTraceToString()}")
     }
 

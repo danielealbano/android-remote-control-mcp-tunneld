@@ -2,6 +2,7 @@ package limit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
@@ -29,7 +30,7 @@ type Limiter struct {
 // Option configures a Limiter (functional-options pattern).
 type Option func(*Limiter)
 
-// WithLogger sets the Limiter's logger (used for the issuance-lock refresh failure surface).
+// WithLogger sets the Limiter's logger.
 func WithLogger(l *slog.Logger) Option { return func(lm *Limiter) { lm.logger = l } }
 
 // WithPacketCap sets the per-tunnel/per-direction reads-per-second cap (0 = disabled, the default).
@@ -40,7 +41,7 @@ func WithPacketCap(n int64) Option { return func(l *Limiter) { l.pktCap = n } }
 // refreshed by every traffic chunk (derived = 3 × --limit-conn-idle).
 func NewLimiter(rdb redis.UniversalClient, bwRate, dayCap, weekCap int64, streamTTL time.Duration, opts ...Option) *Limiter {
 	l := &Limiter{rdb: rdb, bwRate: bwRate, dayCap: dayCap, weekCap: weekCap, streamTTL: streamTTL,
-		now: time.Now, logger: slog.New(slog.DiscardHandler)}
+		now: time.Now, logger: slog.Default()}
 	for _, o := range opts {
 		o(l)
 	}
@@ -136,13 +137,18 @@ func (l *Limiter) Charge(ctx context.Context, name, dir string, nr int64) (Charg
 
 // atoiCap parses a Valkey MGET result element (string | nil) to an int64, treating a missing/unparseable
 // value as 0 — the shared parse helper for TrafficExhausted's four per-direction lookups.
-func atoiCap(v any) int64 {
+func (l *Limiter) atoiCap(key string, v any) int64 {
+	if v == nil {
+		return 0
+	}
 	s, ok := v.(string)
 	if !ok {
+		l.logger.Warn("unexpected Valkey counter type (counted as 0)", "key", key, "type", fmt.Sprintf("%T", v))
 		return 0
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
+		l.logger.Warn("unparseable Valkey counter (counted as 0)", "key", key, "err", err)
 		return 0
 	}
 	return n
@@ -163,7 +169,7 @@ func (l *Limiter) TrafficExhausted(ctx context.Context, name string) (dayOver, w
 	if err != nil {
 		return false, false, err
 	}
-	dayOver = atoiCap(vals[0]) >= l.dayCap || atoiCap(vals[1]) >= l.dayCap
-	weekOver = atoiCap(vals[2]) >= l.weekCap || atoiCap(vals[3]) >= l.weekCap
+	dayOver = l.atoiCap(keys[0], vals[0]) >= l.dayCap || l.atoiCap(keys[1], vals[1]) >= l.dayCap
+	weekOver = l.atoiCap(keys[2], vals[2]) >= l.weekCap || l.atoiCap(keys[3], vals[3]) >= l.weekCap
 	return dayOver, weekOver, nil
 }

@@ -51,6 +51,12 @@ func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 	}
 }
 
+func closeDebug(logger *slog.Logger, what string, c io.Closer) {
+	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		logger.Debug("close failed", "what", what, "err", err)
+	}
+}
+
 func shutdownLogged(ctx context.Context, logger *slog.Logger, which string, srv *http.Server) {
 	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("server shutdown did not complete cleanly", "which", which, "err", err)
@@ -121,6 +127,7 @@ type dialBackOpener interface {
 type bridgeAdapter struct {
 	mgr             dialBackOpener
 	dialBackTimeout time.Duration
+	logger          *slog.Logger
 }
 
 func (b *bridgeAdapter) OpenMesh(ctx context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
@@ -146,7 +153,7 @@ func (b *bridgeAdapter) OpenMesh(ctx context.Context, tunnel, streamID string) (
 }
 
 func (b *bridgeAdapter) SpliceMesh(ds, client io.ReadWriteCloser) {
-	bridgeCopy(ds, client)
+	bridgeCopy(ds, client, b.logger)
 }
 
 // bridgeCopy splices the phone stream `ds` ↔ the mesh stream `client`, returning once the phone→client
@@ -157,17 +164,27 @@ func (b *bridgeAdapter) SpliceMesh(ds, client io.ReadWriteCloser) {
 // closing `client` marks the response writer done + unblocks the entry. The client→phone copy writes
 // solely to `ds` and never touches the response writer, so it may safely outlive the return by the
 // microseconds until the server closes the request body and unblocks its read.
-func bridgeCopy(ds, client io.ReadWriteCloser) {
+func bridgeCopy(ds, client io.ReadWriteCloser, logger *slog.Logger) {
 	inDone := make(chan struct{}, 1) // client→phone finished
 	respDone := make(chan struct{})  // phone→client finished (the one that writes the response body)
-	go func() { _, _ = io.Copy(ds, client); inDone <- struct{}{} }()
-	go func() { _, _ = io.Copy(client, ds); close(respDone) }()
+	go func() {
+		if _, err := io.Copy(ds, client); err != nil {
+			logger.Debug("mesh splice to the phone ended with an error", "err", err)
+		}
+		inDone <- struct{}{}
+	}()
+	go func() {
+		if _, err := io.Copy(client, ds); err != nil {
+			logger.Debug("mesh splice from the phone ended with an error", "err", err)
+		}
+		close(respDone)
+	}()
 	select {
 	case <-respDone: // the phone (or a client write error) ended the response direction
 	case <-inDone: // the entry (or a phone write error) ended the request direction
 	}
-	_ = ds.Close()
-	_ = client.Close()
+	closeDebug(logger, "phone data stream", ds)
+	closeDebug(logger, "mesh stream", client)
 	<-respDone // the response-writer copy has fully stopped — safe to return
 }
 

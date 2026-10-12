@@ -207,6 +207,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	go func() { done <- server.Run(ctx, cfg, logger, "e2e") }()
 
 	deadline := time.Now().Add(120 * time.Second)
+	var healthErr error
 	for time.Now().Before(deadline) {
 		select {
 		case runErr := <-done:
@@ -217,11 +218,15 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 			return "", false
 		default:
 		}
-		if healthOK(internalAddr) {
+		var ok bool
+		if ok, healthErr = healthOK(internalAddr); ok {
 			t.Cleanup(func() {
 				cancel()
 				select {
-				case <-done:
+				case runErr := <-done:
+					if runErr != nil {
+						t.Errorf("replica run: %v", runErr)
+					}
 				case <-time.After(20 * time.Second):
 					t.Error("replica did not drain within 20s")
 				}
@@ -233,8 +238,8 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
-	<-done
-	t.Fatal("replica never became ready")
+	runErr := <-done
+	t.Fatalf("replica never became ready (last health probe: %v; run: %v)", healthErr, runErr)
 	return "", false
 }
 
@@ -251,11 +256,14 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 	phoneTLS := phoneServerTLS(t, ident)
 	backend := func(s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
-		defer func() { _ = conn.Close() }()
+		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
+			tunneltest.Logger().Warn("echo phone handshake failed", "err", err)
 			return
 		}
-		_, _ = io.Copy(conn, conn)
+		if _, err := io.Copy(conn, conn); err != nil {
+			tunneltest.Logger().Debug("echo phone stream ended with an error", "err", err)
+		}
 	}
 	c, err := client.New(controlAddr, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
 	if err != nil {
@@ -263,7 +271,12 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	runDone := make(chan struct{})
-	go func() { _ = c.Run(runCtx); close(runDone) }()
+	go func() {
+		defer close(runDone)
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			t.Logf("tunnel client run ended: %v", err)
+		}
+	}()
 	// Close honors its "call once Run has returned" contract: cancel, JOIN Run, then Close (no leaked
 	// control transport, no Close-before-Run-return).
 	t.Cleanup(func() {
@@ -318,10 +331,12 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
 	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	var rtErr error
 	if !waitBool(30*time.Second, func() bool {
-		return frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots) == nil
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
 	}) {
-		t.Fatal("route never bound on the owner replica")
+		t.Fatalf("route never bound on the owner replica: %v", rtErr)
 	}
 
 	before := sha256.Sum256(c.Identity().PublicCertPEM)
@@ -365,14 +380,19 @@ func TestE2E_CrossNodeTerminate(t *testing.T) {
 		t.Fatalf("parse redis url: %v", err)
 	}
 	rdb := redis.NewClient(opt)
-	t.Cleanup(func() { _ = rdb.Close() })
-	reg := router.NewRegistry(rdb, 30*time.Second)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	var rtErr error
 	if !waitBool(30*time.Second, func() bool {
-		return frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots) == nil
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
 	}) {
-		t.Fatal("route never bound on the owner replica")
+		t.Fatalf("route never bound on the owner replica: %v", rtErr)
 	}
 
 	// Terminate via the NON-owner replica A; A meshes to the owner B, which closes the phone conn.
@@ -382,11 +402,13 @@ func TestE2E_CrossNodeTerminate(t *testing.T) {
 	}
 
 	// The owner's teardown unbinds the route; the Go client does not reconnect, so it stays unbound.
+	var lookupErr error
 	if !waitBool(30*time.Second, func() bool {
-		_, _, _, ok, lerr := reg.LookupRoute(context.Background(), ident.Name)
-		return lerr == nil && !ok
+		var ok bool
+		_, _, _, ok, lookupErr = reg.LookupRoute(context.Background(), ident.Name)
+		return lookupErr == nil && !ok
 	}) {
-		t.Fatal("the route was not unbound after cross-node terminate")
+		t.Fatalf("the route was not unbound after cross-node terminate (last lookup error: %v)", lookupErr)
 	}
 }
 
@@ -414,16 +436,23 @@ func TestE2E_Quota(t *testing.T) {
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
 	// Wait for bind (a small roundtrip succeeds), then exceed the cap.
-	if !waitBool(30*time.Second, func() bool { return frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots) == nil }) {
-		t.Fatal("initial roundtrip never succeeded")
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("initial roundtrip never succeeded: %v", rtErr)
 	}
 	if err := frontendTransfer(edge, fqdn, inf.pebble.IssuingRoots, 256*1024); err == nil {
 		t.Fatal("a transfer well past --limit-traffic-day must be cut by the quota, but it completed")
 	}
+	var metricErr error
 	if !waitBool(10*time.Second, func() bool {
-		return metricCounterPositive(inf.internal[edge], "tunneld_quota_exhausted_total")
+		var positive bool
+		positive, metricErr = metricCounterPositive(inf.internal[edge], "tunneld_quota_exhausted_total")
+		return positive
 	}) {
-		t.Fatal("the cut must be attributed to the quota (tunneld_quota_exhausted_total)")
+		t.Fatalf("the cut must be attributed to the quota (tunneld_quota_exhausted_total; last scrape error: %v)", metricErr)
 	}
 }
 
@@ -435,8 +464,12 @@ func TestE2E_Eviction(t *testing.T) {
 	_, ident := echoPhone(t, inf, edge, edge)
 	fqdn := ident.Name + "." + e2eTunnelDomain
 
-	if !waitBool(30*time.Second, func() bool { return frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots) == nil }) {
-		t.Fatal("initial roundtrip never succeeded")
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("initial roundtrip never succeeded: %v", rtErr)
 	}
 
 	// Fill the concurrency cap (2) with idle, handshaked connections.
@@ -444,12 +477,12 @@ func TestE2E_Eviction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("c1: %v", err)
 	}
-	defer func() { _ = c1.Close() }()
+	defer tunneltest.CloseOrLog(t, c1)
 	c2, err := dialTunnelTLS(edge, fqdn, inf.pebble.IssuingRoots)
 	if err != nil {
 		t.Fatalf("c2: %v", err)
 	}
-	defer func() { _ = c2.Close() }()
+	defer tunneltest.CloseOrLog(t, c2)
 
 	// A third connection must succeed by evicting a least-active idle stream (rolling rate 0 < protect).
 	var c3 *tls.Conn
@@ -459,7 +492,7 @@ func TestE2E_Eviction(t *testing.T) {
 			return false
 		}
 		if eerr := echoOn(c3); eerr != nil {
-			_ = c3.Close() // a leaked conn would join the eviction population under test
+			tunneltest.CloseOrLog(t, c3) // a leaked conn would join the eviction population under test
 			err = eerr
 			return false
 		}
@@ -467,13 +500,15 @@ func TestE2E_Eviction(t *testing.T) {
 	}) {
 		t.Fatalf("the over-cap connection must evict an idle stream and round-trip: %v", err)
 	}
-	_ = c3.Close()
+	tunneltest.CloseOrLog(t, c3)
 
 	// The over-cap admission must have EVICTED one of the two idle victims (not silently admitted a
 	// third): exactly one of c1/c2 must observe its socket closed by the edge. If the concurrency cap
 	// were unenforced, both would stay open and this assertion would fail.
 	isEvicted := func(c *tls.Conn) bool {
-		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
 		_, rerr := c.Read(make([]byte, 1))
 		if rerr == nil {
 			return false // read data on an idle conn → not the evicted victim
@@ -580,7 +615,7 @@ func freeAddr(t *testing.T) string {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
+	tunneltest.CloseOrLog(t, ln)
 	return addr
 }
 
@@ -644,16 +679,16 @@ func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
 
 // metricCounterPositive GETs the replica's internal /metrics and reports whether any exposition line for
 // the given counter family carries a value > 0 (i.e. the counter fired at least once).
-func metricCounterPositive(internalAddr, family string) bool {
+func metricCounterPositive(internalAddr, family string) (bool, error) {
 	c := &http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Get("http://" + internalAddr + "/metrics")
 	if err != nil {
-		return false
+		return false, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer tunneltest.CloseLogged(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, line := range strings.Split(string(body), "\n") {
 		if !strings.HasPrefix(line, family) {
@@ -669,11 +704,15 @@ func metricCounterPositive(internalAddr, family string) bool {
 		if len(fields) < 2 {
 			continue
 		}
-		if v, err := strconv.ParseFloat(fields[len(fields)-1], 64); err == nil && v > 0 {
-			return true
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			return false, fmt.Errorf("parse %q: %w", line, err)
+		}
+		if v > 0 {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // postAdminAction POSTs /api/v1/admin/tunnels/<name>/<action> to a replica's internal listener and returns
@@ -687,7 +726,7 @@ func postAdminAction(t *testing.T, internalAddr, action, name, respField string)
 	if err != nil {
 		t.Fatalf("POST %s: %v", u, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer tunneltest.CloseOrLog(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, false
 	}
@@ -711,14 +750,17 @@ func postAdminTerminate(t *testing.T, internalAddr, name string) (int, bool) {
 	return postAdminAction(t, internalAddr, "terminate", name, "terminated")
 }
 
-func healthOK(internalAddr string) bool {
+func healthOK(internalAddr string) (bool, error) {
 	c := &http.Client{Timeout: 2 * time.Second}
 	resp, err := c.Get("http://" + internalAddr + "/healthz")
 	if err != nil {
-		return false
+		return false, err
 	}
-	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	tunneltest.CloseLogged(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("healthz status %d", resp.StatusCode)
+	}
+	return true, nil
 }
 
 func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
@@ -726,7 +768,7 @@ func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	defer tunneltest.CloseLogged(conn)
 	msg := []byte("e2e-hello")
 	if _, err := conn.Write(msg); err != nil {
 		return err
@@ -748,7 +790,7 @@ func frontendTransfer(edgeAddr, fqdn string, roots *x509.CertPool, n int) error 
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	defer tunneltest.CloseLogged(conn)
 	payload := make([]byte, n)
 	done := make(chan error, 1)
 	go func() {
@@ -757,7 +799,8 @@ func frontendTransfer(edgeAddr, fqdn string, roots *x509.CertPool, n int) error 
 	}()
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return fmt.Errorf("read %d bytes: %w", n, err)
+		tunneltest.CloseLogged(conn)
+		return errors.Join(fmt.Errorf("read %d bytes: %w", n, err), <-done)
 	}
 	return <-done
 }
@@ -767,11 +810,12 @@ func dialTunnelTLS(edgeAddr, fqdn string, roots *x509.CertPool) (*tls.Conn, erro
 	if err != nil {
 		return nil, err
 	}
-	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := raw.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return nil, errors.Join(fmt.Errorf("set deadline: %w", err), raw.Close())
+	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err != nil {
-		_ = raw.Close()
-		return nil, fmt.Errorf("handshake: %w", err)
+		return nil, errors.Join(fmt.Errorf("handshake: %w", err), raw.Close())
 	}
 	return conn, nil
 }

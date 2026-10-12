@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 type h2TestServer struct {
@@ -42,11 +44,11 @@ func (l *trackingListener) Accept() (net.Conn, error) {
 	return c, nil
 }
 
-func (s *h2TestServer) closeConns() {
+func (s *h2TestServer) closeConns(t *testing.T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, c := range s.conns {
-		_ = c.Close()
+		tunneltest.CloseOrLog(t, c)
 	}
 	s.conns = nil
 }
@@ -70,8 +72,7 @@ func startH2TestServer(t *testing.T, nextProtos []string, maxStreams int, handle
 	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12, NextProtos: nextProtos}
 	srv := &http.Server{Handler: handler, TLSConfig: tlsConf, ReadHeaderTimeout: 5 * time.Second,
 		HTTP2: &http.HTTP2Config{MaxConcurrentStreams: maxStreams}}
-	go func() { _ = srv.Serve(tls.NewListener(&trackingListener{Listener: ln, s: s}, tlsConf)) }()
-	t.Cleanup(func() { _ = srv.Close() })
+	tunneltest.ServeHTTP(t, srv, tls.NewListener(&trackingListener{Listener: ln, s: s}, tlsConf))
 	return s
 }
 
@@ -86,8 +87,10 @@ func getOnce(hc *http.Client) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	_, copyErr := io.Copy(io.Discard, resp.Body)
+	if err := errors.Join(copyErr, resp.Body.Close()); err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 
@@ -150,8 +153,10 @@ func TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 	defer func() {
 		close(release)
 		for _, r := range resps {
-			_, _ = io.Copy(io.Discard, r.Body)
-			_ = r.Body.Close()
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				t.Logf("drain held response: %v", err)
+			}
+			tunneltest.CloseOrLog(t, r.Body)
 		}
 	}()
 	for i := range 3 {
@@ -175,9 +180,10 @@ func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
 	if _, err := getOnce(hc); err != nil {
 		t.Fatal(err)
 	}
-	s.closeConns()
-	if !waitFor(t, 5*time.Second, func() bool { _, err := getOnce(hc); return err == nil }) {
-		t.Fatal("a request must succeed on a new connection after the drop")
+	s.closeConns(t)
+	var getErr error
+	if !waitFor(t, 5*time.Second, func() bool { _, getErr = getOnce(hc); return getErr == nil }) {
+		t.Fatalf("a request must succeed on a new connection after the drop: %v", getErr)
 	}
 	if got := s.accepts.Load(); got != 2 {
 		t.Fatalf("want exactly 2 TCP connections (original + reconnect), got %d", got)
@@ -188,12 +194,20 @@ func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
 // full-duplex splice (the echo backend proves interleaved read/write works across the data stream).
 func TestControlConnectBindAndDuplex(t *testing.T) {
 	ts := startTestServer(t)
-	echo := func(s io.ReadWriteCloser) { _, _ = io.Copy(s, s) }
+	echo := func(s io.ReadWriteCloser) {
+		if _, err := io.Copy(s, s); err != nil {
+			tunneltest.Logger().Debug("echo backend ended", "err", err)
+		}
+	}
 	c := ts.newClient(t, echo)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = c.Run(ctx) }()
+	go func() {
+		if err := c.Run(ctx); err != nil && ctx.Err() == nil {
+			tunneltest.Logger().Warn("client run failed", "err", err)
+		}
+	}()
 
 	// The control stream must bind the route (HasConn becomes true).
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
@@ -207,7 +221,7 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial-back OpenStream failed: %v", err)
 	}
-	defer func() { _ = ds.Close() }()
+	defer tunneltest.CloseOrLog(t, ds)
 
 	// Full-duplex echo: write client→phone bytes; the echo backend must send them back phone→client.
 	msg := []byte("full-duplex-hello")
@@ -231,7 +245,11 @@ func TestRenewViaNudgeAndIssue(t *testing.T) {
 	c := ts.newClient(t, func(io.ReadWriteCloser) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = c.Run(ctx) }()
+	go func() {
+		if err := c.Run(ctx); err != nil && ctx.Err() == nil {
+			tunneltest.Logger().Warn("client run failed", "err", err)
+		}
+	}()
 
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
 		t.Fatal("control must bind before renewal")
@@ -247,5 +265,11 @@ func TestRenewViaNudgeAndIssue(t *testing.T) {
 		return string(id.IdentityCertPEM) != originalID && len(id.PublicCertPEM) > 0
 	}) {
 		t.Fatal("renewal must call /api/v1/issue and swap in the regenerated identity + public certs")
+	}
+}
+
+func TestNew_RejectsNilLogger(t *testing.T) {
+	if _, err := New("", "", "", nil, nil, nil, WithLogger(nil)); err == nil {
+		t.Fatal("a nil logger must be rejected")
 	}
 }

@@ -11,10 +11,17 @@ import (
 // connection stays on the current certs on failure).
 func (c *Client) renew(ctx context.Context, payload []byte) {
 	var nudge wire.RenewNudgePayload
-	if err := json.Unmarshal(payload, &nudge); err != nil || nudge.Nonce == "" {
+	if err := json.Unmarshal(payload, &nudge); err != nil {
+		c.logger.Warn("malformed RENEW_NUDGE payload from the server (ignored)", "err", err)
 		return
 	}
-	_ = c.Renew(ctx, nudge.Nonce)
+	if nudge.Nonce == "" {
+		c.logger.Warn("RENEW_NUDGE without a nonce from the server (ignored)")
+		return
+	}
+	if err := c.Renew(ctx, nudge.Nonce); err != nil {
+		c.logger.Warn("renew after a RENEW_NUDGE failed (keeping the current certs)", "err", err)
+	}
 }
 
 // Renew regenerates the identity + public certs via the mTLS POST /api/v1/issue endpoint (a fresh attestation

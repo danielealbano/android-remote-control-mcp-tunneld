@@ -55,7 +55,10 @@ object Keys {
     fun hexToBytes(s: String): ByteArray {
         require(s.length % 2 == 0 && s.isNotEmpty()) { "bad hex" }
         return ByteArray(s.length / 2) {
-            ((Character.digit(s[it * 2], 16) shl 4) + Character.digit(s[it * 2 + 1], 16)).toByte()
+            val hi = Character.digit(s[it * 2], 16)
+            val lo = Character.digit(s[it * 2 + 1], 16)
+            require(hi >= 0 && lo >= 0) { "bad hex" }
+            ((hi shl 4) + lo).toByte()
         }
     }
 }

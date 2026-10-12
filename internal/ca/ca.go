@@ -72,12 +72,13 @@ func parsePrivateKeyPEM(data []byte) (crypto.Signer, error) {
 	if block == nil {
 		return nil, errors.New("no PEM block in key")
 	}
-	if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-		return k, nil
+	k1, sec1Err := x509.ParseECPrivateKey(block.Bytes)
+	if sec1Err == nil {
+		return k1, nil
 	}
 	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(fmt.Errorf("parse as SEC1: %w", sec1Err), fmt.Errorf("parse as PKCS#8: %w", err))
 	}
 	signer, ok := k.(crypto.Signer)
 	if !ok {

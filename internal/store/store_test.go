@@ -71,14 +71,20 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 
 func TestEventJSONOmitEmpty(t *testing.T) {
 	start := store.Event{Schema: 1, Event: "start", Conn: "aabbccdd", Type: "phone", Tunnel: "t"}
-	b, _ := json.Marshal(start)
+	b, err := json.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(b), "ts_end") || strings.Contains(string(b), "bytes_in") ||
 		strings.Contains(string(b), "sni") {
 		t.Errorf("start/phone event leaked end-only or public-only fields: %s", b)
 	}
 	pub := store.Event{Schema: 1, Event: "end", Type: "public", SNI: "x.example.test",
 		TSEnd: time.Unix(1, 0), BytesIn: 5}
-	b, _ = json.Marshal(pub)
+	b, err = json.Marshal(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(string(b), "sni") || !strings.Contains(string(b), "ts_end") {
 		t.Errorf("public end event should carry sni + ts_end: %s", b)
 	}

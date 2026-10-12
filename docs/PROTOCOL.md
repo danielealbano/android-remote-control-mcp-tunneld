@@ -86,7 +86,8 @@ key is refused (`unsupported_key_type`) before the public cert is ever obtained.
 `attestationChallenge == nonce` ∧ signing digest ∈ the hot-reloadable allowlist ∧ `securityLevel ≥
 TrustedEnvironment` (Software rejected; StrongBox not required) ∧ `verifiedBootState == Verified` ∧
 `deviceLocked == true` ∧ not revoked (status list refreshed with last-known-good; refused if `> 24h`
-stale).
+stale). A KeyDescription that does not parse — including a malformed informational field such as the OS
+version or a patch level — fails the chain (`attest-untrusted`).
 
 **Write-verify claim invariant**: the settle wait MUST strictly exceed the claim-PUT timeout, and
 registry writes disable SDK auto-retries (a retried claim PUT would be a self-inflicted zombie write).

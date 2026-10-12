@@ -49,12 +49,12 @@ var knownRejectReasons = func() map[string]struct{} {
 	return set
 }()
 
-// NewPromRecorder builds the recorder. A nil caplog/log defaults to a discarding sink; a nil traffic
+// NewPromRecorder builds the recorder. A nil traffic
 // sink is accepted and treated as a no-op (flush becomes a no-op) — used by metrics-only test wiring
 // that never records per-tunnel counters.
 func NewPromRecorder(m *Metrics, cl *caplog.Logger, sink TrafficSink, log *slog.Logger) *PromRecorder {
 	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+		log = slog.Default()
 	}
 	if cl == nil {
 		cl = caplog.New(log)

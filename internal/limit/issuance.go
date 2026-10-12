@@ -3,6 +3,7 @@ package limit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -36,11 +37,12 @@ func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok 
 	}
 	n, err := l.rdb.Get(ctx, issuanceKey(name)).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		l.releaseIssLock(ctx, name, token)
-		return false, "", err
+		return false, "", errors.Join(fmt.Errorf("issuance count read: %w", err), l.releaseIssLock(ctx, name, token))
 	}
 	if n >= maxN {
-		l.releaseIssLock(ctx, name, token) // over cap — release and refuse
+		if rerr := l.releaseIssLock(ctx, name, token); rerr != nil && ctx.Err() == nil { // over cap — release and refuse
+			l.logger.Warn("issuance lock release failed (lock expires by TTL)", "tunnel", name, "err", rerr)
+		}
 		return false, "", nil
 	}
 	return true, token, nil
@@ -56,30 +58,52 @@ func (l *Limiter) IssuanceHeartbeatLoop(ctx context.Context, name, orderID strin
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Refresh the lock TTL while we still hold it. The GET(value==orderID) then PEXPIRE is a benign,
-			// rare TOCTOU: if the lock expired and another order re-acquired it between the two commands, the
-			// PEXPIRE extends the new holder's TTL — harmless and self-healing under the posture. Best-effort;
-			// a failure is logged.
-			if v, err := l.rdb.Get(ctx, issLockKey(name)).Result(); err == nil && v == orderID {
-				if err := l.rdb.PExpire(ctx, issLockKey(name), issLockTTL).Err(); err != nil {
-					l.logger.Warn("issuance lock refresh failed (lock may expire; a retry could then start)",
-						"tunnel", name, "err", err)
-				}
-			}
+			l.refreshIssLock(ctx, name, orderID)
+		}
+	}
+}
+
+// Refresh the lock TTL while we still hold it. The GET(value==orderID) then PEXPIRE is a benign,
+// rare TOCTOU: if the lock expired and another order re-acquired it between the two commands, the
+// PEXPIRE extends the new holder's TTL — harmless and self-healing under the posture. Best-effort;
+// a failure is logged.
+func (l *Limiter) refreshIssLock(ctx context.Context, name, orderID string) {
+	v, err := l.rdb.Get(ctx, issLockKey(name)).Result()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+			l.logger.Warn("issuance lock refresh check failed (lock may expire; a retry could then start)",
+				"tunnel", name, "err", err)
+		}
+		return
+	}
+	if v == orderID {
+		if err := l.rdb.PExpire(ctx, issLockKey(name), issLockTTL).Err(); err != nil && ctx.Err() == nil {
+			l.logger.Warn("issuance lock refresh failed (lock may expire; a retry could then start)",
+				"tunnel", name, "err", err)
 		}
 	}
 }
 
 // IssuanceEnd releases the lock (success AND failure — failed orders never burn the window).
 func (l *Limiter) IssuanceEnd(ctx context.Context, name, orderID string) error {
-	l.releaseIssLock(ctx, name, orderID)
-	return nil
+	return l.releaseIssLock(ctx, name, orderID)
 }
 
-func (l *Limiter) releaseIssLock(ctx context.Context, name, token string) {
-	if v, err := l.rdb.Get(ctx, issLockKey(name)).Result(); err == nil && v == token {
-		_ = l.rdb.Del(ctx, issLockKey(name)).Err()
+func (l *Limiter) releaseIssLock(ctx context.Context, name, token string) error {
+	v, err := l.rdb.Get(ctx, issLockKey(name)).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		return fmt.Errorf("issuance lock release check: %w", err)
 	}
+	if v != token {
+		return nil
+	}
+	if err := l.rdb.Del(ctx, issLockKey(name)).Err(); err != nil {
+		return fmt.Errorf("issuance lock release: %w", err)
+	}
+	return nil
 }
 
 // IssuanceRecord increments the rolling-7d success counter (called ONLY after a public cert issues, under

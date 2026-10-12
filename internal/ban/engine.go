@@ -108,9 +108,13 @@ func (e *Engine) build(files []string, csvPath string, required map[string]struc
 		for cc := range countries {
 			wanted[cc] = struct{}{}
 		}
-		byCC, err := ExpandCountries(csvPath, wanted)
+		byCC, skipped, err := ExpandCountries(csvPath, wanted)
 		switch {
 		case err == nil:
+			if skipped.Total() > 0 {
+				log.Warn("dbip csv rows skipped", "csv", csvPath, "malformed", skipped.Malformed,
+					"bad_address", skipped.BadAddress, "invalid_range", skipped.InvalidRange)
+			}
 			for cc, pfxs := range byCC {
 				src := countries[cc] // the ban-file entry that requested this country (file/line/Detail=cc)
 				for _, pfx := range pfxs {

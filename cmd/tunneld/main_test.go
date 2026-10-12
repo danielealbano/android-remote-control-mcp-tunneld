@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // captureStdout redirects os.Stdout for the duration of fn and returns what was written.
@@ -24,11 +26,14 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = w
 	done := make(chan string, 1)
 	go func() {
-		b, _ := io.ReadAll(r)
+		b, err := io.ReadAll(r)
+		if err != nil {
+			tunneltest.Logger().Warn("captured stdout read failed", "err", err)
+		}
 		done <- string(b)
 	}()
 	fn()
-	_ = w.Close()
+	tunneltest.CloseOrLog(t, w)
 	os.Stdout = orig
 	return <-done
 }
@@ -100,5 +105,17 @@ func TestCLIServeDispatch(t *testing.T) {
 	}
 	if gotCfg.CACert != cert {
 		t.Errorf("dispatched cfg.CACert = %q, want %q", gotCfg.CACert, cert)
+	}
+}
+
+func TestServe_ReturnsRunErrorAfterClosingLogs(t *testing.T) {
+	origRun := runServe
+	defer func() { runServe = origRun }()
+	runErr := errors.New("bind failed")
+	runServe = func(context.Context, config.ServeCmd, *slog.Logger, string) error { return runErr }
+	logPath := filepath.Join(t.TempDir(), "tunneld.log")
+	err := serve(config.ServeCmd{Log: []string{"output=" + logPath + ";level=info"}})
+	if !errors.Is(err, runErr) {
+		t.Fatalf("serve = %v, want the run error returned (not an exit) so the log sinks close first", err)
 	}
 }

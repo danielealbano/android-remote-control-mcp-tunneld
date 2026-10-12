@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // captureHandler is a slog.Handler that records emitted records so tests can assert the refreshers log
@@ -58,7 +62,9 @@ func (s *switchServer) handler() http.HandlerFunc {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write(*s.body.Load())
+		if _, err := w.Write(*s.body.Load()); err != nil {
+			tunneltest.Logger().Warn("switch server response write failed", "err", err)
+		}
 	}
 }
 
@@ -163,7 +169,9 @@ func TestRootSetRejectsMalformedBundle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tc.body))
+				if _, err := w.Write([]byte(tc.body)); err != nil {
+					t.Errorf("write test body: %v", err)
+				}
 			}))
 			defer srv.Close()
 			rs, err := NewRootSet(context.Background(), srv.URL, srv.Client(), nil)
@@ -252,4 +260,22 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("condition not reached in time")
+}
+
+type closeFailBody struct{ io.Reader }
+
+func (closeFailBody) Close() error { return errors.New("body close failed") }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestHTTPGet_ReturnsBodyCloseError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: closeFailBody{strings.NewReader("payload")}, Request: r}, nil
+	})}
+	body, err := httpGet(context.Background(), client, "https://status.example.test/")
+	if err == nil || !strings.Contains(err.Error(), "close response body: body close failed") {
+		t.Fatalf("httpGet = (%q, %v), want the body close error", body, err)
+	}
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 const concLockTTL = 5 * time.Second
@@ -20,7 +22,7 @@ func concLockKey(name string) string { return "conclock:" + name }
 // lock here and the issuance lock.
 func mintToken() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:])
+	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
 
@@ -36,11 +38,7 @@ func (l *Limiter) withConcLock(ctx context.Context, name string, fn func() error
 			return err
 		}
 		if ok {
-			defer func() {
-				if v, gerr := l.rdb.Get(ctx, concLockKey(name)).Result(); gerr == nil && v == token {
-					_ = l.rdb.Del(ctx, concLockKey(name)).Err()
-				}
-			}()
+			defer l.releaseConcLock(ctx, name, token)
 			return fn()
 		}
 		select {
@@ -50,4 +48,20 @@ func (l *Limiter) withConcLock(ctx context.Context, name string, fn func() error
 		}
 	}
 	return ErrConcLockContended
+}
+
+func (l *Limiter) releaseConcLock(ctx context.Context, name, token string) {
+	v, err := l.rdb.Get(ctx, concLockKey(name)).Result()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+			l.logger.Debug("stream-cap lock release check failed (lock expires by TTL)", "tunnel", name, "err", err)
+		}
+		return
+	}
+	if v != token {
+		return
+	}
+	if err := l.rdb.Del(ctx, concLockKey(name)).Err(); err != nil && ctx.Err() == nil {
+		l.logger.Debug("stream-cap lock release failed (lock expires by TTL)", "tunnel", name, "err", err)
+	}
 }

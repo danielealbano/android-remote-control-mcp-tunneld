@@ -30,6 +30,7 @@ for f in "$@"; do
 		if npx --yes @mermaid-js/mermaid-cli@12.0.0 -p "$OUT_DIR/puppeteer.json" \
 			-i "$OUT_DIR/block.mmd" -o "$OUT_DIR/block.svg" > "$OUT_DIR/mmdc.log" 2>&1; then
 			echo "OK   $f mermaid block $i"
+			cat "$OUT_DIR/mmdc.log"
 		else
 			echo "FAIL $f mermaid block $i"
 			cat "$OUT_DIR/mmdc.log"

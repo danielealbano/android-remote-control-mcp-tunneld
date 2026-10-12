@@ -58,7 +58,11 @@ func startContainer(t *testing.T, req testcontainers.ContainerRequest) testconta
 	if err != nil {
 		t.Fatalf("start container %s: %v", req.Image, err)
 	}
-	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
+	t.Cleanup(func() {
+		if err := c.Terminate(context.Background()); err != nil {
+			t.Logf("terminate container %s: %v", req.Image, err)
+		}
+	})
 	return c
 }
 
@@ -80,7 +84,11 @@ func newNetwork(t *testing.T) *testcontainers.DockerNetwork {
 	if err != nil {
 		t.Fatalf("create network: %v", err)
 	}
-	t.Cleanup(func() { _ = nw.Remove(context.Background()) })
+	t.Cleanup(func() {
+		if err := nw.Remove(context.Background()); err != nil {
+			t.Logf("remove network %s: %v", nw.Name, err)
+		}
+	})
 	return nw
 }
 
@@ -471,14 +479,21 @@ func (p *PebbleEnv) ClearTXT(host string) error {
 // DNS shim (and thus replica startup) indefinitely, matching the other timed HTTP helpers in this file.
 const chalMgmtTimeout = 15 * time.Second
 
-func (p *PebbleEnv) chalPost(path string, body map[string]string) error {
-	raw, _ := json.Marshal(body) // string-map marshal cannot fail
+func (p *PebbleEnv) chalPost(path string, body map[string]string) (err error) {
+	raw, err := json.Marshal(body) // string-map marshal cannot fail
+	if err != nil {
+		return err
+	}
 	hc := &http.Client{Timeout: chalMgmtTimeout}
 	resp, err := hc.Post(p.ChallMgmtURL+path, "application/json", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("challtestsrv %s: close response: %w", path, cerr))
+		}
+	}()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("challtestsrv %s: status %d", path, resp.StatusCode)
 	}
@@ -499,7 +514,11 @@ func StartACMEDNSShim(t *testing.T, p *PebbleEnv) (endpointURL string) {
 			FQDN  string `json:"fqdn"`
 			Value string `json:"value"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.FQDN == "" {
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Logf("acme dns shim: undecodable body: %v", err)
+			return "", "", false
+		}
+		if m.FQDN == "" {
 			return "", "", false
 		}
 		return m.FQDN, m.Value, true
@@ -540,7 +559,7 @@ func copyFromContainer(t *testing.T, c testcontainers.Container, path string) []
 	if err != nil {
 		t.Fatalf("copy %s from container: %v", path, err)
 	}
-	defer func() { _ = rc.Close() }()
+	defer CloseOrLog(t, rc)
 	data, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
@@ -569,7 +588,7 @@ func httpGet(t *testing.T, client *http.Client, url string) []byte {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer CloseOrLog(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET %s: status %d", url, resp.StatusCode)
 	}

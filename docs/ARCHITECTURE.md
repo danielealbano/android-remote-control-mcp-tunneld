@@ -184,7 +184,7 @@ in-flight public splices (`EvictBannedStreams`, `close_reason=ban-evict`) — ba
 so a reload must stop live traffic, not just new admissions. A `--ban-file` or the DB-IP CSV that was
 present at the last successful load but VANISHES at runtime is refused: the previous snapshot is kept
 (Error-logged, retried), never silently unbanning (a first-deploy absence stays a benign skip). The ban
-check is the FIRST handler-level check on every ingress edge. This includes ACME validation connections (TLS-ALPN-01 on `:443`, HTTP-01 on `:80`): an `ip` / `cidr` / `country` ban can drop a CA's validation perspectives and fail issuance (DNS-01 is unaffected).
+check is the FIRST handler-level check on every ingress edge; a peer address that does not parse as an IP cannot be ban-checked, so the edge refuses it before the ban gate (fail closed, Debug-logged) — the SNI edge and the `:80` listener close the connection, `/api/v1/enroll` and `/api/v1/control` answer `400 bad_source_ip`. This includes ACME validation connections (TLS-ALPN-01 on `:443`, HTTP-01 on `:80`): an `ip` / `cidr` / `country` ban can drop a CA's validation perspectives and fail issuance (DNS-01 is unaffected).
 
 Ban inputs are loaded **exactly once** at startup (synchronously, before any listener binds); the watcher
 then polls and reloads with **build-verify-commit** — it builds the snapshot, re-reads the input
@@ -240,6 +240,12 @@ admission, splice, or teardown path. A fixed pool of 8 workers drains a bounded 
 per-item exponential retry; a full queue drops the newest event and increments
 `tunneld_connlog_dropped_total`. The queue is drained (bounded) at shutdown so `server-shutdown` end
 events land.
+
+A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
+fan-out handler counts every failed record in `tunneld_log_sink_errors_total` and writes the sink's
+first failure — then at most one summary per minute carrying the suppressed count — directly to stderr;
+a pending count is still reported once the failures stop (on the next record after the minute) and when
+the sinks are closed at shutdown.
 
 ## 9. Shutdown
 
