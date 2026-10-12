@@ -16,6 +16,10 @@ type RedisConn struct {
 func ParseRedisURL(redisURL string) (RedisConn, error) {
 	u, err := url.Parse(redisURL)
 	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return RedisConn{}, ue.Err
+		}
 		return RedisConn{}, err
 	}
 	q, err := url.ParseQuery(u.RawQuery)

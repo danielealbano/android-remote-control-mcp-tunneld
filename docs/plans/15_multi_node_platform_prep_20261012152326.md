@@ -132,3 +132,7 @@ DoD: [x] the release config uses `dockers_v2` only.
   with `route_by_latency` / `route_randomly` (go-redis `NewFailoverClient` panics on them — they need the
   cluster client) and with `replica_only` (it routes every command to read-only replicas; tunneld writes).
   Why: these are startup-fatal or write-breaking misconfigurations, so they fail fast in `Validate()`.
+- Task 1.1 (found in the Task 5 ground-up re-read): `net/url` parse errors embed the whole URL, so a
+  malformed `--redis-url` printed its password in the startup error (go-redis's own parser did the same
+  before). The shared parser now returns only the underlying parse cause; a unit test asserts no parse error
+  carries the password. Why: secrets must never be logged.

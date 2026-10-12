@@ -2,6 +2,7 @@ package config
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,21 @@ func TestValidate_RedisURLSentinel(t *testing.T) {
 	c.RedisURL = "redis://s1.example.test:26379?master_name=tunneld&addr=no-port"
 	if err := c.Validate(); err == nil {
 		t.Fatal("a malformed Sentinel --redis-url must be rejected")
+	}
+}
+
+func TestParseRedisURL_ErrorOmitsCredentials(t *testing.T) {
+	for _, u := range []string{
+		"redis://user:s3cr3t-pw@valkey.example.test:6379/0\x7f",
+		"redis://user:s3cr3t-pw@s1.example.test:26379?master_name=tunneld&addr=no-port",
+		"redis://user:s3cr3t-pw@valkey.example.test:6379/not-a-db",
+	} {
+		_, err := ParseRedisURL(u)
+		if err == nil {
+			t.Fatalf("ParseRedisURL(%q) must fail", u)
+		}
+		if strings.Contains(err.Error(), "s3cr3t-pw") {
+			t.Fatalf("a --redis-url parse error must not carry the password, got %q", err)
+		}
 	}
 }
