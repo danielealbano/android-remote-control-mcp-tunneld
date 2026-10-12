@@ -12,10 +12,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -152,7 +155,10 @@ func TestReadPumpPongStampsLiveness(t *testing.T) {
 	c := newConn("phonee")
 	before := c.lastPong.Load()
 
-	pong, _ := wire.EncodeControl(wire.CtrlPong, nil)
+	pong, err := wire.EncodeControl(wire.CtrlPong, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h.readPump(bytes.NewReader(pong), c) // EOF after the frame → phone-close
 	if c.lastPong.Load() <= before {
 		t.Fatal("a PONG frame must advance lastPong")
@@ -197,7 +203,9 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 	var er struct {
 		Reason string `json:"reason"`
 	}
-	_ = json.Unmarshal(rec2.Body.Bytes(), &er)
+	if err := json.Unmarshal(rec2.Body.Bytes(), &er); err != nil {
+		t.Fatal(err)
+	}
 	if er.Reason == "banned" {
 		t.Fatal("an unbanned IP must not hit the ban gate")
 	}
@@ -419,5 +427,64 @@ func TestServeControl_CertExpiryCloses(t *testing.T) {
 	}
 	if reason != store.CloseCertExpired {
 		t.Fatalf("end close_reason = %q, want %q", reason, store.CloseCertExpired)
+	}
+}
+
+func TestServeHTTP_UnparseablePeerRefused(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		BanIP: func(netip.Addr) bool {
+			t.Error("the ban gate must not be consulted for an unparseable peer")
+			return false
+		}})
+	req := httptest.NewRequest("GET", "/api/v1/control", nil)
+	req.RemoteAddr = "@peer"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var er struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &er); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusBadRequest || er.Reason != "bad_source_ip" {
+		t.Fatalf("unparseable peer = %d %q, want 400 bad_source_ip", rec.Code, er.Reason)
+	}
+}
+
+func TestServeControl_BindFailureLogging(t *testing.T) {
+	tests := []struct {
+		name      string
+		bindErr   error
+		cancelled bool
+		wantLog   bool
+	}{
+		{name: "transient failure is logged", bindErr: errors.New("valkey down"), wantLog: true},
+		{name: "cancelled request is silent", bindErr: context.Canceled, cancelled: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := newFakeRouter()
+			fr.bindErr = tc.bindErr
+			var buf bytes.Buffer
+			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
+				RouteTTL: 30 * time.Second, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
+			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			req := httptest.NewRequest("GET", "/api/v1/control", newBlockedReader()).WithContext(ctx)
+			rec := newFlushRecorder()
+			h.serveControl(rec, req, phoneIdentity{name: "phonex", fingerprint: "sha256:fp"})
+			if rec.code() != http.StatusServiceUnavailable {
+				t.Fatalf("code = %d, want 503", rec.code())
+			}
+			if logged := strings.Contains(buf.String(), `msg="phone route bind failed"`); logged != tc.wantLog {
+				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
+			}
+		})
 	}
 }

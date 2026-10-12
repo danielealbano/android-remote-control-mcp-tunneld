@@ -3,9 +3,11 @@ package phoneconn
 import (
 	"context"
 	"errors"
-	"hash/fnv"
+	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,9 +95,7 @@ type Manager struct {
 // bindLock returns the striped per-name mutex serializing BindRoute + the local-map insert, so a
 // concurrent same-name bind can never leave the Valkey owner different from the local winner.
 func (m *Manager) bindLock(name string) *sync.Mutex {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(name))
-	return &m.bindMu[h.Sum32()%uint32(len(m.bindMu))]
+	return &m.bindMu[crc32.ChecksumIEEE([]byte(name))%uint32(len(m.bindMu))]
 }
 
 // Config wires the Manager.
@@ -114,7 +114,7 @@ type Config struct {
 func NewManager(cfg Config) *Manager {
 	logger := cfg.Logger
 	if logger == nil {
-		logger = slog.New(slog.DiscardHandler)
+		logger = slog.Default()
 	}
 	return &Manager{
 		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, logger: logger,
@@ -217,8 +217,10 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 				// Retrying next tick is fine for a blip, but a PERSISTENT failure (Valkey ACL/auth or a
 				// partition to Valkey only) lets tunnel:{name} TTL-expire — public clients then get
 				// no-route while the phone still believes it is connected. Surface it, don't swallow it.
-				m.logger.Warn("route heartbeat failed (route expires by TTL if this persists)",
-					"tunnel", c.name, "conn", c.connID, "err", err)
+				if ctx.Err() == nil {
+					m.logger.Warn("route heartbeat failed (route expires by TTL if this persists)",
+						"tunnel", c.name, "conn", c.connID, "err", err)
+				}
 				continue
 			}
 			switch res {
@@ -228,7 +230,10 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 				return
 			case router.HeartbeatMissing:
 				// Best-effort self-heal: a transient error/loss here is retried on the next heartbeat tick.
-				_, _ = m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.fingerprint, c.connID)
+				if _, err := m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.fingerprint, c.connID); err != nil && ctx.Err() == nil {
+					m.logger.Warn("route self-heal failed (retried on the next heartbeat)",
+						"tunnel", c.name, "conn", c.connID, "err", err)
+				}
 			}
 		}
 	}
@@ -256,11 +261,15 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	c.mu.Unlock()
 
 	// EncodeControl fails only on a non-marshalable payload; OpenPayload is a fixed struct of strings.
-	frame, _ := wire.EncodeControl(wire.CtrlOpen, wire.OpenPayload{StreamID: streamID})
+	frame, err := wire.EncodeControl(wire.CtrlOpen, wire.OpenPayload{StreamID: streamID})
+	if err != nil {
+		c.cancelPending(streamID, waiter, m.logger)
+		return nil, fmt.Errorf("encode OPEN frame: %w", err)
+	}
 	select {
 	case c.send <- frame:
 	case <-ctx.Done():
-		c.cancelPending(streamID, waiter)
+		c.cancelPending(streamID, waiter, m.logger)
 		return nil, ctx.Err()
 	}
 
@@ -268,7 +277,7 @@ func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataSt
 	case ds := <-waiter:
 		return ds, nil
 	case <-ctx.Done():
-		c.cancelPending(streamID, waiter)
+		c.cancelPending(streamID, waiter, m.logger)
 		return nil, ctx.Err()
 	}
 }
@@ -365,6 +374,7 @@ func (m *Manager) SendRenewNudge(name, nonceHex, ariWindow string) bool {
 	}
 	frame, err := wire.EncodeControl(wire.CtrlRenewNudge, wire.RenewNudgePayload{Nonce: nonceHex, ARIWindow: ariWindow})
 	if err != nil {
+		m.logger.Warn("renew nudge encode failed", "tunnel", name, "err", err)
 		return false
 	}
 	select {
@@ -408,13 +418,15 @@ func (c *conn) isClosed() bool {
 // delivered to the buffered waiter, so an orphaned /api/v1/data handler cannot leak. Because deliverStream
 // sends under the same lock, once the delete returns either a stream is already in `waiter` (drained
 // here) or deliverStream will observe the registration gone and report the stream undeliverable.
-func (c *conn) cancelPending(streamID string, waiter chan DataStream) {
+func (c *conn) cancelPending(streamID string, waiter chan DataStream, logger *slog.Logger) {
 	c.mu.Lock()
 	delete(c.pending, streamID)
 	c.mu.Unlock()
 	select {
 	case ds := <-waiter:
-		_ = ds.Close()
+		if err := ds.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Debug("orphaned data stream close failed", "tunnel", c.name, "stream", streamID, "err", err)
+		}
 	default:
 	}
 }

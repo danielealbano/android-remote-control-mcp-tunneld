@@ -250,7 +250,9 @@ func TestManager_Close_AbsentReturnsFalse(t *testing.T) {
 func TestEvictBanned(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
-	_, _ = m.register(context.Background(), c)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
 	m.EvictBanned(func(name, fp string) bool { return name == "abc" })
 	if !c.isClosed() {
 		t.Error("banned connection should be closed")
@@ -309,7 +311,9 @@ func TestOpenStreamNoConn(t *testing.T) {
 func TestOpenStreamDialbackCorrelates(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
-	_, _ = m.register(context.Background(), c)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
 
 	got := make(chan DataStream, 1)
 	go func() {
@@ -373,7 +377,9 @@ func TestDeliverStream_RefusesClosedConn(t *testing.T) {
 func TestOpenStreamTimesOut(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
-	_, _ = m.register(context.Background(), c)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
 	go func() { <-c.send }() // accept the OPEN frame, then never deliver a stream
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -399,7 +405,9 @@ func TestOpenStreamTimesOut(t *testing.T) {
 func TestManager_OpenStream_DuplicateRefused(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	c := newConn("abc")
-	_, _ = m.register(context.Background(), c)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
 
 	go func() { <-c.send }() // accept the first OPEN frame; never deliver a stream
 	ctx1, cancel1 := context.WithCancel(context.Background())
@@ -433,7 +441,9 @@ func TestHeartbeatNotOwnerCloses(t *testing.T) {
 	c := newConn("abc")
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	_, _ = m.register(ctx, c)
+	if _, err := m.register(ctx, c); err != nil {
+		t.Fatal(err)
+	}
 	m.routeTTL = 3 * time.Millisecond
 	go m.heartbeatLoop(ctx, c)
 	deadline := time.After(time.Second)
@@ -463,7 +473,7 @@ func TestCancelPendingClosesRacedDelivery(t *testing.T) {
 	fake := &closeableStream{}
 	waiter <- fake // deliverStream raced in and delivered before OpenStream observed the cancel
 
-	c.cancelPending("s1", waiter)
+	c.cancelPending("s1", waiter, slog.Default())
 
 	if !fake.isClosed() {
 		t.Fatal("a stream delivered concurrently with the dial-back cancel must be closed, not orphaned")
@@ -538,8 +548,11 @@ func TestManager_Teardown_StopsHeartbeatBeforeUnbind(t *testing.T) {
 func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
-	reg := router.NewRegistry(rdb, 30*time.Second)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	st := tunneltest.NewStore()
 	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-19T00:00:00Z", RouteTTL: 30 * time.Second})
@@ -591,5 +604,79 @@ func TestHeartbeatLoop_TinyRouteTTLNoPanic(t *testing.T) {
 	case <-c.hbDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("heartbeatLoop did not exit")
+	}
+}
+
+type scriptedHBRouter struct {
+	*fakeRouter
+	hb   func() (router.HeartbeatResult, error)
+	heal func() error
+}
+
+func (r *scriptedHBRouter) Heartbeat(context.Context, string, string) (router.HeartbeatResult, error) {
+	return r.hb()
+}
+
+func (r *scriptedHBRouter) BindRouteIfAbsentOrOwner(context.Context, string, string, string, string) (router.SelfHealResult, error) {
+	return router.SelfHealBound, r.heal()
+}
+
+func TestHeartbeatLoop_FailureLogging(t *testing.T) {
+	missing := func() (router.HeartbeatResult, error) { return router.HeartbeatMissing, nil }
+	tests := []struct {
+		name    string
+		hb      func(cancel context.CancelFunc) func() (router.HeartbeatResult, error)
+		heal    func(cancel context.CancelFunc) func() error
+		wantLog string
+	}{
+		{name: "cancelled heartbeat is silent",
+			hb: func(cancel context.CancelFunc) func() (router.HeartbeatResult, error) {
+				return func() (router.HeartbeatResult, error) { cancel(); return router.HeartbeatRefreshed, context.Canceled }
+			}},
+		{name: "cancelled self-heal is silent",
+			hb: func(context.CancelFunc) func() (router.HeartbeatResult, error) { return missing },
+			heal: func(cancel context.CancelFunc) func() error {
+				return func() error { cancel(); return context.Canceled }
+			}},
+		{name: "self-heal failure is logged", wantLog: "route self-heal failed (retried on the next heartbeat)",
+			hb: func(context.CancelFunc) func() (router.HeartbeatResult, error) { return missing },
+			heal: func(context.CancelFunc) func() error {
+				return func() error { return errors.New("valkey unreachable") }
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			r := &scriptedHBRouter{fakeRouter: newFakeRouter(), hb: tc.hb(cancel), heal: func() error { return nil }}
+			if tc.heal != nil {
+				r.heal = tc.heal(cancel)
+			}
+			buf := &syncBuf{}
+			m := NewManager(Config{Router: r, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
+				RouteTTL: 30 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(buf, nil))})
+			c := newConn("abc")
+			go m.heartbeatLoop(ctx, c)
+			if tc.wantLog != "" {
+				deadline := time.After(2 * time.Second)
+				for !strings.Contains(buf.String(), tc.wantLog) {
+					select {
+					case <-deadline:
+						t.Fatalf("the failure must be logged; log = %q", buf.String())
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+				cancel()
+			}
+			select {
+			case <-c.hbDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("the heartbeat loop must exit once its context is cancelled")
+			}
+			if tc.wantLog == "" && buf.String() != "" {
+				t.Fatalf("a failure caused by the connection's cancellation must not be logged; log = %q", buf.String())
+			}
+		})
 	}
 }
