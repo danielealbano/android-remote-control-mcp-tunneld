@@ -67,8 +67,12 @@ func TestLimiter_ReleaseStream_StragglerNoOp(t *testing.T) {
 	ctx := ctxT(t)
 	lim := NewLimiter(rdb, 0, 0, 0, time.Hour)
 	const name = "tunnel-straggler"
-	_, _ = lim.AcquireStream(ctx, name, "conn2", 5) // conn2 owns 2 slots
-	_, _ = lim.AcquireStream(ctx, name, "conn2", 5)
+	if _, err := lim.AcquireStream(ctx, name, "conn2", 5); err != nil { // conn2 owns 2 slots
+		t.Fatal(err)
+	}
+	if _, err := lim.AcquireStream(ctx, name, "conn2", 5); err != nil {
+		t.Fatal(err)
+	}
 	// A straggler release from the superseded conn1 must NOT decrement conn2's count.
 	if err := lim.ReleaseStream(ctx, name, "conn1"); err != nil {
 		t.Fatal(err)

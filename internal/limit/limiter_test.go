@@ -1,6 +1,9 @@
 package limit
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,10 +104,14 @@ func TestCharge_DayCapWaitsNearBoundary(t *testing.T) {
 func TestCharge_PerDirectionIsolated(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 1<<30, 0, 4, 1<<40) // 4-byte day cap; clock mid-day (reset far)
-	if action, _, win, _ := l.Charge(ctx, "t", "in", 10); action != ChargeKill || win != "day" {
+	if action, _, win, err := l.Charge(ctx, "t", "in", 10); err != nil {
+		t.Fatal(err)
+	} else if action != ChargeKill || win != "day" {
 		t.Fatalf("in charge: action=%v win=%q, want Kill day", action, win)
 	}
-	if action, _, _, _ := l.Charge(ctx, "t", "out", 1); action != ChargeProceed {
+	if action, _, _, err := l.Charge(ctx, "t", "out", 1); err != nil {
+		t.Fatal(err)
+	} else if action != ChargeProceed {
 		t.Fatalf("out charge: action=%v, want Proceed (in's bytes must not trip out's day counter)", action)
 	}
 }
@@ -152,7 +159,9 @@ func TestIssuanceRecordCountsSuccesses(t *testing.T) {
 		}
 	}
 	// Three committed successes fill cap 3: a fresh Begin (no in-flight order) is refused.
-	if ok, _, _ := l.IssuanceBegin(ctx, "t", 3); ok {
+	if ok, _, err := l.IssuanceBegin(ctx, "t", 3); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Error("after 3 committed successes, cap 3 must deny a new begin")
 	}
 	// A higher cap still admits with 3 committed.
@@ -164,22 +173,37 @@ func TestIssuanceRecordCountsSuccesses(t *testing.T) {
 func TestCACooldownAndFailures(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
-	if d, _ := l.CACooldown(ctx, "letsencrypt"); d != 0 {
+	if d, err := l.CACooldown(ctx, "letsencrypt"); err != nil {
+		t.Fatal(err)
+	} else if d != 0 {
 		t.Errorf("no cooldown expected, got %s", d)
 	}
 	if err := l.SetCACooldown(ctx, "letsencrypt", time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if d, _ := l.CACooldown(ctx, "letsencrypt"); d <= 0 {
+	if d, err := l.CACooldown(ctx, "letsencrypt"); err != nil {
+		t.Fatal(err)
+	} else if d <= 0 {
 		t.Error("cooldown should be readable")
 	}
-	c1, _ := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
-	c2, _ := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
+	c1, err := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if c1 != 1 || c2 != 2 {
 		t.Errorf("failure streak = %d,%d", c1, c2)
 	}
-	_ = l.ResetCAFailures(ctx, "gts")
-	c3, _ := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
+	if err := l.ResetCAFailures(ctx, "gts"); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := l.BumpCAFailures(ctx, "gts", 6*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if c3 != 1 {
 		t.Errorf("after reset streak = %d, want 1", c3)
 	}
@@ -194,13 +218,17 @@ func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 			t.Fatalf("acquire: ok=%v err=%v", ok, err)
 		}
 	}
-	if ok, _ := l.AcquireStream(ctx, "t", "conn1", 4); ok {
+	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Error("5th acquire past cap 4 should fail")
 	}
 	if err := l.ReleaseStream(ctx, "t", "conn1"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := l.AcquireStream(ctx, "t", "conn1", 4); !ok {
+	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil {
+		t.Fatal(err)
+	} else if !ok {
 		t.Error("after release, a slot should be free")
 	}
 }
@@ -229,11 +257,15 @@ func TestTrafficExhausted_PerDirection(t *testing.T) {
 	if err := l.rdb.Set(ctx, inWeek, "20", 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if _, week, _ := l.TrafficExhausted(ctx, "t"); !week {
+	if _, week, err := l.TrafficExhausted(ctx, "t"); err != nil {
+		t.Fatal(err)
+	} else if !week {
 		t.Fatal("at-cap in-week window must report week exhausted (either direction)")
 	}
 	// Read-only: the seeded counter is unchanged after the checks.
-	if got, _ := l.rdb.Get(ctx, outDay).Int64(); got != 10 {
+	if got, err := l.rdb.Get(ctx, outDay).Int64(); err != nil {
+		t.Fatal(err)
+	} else if got != 10 {
 		t.Fatalf("TrafficExhausted must be read-only, out-day counter moved to %d", got)
 	}
 }
@@ -279,5 +311,23 @@ func TestAcquireStream_UsesDerivedTTL(t *testing.T) {
 	}
 	if got := mr.TTL("conc:t"); got != ttl {
 		t.Fatalf("conc TTL = %s, want the configured streamTTL %s", got, ttl)
+	}
+}
+
+func TestTrafficExhausted_UnparseableCounterLogged(t *testing.T) {
+	ctx := ctxT(t)
+	l, _, clk := newChargeLimiter(t, 1, 0, 10, 20)
+	var buf bytes.Buffer
+	l.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	_, _, outDay, _ := chargeKeys("t", "out", clk.Unix())
+	if err := l.rdb.Set(ctx, outDay, "not-a-number", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	day, week, err := l.TrafficExhausted(ctx, "t")
+	if err != nil || day || week {
+		t.Fatalf("an unparseable counter counts as 0 (day=%v week=%v err=%v)", day, week, err)
+	}
+	if !strings.Contains(buf.String(), "unparseable Valkey counter") {
+		t.Fatalf("the unparseable counter must be logged; log = %q", buf.String())
 	}
 }

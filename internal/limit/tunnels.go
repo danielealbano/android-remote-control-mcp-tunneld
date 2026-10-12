@@ -54,12 +54,12 @@ func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string
 		b := i * perName
 		var conc int64
 		if cv := concCmds[i].Val(); len(cv) > 0 {
-			conc = atoiCap(cv[0]) // atoiCap treats nil / non-string as 0
+			conc = l.atoiCap("conc:"+n, cv[0]) // atoiCap treats nil / non-string as 0
 		}
 		out[n] = TunnelStat{
-			Conc: conc, BwIn: atoiCap(vals[b]), BwOut: atoiCap(vals[b+1]),
-			DayIn: atoiCap(vals[b+2]), DayOut: atoiCap(vals[b+3]),
-			WeekIn: atoiCap(vals[b+4]), WeekOut: atoiCap(vals[b+5]),
+			Conc: conc, BwIn: l.atoiCap(keys[b], vals[b]), BwOut: l.atoiCap(keys[b+1], vals[b+1]),
+			DayIn: l.atoiCap(keys[b+2], vals[b+2]), DayOut: l.atoiCap(keys[b+3], vals[b+3]),
+			WeekIn: l.atoiCap(keys[b+4], vals[b+4]), WeekOut: l.atoiCap(keys[b+5], vals[b+5]),
 		}
 	}
 	return out, nil
