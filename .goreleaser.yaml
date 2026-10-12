@@ -34,42 +34,22 @@ archives:
 checksum:
   name_template: checksums.txt
 
-dockers:
-  - id: amd64
-    goos: linux
-    goarch: amd64
+dockers_v2:
+  - id: tunneld
+    ids:
+      - tunneld
     dockerfile: Dockerfile.goreleaser
-    use: buildx
-    image_templates:
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
-      - "--label=org.opencontainers.image.description=Self-hosted end-to-end-encrypted tunnel server (tunneld)"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-  - id: arm64
-    goos: linux
-    goarch: arm64
-    dockerfile: Dockerfile.goreleaser
-    use: buildx
-    image_templates:
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.source=https://github.com/danielealbano/android-remote-control-mcp-tunneld"
-      - "--label=org.opencontainers.image.description=Self-hosted end-to-end-encrypted tunnel server (tunneld)"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-
-docker_manifests:
-  - name_template: "ghcr.io/danielealbano/tunneld:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-amd64"
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/danielealbano/tunneld:latest"
-    image_templates:
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-amd64"
-      - "ghcr.io/danielealbano/tunneld:{{ .Version }}-arm64"
+    images:
+      - "ghcr.io/danielealbano/tunneld"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.source": "https://github.com/danielealbano/android-remote-control-mcp-tunneld"
+      "org.opencontainers.image.description": "Self-hosted end-to-end-encrypted tunnel server (tunneld)"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "MIT"

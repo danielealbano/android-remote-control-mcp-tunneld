@@ -96,25 +96,25 @@ per renewal); the existing `lock:acme-self:<host>` only serializes the orders.
 
 DoD: [x] a multi-replica deployment issues each reserved-host cert once per renewal cycle.
 
-## [ ] US4 — Release config on goreleaser `dockers_v2`
+## [x] US4 — Release config on goreleaser `dockers_v2`
 
 Why: goreleaser reports that `dockers` + `docker_manifests` are being phased out and will eventually be
 replaced by `dockers_v2`.
 
-- [ ] `.goreleaser.yaml` uses one `dockers_v2` entry (platforms `linux/amd64`, `linux/arm64`) for
+- [x] `.goreleaser.yaml` uses one `dockers_v2` entry (platforms `linux/amd64`, `linux/arm64`) for
       `ghcr.io/danielealbano/tunneld` with tags `{{ .Version }}` and `latest` and the same OCI labels;
       `dockers` and `docker_manifests` are removed.
-- [ ] `Dockerfile.goreleaser` copies the per-platform binary (`ARG TARGETPLATFORM` +
+- [x] `Dockerfile.goreleaser` copies the per-platform binary (`ARG TARGETPLATFORM` +
       `COPY $TARGETPLATFORM/tunneld`).
-- [ ] The per-arch `-amd64` / `-arm64` tags are no longer published (user decision); the multi-arch tags
+- [x] The per-arch `-amd64` / `-arm64` tags are no longer published (user decision); the multi-arch tags
       cover both platforms.
 
-### [ ] Task 4.1 — Migrate the release config
+### [x] Task 4.1 — Migrate the release config
 
-- [ ] Update `.goreleaser.yaml` + `Dockerfile.goreleaser`; `release.yml` needs no change (it runs goreleaser
+- [x] Update `.goreleaser.yaml` + `Dockerfile.goreleaser`; `release.yml` needs no change (it runs goreleaser
       `~> v2`, which supports `dockers_v2`).
 
-DoD: [ ] the release config uses `dockers_v2` only.
+DoD: [x] the release config uses `dockers_v2` only.
 
 ## [ ] Task 5 — Ground-up verification
 
