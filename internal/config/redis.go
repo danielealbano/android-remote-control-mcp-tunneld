@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -65,32 +66,11 @@ func (c RedisConn) NewClient() *redis.Client {
 	return redis.NewClient(c.single)
 }
 
-func urlSecrets(raw string) []string {
-	var secrets []string
-	rest := raw
-	if i := strings.Index(rest, "://"); i >= 0 {
-		rest = rest[i+3:]
-	}
-	if at := strings.LastIndex(rest, "@"); at > 0 {
-		secrets = append(secrets, rest[:at])
-	}
-	for s := raw; ; {
-		i := strings.Index(s, "password=")
-		if i < 0 {
-			break
-		}
-		s = s[i+len("password="):]
-		if s != "" {
-			secrets = append(secrets, s)
-		}
-	}
-	return secrets
-}
-
 func redactURLSecrets(msg, raw string) string {
-	secrets := urlSecrets(raw)
-	if len(secrets) == 0 {
-		return msg
+	var sources []string
+	for _, src := range []string{raw, lenientUnescape(raw, false), lenientUnescape(raw, true)} {
+		quoted := strconv.Quote(src)
+		sources = append(sources, src, quoted[1:len(quoted)-1])
 	}
 	isDelim := func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("\"'`:,()[]", r) }
 	var b strings.Builder
@@ -101,9 +81,11 @@ func redactURLSecrets(msg, raw string) string {
 		}
 		t := tok.String()
 		tok.Reset()
-		if leaksSecret(t, secrets) {
-			b.WriteString("[redacted]")
-			return
+		for _, src := range sources {
+			if strings.Contains(src, t) {
+				b.WriteString("[redacted]")
+				return
+			}
 		}
 		b.WriteString(t)
 	}
@@ -119,21 +101,33 @@ func redactURLSecrets(msg, raw string) string {
 	return b.String()
 }
 
-func leaksSecret(token string, secrets []string) bool {
-	for _, s := range secrets {
-		if len(token) < 3 {
-			for _, seg := range strings.FieldsFunc(s, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
-				if seg == token {
-					return true
-				}
-			}
-			continue
-		}
-		for i := 0; i+3 <= len(token); i++ {
-			if strings.Contains(s, token[i:i+3]) {
-				return true
-			}
+func lenientUnescape(s string, plusAsSpace bool) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '%' && i+2 < len(s) && isHex(s[i+1]) && isHex(s[i+2]):
+			b.WriteByte(unhex(s[i+1])<<4 | unhex(s[i+2]))
+			i += 2
+		case s[i] == '+' && plusAsSpace:
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(s[i])
 		}
 	}
-	return false
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func unhex(c byte) byte {
+	switch {
+	case '0' <= c && c <= '9':
+		return c - '0'
+	case 'a' <= c && c <= 'f':
+		return c - 'a' + 10
+	default:
+		return c - 'A' + 10
+	}
 }

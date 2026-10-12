@@ -137,8 +137,10 @@ DoD: [x] the release config uses `dockers_v2` only.
   before). The shared parser now returns only the underlying parse cause; a unit test asserts no parse error
   carries the password. Why: secrets must never be logged. Code review then showed `net/url` and go-redis
   also echo password FRAGMENTS (an unescaped `/`, `?`, `#`, `&` or `%` splits them into other fields), so
-  every parse error is now emitted with each token that overlaps the URL's userinfo or a `password=` value
-  replaced by `[redacted]` (the redacted cause is kept, never dropped), prefixed with `--redis-url:`.
+  every parse error is now emitted with EVERY token that appears in the URL (raw, percent-decoded or
+  Go-quoted, any length) replaced by `[redacted]` — locating the password inside a malformed URL is not
+  reliable, so all URL-derived text is hidden; the redacted cause (the error's structure) is kept, never
+  dropped, prefixed with `--redis-url:`.
 - Task 1.1: a plain (non-Sentinel) `--redis-url` with a malformed query pair (e.g. a bad `%`-escape) is now
   REJECTED; go-redis's own parser silently dropped such pairs. Why: the shared parser must read the query
   strictly to detect `master_name`, and silently dropping a malformed setting is a discarded error — fail
