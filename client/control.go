@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -27,6 +28,7 @@ type Client struct {
 	tunnelDomain string
 	caPool       *x509.CertPool
 	backend      Backend
+	logger       *slog.Logger
 
 	mu    sync.Mutex
 	ident *Identity
@@ -42,10 +44,15 @@ type Client struct {
 // New builds a control client that dials dialAddr, negotiates TLS with SNI/Host controlHost (trusting
 // caPool), presents ident as the mTLS client cert, serves dial-back streams to backend, and renews via
 // the mTLS POST /api/v1/issue endpoint (needing tunnelDomain to request <name>.<tunnelDomain>).
-func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend) (*Client, error) {
+func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend, opts ...Option) (*Client, error) {
 	c := &Client{
 		dialAddr: dialAddr, controlHost: controlHost, tunnelDomain: tunnelDomain,
-		caPool: caPool, backend: backend, ident: ident,
+		caPool: caPool, backend: backend, ident: ident, logger: slog.Default(),
+	}
+	for _, o := range opts {
+		if err := o(c); err != nil {
+			return nil, err
+		}
 	}
 	cert, err := ident.tlsCertificate()
 	if err != nil {
@@ -55,6 +62,18 @@ func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, iden
 	c.tr = newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert)
 	c.hc = &http.Client{Transport: c.tr}
 	return c, nil
+}
+
+type Option func(*Client) error
+
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) error {
+		if l == nil {
+			return errors.New("client: nil logger")
+		}
+		c.logger = l
+		return nil
+	}
 }
 
 // Close releases the control client's pooled TLS connections. Call it once Run has returned.
@@ -91,8 +110,7 @@ func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCe
 func requireH2(conn net.Conn) (net.Conn, error) {
 	tc, ok := conn.(*tls.Conn)
 	if !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
-		_ = conn.Close()
-		return nil, errNotHTTP2
+		return nil, errors.Join(errNotHTTP2, conn.Close())
 	}
 	return conn, nil
 }
@@ -119,11 +137,11 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		_ = pw.CloseWithError(err)
+		pw.CloseWithError(err)
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	defer func() { _ = pw.Close() }()
+	defer c.closeLogged("control response body", resp.Body)
+	defer c.closeLogged("control request body", pw)
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("client: control connect rejected: " + resp.Status)
 	}
@@ -134,24 +152,20 @@ func (c *Client) Run(ctx context.Context) error {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = resp.Body.Close()
-			_ = pw.CloseWithError(ctx.Err())
+			c.closeLogged("control response body", resp.Body)
+			pw.CloseWithError(ctx.Err())
 		case <-watchDone:
 		}
 	}()
 	c.setSend(pw)
 
 	for {
-		frame, err := readControlFrame(resp.Body)
+		ct, payload, err := readControlFrame(resp.Body)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
-		}
-		ct, payload, derr := wire.DecodeControl(frame)
-		if derr != nil {
-			continue
 		}
 		switch ct {
 		case wire.CtrlOpen:
@@ -174,6 +188,7 @@ func (c *Client) setSend(w io.Writer) {
 func (c *Client) sendControl(t wire.ControlType, payload any) {
 	frame, err := wire.EncodeControl(t, payload)
 	if err != nil {
+		c.logger.Warn("control frame encode failed", "type", t, "err", err)
 		return
 	}
 	c.sendMu.Lock()
@@ -181,23 +196,31 @@ func (c *Client) sendControl(t wire.ControlType, payload any) {
 	if c.sendW == nil {
 		return
 	}
-	_, _ = c.sendW.Write(frame)
+	if _, err := c.sendW.Write(frame); err != nil {
+		c.logger.Debug("control frame write failed", "type", t, "err", err)
+	}
+}
+
+func (c *Client) closeLogged(what string, cl io.Closer) {
+	if err := cl.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		c.logger.Debug("close failed", "what", what, "err", err)
+	}
 }
 
 // readControlFrame reads one length-framed v1 control frame ([type:1][len:4 BE][payload]) from r.
-func readControlFrame(r io.Reader) ([]byte, error) {
+func readControlFrame(r io.Reader) (wire.ControlType, []byte, error) {
 	var hdr [5]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	n := binary.BigEndian.Uint32(hdr[1:5])
 	if n > 1<<20 {
-		return nil, errors.New("client: control frame too large")
+		return 0, nil, errors.New("client: control frame too large")
 	}
 	frame := make([]byte, 5+int(n))
 	copy(frame, hdr[:])
 	if _, err := io.ReadFull(r, frame[5:]); err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	return frame, nil
+	return wire.DecodeControl(frame)
 }

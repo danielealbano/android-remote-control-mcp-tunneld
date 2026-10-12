@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -61,6 +62,14 @@ func newTestCA(t *testing.T) *testCA {
 // signLeaf signs a leaf cert (server or client) for pub with the given CN + optional SANs.
 func (ca *testCA) signLeaf(t *testing.T, cn string, pub crypto.PublicKey, server bool, dns []string) []byte {
 	t.Helper()
+	certPEM, err := ca.sign(cn, pub, server, dns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certPEM
+}
+
+func (ca *testCA) sign(cn string, pub crypto.PublicKey, server bool, dns []string) ([]byte, error) {
 	eku := x509.ExtKeyUsageClientAuth
 	if server {
 		eku = x509.ExtKeyUsageServerAuth
@@ -72,9 +81,9 @@ func (ca *testCA) signLeaf(t *testing.T, cn string, pub crypto.PublicKey, server
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, pub, ca.key)
 	if err != nil {
-		t.Fatal(err)
+		return nil, fmt.Errorf("sign leaf %q: %w", cn, err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
 func keyPEM(t *testing.T, key *ecdsa.PrivateKey) []byte {
@@ -101,10 +110,13 @@ func startTestServer(t *testing.T) *testServer {
 	ca := newTestCA(t)
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = rdb.Close() })
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 
 	st := tunneltest.NewStore()
-	reg := router.NewRegistry(rdb, 30*time.Second)
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	mgr := phoneconn.NewManager(phoneconn.Config{
 		Router: reg, Logs: st, Recorder: &tunneltest.Recorder{},
 		NodeID: "node-test", NodeHost: "host-test", NodeStart: "start", RouteTTL: 30 * time.Second,
@@ -130,8 +142,16 @@ func startTestServer(t *testing.T) *testServer {
 			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
 		}
 		fqdn := name + "." + testTunnelDomain
-		idCert := ca.signLeaf(t, name, idCSR.PublicKey, false, nil)
-		pubCert := ca.signLeaf(t, fqdn, tlsCSR.PublicKey, true, []string{fqdn})
+		idCert, err := ca.sign(name, idCSR.PublicKey, false, nil)
+		if err != nil {
+			tunneltest.Logger().Error("test control server: identity signing failed", "err", err)
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "internal", Retryable: true}
+		}
+		pubCert, err := ca.sign(fqdn, tlsCSR.PublicKey, true, []string{fqdn})
+		if err != nil {
+			tunneltest.Logger().Error("test control server: public signing failed", "err", err)
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "internal", Retryable: true}
+		}
 		return phoneconn.IssueResponse{IdentityCert: string(idCert), PublicCert: string(pubCert), CA: "test"}, nil
 	}
 
@@ -162,8 +182,7 @@ func startTestServer(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 	cl := &countingListener{Listener: ln}
-	go func() { _ = srv.Serve(tls.NewListener(cl, srv.TLSConfig)) }()
-	t.Cleanup(func() { _ = srv.Close() })
+	tunneltest.ServeHTTP(t, srv, tls.NewListener(cl, srv.TLSConfig))
 
 	return &testServer{ca: ca, mgr: mgr, store: st, dialAdr: ln.Addr().String(), conns: cl}
 }

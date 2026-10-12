@@ -13,18 +13,23 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		tunneltest.Logger().Warn("test enroll server response write failed", "err", err)
+	}
 }
 
-func readJSON(r *http.Request, v any) bool {
-	return json.NewDecoder(r.Body).Decode(v) == nil
+func readJSON(r *http.Request, v any) error {
+	return json.NewDecoder(r.Body).Decode(v)
 }
 
 const testEnrollHost = "enroll.example.test"
@@ -62,12 +67,20 @@ func (c *countingConn) Close() error {
 func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (string, *countingListener) {
 	t.Helper()
 
-	signFromCSR := func(csrPEM, cn string, server bool, dns []string) (string, bool) {
+	signFromCSR := func(w http.ResponseWriter, kind, csrPEM, cn string, server bool, dns []string) (string, bool) {
 		csr, err := parseCSR(csrPEM)
 		if err != nil {
+			tunneltest.Logger().Warn("test enroll server: unparseable CSR", "err", err)
+			http.Error(w, "bad "+kind+" csr", http.StatusBadRequest)
 			return "", false
 		}
-		return string(ca.signLeaf(t, cn, csr.PublicKey, server, dns)), true
+		certPEM, err := ca.sign(cn, csr.PublicKey, server, dns)
+		if err != nil {
+			tunneltest.Logger().Error("test enroll server: signing failed", "err", err)
+			http.Error(w, "signing failed", http.StatusInternalServerError)
+			return "", false
+		}
+		return string(certPEM), true
 	}
 
 	mux := http.NewServeMux()
@@ -76,13 +89,13 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 	})
 	mux.HandleFunc("/api/v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var body enrollRequestBody
-		if !readJSON(r, &body) {
+		if err := readJSON(r, &body); err != nil {
+			tunneltest.Logger().Warn("test enroll server: undecodable body", "err", err)
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		idCert, ok := signFromCSR(body.IdentityCSR, testName, false, nil)
+		idCert, ok := signFromCSR(w, "identity", body.IdentityCSR, testName, false, nil)
 		if !ok {
-			http.Error(w, "bad identity csr", http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, enrollResponse{Name: testName, IdentityCert: idCert, IssueNonce: "bb"})
@@ -98,19 +111,18 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 			return
 		}
 		var body issueRequestBody
-		if !readJSON(r, &body) {
+		if err := readJSON(r, &body); err != nil {
+			tunneltest.Logger().Warn("test enroll server: undecodable body", "err", err)
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
 		}
-		idCert, ok := signFromCSR(body.IdentityCSR, testName, false, nil)
+		idCert, ok := signFromCSR(w, "identity", body.IdentityCSR, testName, false, nil)
 		if !ok {
-			http.Error(w, "bad identity csr", http.StatusBadRequest)
 			return
 		}
 		fqdn := testName + "." + testTunnelDomain
-		pubCert, ok := signFromCSR(body.TLSCSR, fqdn, true, []string{fqdn})
+		pubCert, ok := signFromCSR(w, "tls", body.TLSCSR, fqdn, true, []string{fqdn})
 		if !ok {
-			http.Error(w, "bad tls csr", http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, issueResponseBody{IdentityCert: idCert, PublicCert: pubCert, CA: "test"})
@@ -138,8 +150,7 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 		t.Fatal(err)
 	}
 	cl := &countingListener{Listener: ln}
-	go func() { _ = srv.Serve(tls.NewListener(cl, srv.TLSConfig)) }()
-	t.Cleanup(func() { _ = srv.Close() })
+	tunneltest.ServeHTTP(t, srv, tls.NewListener(cl, srv.TLSConfig))
 	return ln.Addr().String(), cl
 }
 
@@ -274,7 +285,12 @@ func TestClient_CloseReleasesControlTransport(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})
-	go func() { defer close(runDone); _ = c.Run(ctx) }()
+	go func() {
+		defer close(runDone)
+		if err := c.Run(ctx); err != nil && ctx.Err() == nil {
+			tunneltest.Logger().Warn("client run failed", "err", err)
+		}
+	}()
 
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
 		t.Fatal("control connect must bind the route")
@@ -289,5 +305,67 @@ func TestClient_CloseReleasesControlTransport(t *testing.T) {
 	// Close until the pool has quiesced and released it.
 	if !waitFor(t, 3*time.Second, func() bool { c.Close(); return ts.conns.live.Load() == 0 }) {
 		t.Fatalf("Close must release the control transport; %d connection(s) remain", ts.conns.live.Load())
+	}
+}
+
+func TestErrorFromResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantReason string
+		wantRetry  bool
+		wantAfter  time.Duration
+		wantDecode bool
+	}{
+		{name: "structured error", body: `{"reason":"enroll_rate","retryable":true,"retry_after_seconds":30}`,
+			wantReason: "enroll_rate", wantRetry: true, wantAfter: 30 * time.Second},
+		{name: "undecodable body", body: "<html>bad gateway</html>", wantDecode: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errorFromResponse(http.StatusBadGateway, []byte(tc.body))
+			var ee *EnrollError
+			if !errors.As(err, &ee) || ee.Status != http.StatusBadGateway || ee.Reason != tc.wantReason {
+				t.Fatalf("errorFromResponse = %v, want an *EnrollError with status 502 and reason %q", err, tc.wantReason)
+			}
+			if ee.Retryable != tc.wantRetry || ee.RetryAfter != tc.wantAfter {
+				t.Fatalf("retryable=%v retryAfter=%s, want %v %s", ee.Retryable, ee.RetryAfter, tc.wantRetry, tc.wantAfter)
+			}
+			if decodeFailed := strings.Contains(err.Error(), "decode error response"); decodeFailed != tc.wantDecode {
+				t.Fatalf("decode failure surfaced = %v, want %v (err %v)", decodeFailed, tc.wantDecode, err)
+			}
+		})
+	}
+}
+
+func TestClient_ResponseCloseErrorsReturned(t *testing.T) {
+	ctx := context.Background()
+	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: failingBody{strings.NewReader(`{"nonce":"aa"}`)}, Request: r}, nil
+	})}
+	tests := []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{name: "nonce fetch", want: "enroll: close nonce response", call: func() error {
+			_, err := fetchNonce(ctx, hc, testEnrollHost)
+			return err
+		}},
+		{name: "phase-1 enroll", want: "enroll: close response", call: func() error {
+			_, err := postEnroll(ctx, hc, testEnrollHost, []byte("{}"))
+			return err
+		}},
+		{name: "issuance", want: "issue: close response", call: func() error {
+			_, err := issueCerts(ctx, hc, testControlHost, testName, testTunnelDomain, "", "00")
+			return err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); !errors.Is(err, errInjected) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want the %q body close error", err, tc.want)
+			}
+		})
 	}
 }
