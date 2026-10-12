@@ -25,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // tunnelAppPkg is the committed reference client (support/tunnel-app/, built via `make tunnel-app`).
@@ -89,7 +91,12 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "adb", "-s", serial, "reverse", "--remove", "tcp:"+strconv.Itoa(tunnelAppDevicePort)).Run()
+		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "reverse", "--remove", "tcp:"+strconv.Itoa(tunnelAppDevicePort)).CombinedOutput()
+		if err != nil {
+			t.Logf("adb cleanup failed: %v: %s", err, out)
+		} else if msg := strings.TrimSpace(string(out)); msg != "" {
+			t.Logf("adb cleanup: %s", msg)
+		}
 	})
 
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
@@ -97,7 +104,12 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", tunnelAppPkg).Run()
+		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "uninstall", tunnelAppPkg).CombinedOutput()
+		if err != nil {
+			t.Logf("adb cleanup failed: %v: %s", err, out)
+		} else if msg := strings.TrimSpace(string(out)); msg != "" {
+			t.Logf("adb cleanup: %s", msg)
+		}
 	})
 	// Android 12+ blocks a background broadcast receiver from calling startForegroundService(); put the app
 	// on the power allowlist (as a real user-installed tunnel app would be exempted from battery
@@ -106,7 +118,12 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		_ = exec.CommandContext(ctx, "adb", "-s", serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg).Run()
+		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg).CombinedOutput()
+		if err != nil {
+			t.Logf("adb cleanup failed: %v: %s", err, out)
+		} else if msg := strings.TrimSpace(string(out)); msg != "" {
+			t.Logf("adb cleanup: %s", msg)
+		}
 	})
 	// install -r keeps app data, so clear any stale status files from a prior interrupted run.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
@@ -189,14 +206,15 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// Public roundtrip #2: the nonce is unchanged but the cert digest changed (renewal rotated it).
 	var info2 infoResp
 	if !waitBool(90*time.Second, func() bool {
-		r, gerr := fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
-		if gerr != nil || r.TLSCertSHA256 == f1 {
+		var r infoResp
+		r, infoErr = fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
+		if infoErr != nil || r.TLSCertSHA256 == f1 {
 			return false
 		}
 		info2 = r
 		return true
 	}) {
-		t.Fatalf("/info tls_cert_sha256 never changed after refresh (still %s)", f1)
+		t.Fatalf("/info tls_cert_sha256 never changed after refresh (still %s; last fetch error: %v)", f1, infoErr)
 	}
 	if info2.Nonce != appNonce {
 		t.Fatalf("after refresh /info nonce = %q, want %q", info2.Nonce, appNonce)
@@ -213,14 +231,15 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	}
 	var info3 infoResp
 	if !waitBool(90*time.Second, func() bool {
-		r, gerr := fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
-		if gerr != nil || r.TLSCertSHA256 == f2 {
+		var r infoResp
+		r, infoErr = fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
+		if infoErr != nil || r.TLSCertSHA256 == f2 {
 			return false
 		}
 		info3 = r
 		return true
 	}) {
-		t.Fatalf("/info tls_cert_sha256 never changed after the nudge (still %s)", f2)
+		t.Fatalf("/info tls_cert_sha256 never changed after the nudge (still %s; last fetch error: %v)", f2, infoErr)
 	}
 	if info3.Nonce != appNonce {
 		t.Fatalf("after the nudge /info nonce = %q, want %q", info3.Nonce, appNonce)
@@ -305,7 +324,7 @@ func assertPhoneCert(t *testing.T, edge, fqdn string, roots *x509.CertPool) {
 	if err != nil {
 		t.Fatalf("public TLS handshake to %s failed: %v", fqdn, err)
 	}
-	defer func() { _ = conn.Close() }()
+	defer tunneltest.CloseOrLog(t, conn)
 	leaf := conn.ConnectionState().PeerCertificates[0]
 	if err := leaf.VerifyHostname(fqdn); err != nil {
 		t.Fatalf("phone cert SAN does not cover %s: %v (dns=%v)", fqdn, err, leaf.DNSNames)
@@ -345,7 +364,7 @@ func h1Get(edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer tunneltest.CloseLogged(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, body, err
 }
@@ -367,8 +386,7 @@ func h2Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
 				return nil, err
 			}
 			if tc, ok := conn.(*tls.Conn); !ok || tc.ConnectionState().NegotiatedProtocol != "h2" {
-				_ = conn.Close()
-				return nil, errors.New("e2e: tunnel peer did not negotiate HTTP/2")
+				return nil, errors.Join(errors.New("e2e: tunnel peer did not negotiate HTTP/2"), conn.Close())
 			}
 			return conn, nil
 		},
@@ -414,7 +432,7 @@ func waitOnce(c *http.Client, fqdn string, seconds int) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer tunneltest.CloseLogged(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
