@@ -81,6 +81,7 @@ func (r *Registry) Nodes(ctx context.Context) (map[string]NodeInfo, error) {
 			}
 			var info NodeInfo
 			if err := json.Unmarshal([]byte(v), &info); err != nil {
+				r.logger.Warn("malformed node registry entry skipped", "key", k, "err", err)
 				continue // skip a malformed value rather than failing the whole listing
 			}
 			out[k[len("node:"):]] = info

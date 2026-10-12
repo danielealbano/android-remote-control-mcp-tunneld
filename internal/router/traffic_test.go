@@ -9,7 +9,9 @@ import (
 func TestRegistry_BindResetsByteFields(t *testing.T) {
 	reg, mr := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1")
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := reg.AddTraffic(ctx, "abc", 100, 50); err != nil {
 		t.Fatal(err)
 	}
@@ -25,8 +27,10 @@ func TestRegistry_BindResetsByteFields(t *testing.T) {
 func TestRegistry_AddTraffic_LiveKeyIncrements(t *testing.T) {
 	reg, mr := newReg(t)
 	ctx := context.Background()
-	_ = reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1") // TTL 30s
-	mr.FastForward(20 * time.Second)                      // TTL now ~10s
+	if err := reg.BindRoute(ctx, "abc", "nodeA", "fp", "conn1"); err != nil { // TTL 30s
+		t.Fatal(err)
+	}
+	mr.FastForward(20 * time.Second) // TTL now ~10s
 	if err := reg.AddTraffic(ctx, "abc", 100, 50); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +45,9 @@ func TestRegistry_AddTraffic_LiveKeyIncrements(t *testing.T) {
 		t.Errorf("AddTraffic reset a live route's TTL to %s (EXPIRE NX must no-op on a keyed TTL)", ttl)
 	}
 	// The route stays routable (node untouched).
-	if _, _, _, ok, _ := reg.LookupRoute(ctx, "abc"); !ok {
+	if _, _, _, ok, err := reg.LookupRoute(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	} else if !ok {
 		t.Error("AddTraffic must not clobber the route")
 	}
 }
@@ -54,7 +60,9 @@ func TestRegistry_AddTraffic_GoneKey_NonRoutableSelfExpiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The created key is NON-routable (no `node` field) → LookupRoute reports ok=false.
-	if _, _, _, ok, _ := reg.LookupRoute(ctx, "abc"); ok {
+	if _, _, _, ok, err := reg.LookupRoute(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	} else if ok {
 		t.Error("a byte-only orphan must not be routable")
 	}
 	// And it self-expires (EXPIRE NX gave it a TTL).

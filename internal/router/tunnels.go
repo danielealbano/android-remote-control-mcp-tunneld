@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	"github.com/redis/go-redis/v9"
@@ -45,22 +46,30 @@ func (r *Registry) TunnelMeta(ctx context.Context, names []string) (map[string]T
 	}
 	out := make(map[string]TunnelMetaInfo, len(names))
 	for i, n := range names {
-		v, _ := cmds[i].Result()
+		v := cmds[i].Val()
 		node, _ := v[0].(string)
 		if node == "" {
 			continue // no live route (or a byte-only orphan) — not reported
 		}
-		out[n] = TunnelMetaInfo{Node: node, BytesIn: atoiVal(v[1]), BytesOut: atoiVal(v[2])}
+		out[n] = TunnelMetaInfo{Node: node, BytesIn: r.atoiVal(n, v[1]), BytesOut: r.atoiVal(n, v[2])}
 	}
 	return out, nil
 }
 
 // atoiVal parses an HMGET result element (string | nil) to int64; a missing/unparseable value → 0.
-func atoiVal(v any) int64 {
-	s, ok := v.(string)
-	if !ok {
+func (r *Registry) atoiVal(name string, v any) int64 {
+	if v == nil {
 		return 0
 	}
-	n, _ := strconv.ParseInt(s, 10, 64)
+	s, ok := v.(string)
+	if !ok {
+		r.logger.Warn("unexpected route byte counter type (reported as 0)", "tunnel", name, "type", fmt.Sprintf("%T", v))
+		return 0
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		r.logger.Warn("unparseable route byte counter (reported as 0)", "tunnel", name, "err", err)
+		return 0
+	}
 	return n
 }
