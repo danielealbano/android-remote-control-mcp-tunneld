@@ -13,6 +13,7 @@
 package logging
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,12 +37,12 @@ func newLogger(specs []string, stdout, stderr io.Writer) (*slog.Logger, func() e
 		return nil, noopClose, err
 	}
 	var (
-		children []slog.Handler
+		children []sink
 		closers  []io.Closer
 	)
 	for _, s := range parsed {
 		if s.stdout {
-			children = append(children, newStdSplit(stdout, stderr, s))
+			children = append(children, sink{name: "std", h: newStdSplit(stdout, stderr, s)})
 			continue
 		}
 		lj := &lumberjack.Logger{
@@ -53,22 +54,21 @@ func newLogger(specs []string, stdout, stderr io.Writer) (*slog.Logger, func() e
 		// Probe the sink at startup (lumberjack opens lazily) so a bad path fails fast instead of
 		// silently dropping every log line. A zero-length write creates/opens the file, no record.
 		if _, werr := lj.Write(nil); werr != nil {
-			_ = lj.Close()
-			return nil, noopClose, fmt.Errorf("log sink %q not writable: %w", s.path, werr)
+			return nil, noopClose, errors.Join(fmt.Errorf("log sink %q not writable: %w", s.path, werr), lj.Close())
 		}
 		closers = append(closers, lj)
-		children = append(children, newLeaf(lj, s))
+		children = append(children, sink{name: s.path, h: newLeaf(lj, s)})
 	}
+	health := newSinkHealth(stderr)
 	closeAll := func() error {
-		var firstErr error
+		health.sweep(true)
+		var errs []error
 		for _, c := range closers {
-			if e := c.Close(); e != nil && firstErr == nil {
-				firstErr = e
-			}
+			errs = append(errs, c.Close())
 		}
-		return firstErr
+		return errors.Join(errs...)
 	}
-	return slog.New(&fanoutHandler{children: children}), closeAll, nil
+	return slog.New(&fanoutHandler{children: children, health: health}), closeAll, nil
 }
 
 func noopClose() error { return nil }

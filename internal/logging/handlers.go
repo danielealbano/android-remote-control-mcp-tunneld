@@ -2,19 +2,99 @@ package logging
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
 )
+
+const sinkReportEvery = time.Minute
+
+type sink struct {
+	name string
+	h    slog.Handler
+}
+
+type sinkHealth struct {
+	report  io.Writer
+	now     func() time.Time
+	errs    atomic.Uint64
+	pending atomic.Bool
+
+	mu     sync.Mutex
+	status map[string]*sinkStatus
+}
+
+type sinkStatus struct {
+	lastReport time.Time
+	suppressed uint64
+}
+
+func newSinkHealth(report io.Writer) *sinkHealth {
+	return &sinkHealth{report: report, now: time.Now, status: map[string]*sinkStatus{}}
+}
+
+func (s *sinkHealth) failed(name string, err error) {
+	s.errs.Add(1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.status[name]
+	if st == nil {
+		st = &sinkStatus{}
+		s.status[name] = st
+	}
+	now := s.now()
+	if !st.lastReport.IsZero() && now.Sub(st.lastReport) < sinkReportEvery {
+		st.suppressed++
+		s.pending.Store(true)
+		return
+	}
+	if _, werr := fmt.Fprintf(s.report, "tunneld: log sink %s failed: %v (%d more failures since the last report)\n", name, err, st.suppressed); werr != nil {
+		st.suppressed++
+		s.pending.Store(true)
+		return
+	}
+	st.lastReport, st.suppressed = now, 0
+}
+
+func (s *sinkHealth) sweep(force bool) {
+	if !s.pending.Load() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	still := false
+	for name, st := range s.status {
+		if st.suppressed == 0 {
+			continue
+		}
+		if !force && !st.lastReport.IsZero() && now.Sub(st.lastReport) < sinkReportEvery {
+			still = true
+			continue
+		}
+		if _, err := fmt.Fprintf(s.report, "tunneld: log sink %s: %d failures since the last report\n", name, st.suppressed); err != nil {
+			still = true
+			continue
+		}
+		st.lastReport, st.suppressed = now, 0
+	}
+	s.pending.Store(still)
+}
 
 // fanoutHandler dispatches each record to every child that admits its level. Enabled reports true
 // if ANY child would handle the record, so slog does not drop records the fan-out still needs.
 type fanoutHandler struct {
-	children []slog.Handler
+	children []sink
+	health   *sinkHealth
 }
 
 func (h *fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
 	for _, c := range h.children {
-		if c.Enabled(ctx, level) {
+		if c.h.Enabled(ctx, level) {
 			return true
 		}
 	}
@@ -22,32 +102,36 @@ func (h *fanoutHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
-	var firstErr error
+	var errs []error
 	for _, c := range h.children {
-		if !c.Enabled(ctx, r.Level) {
+		if !c.h.Enabled(ctx, r.Level) {
 			continue
 		}
-		if err := c.Handle(ctx, r.Clone()); err != nil && firstErr == nil {
-			firstErr = err
+		if err := c.h.Handle(ctx, r.Clone()); err != nil {
+			h.health.failed(c.name, err)
+			errs = append(errs, fmt.Errorf("log sink %s: %w", c.name, err))
 		}
 	}
-	return firstErr
+	h.health.sweep(false)
+	return errors.Join(errs...)
 }
 
+func (h *fanoutHandler) SinkErrors() uint64 { return h.health.errs.Load() }
+
 func (h *fanoutHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	next := make([]slog.Handler, len(h.children))
+	next := make([]sink, len(h.children))
 	for i, c := range h.children {
-		next[i] = c.WithAttrs(attrs)
+		next[i] = sink{name: c.name, h: c.h.WithAttrs(attrs)}
 	}
-	return &fanoutHandler{children: next}
+	return &fanoutHandler{children: next, health: h.health}
 }
 
 func (h *fanoutHandler) WithGroup(name string) slog.Handler {
-	next := make([]slog.Handler, len(h.children))
+	next := make([]sink, len(h.children))
 	for i, c := range h.children {
-		next[i] = c.WithGroup(name)
+		next[i] = sink{name: c.name, h: c.h.WithGroup(name)}
 	}
-	return &fanoutHandler{children: next}
+	return &fanoutHandler{children: next, health: h.health}
 }
 
 // stdSplitHandler is a std sink: it routes each admitted record to EXACTLY one of two underlying
