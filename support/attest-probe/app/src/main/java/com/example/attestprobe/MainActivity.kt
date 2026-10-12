@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.io.File
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -47,7 +48,8 @@ class MainActivity : Activity() {
             File(dir, "chain.pem").writeBytes(pem.toByteArray())
             File(dir, "done").writeBytes(ByteArray(0)) // marker LAST — chain.pem is complete
         } catch (t: Throwable) {
-            File(dir, "error").writeText(t.toString())
+            Log.e("AttestProbe", "attestation probe failed", t)
+            File(dir, "error").writeText(t.stackTraceToString())
         } finally {
             finish()
         }
@@ -56,7 +58,10 @@ class MainActivity : Activity() {
     private fun hexToBytes(s: String): ByteArray {
         require(s.length % 2 == 0 && s.isNotEmpty()) { "bad nonce hex" }
         return ByteArray(s.length / 2) {
-            ((Character.digit(s[it * 2], 16) shl 4) + Character.digit(s[it * 2 + 1], 16)).toByte()
+            val hi = Character.digit(s[it * 2], 16)
+            val lo = Character.digit(s[it * 2 + 1], 16)
+            require(hi >= 0 && lo >= 0) { "bad nonce hex" }
+            ((hi shl 4) + lo).toByte()
         }
     }
 }

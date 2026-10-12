@@ -1,6 +1,7 @@
 package com.example.tunnelapp
 
 import io.ktor.http.ContentType
+import io.ktor.http.HttpStatusCode
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.engine.sslConnector
@@ -82,7 +83,11 @@ class Server(private val port: Int, private val appNonce: String, private val na
                         )
                     }
                     get("/wait") {
-                        val seconds = call.request.queryParameters["seconds"]?.toIntOrNull() ?: 1
+                        val raw = call.request.queryParameters["seconds"]
+                        val seconds = if (raw == null) 1 else raw.toIntOrNull()?.takeIf { it >= 0 } ?: run {
+                            call.respondText("bad seconds: $raw", status = HttpStatusCode.BadRequest)
+                            return@get
+                        }
                         val rate = 1 shl 20 // ~1 MiB/s
                         val chunk = ByteArray(rate)
                         val alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toByteArray()

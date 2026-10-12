@@ -15,12 +15,11 @@ object Frames {
     val PONG_FRAME = byteArrayOf(PONG.toByte(), 0, 0, 0, 0)
 
     // read parses one frame from source (blocking); returns (type, payloadJsonBytes) or null on EOF.
-    fun read(source: BufferedSource): Pair<Int, ByteArray>? = try {
+    fun read(source: BufferedSource): Pair<Int, ByteArray>? {
+        if (source.exhausted()) return null
         val type = source.readByte().toInt() and 0xff
         val len = source.readInt() // big-endian
         if (len < 0 || len > MAX) throw IOException("control frame too large: $len")
-        type to (if (len == 0) ByteArray(0) else source.readByteArray(len.toLong()))
-    } catch (_: Throwable) {
-        null
+        return type to (if (len == 0) ByteArray(0) else source.readByteArray(len.toLong()))
     }
 }

@@ -1,5 +1,6 @@
 package com.example.tunnelapp
 
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -167,7 +168,12 @@ object Enroll {
     }
 
     private fun fail(status: Int, resp: String): Nothing {
-        val r = try { JSONObject(resp) } catch (_: Throwable) { JSONObject() }
+        val r = try {
+            JSONObject(resp)
+        } catch (t: Throwable) {
+            Log.w(TAG, "undecodable error body (status $status)", t)
+            JSONObject()
+        }
         throw EnrollError(
             r.optString("reason", "http_$status"), r.optBoolean("retryable", false),
             r.optLong("retry_after_seconds", 0), status,
