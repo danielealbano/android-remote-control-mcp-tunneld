@@ -116,15 +116,15 @@ replaced by `dockers_v2`.
 
 DoD: [x] the release config uses `dockers_v2` only.
 
-## [ ] Task 5 — Ground-up verification
+## [x] Task 5 — Ground-up verification
 
-- [ ] Re-read this plan and every change from the ground up; docs and `.claude/rules/project.md` match.
-- [ ] Quality gates: `make lint`, `make vet`, `make govulncheck`, `make build`, `make test-unit`,
+- [x] Re-read this plan and every change from the ground up; docs and `.claude/rules/project.md` match.
+- [x] Quality gates: `make lint`, `make vet`, `make govulncheck`, `make build`, `make test-unit`,
       `make test-scripts`, `make mermaid-check`, `go mod tidy` drift, `make test-integration`,
       `make test-e2e`, `make test-staging`.
-- [ ] Validate every touched Mermaid chart (`make mermaid-check`, per development_pipeline.md §9).
-- [ ] `goreleaser check` reports no deprecation; a local `--snapshot` release builds both platform images.
-- [ ] All checkboxes ticked; deviations recorded below.
+- [x] Validate every touched Mermaid chart (`make mermaid-check`, per development_pipeline.md §9).
+- [x] `goreleaser check` reports no deprecation; a local `--snapshot` release builds both platform images.
+- [x] All checkboxes ticked; deviations recorded below.
 
 ## Deviations
 
