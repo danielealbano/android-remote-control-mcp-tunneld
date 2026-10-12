@@ -128,8 +128,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
   day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (JSONL batches under
-  `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl` — one per tunnel, UTC day and node,
-  written at 100 events, 5 minutes after the batch's first event, or at shutdown), and
+  `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl` — each batch holds one tunnel's
+  events for one UTC day on one node; a batch is written at 100 events, 5 minutes after its first event, or
+  at shutdown, so a busy tunnel gets many objects per day), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
   claim protocol, not storage semantics. **PRE-GO-LIVE**, validate a provider with a read-after-write

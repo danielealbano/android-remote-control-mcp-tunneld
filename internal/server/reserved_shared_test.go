@@ -84,6 +84,7 @@ func (u *unlockProbe) LockSelf(ctx context.Context, host string) (func() error, 
 }
 
 func TestReservedCerts_SharedHitUnderLockOrdersNothing(t *testing.T) {
+	t.Parallel()
 	cs, _ := newSharedStore(t)
 	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 	seedShared(t, cs, certPEM, keyPEM, info)
@@ -109,6 +110,7 @@ func TestReservedCerts_SharedHitUnderLockOrdersNothing(t *testing.T) {
 }
 
 func TestReservedCerts_MissOrdersAndPublishesBeforeUnlock(t *testing.T) {
+	t.Parallel()
 	cs, mr := newSharedStore(t)
 	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
@@ -141,6 +143,7 @@ func TestReservedCerts_MissOrdersAndPublishesBeforeUnlock(t *testing.T) {
 }
 
 func TestReservedCerts_SharedPickUp(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	tests := []struct {
 		name       string
@@ -157,6 +160,7 @@ func TestReservedCerts_SharedPickUp(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			localCert, localKey, localInfo := mintSelfCert(t, sharedHost, now.Add(tc.local))
 			seedCache(t, dir, sharedHost, localCert, localKey, localInfo)
@@ -191,6 +195,7 @@ func TestReservedCerts_SharedPickUp(t *testing.T) {
 }
 
 func TestReservedCerts_SharedErrorFallsBackToDisk(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 	seedCache(t, dir, sharedHost, certPEM, keyPEM, info)
@@ -209,6 +214,7 @@ func TestReservedCerts_SharedErrorFallsBackToDisk(t *testing.T) {
 }
 
 func TestReservedCerts_SharedUnderLockStillOrders(t *testing.T) {
+	t.Parallel()
 	failCheck := func(context.Context, store.CertInfo) (bool, time.Time, error) {
 		return false, time.Time{}, errors.New("ari unavailable")
 	}
@@ -223,6 +229,7 @@ func TestReservedCerts_SharedUnderLockStillOrders(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			shared := &memShared{}
 			sharedCert, sharedKey, sharedInfo := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 			seedShared(t, shared, sharedCert, sharedKey, sharedInfo)
@@ -248,6 +255,7 @@ func TestReservedCerts_SharedUnderLockStillOrders(t *testing.T) {
 }
 
 func TestReservedCerts_PublishFailureLoggedCertStillServed(t *testing.T) {
+	t.Parallel()
 	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
 	var buf bytes.Buffer
