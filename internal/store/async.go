@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -50,17 +52,41 @@ type AsyncConnLog struct {
 }
 
 // AsyncOption configures an AsyncConnLog (functional-options pattern).
-type AsyncOption func(*AsyncConnLog)
+type AsyncOption func(*AsyncConnLog) error
 
 // WithBackoffBase sets the first retry backoff (default 1s; doubles per retry). Tests use a tiny
 // value so the retry-exhaustion path runs in milliseconds rather than ~15s of real sleep.
-func WithBackoffBase(d time.Duration) AsyncOption { return func(a *AsyncConnLog) { a.backoffBase = d } }
+func WithBackoffBase(d time.Duration) AsyncOption {
+	return func(a *AsyncConnLog) error {
+		if d < 0 {
+			return fmt.Errorf("store: negative conn-log backoff %v", d)
+		}
+		a.backoffBase = d
+		return nil
+	}
+}
 
-func WithClock(now func() time.Time) AsyncOption { return func(a *AsyncConnLog) { a.now = now } }
+func WithClock(now func() time.Time) AsyncOption {
+	return func(a *AsyncConnLog) error {
+		if now == nil {
+			return errors.New("store: nil conn-log clock")
+		}
+		a.now = now
+		return nil
+	}
+}
 
-func WithAgeCheck(d time.Duration) AsyncOption { return func(a *AsyncConnLog) { a.checkEvery = d } }
+func WithAgeCheck(d time.Duration) AsyncOption {
+	return func(a *AsyncConnLog) error {
+		if d <= 0 {
+			return fmt.Errorf("store: non-positive conn-log age check %v", d)
+		}
+		a.checkEvery = d
+		return nil
+	}
+}
 
-func NewAsyncConnLog(inner ConnLogBatchStore, nodeID string, onDrop func(n int), logger *slog.Logger, opts ...AsyncOption) *AsyncConnLog {
+func NewAsyncConnLog(inner ConnLogBatchStore, nodeID string, onDrop func(n int), logger *slog.Logger, opts ...AsyncOption) (*AsyncConnLog, error) {
 	if onDrop == nil {
 		onDrop = func(int) {}
 	}
@@ -72,7 +98,9 @@ func NewAsyncConnLog(inner ConnLogBatchStore, nodeID string, onDrop func(n int),
 		pending: map[batchKey]*pendingBatch{}, ready: make(chan ConnLogBatch, asyncLogQueue),
 		stop: make(chan struct{})}
 	for _, o := range opts {
-		o(a)
+		if err := o(a); err != nil {
+			return nil, err
+		}
 	}
 	for range asyncLogWorkers {
 		a.wg.Add(1)
@@ -80,7 +108,7 @@ func NewAsyncConnLog(inner ConnLogBatchStore, nodeID string, onDrop func(n int),
 	}
 	a.wg.Add(1)
 	go a.ager()
-	return a
+	return a, nil
 }
 
 // PutConnLog enqueues (drop-newest on a full queue). Always returns nil: delivery is the workers' job.

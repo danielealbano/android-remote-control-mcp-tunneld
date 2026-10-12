@@ -74,6 +74,15 @@ func startEvent(tunnel string, at time.Time) store.Event {
 	return store.Event{Event: "start", Tunnel: tunnel, TSStart: at}
 }
 
+func newAsync(t *testing.T, inner store.ConnLogBatchStore, nodeID string, onDrop func(int), logger *slog.Logger, opts ...store.AsyncOption) *store.AsyncConnLog {
+	t.Helper()
+	a, err := store.NewAsyncConnLog(inner, nodeID, onDrop, logger, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
 func drain(t *testing.T, a *store.AsyncConnLog) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -105,9 +114,10 @@ func waitBatches(t *testing.T, r *recordingLog, n int) []store.ConnLogBatch {
 }
 
 func TestAsyncConnLog_EnqueueNonBlocking(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	inner := &blockingLog{release: release}
-	a := store.NewAsyncConnLog(inner, "n1", nil, nil)
+	a := newAsync(t, inner, "n1", nil, nil)
 
 	done := make(chan struct{})
 	go func() {
@@ -129,10 +139,11 @@ func TestAsyncConnLog_EnqueueNonBlocking(t *testing.T) {
 }
 
 func TestAsyncConnLog_FullBufferDropsNewest(t *testing.T) {
+	t.Parallel()
 	block := make(chan struct{})
 	inner := &blockingLog{release: block} // stays blocked → workers stall, the buffer fills
 	var drops atomic.Int64
-	a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
+	a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
 
 	for range 5000 + 10 {
 		enqueue(t, a, startEvent("t", day1))
@@ -149,8 +160,9 @@ func TestAsyncConnLog_FullBufferDropsNewest(t *testing.T) {
 }
 
 func TestAsyncConnLog_CountTrigger(t *testing.T) {
+	t.Parallel()
 	inner := &recordingLog{}
-	a := store.NewAsyncConnLog(inner, "n1", nil, nil)
+	a := newAsync(t, inner, "n1", nil, nil)
 	for i := range 100 {
 		enqueue(t, a, startEvent("t", day1.Add(time.Duration(i))))
 	}
@@ -162,10 +174,11 @@ func TestAsyncConnLog_CountTrigger(t *testing.T) {
 }
 
 func TestAsyncConnLog_AgeTrigger(t *testing.T) {
+	t.Parallel()
 	var clock atomic.Int64
 	clock.Store(day1.UnixNano())
 	inner := &recordingLog{}
-	a := store.NewAsyncConnLog(inner, "n1", nil, nil,
+	a := newAsync(t, inner, "n1", nil, nil,
 		store.WithClock(func() time.Time { return time.Unix(0, clock.Load()) }),
 		store.WithAgeCheck(time.Millisecond))
 	enqueue(t, a, startEvent("t", day1), startEvent("t", day1), startEvent("t", day1))
@@ -183,8 +196,9 @@ func TestAsyncConnLog_AgeTrigger(t *testing.T) {
 }
 
 func TestAsyncConnLog_SplitsByTunnelAndDay(t *testing.T) {
+	t.Parallel()
 	inner := &recordingLog{}
-	a := store.NewAsyncConnLog(inner, "n1", nil, nil)
+	a := newAsync(t, inner, "n1", nil, nil)
 	day2 := day1.Add(2 * time.Minute)
 	end := store.Event{Event: "end", Tunnel: "a", TSStart: day1, TSEnd: day2}
 	enqueue(t, a, startEvent("a", day1), startEvent("b", day1), startEvent("a", day1.Add(time.Second)), end)
@@ -210,9 +224,10 @@ func TestAsyncConnLog_SplitsByTunnelAndDay(t *testing.T) {
 }
 
 func TestAsyncConnLog_DrainFlushesAndRefusesLateEvents(t *testing.T) {
+	t.Parallel()
 	inner := &recordingLog{}
 	var drops atomic.Int64
-	a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
+	a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
 	for range 250 {
 		enqueue(t, a, startEvent("t", day1))
 	}
@@ -233,11 +248,12 @@ func TestAsyncConnLog_DrainFlushesAndRefusesLateEvents(t *testing.T) {
 }
 
 func TestAsyncConnLog_Retries(t *testing.T) {
+	t.Parallel()
 	t.Run("retries then succeeds", func(t *testing.T) {
 		t.Parallel()
 		inner := &flakyLog{failFirst: 1} // fail attempt 0, succeed attempt 1 (one backoff)
 		var drops atomic.Int64
-		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil, store.WithBackoffBase(time.Millisecond))
+		a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, nil, store.WithBackoffBase(time.Millisecond))
 		enqueue(t, a, startEvent("t", day1), startEvent("t", day1))
 		drain(t, a)
 		if drops.Load() != 0 {
@@ -256,7 +272,7 @@ func TestAsyncConnLog_Retries(t *testing.T) {
 		inner := &flakyLog{failFirst: 1 << 30} // always fail: all 5 attempts (tiny backoff → milliseconds)
 		var drops atomic.Int64
 		log, buf := captureWarn()
-		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, log, store.WithBackoffBase(time.Millisecond))
+		a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, log, store.WithBackoffBase(time.Millisecond))
 		enqueue(t, a, startEvent("t", day1), startEvent("t", day1), startEvent("t", day1))
 		drain(t, a)
 		if got := inner.attempts.Load(); got != 5 {
@@ -273,11 +289,13 @@ func TestAsyncConnLog_Retries(t *testing.T) {
 }
 
 func TestAsyncConnLog_BoundFreedAfterWritesAndDrops(t *testing.T) {
+	t.Parallel()
 	t.Run("after writes", func(t *testing.T) {
+		t.Parallel()
 		block := make(chan struct{})
 		inner := &blockingLog{release: block}
 		var drops atomic.Int64
-		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
+		a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
 		for range 5000 {
 			enqueue(t, a, startEvent("t", day1))
 		}
@@ -301,9 +319,10 @@ func TestAsyncConnLog_BoundFreedAfterWritesAndDrops(t *testing.T) {
 	})
 
 	t.Run("after retries exhausted", func(t *testing.T) {
+		t.Parallel()
 		inner := &flakyLog{failFirst: 1 << 30}
 		var drops atomic.Int64
-		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil, store.WithBackoffBase(time.Millisecond))
+		a := newAsync(t, inner, "n1", func(n int) { drops.Add(int64(n)) }, nil, store.WithBackoffBase(time.Millisecond))
 		for range 5000 {
 			enqueue(t, a, startEvent("t", day1))
 		}
@@ -320,4 +339,25 @@ func TestAsyncConnLog_BoundFreedAfterWritesAndDrops(t *testing.T) {
 		}
 		drain(t, a)
 	})
+}
+
+func TestNewAsyncConnLog_RejectsInvalidOptions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opt  store.AsyncOption
+	}{
+		{name: "negative backoff", opt: store.WithBackoffBase(-time.Millisecond)},
+		{name: "nil clock", opt: store.WithClock(nil)},
+		{name: "zero age check", opt: store.WithAgeCheck(0)},
+		{name: "negative age check", opt: store.WithAgeCheck(-time.Second)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if a, err := store.NewAsyncConnLog(&recordingLog{}, "n1", nil, nil, tc.opt); err == nil || a != nil {
+				t.Fatalf("NewAsyncConnLog = (%v, %v), want a refusal and no goroutines", a, err)
+			}
+		})
+	}
 }

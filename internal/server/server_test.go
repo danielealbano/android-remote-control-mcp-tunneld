@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -191,6 +192,7 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.InternalListen = occupied.Addr().String() // already in use → bind must fail
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -202,6 +204,39 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("Run did not fail on the internal bind")
+	}
+	waitAsyncLogGoroutines(t, baseline)
+}
+
+func asyncLogGoroutines() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			count := 0
+			for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+				if strings.Contains(g, "store.(*AsyncConnLog)") {
+					count++
+				}
+			}
+			return count
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+func waitAsyncLogGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := asyncLogGoroutines()
+		if got <= baseline {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Run returned with %d connection-log goroutines still running (baseline %d)", got, baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -224,6 +259,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.ACMEHTTPListen = occupied.Addr().String()
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -236,6 +272,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("Run did not fail on the ACME HTTP-01 bind")
 	}
+	waitAsyncLogGoroutines(t, baseline)
 	rebound, err := net.Listen("tcp", cfg.InternalListen)
 	if err != nil {
 		t.Fatalf("the internal listener leaked after the ACME HTTP-01 bind failure: %v", err)

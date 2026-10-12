@@ -135,7 +135,15 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
 	// S3 write; a fixed worker pool drains with retry, a full queue drops-newest and bumps the
 	// dropped-events counter. Both the phone control plane and the public edge log through it.
-	asyncLogs := store.NewAsyncConnLog(st, nodeID, func(n int) { m.ConnLogDropped().Add(float64(n)) }, logger)
+	asyncLogs, err := store.NewAsyncConnLog(st, nodeID, func(n int) { m.ConnLogDropped().Add(float64(n)) }, logger)
+	if err != nil {
+		return fmt.Errorf("connection-log writer: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+		defer dcancel()
+		asyncLogs.Drain(dctx)
+	}()
 
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
 	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
