@@ -11,7 +11,7 @@ under one `errgroup`. The public edge is a raw TCP `:443` listener; the phone co
 mesh, and the internal metrics listener are separate servers. ALL construction completes BEFORE the
 `:443`, `:9443` and `:9090` listeners (and, when a CA uses HTTP-01, the `:80` challenge listener) bind: a
 socket is never bound while unserved. A valid reserved-host certificate cached on disk is loaded before the
-bind; reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
+bind (replaced by the Valkey-shared one when that expires later); reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
 the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded; tunnel
 splicing is unaffected) and issuance is retried every minute.
 
@@ -120,7 +120,13 @@ immediately), retried every minute while missing, and renewed on schedule. Reser
 serialized across replicas by a per-host Valkey lock (`lock:acme-self:{host}`): a replica waits up to 5 min
 for it, then gets up to 5 min to issue; an issuance abandoned at that deadline keeps the lock until its
 10-min TTL (the background lego order may still hold the challenge); a shutdown releases it; a lock error
-issues without it.
+issues without it. Reserved-host certs are SHARED through Valkey (`acme:self-cert:{host}`: cert chain + key +
+metadata, TTL = time until the cert's NotAfter): the lock holder first takes a shared cert that is valid and
+not due for renewal (no ACME order); otherwise it issues and publishes the new cert BEFORE releasing the lock,
+so the next lock holder finds it. At startup and at every renewal check a node takes the shared cert only
+when it expires later than its own (never a downgrade); every cert a node takes is also written to its disk
+cache, which stays the fallback when Valkey is unavailable. The reserved-host private key therefore lives in
+Valkey (TTL'd) — Valkey MUST stay private.
 
 Each CA validates with its own method (`--acme-challenge-le` / `--acme-challenge-gts` /
 `--acme-challenge-zerossl`: `dns-01`, `http-01`, `tls-alpn-01` — ZeroSSL has no `tls-alpn-01`; defaults LE +
@@ -161,7 +167,7 @@ the global concurrency counter (`conc:{name}`, a lock-guarded `{connID, count}` 
 first acquire STRUCTURALLY resets it and a straggler release from a superseded connection is a no-op; TTL =
 3 × `--limit-conn-idle`, refreshed by every traffic chunk via the `Charge` pipeline's `PEXPIRE` that no-ops
 on a missing key), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-CA ACME
-cooldown/backoff, the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), and the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way). No permanent Valkey state; a stale connection never clobbers a re-bound route.
+cooldown/backoff, the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private). No permanent Valkey state; a stale connection never clobbers a re-bound route.
 Connection/stream ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
 and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic.

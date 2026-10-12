@@ -123,7 +123,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   counters (`conc:{name}` — a lock-guarded `{connID, count}` hash reset structurally at a fresh
   connection's first acquire; the day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
   bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
-  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) and the reserved-host issuance lock (`lock:acme-self:`, 10 min). Every
+  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) the reserved-host issuance lock (`lock:acme-self:`, 10 min) and the shared reserved-host cert (`acme:self-cert:`, until the cert's NotAfter — it holds the private key, so Valkey must stay private). Every
   key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
   day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.

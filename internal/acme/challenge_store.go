@@ -41,6 +41,8 @@ func httpChallengeKey(domain, token string) string {
 
 func selfLockKey(host string) string { return "lock:acme-self:" + strings.ToLower(host) }
 
+func selfCertKey(host string) string { return "acme:self-cert:" + strings.ToLower(host) }
+
 func (s *ChallengeStore) PutTLSALPN(ctx context.Context, domain, keyAuth string) error {
 	key := alpnChallengeKey(domain)
 	for range 2 {
@@ -116,6 +118,24 @@ func (s *ChallengeStore) LockSelf(ctx context.Context, host string) (func() erro
 }
 
 func noUnlock() error { return nil }
+
+func (s *ChallengeStore) SelfCert(ctx context.Context, host string) ([]byte, bool, error) {
+	v, ok, err := s.get(ctx, selfCertKey(host))
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return []byte(v), true, nil
+}
+
+func (s *ChallengeStore) PutSelfCert(ctx context.Context, host string, bundle []byte, ttl time.Duration) error {
+	if ttl <= 0 {
+		return fmt.Errorf("%w: self cert for %s is already expired", ErrChallengeStore, host)
+	}
+	if err := s.rdb.Set(ctx, selfCertKey(host), bundle, ttl).Err(); err != nil {
+		return fmt.Errorf("%w: publish self cert for %s: %w", ErrChallengeStore, host, err)
+	}
+	return nil
+}
 
 func (s *ChallengeStore) get(ctx context.Context, key string) (string, bool, error) {
 	v, err := s.rdb.Get(ctx, key).Result()

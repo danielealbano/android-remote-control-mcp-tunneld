@@ -412,6 +412,25 @@ func TestE2E_CrossNodeTerminate(t *testing.T) {
 	}
 }
 
+func TestE2E_ReservedCertsSharedAcrossReplicas(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+	for _, host := range []string{e2eEnrollHost, e2eControlHost} {
+		serialA, errA := tunneltest.ServedSerial(t, edgeA, host)
+		serialB, errB := tunneltest.ServedSerial(t, edgeB, host)
+		if serialA == "" || serialB == "" {
+			t.Fatalf("both replicas must serve a %s certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if errA != nil || errB != nil {
+			t.Logf("%s probe handshake ended after the certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if serialA != serialB {
+			t.Errorf("replica B must reuse replica A's %s certificate (one ACME order per host), serials %s vs %s", host, serialA, serialB)
+		}
+	}
+}
+
 // TestE2E_Spillover forces the LE directory unreachable so the ACME chain spills to GTS (the Pebble test
 // CA): the issued public cert must come from the fallback CA.
 func TestE2E_Spillover(t *testing.T) {

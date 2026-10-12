@@ -29,6 +29,11 @@ type selfLocker interface {
 	LockSelf(ctx context.Context, host string) (unlock func() error, ok bool, err error)
 }
 
+type sharedCertStore interface {
+	SelfCert(ctx context.Context, host string) (bundle []byte, ok bool, err error)
+	PutSelfCert(ctx context.Context, host string, bundle []byte, ttl time.Duration) error
+}
+
 const (
 	reservedDegradedRetry = time.Minute
 	selfLockWait          = 5 * time.Minute
@@ -56,6 +61,7 @@ type reservedCerts struct {
 	obtain       selfIssuer
 	shouldRenew  shouldRenewFunc
 	lock         selfLocker
+	shared       sharedCertStore
 	lockWait     time.Duration
 	issueTimeout time.Duration
 	lockPoll     time.Duration
@@ -67,9 +73,9 @@ type reservedCerts struct {
 
 // newReservedCerts builds the manager.
 func newReservedCerts(accountDir string, hosts []string, obtain selfIssuer, shouldRenew shouldRenewFunc,
-	lock selfLocker, logger *slog.Logger) *reservedCerts {
+	lock selfLocker, shared sharedCertStore, logger *slog.Logger) *reservedCerts {
 	rc := &reservedCerts{
-		dir: filepath.Join(accountDir, "self"), obtain: obtain, shouldRenew: shouldRenew, lock: lock,
+		dir: filepath.Join(accountDir, "self"), obtain: obtain, shouldRenew: shouldRenew, lock: lock, shared: shared,
 		lockWait: selfLockWait, issueTimeout: selfIssueTimeout, lockPoll: selfLockPoll,
 		logger: logger, now: time.Now, hosts: map[string]*reservedHost{},
 	}
@@ -79,11 +85,12 @@ func newReservedCerts(accountDir string, hosts []string, obtain selfIssuer, shou
 	return rc
 }
 
-func (rc *reservedCerts) loadCache() {
+func (rc *reservedCerts) loadCache(ctx context.Context) {
 	for _, rh := range rc.hosts {
 		if cert, info, ok := rc.loadCached(rh.host); ok && rc.now().Before(info.NotAfter) {
 			rh.store(cert, info)
 		}
+		rc.adoptShared(ctx, rh, false)
 	}
 }
 
@@ -116,6 +123,7 @@ func (rc *reservedCerts) degraded() bool {
 }
 
 func (rc *reservedCerts) maybeRenew(ctx context.Context, rh *reservedHost) {
+	rc.adoptShared(ctx, rh, false)
 	if rh.cur.Load() != nil {
 		due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
 		if err != nil {
@@ -145,18 +153,22 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 		rc.logger.Info("reserved-host issuance busy on another node (will retry)", "host", rh.host)
 		return
 	}
+	if locked && rc.adoptShared(ctx, rh, true) {
+		rc.releaseLock(rh.host, unlock)
+		return
+	}
 	issueCtx, cancel := context.WithTimeout(ctx, rc.issueTimeout)
 	defer cancel()
 	certPEM, keyPEM, info, err := rc.obtain(issueCtx, rh.host)
-	abandoned := err != nil && ctx.Err() == nil && issueCtx.Err() != nil
-	if locked {
-		if abandoned {
-			rc.logger.Warn("reserved-host issuance abandoned at its deadline (lock kept until its TTL)", "host", rh.host)
-		} else {
-			rc.releaseLock(rh.host, unlock)
-		}
-	}
 	if err != nil {
+		abandoned := ctx.Err() == nil && issueCtx.Err() != nil
+		if locked {
+			if abandoned {
+				rc.logger.Warn("reserved-host issuance abandoned at its deadline (lock kept until its TTL)", "host", rh.host)
+			} else {
+				rc.releaseLock(rh.host, unlock)
+			}
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -167,6 +179,9 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 		}
 		return
 	}
+	if locked {
+		defer rc.releaseLock(rh.host, unlock)
+	}
 	c, perr := tls.X509KeyPair(certPEM, keyPEM)
 	if perr != nil {
 		rc.logger.Warn("reserved-host cert parse failed", "host", rh.host, "err", perr)
@@ -174,6 +189,70 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 	}
 	rh.store(&c, info)
 	rc.persist(rh.host, certPEM, keyPEM, info)
+	rc.publish(ctx, rh.host, certPEM, keyPEM, info)
+}
+
+func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requireNotDue bool) bool {
+	raw, ok, err := rc.shared.SelfCert(ctx, rh.host)
+	if err != nil {
+		if ctx.Err() == nil {
+			rc.logger.Warn("reserved-host shared cert read failed (keeping the local cert)", "host", rh.host, "err", err)
+		}
+		return false
+	}
+	if !ok {
+		return false
+	}
+	var b certBundle
+	if err := json.Unmarshal(raw, &b); err != nil {
+		rc.logger.Warn("reserved-host shared cert unparseable", "host", rh.host, "err", err)
+		return false
+	}
+	cert, err := tls.X509KeyPair([]byte(b.CertPEM), []byte(b.KeyPEM))
+	if err != nil {
+		rc.logger.Warn("reserved-host shared cert holds no usable key pair", "host", rh.host, "err", err)
+		return false
+	}
+	info := b.Info
+	if info.NotAfter.IsZero() {
+		na, err := leafNotAfter([]byte(b.CertPEM))
+		if err != nil {
+			rc.logger.Warn("reserved-host shared cert leaf unparseable", "host", rh.host, "err", err)
+			return false
+		}
+		info.NotAfter = na
+	}
+	if !rc.now().Before(info.NotAfter) {
+		return false
+	}
+	if rh.cur.Load() != nil && !info.NotAfter.After(rh.currentInfo().NotAfter) {
+		return false
+	}
+	if requireNotDue {
+		due, _, err := rc.shouldRenew(ctx, info)
+		if err != nil {
+			rc.logger.Warn("reserved-host shared cert renewal check failed (ordering instead)", "host", rh.host, "err", err)
+			return false
+		}
+		if due {
+			return false
+		}
+	}
+	rh.store(&cert, info)
+	rc.persist(rh.host, []byte(b.CertPEM), []byte(b.KeyPEM), info)
+	rc.logger.Info("reserved-host cert taken from the shared store", "host", rh.host, "not_after", info.NotAfter)
+	return true
+}
+
+func (rc *reservedCerts) publish(ctx context.Context, host string, certPEM, keyPEM []byte, info store.CertInfo) {
+	raw, err := json.Marshal(certBundle{CertPEM: string(certPEM), KeyPEM: string(keyPEM), Info: info})
+	if err != nil {
+		rc.logger.Warn("reserved-host shared cert encode failed", "host", host, "err", err)
+		return
+	}
+	if err := rc.shared.PutSelfCert(ctx, host, raw, info.NotAfter.Sub(rc.now())); err != nil && ctx.Err() == nil {
+		rc.logger.Warn("reserved-host shared cert publish failed (other nodes order their own)", "host", host, "err", err)
+	}
 }
 
 func (rc *reservedCerts) releaseLock(host string, unlock func() error) {

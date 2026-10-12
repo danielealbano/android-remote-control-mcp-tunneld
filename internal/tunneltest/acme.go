@@ -32,6 +32,28 @@ func ServesCertificate(t *testing.T, edgeAddr, host string) (bool, error) {
 	return presented, nil
 }
 
+func ServedSerial(t *testing.T, edgeAddr, host string) (string, error) {
+	t.Helper()
+	var serial string
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", edgeAddr, &tls.Config{
+		ServerName: host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) > 0 {
+				serial = cs.PeerCertificates[0].SerialNumber.Text(16)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		return serial, err
+	}
+	if err := conn.Close(); err != nil {
+		t.Logf("close the %s serial probe: %v", host, err)
+	}
+	return serial, nil
+}
+
 func WaitReservedHosts(t *testing.T, edgeAddr string, hosts []string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

@@ -212,8 +212,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, chal, logger)
-	reserved.loadCache()
+		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
+	reserved.loadCache(ctx)
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the

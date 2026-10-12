@@ -67,34 +67,34 @@ recorded with the user).
 
 DoD: [x] connection logs land as JSONL batches with the key above; no event path blocks.
 
-## [ ] US3 — Reserved-host certs shared through Valkey
+## [x] US3 — Reserved-host certs shared through Valkey
 
 Why: today every node orders its own `--enroll-host` / `--control-host` certs (N nodes = N orders per host
 per renewal); the existing `lock:acme-self:<host>` only serializes the orders.
 
-- [ ] Holding `lock:acme-self:<host>`, a node first reads the shared cert from Valkey
+- [x] Holding `lock:acme-self:<host>`, a node first reads the shared cert from Valkey
       (`acme:self-cert:<host>`: cert chain + key + metadata). If it is valid and not due for renewal it is
       used with NO ACME order.
-- [ ] Otherwise the node issues the cert and publishes it to Valkey with TTL = time until the cert's NotAfter
+- [x] Otherwise the node issues the cert and publishes it to Valkey with TTL = time until the cert's NotAfter
       (no permanent Valkey state) BEFORE releasing the lock, so the next lock holder finds it.
-- [ ] At startup and at each renewal check a node takes the shared cert only when its NotAfter is later than
+- [x] At startup and at each renewal check a node takes the shared cert only when its NotAfter is later than
       the cert it already holds (never a downgrade); the local disk cache stays the fallback when Valkey is
       unavailable.
-- [ ] Every cert a node takes — issued or read from Valkey — is also persisted to its local disk cache.
+- [x] Every cert a node takes — issued or read from Valkey — is also persisted to its local disk cache.
 
-### [ ] Task 3.1 — Shared cert store
+### [x] Task 3.1 — Shared cert store
 
-- [ ] `internal/server/reserved.go` (+ a small Valkey accessor next to the existing ACME challenge store):
+- [x] `internal/server/reserved.go` (+ a small Valkey accessor next to the existing ACME challenge store):
       read-before-order, publish-before-unlock, take-if-newer, persist-on-take.
-- [ ] Tests: unit (miniredis) — shared hit under the lock orders nothing; miss orders + publishes with the TTL
+- [x] Tests: unit (miniredis) — shared hit under the lock orders nothing; miss orders + publishes with the TTL
       before unlocking; startup and renewal-check pick-up of a newer shared cert (and NO pick-up of an older
       one); a cert taken from Valkey (startup / renewal check) is persisted to the disk bundle; Valkey error
       falls back to the disk cache; e2e — two replicas obtain exactly ONE order per host.
-- [ ] Docs: `.claude/rules/project.md` (Valkey key list: `acme:self-cert:`), `docs/PROJECT.md` §5 (Valkey
+- [x] Docs: `.claude/rules/project.md` (Valkey key list: `acme:self-cert:`), `docs/PROJECT.md` §5 (Valkey
       keys), `docs/ARCHITECTURE.md` §1 (startup cert load), §3 (reserved-host flow) and §5 — including that
       the reserved-host private key lives in Valkey (TTL'd), so Valkey must stay private.
 
-DoD: [ ] a multi-replica deployment issues each reserved-host cert once per renewal cycle.
+DoD: [x] a multi-replica deployment issues each reserved-host cert once per renewal cycle.
 
 ## [ ] US4 — Release config on goreleaser `dockers_v2`
 
