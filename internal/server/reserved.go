@@ -53,9 +53,8 @@ type reservedHost struct {
 }
 
 // reservedCerts manages the --enroll-host/--control-host server certs: on start it reuses a valid
-// cached pair from disk (a restart orders nothing) or obtains one via the ACME chain; when no usable
-// cache exists it starts DEGRADED (reserved-host TLS refused until a cert lands, tunnel splicing
-// unaffected); and it renews on the chain's schedule, re-persisting each new pair.
+// cached pair from disk (a restart orders nothing) or obtains one via the ACME chain; and it renews on
+// the chain's schedule, re-persisting each new pair.
 type reservedCerts struct {
 	dir          string // <acme-account-dir>/self
 	obtain       selfIssuer

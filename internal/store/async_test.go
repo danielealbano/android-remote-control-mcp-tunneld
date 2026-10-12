@@ -271,3 +271,53 @@ func TestAsyncConnLog_Retries(t *testing.T) {
 		}
 	})
 }
+
+func TestAsyncConnLog_BoundFreedAfterWritesAndDrops(t *testing.T) {
+	t.Run("after writes", func(t *testing.T) {
+		block := make(chan struct{})
+		inner := &blockingLog{release: block}
+		var drops atomic.Int64
+		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil)
+		for range 5000 {
+			enqueue(t, a, startEvent("t", day1))
+		}
+		enqueue(t, a, startEvent("t", day1))
+		if drops.Load() != 1 {
+			t.Fatalf("the 5001st event must be dropped while 5000 are in flight, drops = %d", drops.Load())
+		}
+		close(block)
+		deadline := time.Now().Add(5 * time.Second)
+		for inner.writes.Load() < 5000 {
+			if time.Now().After(deadline) {
+				t.Fatalf("the in-flight batches were not written, wrote %d", inner.writes.Load())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		enqueue(t, a, startEvent("t", day1))
+		if drops.Load() != 1 {
+			t.Fatalf("written batches must free the bound, drops = %d", drops.Load())
+		}
+		drain(t, a)
+	})
+
+	t.Run("after retries exhausted", func(t *testing.T) {
+		inner := &flakyLog{failFirst: 1 << 30}
+		var drops atomic.Int64
+		a := store.NewAsyncConnLog(inner, "n1", func(n int) { drops.Add(int64(n)) }, nil, store.WithBackoffBase(time.Millisecond))
+		for range 5000 {
+			enqueue(t, a, startEvent("t", day1))
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for drops.Load() < 5000 {
+			if time.Now().After(deadline) {
+				t.Fatalf("the failing batches were not dropped, drops = %d", drops.Load())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		enqueue(t, a, startEvent("t", day1))
+		if drops.Load() != 5000 {
+			t.Fatalf("dropped batches must free the bound, drops = %d", drops.Load())
+		}
+		drain(t, a)
+	})
+}

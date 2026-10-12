@@ -22,9 +22,10 @@ import (
 const sharedHost = "enroll.example.test"
 
 type memShared struct {
-	mu   sync.Mutex
-	data map[string][]byte
-	err  error
+	mu     sync.Mutex
+	data   map[string][]byte
+	err    error
+	putErr error
 }
 
 func (m *memShared) SelfCert(_ context.Context, host string) ([]byte, bool, error) {
@@ -42,6 +43,9 @@ func (m *memShared) PutSelfCert(_ context.Context, host string, bundle []byte, _
 	defer m.mu.Unlock()
 	if m.err != nil {
 		return m.err
+	}
+	if m.putErr != nil {
+		return m.putErr
 	}
 	if m.data == nil {
 		m.data = map[string][]byte{}
@@ -201,5 +205,64 @@ func TestReservedCerts_SharedErrorFallsBackToDisk(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `msg="reserved-host shared cert read failed (keeping the local cert)"`) {
 		t.Fatalf("the shared-store failure must be logged; log = %q", buf.String())
+	}
+}
+
+func TestReservedCerts_SharedUnderLockStillOrders(t *testing.T) {
+	failCheck := func(context.Context, store.CertInfo) (bool, time.Time, error) {
+		return false, time.Time{}, errors.New("ari unavailable")
+	}
+	tests := []struct {
+		name        string
+		shouldRenew shouldRenewFunc
+		wantLog     string
+	}{
+		{name: "shared cert due for renewal", shouldRenew: alwaysRenew},
+		{name: "shared cert renewal check fails", shouldRenew: failCheck,
+			wantLog: `msg="reserved-host shared cert renewal check failed (ordering instead)"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			shared := &memShared{}
+			sharedCert, sharedKey, sharedInfo := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
+			seedShared(t, shared, sharedCert, sharedKey, sharedInfo)
+			newCert, newKey, newInfo := mintSelfCert(t, sharedHost, time.Now().Add(150*time.Hour))
+			iss := &countingIssuer{certPEM: newCert, keyPEM: newKey, info: newInfo}
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			rc := newTestReserved(t.TempDir(), []string{sharedHost}, iss.obtain, tc.shouldRenew, &fakeLocker{}, logger)
+			rc.shared = shared
+
+			rc.issue(context.Background(), rc.hosts[sharedHost])
+			if iss.callCount() != 1 {
+				t.Fatalf("the shared cert must not be taken under the lock, orders = %d", iss.callCount())
+			}
+			if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(newInfo.NotAfter) {
+				t.Fatalf("the newly issued cert must be served, NotAfter = %v", got)
+			}
+			if tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("the failed check must be logged; log = %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestReservedCerts_PublishFailureLoggedCertStillServed(t *testing.T) {
+	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
+	iss := &countingIssuer{certPEM: certPEM, keyPEM: keyPEM, info: info}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	rc := newTestReserved(t.TempDir(), []string{sharedHost}, iss.obtain, neverRenew, &fakeLocker{}, logger)
+	rc.shared = &memShared{putErr: errors.New("valkey down")}
+
+	rc.issue(context.Background(), rc.hosts[sharedHost])
+	if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(info.NotAfter) {
+		t.Fatalf("the issued cert must be served even when publishing fails, NotAfter = %v", got)
+	}
+	if _, disk, ok := rc.loadCached(sharedHost); !ok || !disk.NotAfter.Equal(info.NotAfter) {
+		t.Fatalf("the issued cert must be persisted even when publishing fails, got %+v (ok=%v)", disk, ok)
+	}
+	if !strings.Contains(buf.String(), `msg="reserved-host shared cert publish failed (other nodes order their own)"`) {
+		t.Fatalf("the publish failure must be logged; log = %q", buf.String())
 	}
 }

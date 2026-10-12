@@ -121,6 +121,7 @@ func TestConnLogBatchKeyLayoutAndSort(t *testing.T) {
 	if got := b.Key(); got != want {
 		t.Errorf("Key = %q, want %q", got, want)
 	}
+	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
 	later := b
 	later.First = b.First.Add(time.Second)
 	if b.Key() >= later.Key() {
