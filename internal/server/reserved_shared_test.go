@@ -296,3 +296,39 @@ func TestReservedCerts_PublishSurvivesShutdownAfterOrder(t *testing.T) {
 		t.Fatalf("a cert ordered before shutdown must still be published for the next lock holder: ok=%v err=%v", ok, err)
 	}
 }
+
+type hangingShared struct{}
+
+func (hangingShared) SelfCert(ctx context.Context, _ string) ([]byte, bool, error) {
+	<-ctx.Done()
+	return nil, false, ctx.Err()
+}
+
+func (hangingShared) PutSelfCert(ctx context.Context, _ string, _ []byte, _ time.Duration) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestReservedCerts_HangingSharedStoreDoesNotBlockStartup(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
+	seedCache(t, dir, sharedHost, certPEM, keyPEM, info)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	rc := newTestReserved(dir, []string{sharedHost}, (&countingIssuer{}).obtain, neverRenew, &fakeLocker{}, logger)
+	rc.shared = hangingShared{}
+	rc.readTimeout = 50 * time.Millisecond
+
+	start := time.Now()
+	rc.loadCache(context.Background())
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("an unresponsive shared store must not hold startup, loadCache took %v", took)
+	}
+	if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(info.NotAfter) {
+		t.Fatalf("the disk cert must be served when the shared store hangs, NotAfter = %v", got)
+	}
+	if !strings.Contains(buf.String(), `msg="reserved-host shared cert read failed (keeping the local cert)"`) {
+		t.Fatalf("the timed-out read must be logged; log = %q", buf.String())
+	}
+}

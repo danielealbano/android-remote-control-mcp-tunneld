@@ -40,6 +40,7 @@ const (
 	selfIssueTimeout      = 5 * time.Minute
 	selfLockPoll          = 2 * time.Second
 	selfPublishTimeout    = 5 * time.Second
+	selfReadTimeout       = 5 * time.Second
 )
 
 var errNoReservedCert = errors.New("server: no reserved-host certificate yet")
@@ -65,6 +66,7 @@ type reservedCerts struct {
 	lockWait     time.Duration
 	issueTimeout time.Duration
 	lockPoll     time.Duration
+	readTimeout  time.Duration
 	logger       *slog.Logger
 	now          func() time.Time
 
@@ -76,7 +78,7 @@ func newReservedCerts(accountDir string, hosts []string, obtain selfIssuer, shou
 	lock selfLocker, shared sharedCertStore, logger *slog.Logger) *reservedCerts {
 	rc := &reservedCerts{
 		dir: filepath.Join(accountDir, "self"), obtain: obtain, shouldRenew: shouldRenew, lock: lock, shared: shared,
-		lockWait: selfLockWait, issueTimeout: selfIssueTimeout, lockPoll: selfLockPoll,
+		lockWait: selfLockWait, issueTimeout: selfIssueTimeout, lockPoll: selfLockPoll, readTimeout: selfReadTimeout,
 		logger: logger, now: time.Now, hosts: map[string]*reservedHost{},
 	}
 	for _, h := range hosts {
@@ -193,7 +195,9 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 }
 
 func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requireNotDue bool) bool {
-	raw, ok, err := rc.shared.SelfCert(ctx, rh.host)
+	rctx, cancel := context.WithTimeout(ctx, rc.readTimeout)
+	raw, ok, err := rc.shared.SelfCert(rctx, rh.host)
+	cancel()
 	if err != nil {
 		if ctx.Err() == nil {
 			rc.logger.Warn("reserved-host shared cert read failed (keeping the local cert)", "host", rh.host, "err", err)
