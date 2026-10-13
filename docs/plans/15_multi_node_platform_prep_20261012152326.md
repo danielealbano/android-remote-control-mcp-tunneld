@@ -187,10 +187,12 @@ DoD: [x] the release config uses `dockers_v2` only.
   before). The shared parser now returns only the underlying parse cause; a unit test asserts no parse error
   carries the password. Why: secrets must never be logged. Code review then showed `net/url` and go-redis
   also echo password FRAGMENTS (an unescaped `/`, `?`, `#`, `&` or `%` splits them into other fields), so
-  every parse error is now emitted with EVERY token that appears in the URL (raw, percent-decoded or
-  Go-quoted, any length) replaced by `[redacted]` — locating the password inside a malformed URL is not
+  every `net/url` / go-redis parse error is now emitted with EVERY token that appears in the URL (raw,
+  percent-decoded or Go-quoted, any length) AND every delimiter character that occurs in the URL replaced by
+  `[redacted]` (adjacent replacements merged) — locating the password inside a malformed URL is not
   reliable, so all URL-derived text is hidden; the redacted cause (the error's structure) is kept, never
-  dropped, prefixed with `--redis-url:`.
+  dropped, prefixed with `--redis-url:`. tunneld's own Sentinel-option errors carry no URL text and are
+  emitted verbatim.
 - Task 1.1: a plain (non-Sentinel) `--redis-url` with a malformed query pair (e.g. a bad `%`-escape) is now
   REJECTED; go-redis's own parser silently dropped such pairs. Why: the shared parser must read the query
   strictly to detect `master_name`, and silently dropping a malformed setting is a discarded error — fail
@@ -226,3 +228,13 @@ DoD: [x] the release config uses `dockers_v2` only.
   reported once the minute has passed and at `Drain`; (d) Task 3.1 — every shared-cert Valkey read is bounded
   (5 s), so an unreachable Valkey cannot hold the startup bind for minutes. Why: each closes a failure mode
   the review found (no silent loss, bounded startup/shutdown, convergence).
+- Code review #5 fixes (2026-10-13): (a) Task 1.1 — the redaction also hides delimiter characters that
+  occur in the URL (merged runs), since password punctuation such as `:[]()` was echoed between redacted
+  tokens; tunneld's own Sentinel-option errors are no longer passed through the redactor (they were
+  mangled); (b) Task 2.1 — `PutConnLogFile`'s uncapped upload client and request shape are unit-tested, the
+  stale "teardown paths write conn logs" part of the S3 client comment is removed, the drop causes in the
+  docs and the metric help include events still queued at the shutdown deadline, the timing-dependent
+  spool/server tests now wait for the state they assert and check deadlines structurally, and the normal
+  `Run` return is checked for stopped spool goroutines and a released lock; (c) Task 3.1 — the docs state
+  that an unreachable Valkey delays the startup bind by at most 5 s per reserved host. Why: each closes a
+  review finding (no credential fragment in logs, actionable errors, accurate docs, deterministic tests).

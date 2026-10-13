@@ -188,9 +188,9 @@ MUST NOT be relaxed without explicit user direction.
   separate uploader puts each as `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (all tunnels
   mixed; key from the file name, so re-uploads overwrite), deleting it locally ONLY after the upload
   succeeds. An S3 outage loses nothing below the 1 GiB spool cap; `tunneld_connlog_dropped_total` counts
-  events lost to a full channel, a failed append, the cap, or arriving after shutdown; every Warn on this
-  path is rate-bounded. Shutdown rotates + uploads within `--shutdown-grace`; leftovers upload at the next
-  start.
+  events lost to a full channel, a failed append, the cap, still being queued at the shutdown deadline, or
+  arriving after shutdown; every Warn on this path is rate-bounded. Shutdown rotates + uploads within
+  `--shutdown-grace`; leftovers upload at the next start.
 - NEVER log secrets, key material, or tunnel payloads.
 
 ### Repository hygiene

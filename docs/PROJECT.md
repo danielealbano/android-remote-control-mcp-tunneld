@@ -154,7 +154,8 @@ over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit e
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
 spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
-a full 5000-event queue, a failed local append, the 1 GiB spool cap, or arriving after shutdown. The compose stack
+a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being queued when
+`--shutdown-grace` expires, or arriving after shutdown. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on
 `127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
 Secrets, key material, and tunnel payloads are NEVER logged.
