@@ -55,6 +55,7 @@ class TunnelService : Service() {
         }
         Thread { tun.run() }.apply { isDaemon = true }.start()
         identity = id; server = srv; tunnel = tun
+        check(tun.awaitBound(60)) { "control stream not bound within 60s" }
         writeReady(id) // AFTER serving
     }
 
