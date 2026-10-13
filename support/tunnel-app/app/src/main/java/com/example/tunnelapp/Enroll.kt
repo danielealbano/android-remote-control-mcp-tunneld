@@ -10,6 +10,7 @@ import java.io.ByteArrayInputStream
 import java.security.PrivateKey
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.X509TrustManager
 
 // Cred is an atomic {alias, chain, key} snapshot of the live identity — the Kotlin analogue of the Go
@@ -190,7 +191,8 @@ object Enroll {
 
     private fun postJson(client: OkHttpClient, url: String, json: String): Pair<Int, String> {
         val req = Request.Builder().url(url).post(json.toRequestBody("application/json".toMediaType())).build()
-        client.newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
+        client.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+            .newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
     }
 
     private fun parseChain(pem: String): Array<X509Certificate> =
