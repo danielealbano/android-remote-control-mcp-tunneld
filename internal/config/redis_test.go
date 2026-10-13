@@ -116,6 +116,9 @@ func TestParseRedisURL_ErrorRedactsCredentials(t *testing.T) {
 		{name: "split multi-byte escape in query", url: "redis://valkey.example.test:6379/0?password=Secr3t%€x", frags: []string{"Secr3t", `\xe2`}},
 		{name: "split multi-byte escape in userinfo", url: "redis://user:/%€xSecret@valkey.example.test:6379/0", frags: []string{"Secret", `\xe2`}},
 		{name: "missing scheme keeps credentials", url: "Admin:Secr3t@valkey.example.test:6379", frags: []string{"admin", "Admin", "Secr3t"}},
+		{name: "delimiter-only master password fragment", url: "redis://s1.example.test:26379?master_name=m&password=Xy&:[]()", frags: []string{"Xy", ":[]()"}},
+		{name: "delimiters in a password parsed as the db path", url: "redis://u:12/(),'@valkey.example.test:6379", frags: []string{"(),'"}},
+		{name: "delimiters inside a master password fragment", url: "redis://valkey.example.test:6379/0?password=ab&cd:ef(gh", frags: []string{"cd", "ef", "gh", ":", "("}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,8 +137,14 @@ func TestParseRedisURL_ErrorRedactsCredentials(t *testing.T) {
 					t.Fatalf("a --redis-url error must not carry any part of the password (%q), got %q", frag, msg)
 				}
 			}
-			for _, tok := range strings.FieldsFunc(cause, func(r rune) bool { return strings.ContainsRune(" \t\n\"'`:,()[]", r) }) {
-				if tok != "[redacted]" && strings.Contains(tc.url, tok) {
+			kept := strings.ReplaceAll(cause, "[redacted]", "\x00")
+			for i := 0; i < len(kept); i++ {
+				if c := kept[i]; strings.IndexByte(" \t\n\r\"'`:,()[]", c) >= 0 && strings.IndexByte(tc.url, c) >= 0 {
+					t.Fatalf("no delimiter taken from the URL may survive, %q did in %q", c, msg)
+				}
+			}
+			for _, tok := range strings.FieldsFunc(kept, func(r rune) bool { return r == 0 || strings.ContainsRune(" \t\n\"'`:,()[]", r) }) {
+				if strings.Contains(tc.url, tok) {
 					t.Fatalf("every token taken from the URL must be redacted, %q survived in %q", tok, msg)
 				}
 			}
@@ -145,12 +154,45 @@ func TestParseRedisURL_ErrorRedactsCredentials(t *testing.T) {
 
 func TestRedactURLSecrets_KeepsErrorStructure(t *testing.T) {
 	t.Parallel()
-	got := redactURLSecrets(`invalid port ":a+" after host`, "redis://:a+/x@valkey.example.test:6379/0")
-	if got != `invalid port ":[redacted]" after host` {
-		t.Fatalf("only the URL-derived token may be replaced, got %q", got)
+	tests := []struct {
+		name string
+		msg  string
+		url  string
+		want string
+	}{
+		{name: "URL-derived run with its punctuation", msg: `invalid port ":a+" after host`, url: "redis://:a+/x@valkey.example.test:6379/0", want: `invalid port "[redacted]" after host`},
+		{name: "percent-encoded key's value", msg: `unexpected option: Zm9v`, url: "redis://s1.example.test:26379?master_name=t&%70assword=x&Zm9v", want: `unexpected option[redacted] [redacted]`},
+		{name: "delimiters around URL tokens merge into one marker", msg: `invalid database number: "(),'@valkey.example.test:6379"`, url: "redis://u:12/(),'@valkey.example.test:6379", want: `invalid database number[redacted] "[redacted]"`},
+		{name: "delimiter-only fragment", msg: `unexpected option: :[]()`, url: "redis://s1.example.test:26379?master_name=m&password=Xy&:[]()", want: `unexpected option[redacted] [redacted]`},
 	}
-	got = redactURLSecrets(`unexpected option: Zm9v`, "redis://s1.example.test:26379?master_name=t&%70assword=x&Zm9v")
-	if got != `unexpected option: [redacted]` {
-		t.Fatalf("a token from a percent-encoded key's value must be replaced, got %q", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := redactURLSecrets(tc.msg, tc.url); got != tc.want {
+				t.Fatalf("redactURLSecrets(%q) = %q, want %q", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRedisURL_OwnErrorsAreVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "empty master", url: "redis://s1.example.test:26379?master_name=", want: "--redis-url: master_name must not be empty"},
+		{name: "route randomly", url: "redis://s1.example.test:26379?master_name=tunneld&route_randomly=true", want: "--redis-url: route_by_latency / route_randomly need a cluster client, not the Sentinel failover client"},
+		{name: "route by latency", url: "redis://s1.example.test:26379?master_name=tunneld&route_by_latency=true", want: "--redis-url: route_by_latency / route_randomly need a cluster client, not the Sentinel failover client"},
+		{name: "replica only", url: "redis://s1.example.test:26379?master_name=tunneld&replica_only=true", want: "--redis-url: replica_only routes every command to read-only replicas; tunneld writes to the master"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseRedisURL(tc.url); err == nil || err.Error() != tc.want {
+				t.Fatalf("ParseRedisURL(%q) error = %v, want %q", tc.url, err, tc.want)
+			}
+		})
 	}
 }

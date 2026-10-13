@@ -20,6 +20,16 @@ func ParseRedisURL(redisURL string) (RedisConn, error) {
 	if err != nil {
 		return RedisConn{}, fmt.Errorf("--redis-url: %s", redactURLSecrets(err.Error(), redisURL))
 	}
+	if f := c.failover; f != nil {
+		switch {
+		case f.MasterName == "":
+			return RedisConn{}, errors.New("--redis-url: master_name must not be empty")
+		case f.RouteByLatency || f.RouteRandomly:
+			return RedisConn{}, errors.New("--redis-url: route_by_latency / route_randomly need a cluster client, not the Sentinel failover client")
+		case f.ReplicaOnly:
+			return RedisConn{}, errors.New("--redis-url: replica_only routes every command to read-only replicas; tunneld writes to the master")
+		}
+	}
 	return c, nil
 }
 
@@ -47,14 +57,6 @@ func parseRedisURL(redisURL string) (RedisConn, error) {
 	if err != nil {
 		return RedisConn{}, err
 	}
-	switch {
-	case opts.MasterName == "":
-		return RedisConn{}, errors.New("master_name must not be empty")
-	case opts.RouteByLatency || opts.RouteRandomly:
-		return RedisConn{}, errors.New("route_by_latency / route_randomly need a cluster client, not the Sentinel failover client")
-	case opts.ReplicaOnly:
-		return RedisConn{}, errors.New("replica_only routes every command to read-only replicas; tunneld writes to the master")
-	}
 	return RedisConn{failover: opts}, nil
 }
 
@@ -67,30 +69,44 @@ func (c RedisConn) NewClient() *redis.Client {
 
 func redactURLSecrets(msg, raw string) string {
 	var sources []string
-	for _, src := range []string{raw, lenientUnescape(raw, false), lenientUnescape(raw, true)} {
-		quoted := strconv.Quote(src)
-		sources = append(sources, strings.ToLower(src), strings.ToLower(quoted[1:len(quoted)-1]))
+	var inURL [256]bool
+	srcs := []string{raw, lenientUnescape(raw, false)}
+	if q := strings.IndexByte(raw, '?'); q >= 0 {
+		srcs = append(srcs, lenientUnescape(raw[q:], true))
 	}
-	var b strings.Builder
-	start := 0
-	flush := func(end int) {
-		if end > start {
-			tok := msg[start:end]
-			if fromURL(tok, sources) {
-				b.WriteString("[redacted]")
-			} else {
-				b.WriteString(tok)
+	for _, src := range srcs {
+		quoted := strconv.Quote(src)
+		for _, form := range []string{src, quoted[1 : len(quoted)-1]} {
+			form = strings.ToLower(form)
+			sources = append(sources, form)
+			for i := 0; i < len(form); i++ {
+				inURL[form[i]] = true
 			}
 		}
 	}
+	var b strings.Builder
+	hidden := false
+	emit := func(part string, secret bool) {
+		if !secret {
+			b.WriteString(part)
+		} else if !hidden {
+			b.WriteString("[redacted]")
+		}
+		hidden = secret
+	}
+	start := 0
 	for i := 0; i < len(msg); i++ {
 		if strings.IndexByte(" \t\n\r\"'`:,()[]", msg[i]) >= 0 {
-			flush(i)
-			b.WriteByte(msg[i])
+			if i > start {
+				emit(msg[start:i], fromURL(msg[start:i], sources))
+			}
+			emit(msg[i:i+1], inURL[msg[i]])
 			start = i + 1
 		}
 	}
-	flush(len(msg))
+	if start < len(msg) {
+		emit(msg[start:], fromURL(msg[start:], sources))
+	}
 	return b.String()
 }
 
