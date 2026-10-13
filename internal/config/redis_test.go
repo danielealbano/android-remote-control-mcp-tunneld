@@ -111,6 +111,11 @@ func TestParseRedisURL_ErrorRedactsCredentials(t *testing.T) {
 		{name: "quote in single-slash password", url: `redis:/user:a"bc@valkey.example.test`, frags: []string{`a\`, "bc"}},
 		{name: "sentinel bad addr", url: "redis://user:Secr3tPa-ssw0rd@s1.example.test:26379?master_name=tunneld&addr=no-port", frags: []string{"Secr3tPa"}},
 		{name: "plain bad db", url: "redis://user:Secr3tPa-ssw0rd@valkey.example.test:6379/not-a-db", frags: []string{"Secr3tPa"}},
+		{name: "invalid UTF-8 after an escape in master password", url: "redis://valkey.example.test:6379/0?password=Xy7&%A3kLmN0pQr", frags: []string{"kLmN0pQr", "Xy7"}},
+		{name: "invalid UTF-8 in sentinel master password", url: "redis://s1.example.test:26379?master_name=tunneld&password=Xy7&%E2%82kLmN0pQr", frags: []string{"kLmN0pQr"}},
+		{name: "split multi-byte escape in query", url: "redis://valkey.example.test:6379/0?password=Secr3t%€x", frags: []string{"Secr3t", `\xe2`}},
+		{name: "split multi-byte escape in userinfo", url: "redis://user:/%€xSecret@valkey.example.test:6379/0", frags: []string{"Secret", `\xe2`}},
+		{name: "missing scheme keeps credentials", url: "Admin:Secr3t@valkey.example.test:6379", frags: []string{"admin", "Admin", "Secr3t"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

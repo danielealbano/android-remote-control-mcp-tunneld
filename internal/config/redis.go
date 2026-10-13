@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -70,35 +69,44 @@ func redactURLSecrets(msg, raw string) string {
 	var sources []string
 	for _, src := range []string{raw, lenientUnescape(raw, false), lenientUnescape(raw, true)} {
 		quoted := strconv.Quote(src)
-		sources = append(sources, src, quoted[1:len(quoted)-1])
+		sources = append(sources, strings.ToLower(src), strings.ToLower(quoted[1:len(quoted)-1]))
 	}
-	isDelim := func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("\"'`:,()[]", r) }
 	var b strings.Builder
-	var tok strings.Builder
-	flush := func() {
-		if tok.Len() == 0 {
-			return
-		}
-		t := tok.String()
-		tok.Reset()
-		for _, src := range sources {
-			if strings.Contains(src, t) {
+	start := 0
+	flush := func(end int) {
+		if end > start {
+			tok := msg[start:end]
+			if fromURL(tok, sources) {
 				b.WriteString("[redacted]")
-				return
+			} else {
+				b.WriteString(tok)
 			}
 		}
-		b.WriteString(t)
 	}
-	for _, r := range msg {
-		if isDelim(r) {
-			flush()
-			b.WriteRune(r)
-			continue
+	for i := 0; i < len(msg); i++ {
+		if strings.IndexByte(" \t\n\r\"'`:,()[]", msg[i]) >= 0 {
+			flush(i)
+			b.WriteByte(msg[i])
+			start = i + 1
 		}
-		tok.WriteRune(r)
 	}
-	flush()
+	flush(len(msg))
 	return b.String()
+}
+
+func fromURL(tok string, sources []string) bool {
+	for i := 0; i < len(tok); i++ {
+		if tok[i] >= 0x80 || tok[i] == '\\' {
+			return true
+		}
+	}
+	lower := strings.ToLower(tok)
+	for _, src := range sources {
+		if strings.Contains(src, lower) {
+			return true
+		}
+	}
+	return false
 }
 
 func lenientUnescape(s string, plusAsSpace bool) string {
