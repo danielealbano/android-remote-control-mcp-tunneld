@@ -24,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -157,6 +158,7 @@ func TestRun_Lifecycle(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := lifecycleConfig(t, mr.Addr())
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, cfg, testLogger(), "test") }()
@@ -181,6 +183,14 @@ func TestRun_Lifecycle(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not drain within 15s of context cancellation")
 	}
+	waitAsyncLogGoroutines(t, baseline)
+	spool, err := store.NewConnLogSpool(cfg.ConnLogDir, "00000000000000aa", tunneltest.NewStore(), func(int) {}, testLogger())
+	if err != nil {
+		t.Fatalf("a cleanly returned Run must release the --conn-log-dir lock: %v", err)
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	spool.Drain(drainCtx)
 }
 
 // TestRun_InternalBindFailureIsFatal verifies an unusable --internal-listen makes Run return an error
@@ -252,13 +262,9 @@ func asyncLogGoroutines() int {
 
 func waitAsyncLogGoroutines(t *testing.T, baseline int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got := asyncLogGoroutines()
-		if got <= baseline {
-			return
-		}
-		if time.Now().After(deadline) {
+	deadline, bounded := t.Deadline()
+	for got := asyncLogGoroutines(); got > baseline; got = asyncLogGoroutines() {
+		if bounded && time.Until(deadline) < time.Second {
 			t.Fatalf("Run returned with %d connection-log goroutines still running (baseline %d)", got, baseline)
 		}
 		time.Sleep(10 * time.Millisecond)

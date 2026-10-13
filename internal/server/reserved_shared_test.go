@@ -297,14 +297,23 @@ func TestReservedCerts_PublishSurvivesShutdownAfterOrder(t *testing.T) {
 	}
 }
 
-type hangingShared struct{}
+type hangingShared struct {
+	mu        sync.Mutex
+	deadlines []time.Time
+	ended     []error
+}
 
-func (hangingShared) SelfCert(ctx context.Context, _ string) ([]byte, bool, error) {
+func (h *hangingShared) SelfCert(ctx context.Context, _ string) ([]byte, bool, error) {
+	dl, _ := ctx.Deadline()
 	<-ctx.Done()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.deadlines = append(h.deadlines, dl)
+	h.ended = append(h.ended, ctx.Err())
 	return nil, false, ctx.Err()
 }
 
-func (hangingShared) PutSelfCert(ctx context.Context, _ string, _ []byte, _ time.Duration) error {
+func (*hangingShared) PutSelfCert(ctx context.Context, _ string, _ []byte, _ time.Duration) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -317,13 +326,19 @@ func TestReservedCerts_HangingSharedStoreDoesNotBlockStartup(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	rc := newTestReserved(dir, []string{sharedHost}, (&countingIssuer{}).obtain, neverRenew, &fakeLocker{}, logger)
-	rc.shared = hangingShared{}
+	shared := &hangingShared{}
+	rc.shared = shared
 	rc.readTimeout = 50 * time.Millisecond
 
 	start := time.Now()
 	rc.loadCache(context.Background())
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("an unresponsive shared store must not hold startup, loadCache took %v", took)
+	end := time.Now()
+	shared.mu.Lock()
+	deadlines, ended := shared.deadlines, shared.ended
+	shared.mu.Unlock()
+	if len(ended) != 1 || !errors.Is(ended[0], context.DeadlineExceeded) ||
+		deadlines[0].Sub(start) < rc.readTimeout || deadlines[0].Sub(end) > rc.readTimeout {
+		t.Fatalf("the shared read must end at its own %v deadline, deadlines=%v ended=%v", rc.readTimeout, deadlines, ended)
 	}
 	if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(info.NotAfter) {
 		t.Fatalf("the disk cert must be served when the shared store hangs, NotAfter = %v", got)
