@@ -251,7 +251,7 @@ appends each as a JSON line to the active file in `--conn-log-dir` (`<file-start
 `<file-start>` = the UTC nanosecond the file was opened, created exclusively — an existing name advances by
 1 ns). A failed or short append is truncated back (or the file is rotated out), so a partial line never sits
 mid-file. The file is fsynced and renamed to `.jsonl` at the end of its clock-aligned 5-minute window, at
-16 MiB, and at shutdown. A separate uploader goroutine uploads ready files oldest-first to
+16 MiB, and at shutdown (a file left empty by failed appends is removed instead, never uploaded). A separate uploader goroutine uploads ready files oldest-first to
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (the key comes from the file name, so a
 re-upload overwrites) and deletes each only after its upload succeeds — each upload gets a deadline of 30 s
 plus the file size at 128 KiB/s (not the S3 client's general 30 s cap); a pass stops at the first S3 failure

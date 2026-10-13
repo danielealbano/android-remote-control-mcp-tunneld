@@ -238,3 +238,7 @@ DoD: [x] the release config uses `dockers_v2` only.
   `Run` return is checked for stopped spool goroutines and a released lock; (c) Task 3.1 — the docs state
   that an unreachable Valkey delays the startup bind by at most 5 s per reserved host. Why: each closes a
   review finding (no credential fragment in logs, actionable errors, accurate docs, deterministic tests).
+- Code review #6 fixes (2026-10-13): (a) Task 2.1 — a file whose only append failed (truncated back to
+  0 bytes) is removed at rotation instead of becoming an empty ready file and object, as the "no empty files"
+  item requires; (b) Task 2.1 (deploy) — `TUNNELD_CONN_LOG_DIR` sits in the `tunneld.env.example` S3 block,
+  not the ACME one. Why: both close a review finding (plan compliance, an accurate operator template).
