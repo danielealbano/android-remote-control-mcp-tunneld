@@ -242,3 +242,6 @@ DoD: [x] the release config uses `dockers_v2` only.
   0 bytes) is removed at rotation instead of becoming an empty ready file and object, as the "no empty files"
   item requires; (b) Task 2.1 (deploy) — `TUNNELD_CONN_LOG_DIR` sits in the `tunneld.env.example` S3 block,
   not the ACME one. Why: both close a review finding (plan compliance, an accurate operator template).
+- Code review #8 fix (2026-10-13): Task 2.1 — the spool shutdown-deadline test drains on a context it cancels
+  only once the upload is in flight, so it no longer races a 100 ms deadline. Why: a timing-dependent test is
+  a bug.
