@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -106,23 +107,16 @@ func (s *S3Store) DeleteName(ctx context.Context, name string) error {
 	return nil
 }
 
-func (s *S3Store) PutConnLogBatch(ctx context.Context, b ConnLogBatch) error {
-	var body bytes.Buffer
-	enc := json.NewEncoder(&body)
-	for _, ev := range b.Events {
-		if err := enc.Encode(ev); err != nil {
-			return fmt.Errorf("store: marshal conn log: %w", err)
-		}
-	}
-	key := b.Key()
+func (s *S3Store) PutConnLogFile(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
 	_, err := s.cli.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      &s.bucket,
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(body.Bytes()),
-		ContentType: aws.String("application/x-ndjson"),
+		Bucket:        &s.bucket,
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String("application/x-ndjson"),
 	})
 	if err != nil {
-		return fmt.Errorf("store: put conn log batch %q: %w", key, err)
+		return fmt.Errorf("store: put conn log %q: %w", key, err)
 	}
 	return nil
 }

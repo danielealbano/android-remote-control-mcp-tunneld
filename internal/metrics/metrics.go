@@ -85,7 +85,7 @@ func NewMetrics() *Metrics {
 			Name: "tunneld_per_conn_mem_bytes", Help: "Estimated per-connection memory.",
 		}),
 		connLogDropped: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "tunneld_connlog_dropped_total", Help: "Connection-log events dropped: queue full or retries exhausted.",
+			Name: "tunneld_connlog_dropped_total", Help: "Connection-log events dropped: spool queue full, append failure, spool cap reached, or after shutdown.",
 		}),
 	}
 	reg.MustRegister(

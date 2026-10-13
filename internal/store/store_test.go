@@ -114,22 +114,6 @@ func TestNewConnID_Format(t *testing.T) {
 	}
 }
 
-func TestConnLogBatchKeyLayoutAndSort(t *testing.T) {
-	t.Parallel()
-	b := store.ConnLogBatch{Tunnel: "k7m2x9qwp4", NodeID: "0a1b2c3d4e5f6a7b",
-		First: time.Date(2026, 8, 17, 14, 12, 33, 482910114, time.FixedZone("x", 3600))}
-	want := "tunnel-logs/k7m2x9qwp4/2026/08/17/20260817T131233.482910114Z-0a1b2c3d4e5f6a7b.jsonl"
-	if got := b.Key(); got != want {
-		t.Errorf("Key = %q, want %q", got, want)
-	}
-	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
-	later := b
-	later.First = b.First.Add(time.Second)
-	if b.Key() >= later.Key() {
-		t.Error("keys must sort chronologically")
-	}
-}
-
 func TestRejectedKeyLayout(t *testing.T) {
 	ev := store.RejectedEnrollment{TS: time.Date(2026, 8, 17, 1, 2, 3, 4, time.UTC)}
 	key := store.RejectedKey(ev)

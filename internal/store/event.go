@@ -60,26 +60,6 @@ type Event struct {
 // tsNanosLayout sorts chronologically as a string in an S3 listing.
 const tsNanosLayout = "20060102T150405.000000000Z"
 
-func (ev Event) at() time.Time {
-	if ev.Event == "end" && !ev.TSEnd.IsZero() {
-		return ev.TSEnd.UTC()
-	}
-	return ev.TSStart.UTC()
-}
-
-type ConnLogBatch struct {
-	Tunnel string
-	NodeID string
-	First  time.Time
-	Events []Event
-}
-
-func (b ConnLogBatch) Key() string {
-	ts := b.First.UTC()
-	return fmt.Sprintf("tunnel-logs/%s/%04d/%02d/%02d/%s-%s.jsonl",
-		b.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), b.NodeID)
-}
-
 // connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure
 // path that exercises MustConnID's fallback. Production always uses crypto/rand.
 var connIDRand = rand.Read
