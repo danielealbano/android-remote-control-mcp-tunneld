@@ -4,7 +4,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"strings"
@@ -64,6 +66,8 @@ type ServeCmd struct {
 	S3AccessKey      string `name:"s3-access-key" help:"S3 access key (secret). Required for serve."`
 	S3SecretKey      string `name:"s3-secret-key" help:"S3 secret key (secret). Required for serve."`
 	S3ForcePathStyle bool   `name:"s3-force-path-style" default:"true" help:"Path-style addressing (MinIO default)."`
+
+	ConnLogDir string `name:"conn-log-dir" help:"Connection-log spool directory on a persistent volume: events are appended locally, uploaded to S3 as per-node 5-minute JSONL objects, then deleted. Required for serve."`
 
 	RegistryClaimTimeout time.Duration `name:"registry-claim-timeout" default:"3s" help:"Hard timeout on the name-claim PUT (SDK retries disabled; timeout = name abandoned)."`
 	RegistryClaimSettle  time.Duration `name:"registry-claim-settle" default:"5s" help:"Settle wait before the claim-verify GET (MUST exceed the claim timeout)."`
@@ -201,10 +205,16 @@ func (c ServeCmd) Validate() error {
 		{"--s3-secret-key", c.S3SecretKey},
 		{"--acme-email", c.ACMEEmail},
 		{"--acme-account-dir", c.ACMEAccountDir},
+		{"--conn-log-dir", c.ConnLogDir},
 	} {
 		if req.v == "" {
 			return fmt.Errorf("%s is required for serve", req.name)
 		}
+	}
+	if fi, err := os.Stat(c.ConnLogDir); err == nil && !fi.IsDir() {
+		return fmt.Errorf("--conn-log-dir %q is not a directory", c.ConnLogDir)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("--conn-log-dir %q: %w", c.ConnLogDir, err)
 	}
 	for _, ch := range []struct {
 		name, method string

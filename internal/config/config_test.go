@@ -58,6 +58,7 @@ func validCfg(t *testing.T) ServeCmd {
 		ACMELEProfile:          "shortlived",
 		ACMEGTSValidity:        168 * time.Hour,
 		ACMEAccountDir:         dir,
+		ConnLogDir:             t.TempDir(),
 		ACMEDNSProvider:        "cloudflare",
 		ACMEChallengeLE:        ChallengeTLSALPN01,
 		ACMEChallengeGTS:       ChallengeTLSALPN01,
@@ -694,5 +695,28 @@ func TestKongDefaults_ACMEChallenge(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `must be one of "dns-01","http-01" but got "tls-alpn-01"`) {
 		t.Errorf("expected kong's enum error, got: %v", err)
+	}
+}
+
+func TestValidate_ConnLogDir(t *testing.T) {
+	t.Parallel()
+	c := validCfg(t)
+	c.ConnLogDir = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--conn-log-dir is required") {
+		t.Fatalf("a missing --conn-log-dir must be rejected, got %v", err)
+	}
+	c = validCfg(t)
+	c.ConnLogDir = filepath.Join(t.TempDir(), "not-yet-created")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a not-yet-existing --conn-log-dir is created at startup and must validate: %v", err)
+	}
+	c = validCfg(t)
+	file := filepath.Join(t.TempDir(), "spool")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.ConnLogDir = file
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("a --conn-log-dir that is a file must be rejected, got %v", err)
 	}
 }

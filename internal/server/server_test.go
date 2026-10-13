@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
@@ -77,6 +79,7 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 	const unreachable = "http://127.0.0.1:1"
 	return config.ServeCmd{
 		RedisURL:       "redis://" + redisAddr,
+		ConnLogDir:     t.TempDir(),
 		Listen:         "127.0.0.1:0",
 		MeshListen:     "127.0.0.1:0",
 		InternalListen: "127.0.0.1:0",
@@ -206,6 +209,28 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 		t.Fatal("Run did not fail on the internal bind")
 	}
 	waitAsyncLogGoroutines(t, baseline)
+
+	go func() { errCh <- Run(ctx, cfg, testLogger(), "bindfatal-again") }()
+	select {
+	case err := <-errCh:
+		if err == nil || strings.Contains(err.Error(), "in use by another process") {
+			t.Fatalf("a returned Run must release the --conn-log-dir lock, second Run got %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the second Run did not fail on the internal bind")
+	}
+	waitAsyncLogGoroutines(t, baseline)
+}
+
+func TestConnLogDropped_AddsEventCount(t *testing.T) {
+	t.Parallel()
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_connlog_dropped_total", Help: "test"})
+	drop := connLogDropped(c)
+	drop(3)
+	drop(1)
+	if got := testutil.ToFloat64(c); got != 4 {
+		t.Fatalf("the dropped counter must grow by each call's event count, got %v", got)
+	}
 }
 
 func asyncLogGoroutines() int {
@@ -215,7 +240,7 @@ func asyncLogGoroutines() int {
 		if n < len(buf) {
 			count := 0
 			for _, g := range strings.Split(string(buf[:n]), "\n\n") {
-				if strings.Contains(g, "store.(*AsyncConnLog)") {
+				if strings.Contains(g, "store.(*ConnLogSpool)") {
 					count++
 				}
 			}

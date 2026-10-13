@@ -111,7 +111,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 
 		ACMEDirLE: acmeDirLE, ACMEDirGTS: acmeDirGTS, ACMEDirZeroSSL: acmeDirZeroSSL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: config.ChallengeDNS01, ACMEChallengeGTS: config.ChallengeDNS01, ACMEChallengeZeroSSL: config.ChallengeDNS01,
 		ACMEDNSResolvers: dnsResolvers, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
@@ -358,27 +358,29 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if err := env.drain(); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	keyRe := regexp.MustCompile(`^tunnel-logs/` + regexp.QuoteMeta(ident.Name) +
-		`/\d{4}/\d{2}/\d{2}/\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{16}\.jsonl$`)
-	keys := tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/"+ident.Name+"/")
+	keyRe := regexp.MustCompile(`^tunnel-logs/\d{4}/\d{2}/\d{2}/\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{16}\.jsonl$`)
+	keys := tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/")
 	if len(keys) == 0 {
-		t.Fatal("no connection-log batch written to MinIO")
+		t.Fatal("no connection-log object written to MinIO")
 	}
 	events := 0
 	for _, k := range keys {
 		if !keyRe.MatchString(k) {
-			t.Errorf("connection-log key %q does not match the batch layout", k)
+			t.Errorf("connection-log key %q does not match the per-node layout", k)
 		}
 		for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
 			var ev store.Event
-			if err := json.Unmarshal(line, &ev); err != nil || ev.Tunnel != ident.Name {
-				t.Errorf("connection-log line in %s is not an event of %s: %q (%v)", k, ident.Name, line, err)
+			if err := json.Unmarshal(line, &ev); err != nil {
+				t.Errorf("connection-log line in %s is not valid JSON: %q (%v)", k, line, err)
+				continue
 			}
-			events++
+			if ev.Tunnel == ident.Name {
+				events++
+			}
 		}
 	}
 	if events < 2 {
-		t.Errorf("the batches must carry at least the phone start and end events, got %d events", events)
+		t.Errorf("the objects must carry at least the phone start and end events of %s, got %d", ident.Name, events)
 	}
 }
 

@@ -184,7 +184,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: attestOptional,
 		ACMEDirLE: leDir, ACMEDirGTS: inf.pebble.DirectoryURL, ACMEDirZeroSSL: inf.pebble.DirectoryURL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: challengeLE, ACMEChallengeGTS: challengeGTS, ACMEChallengeZeroSSL: challengeZeroSSL,
 		ACMEHTTPListen:   acmeHTTPListen,
 		ACMEDNSResolvers: []string{inf.pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,

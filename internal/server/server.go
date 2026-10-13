@@ -133,16 +133,16 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
-	// S3 write; a fixed worker pool drains with retry, a full queue drops-newest and bumps the
-	// dropped-events counter. Both the phone control plane and the public edge log through it.
-	asyncLogs, err := store.NewAsyncConnLog(st, nodeID, func(n int) { m.ConnLogDropped().Add(float64(n)) }, logger)
+	// S3 write; a full queue drops-newest and bumps the dropped-events counter. Both the phone control
+	// plane and the public edge log through it.
+	connLogs, err := store.NewConnLogSpool(cfg.ConnLogDir, nodeID, st, connLogDropped(m.ConnLogDropped()), logger)
 	if err != nil {
-		return fmt.Errorf("connection-log writer: %w", err)
+		return fmt.Errorf("connection-log spool: %w", err)
 	}
 	defer func() {
 		dctx, dcancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 		defer dcancel()
-		asyncLogs.Drain(dctx)
+		connLogs.Drain(dctx)
 	}()
 
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
@@ -174,7 +174,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Phone control plane.
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
+		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
@@ -208,7 +208,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
 	meshHandler, err := mesh.NewHandler(phoneMgr.OwnsConn,
@@ -385,9 +385,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		guarded.Wait(sctx)
 	}
 	werr := g.Wait()
-	asyncLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
-	rec.FinalFlush()      // after ALL producers stopped — no late deltas lost (self-bounded)
-	rec.FlushCapLog()     // pending cap-hit summaries
+	connLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
+	rec.FinalFlush()     // after ALL producers stopped — no late deltas lost (self-bounded)
+	rec.FlushCapLog()    // pending cap-hit summaries
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 		logger.Warn("node deregister failed (expires by TTL)", "err", err)
 	}

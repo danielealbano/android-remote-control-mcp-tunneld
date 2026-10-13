@@ -98,7 +98,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	}
 
 	found := waitBool(15*time.Second, func() bool {
-		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/"+ident.Name+"/") {
+		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/") {
 			if !strings.HasSuffix(k, ".jsonl") {
 				continue
 			}
@@ -107,7 +107,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 				if err := json.Unmarshal(line, &ev); err != nil {
 					t.Fatalf("connection log %s has an invalid JSON line: %v", k, err)
 				}
-				if ev.Event == "end" && ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
+				if ev.Tunnel == ident.Name && ev.Event == "end" && ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
 					return true
 				}
 			}
