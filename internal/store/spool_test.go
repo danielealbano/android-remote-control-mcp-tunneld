@@ -68,7 +68,8 @@ type fakeUploader struct {
 	failN     int
 	block     bool
 	gate      chan struct{}
-	deadlines []time.Duration
+	deadlines []time.Time
+	ended     []error
 }
 
 func (f *fakeUploader) PutConnLogFile(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
@@ -81,11 +82,14 @@ func (f *fakeUploader) PutConnLogFile(ctx context.Context, key string, body io.R
 	}
 	f.mu.Lock()
 	if dl, ok := ctx.Deadline(); ok {
-		f.deadlines = append(f.deadlines, time.Until(dl))
+		f.deadlines = append(f.deadlines, dl)
 	}
 	if f.block {
 		f.mu.Unlock()
 		<-ctx.Done()
+		f.mu.Lock()
+		f.ended = append(f.ended, ctx.Err())
+		f.mu.Unlock()
 		return ctx.Err()
 	}
 	if f.failN > 0 {
@@ -370,13 +374,19 @@ func TestSpool_CapDropsWithOneWarnPerWindow(t *testing.T) {
 	t.Parallel()
 	clock := newClock(t0)
 	env := newSpool(t, t.TempDir(), &fakeUploader{block: true}, append(fastTicks(), clock.option(), withSpoolLimits(1<<20, 200))...)
+	var fit, fitBytes int64
 	for i := range 20 {
 		put(t, env.s, ev("a", i))
+		if n := lineSize(t, ev("a", i)); fit == int64(i) && fitBytes+n <= 200 {
+			fit, fitBytes = fit+1, fitBytes+n
+		}
 	}
+	waitFor(t, "every event appended or dropped", func() bool {
+		return env.s.spooled.Load() == fitBytes && env.drops.Load() == 20-fit
+	})
 	drainWithin(env.s, 100*time.Millisecond)
-	kept := int64(len(lines(t, mustRead(t, env.dir))))
-	if env.drops.Load() == 0 || env.drops.Load()+kept != 20 {
-		t.Fatalf("events past the cap must be dropped and counted, drops=%d kept=%d", env.drops.Load(), kept)
+	if kept := int64(len(lines(t, mustRead(t, env.dir)))); fit == 20 || kept != fit {
+		t.Fatalf("events past the cap must be dropped and counted, fit=%d kept=%d drops=%d", fit, kept, env.drops.Load())
 	}
 	if n := strings.Count(env.log.String(), "conn-log spool full"); n != 1 {
 		t.Fatalf("the cap must be logged once per window, got %d", n)
@@ -488,12 +498,16 @@ func TestSpool_ShutdownRotatesUploadsAndReleasesLock(t *testing.T) {
 func TestSpool_ShutdownPastDeadlineKeepsFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	env := newSpool(t, dir, &fakeUploader{block: true}, fastTicks()...)
+	up := &fakeUploader{block: true}
+	env := newSpool(t, dir, up, fastTicks()...)
 	put(t, env.s, ev("a", 1))
-	start := time.Now()
+	waitFor(t, "the append", func() bool { return env.s.spooled.Load() == lineSize(t, ev("a", 1)) })
 	drainWithin(env.s, 100*time.Millisecond)
-	if took := time.Since(start); took > 2*time.Second {
-		t.Fatalf("Drain must return at its deadline, took %v", took)
+	up.mu.Lock()
+	ended := append([]error(nil), up.ended...)
+	up.mu.Unlock()
+	if len(ended) == 0 || !errors.Is(ended[len(ended)-1], context.Canceled) {
+		t.Fatalf("the drain deadline must cancel the in-flight upload, upload ends = %v", ended)
 	}
 	if files := spoolFiles(t, dir); len(files) != 1 || !strings.HasSuffix(files[0], spoolReadySuffix) {
 		t.Fatalf("an un-uploaded file must stay on disk for the next start, got %v", files)
@@ -709,11 +723,12 @@ func TestSpool_UploadDeadlineScalesWithFileSize(t *testing.T) {
 	dir := t.TempDir()
 	seed(t, dir, "20261013T100000.000000000Z-"+testNode+".jsonl", strings.Repeat("x", 1<<20))
 	up := &fakeUploader{}
+	start := time.Now()
 	newSpool(t, dir, up, fastTicks()...)
 	waitFor(t, "the upload", func() bool { return len(up.snapshot()) == 1 })
 	up.mu.Lock()
 	defer up.mu.Unlock()
-	if len(up.deadlines) != 1 || up.deadlines[0] > 38*time.Second || up.deadlines[0] < 36*time.Second {
-		t.Fatalf("a 1 MiB upload must get a 38 s deadline, got %v", up.deadlines)
+	if len(up.deadlines) != 1 || up.deadlines[0].Sub(start) < 38*time.Second || time.Until(up.deadlines[0]) > 38*time.Second {
+		t.Fatalf("a 1 MiB upload must get a 38 s deadline from its start, got %v (test start %v)", up.deadlines, start)
 	}
 }
