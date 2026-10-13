@@ -245,7 +245,7 @@ func TestSpoolKey_LayoutSortAndRejects(t *testing.T) {
 	}
 	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
 	later := "20261013T235959.123456790Z-" + testNode + ".jsonl"
-	if !(name < later) {
+	if name >= later {
 		t.Fatal("names must sort chronologically")
 	}
 	for _, bad := range []string{name + ".part", "notes.txt", ".lock", "20261013T999999.123456789Z-ab.jsonl"} {

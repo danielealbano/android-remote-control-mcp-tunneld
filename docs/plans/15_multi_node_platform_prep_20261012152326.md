@@ -54,8 +54,9 @@ and an S3 outage must not lose connection logs (decision recorded with the user 
       event arrives (no empty files). The active file is named `<file-start>-<node-id>.jsonl.part`, where
       `<file-start>` is the UTC time the file was opened with NANOSECOND precision
       (`20060102T150405.000000000Z`) — a second file in the same window (16 MiB split, clock step)
-      practically never gets the same name; the file is opened `O_CREATE|O_EXCL` and an existing name advances
-      the start time by 1 ns until it is free, so a ready file is never overwritten. It is fsynced and renamed to `.jsonl` (ready) when its window ends, when it reaches
+      practically never gets the same name; start times strictly increase within a process, the file is opened
+      `O_CREATE|O_EXCL`, and an existing name advances the start time by 1 ns until it is free, so neither a
+      ready file nor an already-uploaded object is ever overwritten. It is fsynced and renamed to `.jsonl` (ready) when its window ends, when it reaches
       16 MiB, and at shutdown. The object key is derived from the file name ONLY —
       `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (all tunnels mixed, every line carries
       `tunnel`; still under `tunnel-logs/`, so the 90-day lifecycle is unchanged; window alignment keeps every
@@ -213,3 +214,7 @@ DoD: [x] the release config uses `dockers_v2` only.
 - Task 2.1 (server): `--conn-log-dir` is created (0o700) and `flock`ed inside `store.NewConnLogSpool`, which
   `server.Run` calls during construction — the store owns the spool directory; `Run` still triggers it and
   releases it on every return path via the idempotent `Drain`.
+- Task 2.1 (store): file start times also STRICTLY increase within a process (each new file starts at least
+  1 ns after the previous one). Why: the size-rotation unit test showed that with a clock that does not
+  advance, a file already uploaded and deleted freed its name, so the next file reused it and overwrote the
+  object; the local existence check alone cannot see uploaded files.

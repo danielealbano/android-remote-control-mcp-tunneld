@@ -71,6 +71,7 @@ type ConnLogSpool struct {
 	ioSuppressed int
 
 	capWarned time.Time
+	lastStart time.Time
 
 	kick         chan struct{}
 	stopUp       chan struct{}
@@ -356,6 +357,9 @@ func (s *ConnLogSpool) append(w *activeFile, ev Event) {
 func (s *ConnLogSpool) open(w *activeFile, now time.Time) error {
 	now = now.UTC()
 	start := now
+	if !start.After(s.lastStart) {
+		start = s.lastStart.Add(time.Nanosecond)
+	}
 	for range spoolMaxNameTries {
 		base := start.Format(tsNanosLayout) + "-" + s.nodeID
 		ready := filepath.Join(s.dir, base+spoolReadySuffix)
@@ -375,6 +379,7 @@ func (s *ConnLogSpool) open(w *activeFile, now time.Time) error {
 			return err
 		}
 		*w = activeFile{f: f, path: path, winStart: now.Truncate(spoolWindow)}
+		s.lastStart = start
 		return nil
 	}
 	return fmt.Errorf("no free conn-log spool file name after %d tries", spoolMaxNameTries)

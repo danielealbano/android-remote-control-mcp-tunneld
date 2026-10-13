@@ -472,6 +472,7 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
 	// Overrides under test (one per kong type category):
 	t.Setenv("TUNNELD_MAX_CLIENTS", "42")            // int twin
 	t.Setenv("TUNNELD_S_3_BUCKET", "envbucket")      // plain string twin (digit-boundary env name)
@@ -662,6 +663,7 @@ func TestKongDefaults_ACMEChallenge(t *testing.T) {
 	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
 
 	newParser := func(cli any) *kong.Kong {
 		t.Helper()
