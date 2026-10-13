@@ -406,6 +406,16 @@ func (s *ConnLogSpool) rotate(w *activeFile) {
 	if w.f == nil {
 		return
 	}
+	if w.size == 0 {
+		if err := w.f.Close(); err != nil {
+			s.ioWarn("close", w.path, err)
+		}
+		if err := os.Remove(w.path); err != nil {
+			s.ioWarn("remove", w.path, err)
+		}
+		*w = activeFile{}
+		return
+	}
 	if err := s.syncFile(w.f); err != nil {
 		s.ioWarn("fsync", w.path, err)
 	}

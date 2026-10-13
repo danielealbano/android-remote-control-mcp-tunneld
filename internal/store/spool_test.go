@@ -293,6 +293,40 @@ func TestSpool_NoEmptyFiles(t *testing.T) {
 	}
 }
 
+func TestSpool_FailedFirstAppendLeavesNoEmptyFile(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		viaDrain bool
+	}{{name: "window rotation"}, {name: "shutdown", viaDrain: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int64
+			write := func(f *os.File, b []byte) (int, error) {
+				if calls.Add(1) == 1 {
+					return 0, errors.New("disk full")
+				}
+				return f.Write(b)
+			}
+			clock := newClock(t0)
+			up := &fakeUploader{}
+			env := newSpool(t, t.TempDir(), up, append(fastTicks(), clock.option(),
+				withFileOps(write, (*os.File).Sync, (*os.File).Truncate))...)
+			put(t, env.s, ev("a", 1))
+			waitFor(t, "the failed append", func() bool { return env.drops.Load() == 1 })
+			if !tc.viaDrain {
+				clock.add(spoolWindow)
+				waitFor(t, "the empty file's removal", func() bool { return len(spoolFiles(t, env.dir)) == 0 })
+			}
+			drainWithin(env.s, 5*time.Second)
+			if files := spoolFiles(t, env.dir); len(files) != 0 || len(up.snapshot()) != 0 || env.drops.Load() != 1 {
+				t.Fatalf("an empty file must be removed, never uploaded: files=%v uploads=%d drops=%d",
+					files, len(up.snapshot()), env.drops.Load())
+			}
+		})
+	}
+}
+
 func TestSpool_ExistingNameAdvancesOneNanosecond(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
