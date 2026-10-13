@@ -1,9 +1,12 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -720,5 +723,9 @@ func TestValidate_ConnLogDir(t *testing.T) {
 	c.ConnLogDir = file
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "is not a directory") {
 		t.Fatalf("a --conn-log-dir that is a file must be rejected, got %v", err)
+	}
+	c.ConnLogDir = filepath.Join(file, "sub")
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("--conn-log-dir %q: ", c.ConnLogDir)) || !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("a --conn-log-dir that cannot be stat'ed must be rejected with the cause, got %v", err)
 	}
 }
