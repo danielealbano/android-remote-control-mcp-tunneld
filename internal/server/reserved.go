@@ -39,6 +39,7 @@ const (
 	selfLockWait          = 5 * time.Minute
 	selfIssueTimeout      = 5 * time.Minute
 	selfLockPoll          = 2 * time.Second
+	selfPublishTimeout    = 5 * time.Second
 )
 
 var errNoReservedCert = errors.New("server: no reserved-host certificate yet")
@@ -249,7 +250,9 @@ func (rc *reservedCerts) publish(ctx context.Context, host string, certPEM, keyP
 		rc.logger.Warn("reserved-host shared cert encode failed", "host", host, "err", err)
 		return
 	}
-	if err := rc.shared.PutSelfCert(ctx, host, raw, info.NotAfter.Sub(rc.now())); err != nil && ctx.Err() == nil {
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), selfPublishTimeout)
+	defer cancel()
+	if err := rc.shared.PutSelfCert(pctx, host, raw, info.NotAfter.Sub(rc.now())); err != nil {
 		rc.logger.Warn("reserved-host shared cert publish failed (other nodes order their own)", "host", host, "err", err)
 	}
 }

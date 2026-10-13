@@ -38,7 +38,10 @@ func (m *memShared) SelfCert(_ context.Context, host string) ([]byte, bool, erro
 	return b, ok, nil
 }
 
-func (m *memShared) PutSelfCert(_ context.Context, host string, bundle []byte, _ time.Duration) error {
+func (m *memShared) PutSelfCert(ctx context.Context, host string, bundle []byte, _ time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
@@ -272,5 +275,24 @@ func TestReservedCerts_PublishFailureLoggedCertStillServed(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `msg="reserved-host shared cert publish failed (other nodes order their own)"`) {
 		t.Fatalf("the publish failure must be logged; log = %q", buf.String())
+	}
+}
+
+func TestReservedCerts_PublishSurvivesShutdownAfterOrder(t *testing.T) {
+	t.Parallel()
+	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	obtain := func(context.Context, string) ([]byte, []byte, store.CertInfo, error) {
+		cancel()
+		return certPEM, keyPEM, info, nil
+	}
+	shared := &memShared{}
+	rc := newTestReserved(t.TempDir(), []string{sharedHost}, obtain, neverRenew, &fakeLocker{}, testLogger())
+	rc.shared = shared
+
+	rc.issue(ctx, rc.hosts[sharedHost])
+	if _, ok, err := shared.SelfCert(context.Background(), sharedHost); err != nil || !ok {
+		t.Fatalf("a cert ordered before shutdown must still be published for the next lock holder: ok=%v err=%v", ok, err)
 	}
 }
