@@ -280,8 +280,7 @@ func TestRun_NamePrefixLowercased(t *testing.T) {
 // TestIntegration_EnrollConnectRoundtrip exercises the full E2E path against the real assembled server +
 // Valkey + MinIO + Pebble: two-phase enrollment (Pebble issues the public cert), the phone binds, and a
 // frontend TLS session round-trips through the tunnel to the phone (which TLS-terminates with its
-// Pebble-issued cert). It then asserts the MinIO registry + connection-log objects and the two lifecycle
-// rules provisioned at startup.
+// Pebble-issued cert). It then asserts the MinIO registry + connection-log objects.
 func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	env := startIntegrationServer(t)
 	ctx := context.Background()
@@ -335,12 +334,6 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 		t.Errorf("name record missing/incomplete in MinIO: %+v %v", rec, err)
 	}
 
-	// Both object-lifecycle rules were provisioned at startup.
-	lc := tunneltest.S3LifecyclePrefixes(t, env.s3URL, env.s3Access, env.s3Secret, itBucket)
-	if lc["tunnel-logs/"] != 90 || lc["rejected-enroll/"] != 30 {
-		t.Errorf("lifecycle rules not applied (want tunnel-logs/=90, rejected-enroll/=30): %+v", lc)
-	}
-
 	// Renewal rotates the certs: inject a server-minted challenge nonce, trigger a renewal via the real
 	// mTLS POST /api/v1/issue (the Renew path, since a cert already exists), and assert the identity cert changes.
 	oldIDCert := string(c.Identity().IdentityCertPEM)
@@ -381,6 +374,9 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	}
 	if events < 2 {
 		t.Errorf("the objects must carry at least the phone start and end events of %s, got %d", ident.Name, events)
+	}
+	if tunneltest.S3LifecycleConfigured(t, env.s3URL, env.s3Access, env.s3Secret, itBucket) {
+		t.Error("tunneld must never write the bucket's lifecycle configuration (retention is an operator setup)")
 	}
 }
 

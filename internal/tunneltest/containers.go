@@ -193,23 +193,22 @@ func S3ListKeys(t *testing.T, endpointURL, access, secret, bucket, prefix string
 	return keys
 }
 
-// S3LifecyclePrefixes returns the bucket's lifecycle expiration rules as prefix→days (test assertions).
-func S3LifecyclePrefixes(t *testing.T, endpointURL, access, secret, bucket string) map[string]int32 {
+func S3LifecycleConfigured(t *testing.T, endpointURL, access, secret, bucket string) bool {
 	t.Helper()
 	cli := s3TestClient(endpointURL, access, secret)
-	out, err := cli.GetBucketLifecycleConfiguration(context.Background(), &s3.GetBucketLifecycleConfigurationInput{
+	_, err := cli.GetBucketLifecycleConfiguration(context.Background(), &s3.GetBucketLifecycleConfigurationInput{
 		Bucket: aws.String(bucket),
 	})
-	if err != nil {
+	var ae smithy.APIError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &ae) && ae.ErrorCode() == "NoSuchLifecycleConfiguration":
+		return false
+	default:
 		t.Fatalf("get bucket lifecycle: %v", err)
+		return false
 	}
-	m := map[string]int32{}
-	for _, r := range out.Rules {
-		if r.Filter != nil && r.Filter.Prefix != nil && r.Expiration != nil && r.Expiration.Days != nil {
-			m[*r.Filter.Prefix] = *r.Expiration.Days
-		}
-	}
-	return m
 }
 
 func bucketAlreadyOwned(err error) bool {
