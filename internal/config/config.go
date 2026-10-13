@@ -4,14 +4,15 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
-	"github.com/redis/go-redis/v9"
 )
 
 // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
@@ -51,7 +52,7 @@ type ServeCmd struct {
 	MeshCertTTL   time.Duration `name:"mesh-cert-ttl" default:"24h" help:"Lifetime of a node's self-issued mesh-role cert."`
 	MaxClients    int           `name:"max-clients" default:"10000" help:"Per-node ceiling on ALL concurrent inbound connections (memory bound), enforced at the edge accept loop."`
 
-	RedisURL string `name:"redis-url" default:"redis://localhost:6379/0" help:"Valkey/Redis connection URL (control plane)."`
+	RedisURL string `name:"redis-url" default:"redis://localhost:6379/0" help:"Valkey/Redis connection URL (control plane). A master_name= query parameter selects Valkey Sentinel: the URL host and repeated addr= are the sentinels, the URL user:password authenticates to the sentinels, and username= / password= authenticate to the master."`
 
 	// --- Internal CA ---
 	CACert       string        `name:"ca-cert" help:"Internal CA certificate (PEM). Required for serve."`
@@ -65,6 +66,8 @@ type ServeCmd struct {
 	S3AccessKey      string `name:"s3-access-key" help:"S3 access key (secret). Required for serve."`
 	S3SecretKey      string `name:"s3-secret-key" help:"S3 secret key (secret). Required for serve."`
 	S3ForcePathStyle bool   `name:"s3-force-path-style" default:"true" help:"Path-style addressing (MinIO default)."`
+
+	ConnLogDir string `name:"conn-log-dir" help:"Connection-log spool directory on a persistent volume: events are appended locally, uploaded to S3 as per-node 5-minute JSONL objects, then deleted. Required for serve."`
 
 	RegistryClaimTimeout time.Duration `name:"registry-claim-timeout" default:"3s" help:"Hard timeout on the name-claim PUT (SDK retries disabled; timeout = name abandoned)."`
 	RegistryClaimSettle  time.Duration `name:"registry-claim-settle" default:"5s" help:"Settle wait before the claim-verify GET (MUST exceed the claim timeout)."`
@@ -191,8 +194,8 @@ func (c ServeCmd) Validate() error {
 	if strings.EqualFold(c.EnrollHost, c.ControlHost) {
 		return fmt.Errorf("--enroll-host and --control-host must differ (SNI dispatch would hide the control plane), both %q", c.EnrollHost)
 	}
-	if _, err := redis.ParseURL(c.RedisURL); err != nil {
-		return fmt.Errorf("--redis-url is not parseable: %w", err)
+	if _, err := ParseRedisURL(c.RedisURL); err != nil {
+		return err
 	}
 	for _, req := range []struct{ name, v string }{
 		{"--mesh-advertise", c.MeshAdvertise},
@@ -202,10 +205,16 @@ func (c ServeCmd) Validate() error {
 		{"--s3-secret-key", c.S3SecretKey},
 		{"--acme-email", c.ACMEEmail},
 		{"--acme-account-dir", c.ACMEAccountDir},
+		{"--conn-log-dir", c.ConnLogDir},
 	} {
 		if req.v == "" {
 			return fmt.Errorf("%s is required for serve", req.name)
 		}
+	}
+	if fi, err := os.Stat(c.ConnLogDir); err == nil && !fi.IsDir() {
+		return fmt.Errorf("--conn-log-dir %q is not a directory", c.ConnLogDir)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("--conn-log-dir %q: %w", c.ConnLogDir, err)
 	}
 	for _, ch := range []struct {
 		name, method string

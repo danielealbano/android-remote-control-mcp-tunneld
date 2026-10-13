@@ -14,13 +14,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -76,6 +80,7 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 	const unreachable = "http://127.0.0.1:1"
 	return config.ServeCmd{
 		RedisURL:       "redis://" + redisAddr,
+		ConnLogDir:     t.TempDir(),
 		Listen:         "127.0.0.1:0",
 		MeshListen:     "127.0.0.1:0",
 		InternalListen: "127.0.0.1:0",
@@ -153,6 +158,7 @@ func TestRun_Lifecycle(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := lifecycleConfig(t, mr.Addr())
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- Run(ctx, cfg, testLogger(), "test") }()
@@ -177,6 +183,14 @@ func TestRun_Lifecycle(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not drain within 15s of context cancellation")
 	}
+	waitAsyncLogGoroutines(t, baseline)
+	spool, err := store.NewConnLogSpool(cfg.ConnLogDir, "00000000000000aa", tunneltest.NewStore(), func(int) {}, testLogger())
+	if err != nil {
+		t.Fatalf("a cleanly returned Run must release the --conn-log-dir lock: %v", err)
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer drainCancel()
+	spool.Drain(drainCtx)
 }
 
 // TestRun_InternalBindFailureIsFatal verifies an unusable --internal-listen makes Run return an error
@@ -191,6 +205,7 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.InternalListen = occupied.Addr().String() // already in use → bind must fail
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -202,6 +217,57 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("Run did not fail on the internal bind")
+	}
+	waitAsyncLogGoroutines(t, baseline)
+
+	go func() { errCh <- Run(ctx, cfg, testLogger(), "bindfatal-again") }()
+	select {
+	case err := <-errCh:
+		if err == nil || strings.Contains(err.Error(), "in use by another process") {
+			t.Fatalf("a returned Run must release the --conn-log-dir lock, second Run got %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the second Run did not fail on the internal bind")
+	}
+	waitAsyncLogGoroutines(t, baseline)
+}
+
+func TestConnLogDropped_AddsEventCount(t *testing.T) {
+	t.Parallel()
+	c := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_connlog_dropped_total", Help: "test"})
+	drop := connLogDropped(c)
+	drop(3)
+	drop(1)
+	if got := testutil.ToFloat64(c); got != 4 {
+		t.Fatalf("the dropped counter must grow by each call's event count, got %v", got)
+	}
+}
+
+func asyncLogGoroutines() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			count := 0
+			for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+				if strings.Contains(g, "store.(*ConnLogSpool)") {
+					count++
+				}
+			}
+			return count
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+func waitAsyncLogGoroutines(t *testing.T, baseline int) {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	for got := asyncLogGoroutines(); got > baseline; got = asyncLogGoroutines() {
+		if bounded && time.Until(deadline) < time.Second {
+			t.Fatalf("Run returned with %d connection-log goroutines still running (baseline %d)", got, baseline)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -224,6 +290,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	defer tunneltest.CloseOrLog(t, occupied)
 	cfg.ACMEHTTPListen = occupied.Addr().String()
 
+	baseline := asyncLogGoroutines()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -236,6 +303,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("Run did not fail on the ACME HTTP-01 bind")
 	}
+	waitAsyncLogGoroutines(t, baseline)
 	rebound, err := net.Listen("tcp", cfg.InternalListen)
 	if err != nil {
 		t.Fatalf("the internal listener leaked after the ACME HTTP-01 bind failure: %v", err)

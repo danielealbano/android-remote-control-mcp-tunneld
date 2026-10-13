@@ -188,8 +188,9 @@ func TestChallengeStore_ErrorsWrapChallengeStore(t *testing.T) {
 	_, certOK, certErr := s.TLSALPNCertificate(ctx, "a.example.test")
 	_, httpFound, httpErr := s.HTTPKeyAuth(ctx, "a.example.test", "tok")
 	_, lockOK, lockErr := s.LockSelf(ctx, "enroll.example.test")
-	if certOK || httpFound || lockOK {
-		t.Fatalf("a failed store reported a hit: cert=%v http=%v lock=%v", certOK, httpFound, lockOK)
+	_, selfOK, selfErr := s.SelfCert(ctx, "enroll.example.test")
+	if certOK || httpFound || lockOK || selfOK {
+		t.Fatalf("a failed store reported a hit: cert=%v http=%v lock=%v self=%v", certOK, httpFound, lockOK, selfOK)
 	}
 	for name, err := range map[string]error{
 		"PutTLSALPN":         s.PutTLSALPN(ctx, "a.example.test", "k"),
@@ -199,6 +200,8 @@ func TestChallengeStore_ErrorsWrapChallengeStore(t *testing.T) {
 		"DeleteHTTP":         s.DeleteHTTP(ctx, "a.example.test", "tok", "k"),
 		"HTTPKeyAuth":        httpErr,
 		"LockSelf":           lockErr,
+		"SelfCert":           selfErr,
+		"PutSelfCert":        s.PutSelfCert(ctx, "enroll.example.test", []byte("bundle"), time.Hour),
 	} {
 		if !errors.Is(err, ErrChallengeStore) {
 			t.Errorf("%s error = %v, want it to wrap ErrChallengeStore", name, err)
@@ -306,5 +309,37 @@ func TestChallengeStore_LockSelf(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > selfUnlockTimeout+time.Second {
 		t.Fatalf("unlock took %s, want at most %s", elapsed, selfUnlockTimeout+time.Second)
+	}
+}
+
+func TestChallengeStore_SelfCertRoundTrip(t *testing.T) {
+	t.Parallel()
+	s, mr, _ := newTestChallengeStore(t)
+	ctx := context.Background()
+	if _, ok, err := s.SelfCert(ctx, "Enroll.Example.Test"); ok || err != nil {
+		t.Fatalf("an absent shared cert must be a clean miss: ok=%v err=%v", ok, err)
+	}
+	if err := s.PutSelfCert(ctx, "Enroll.Example.Test", []byte("bundle"), 3*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL("acme:self-cert:enroll.example.test"); ttl != 3*time.Hour {
+		t.Fatalf("the shared cert key must be lower-cased with the given TTL, ttl = %v", ttl)
+	}
+	got, ok, err := s.SelfCert(ctx, "ENROLL.example.test")
+	if err != nil || !ok || string(got) != "bundle" {
+		t.Fatalf("SelfCert = (%q, %v, %v), want the published bundle", got, ok, err)
+	}
+}
+
+func TestChallengeStore_PutSelfCertRejectsExpired(t *testing.T) {
+	t.Parallel()
+	s, mr, _ := newTestChallengeStore(t)
+	for _, ttl := range []time.Duration{0, -time.Minute} {
+		if err := s.PutSelfCert(context.Background(), "enroll.example.test", []byte("bundle"), ttl); !errors.Is(err, ErrChallengeStore) {
+			t.Fatalf("PutSelfCert(ttl=%v) = %v, want an ErrChallengeStore refusal", ttl, err)
+		}
+	}
+	if mr.Exists("acme:self-cert:enroll.example.test") {
+		t.Fatal("an expired cert must not be published")
 	}
 }

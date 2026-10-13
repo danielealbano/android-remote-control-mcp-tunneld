@@ -184,7 +184,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: attestOptional,
 		ACMEDirLE: leDir, ACMEDirGTS: inf.pebble.DirectoryURL, ACMEDirZeroSSL: inf.pebble.DirectoryURL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: challengeLE, ACMEChallengeGTS: challengeGTS, ACMEChallengeZeroSSL: challengeZeroSSL,
 		ACMEHTTPListen:   acmeHTTPListen,
 		ACMEDNSResolvers: []string{inf.pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
@@ -409,6 +409,25 @@ func TestE2E_CrossNodeTerminate(t *testing.T) {
 		return lookupErr == nil && !ok
 	}) {
 		t.Fatalf("the route was not unbound after cross-node terminate (last lookup error: %v)", lookupErr)
+	}
+}
+
+func TestE2E_ReservedCertsSharedAcrossReplicas(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+	for _, host := range []string{e2eEnrollHost, e2eControlHost} {
+		serialA, errA := tunneltest.ServedSerial(t, edgeA, host)
+		serialB, errB := tunneltest.ServedSerial(t, edgeB, host)
+		if serialA == "" || serialB == "" {
+			t.Fatalf("both replicas must serve a %s certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if errA != nil || errB != nil {
+			t.Logf("%s probe handshake ended after the certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if serialA != serialB {
+			t.Errorf("replica B must reuse replica A's %s certificate (one ACME order per host), serials %s vs %s", host, serialA, serialB)
+		}
 	}
 }
 

@@ -48,6 +48,7 @@ services:
       - ./banfiles:/banfiles-manual:ro   # manual bans: edit deploy/banfiles/bans.txt on the HOST — hot-reloaded within --ban-poll
       - ./acme:/acme                # bind mount (operator-owned): per-CA ACME account keys + reserved-host self-certs
       - ./logs:/logs                # bind mount (operator-owned, writable by DEPLOY_UID)
+      - ./conn-logs:/conn-logs
     ports: ["443:443", "80:80"]     # Mesh (:9443) + internal
                                     # metrics (:9090) stay on the compose network — never publish them.
     logging: *caplog

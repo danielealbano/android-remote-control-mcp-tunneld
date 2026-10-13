@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
@@ -54,11 +53,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// matches the lowercased SNI at the edge (an uppercase prefix would otherwise no-route every tunnel).
 	cfg.NamePrefix = strings.ToLower(cfg.NamePrefix)
 
-	redisOpts, err := redis.ParseURL(cfg.RedisURL)
+	redisConn, err := config.ParseRedisURL(cfg.RedisURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("valkey client: %w", err)
 	}
-	rdb := redis.NewClient(redisOpts)
+	rdb := redisConn.NewClient()
 	defer closeLogged(logger, "valkey client", rdb)
 
 	nodeID := newNodeID()
@@ -134,9 +133,17 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	rec := metrics.NewPromRecorder(m, capLogger, reg, logger) // reg (router.Registry) is the TrafficSink
 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
-	// S3 write; a fixed worker pool drains with per-item retry, a full queue drops-newest and bumps the
-	// dropped-events counter. Both the phone control plane and the public edge log through it.
-	asyncLogs := store.NewAsyncConnLog(st, m.ConnLogDropped().Inc, logger)
+	// S3 write; a full queue drops-newest and bumps the dropped-events counter. Both the phone control
+	// plane and the public edge log through it.
+	connLogs, err := store.NewConnLogSpool(cfg.ConnLogDir, nodeID, st, connLogDropped(m.ConnLogDropped()), logger)
+	if err != nil {
+		return fmt.Errorf("connection-log spool: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+		defer dcancel()
+		connLogs.Drain(dctx)
+	}()
 
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
 	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
@@ -167,7 +174,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Phone control plane.
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: asyncLogs, Recorder: rec, Logger: logger,
+		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
@@ -201,7 +208,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: asyncLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
 	meshHandler, err := mesh.NewHandler(phoneMgr.OwnsConn,
@@ -213,8 +220,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
 	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, chal, logger)
-	reserved.loadCache()
+		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
+	reserved.loadCache(ctx)
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
@@ -378,9 +385,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		guarded.Wait(sctx)
 	}
 	werr := g.Wait()
-	asyncLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
-	rec.FinalFlush()      // after ALL producers stopped — no late deltas lost (self-bounded)
-	rec.FlushCapLog()     // pending cap-hit summaries
+	connLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
+	rec.FinalFlush()     // after ALL producers stopped — no late deltas lost (self-bounded)
+	rec.FlushCapLog()    // pending cap-hit summaries
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 		logger.Warn("node deregister failed (expires by TTL)", "err", err)
 	}

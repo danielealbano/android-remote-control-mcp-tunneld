@@ -119,7 +119,7 @@ MUST NOT be relaxed without explicit user direction.
 - **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry, rate-limit
   windows, concurrency counters, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
   `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
-  locks and the reserved-host issuance lock `lock:acme-self:`) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
+  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
   pipelined `EXPIRE NX` right after the `INCR`. `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
   counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
@@ -139,7 +139,8 @@ MUST NOT be relaxed without explicit user direction.
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
   Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
   retries disabled → settle wait > the PUT timeout → GET-verify). Lifecycle expiry (logs 90d,
-  rejected-enroll 30d) is applied programmatically at startup.
+  rejected-enroll 30d) is applied programmatically at startup. Connection logs are only SPOOLED on the node
+  (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
 - v1 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
@@ -181,10 +182,15 @@ MUST NOT be relaxed without explicit user direction.
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
   summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
   value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert.
-- Connection-log S3 writes are ASYNC (`store.AsyncConnLog`): enqueue is O(1) and MUST NEVER block an
-  admission/splice/teardown path; a bounded 5000-event queue + 8 workers + per-item exponential retry
-  drain it; a full queue drops-newest and increments `tunneld_connlog_dropped_total`; shutdown drains
-  the queue (bounded) so `server-shutdown` end events land.
+- Connection logs are SPOOLED and uploaded per node (`store.ConnLogSpool`): enqueue is O(1) and MUST NEVER
+  block an admission/splice/teardown path (a 5000-event channel → ONE writer appending JSON lines to a local
+  file in `--conn-log-dir`); files rotate at clock-aligned 5-minute windows / 16 MiB / shutdown and a
+  separate uploader puts each as `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (all tunnels
+  mixed; key from the file name, so re-uploads overwrite), deleting it locally ONLY after the upload
+  succeeds. An S3 outage loses nothing below the 1 GiB spool cap; `tunneld_connlog_dropped_total` counts
+  events lost to a full channel, a failed append, the cap, still being queued at the shutdown deadline, or
+  arriving after shutdown; every Warn on this path is rate-bounded. Shutdown rotates + uploads within
+  `--shutdown-grace`; leftovers upload at the next start.
 - NEVER log secrets, key material, or tunnel payloads.
 
 ### Repository hygiene

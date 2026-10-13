@@ -114,22 +114,6 @@ func TestNewConnID_Format(t *testing.T) {
 	}
 }
 
-func TestLogKeyLayoutAndSort(t *testing.T) {
-	ev := store.Event{Event: "start", Conn: "aabbccdd", Tunnel: "k7m2x9qwp4",
-		TSStart: time.Date(2026, 8, 17, 14, 12, 33, 482910114, time.UTC)}
-	key := store.LogKey(ev)
-	want := "tunnel-logs/k7m2x9qwp4/2026/08/17/20260817T141233.482910114Z-aabbccdd-start.json"
-	if key != want {
-		t.Errorf("LogKey = %q, want %q", key, want)
-	}
-	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
-	later := ev
-	later.TSStart = ev.TSStart.Add(time.Second)
-	if store.LogKey(ev) >= store.LogKey(later) {
-		t.Error("keys must sort chronologically")
-	}
-}
-
 func TestRejectedKeyLayout(t *testing.T) {
 	ev := store.RejectedEnrollment{TS: time.Date(2026, 8, 17, 1, 2, 3, 4, time.UTC)}
 	key := store.RejectedKey(ev)

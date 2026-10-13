@@ -44,7 +44,7 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 2. **Create the operator-owned dirs** (bind-mounted):
    ```sh
-   mkdir -p deploy/logs deploy/acme            # acme persists per-CA account keys + reserved-host certs across restarts
+   mkdir -p deploy/logs deploy/acme deploy/conn-logs   # acme persists per-CA account keys + reserved-host certs across restarts
    mkdir -p deploy/banfiles && : > deploy/banfiles/bans.txt   # host-edited manual bans (hot-reloaded within --ban-poll)
    mkdir -p deploy/attest && : > deploy/attest/signers.txt   # add accepted app signer SHA-256 digests, one per line
    ```

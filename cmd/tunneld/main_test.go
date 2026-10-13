@@ -91,6 +91,7 @@ func TestCLIServeDispatch(t *testing.T) {
 		"--acme-email", "ops@example.test",
 		"--acme-account-dir", dir,
 		"--acme-dns-provider", "cloudflare",
+		"--conn-log-dir", t.TempDir(),
 	}
 
 	main()

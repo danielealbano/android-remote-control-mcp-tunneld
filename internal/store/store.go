@@ -44,7 +44,7 @@ type LifecycleStore interface {
 // Store is the full composition implemented by the S3 backend and the tunneltest fake.
 type Store interface {
 	NameStore
-	ConnLogStore
+	ConnLogUploader
 	EvidenceStore
 	LifecycleStore
 }

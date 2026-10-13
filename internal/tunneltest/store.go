@@ -1,7 +1,10 @@
 package tunneltest
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"sync"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -68,6 +71,25 @@ func (s *Store) DeleteName(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.names, name)
+	return nil
+}
+
+func (s *Store) PutConnLogFile(_ context.Context, _ string, body io.ReadSeeker, _ int64) error {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	var evs []store.Event
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+		var ev store.Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			return err
+		}
+		evs = append(evs, ev)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ConnLogs = append(s.ConnLogs, evs...)
 	return nil
 }
 

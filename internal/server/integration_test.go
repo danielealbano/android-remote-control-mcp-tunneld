@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,7 +111,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 
 		ACMEDirLE: acmeDirLE, ACMEDirGTS: acmeDirGTS, ACMEDirZeroSSL: acmeDirZeroSSL,
 		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq",
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: config.ChallengeDNS01, ACMEChallengeGTS: config.ChallengeDNS01, ACMEChallengeZeroSSL: config.ChallengeDNS01,
 		ACMEDNSResolvers: dnsResolvers, ACMEDNSSkipPropagationCheck: true,
 		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
@@ -331,11 +334,6 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if err != nil || rec.CA == "" {
 		t.Errorf("name record missing/incomplete in MinIO: %+v %v", rec, err)
 	}
-	if !waitBool(15*time.Second, func() bool {
-		return len(tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/")) > 0
-	}) {
-		t.Error("no connection-log object written to MinIO")
-	}
 
 	// Both object-lifecycle rules were provisioned at startup.
 	lc := tunneltest.S3LifecyclePrefixes(t, env.s3URL, env.s3Access, env.s3Secret, itBucket)
@@ -355,6 +353,34 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	}
 	if string(c.Identity().IdentityCertPEM) == oldIDCert || len(c.Identity().PublicCertPEM) == 0 {
 		t.Error("renewal must rotate the identity + public certs")
+	}
+
+	if err := env.drain(); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	keyRe := regexp.MustCompile(`^tunnel-logs/\d{4}/\d{2}/\d{2}/\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{16}\.jsonl$`)
+	keys := tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/")
+	if len(keys) == 0 {
+		t.Fatal("no connection-log object written to MinIO")
+	}
+	events := 0
+	for _, k := range keys {
+		if !keyRe.MatchString(k) {
+			t.Errorf("connection-log key %q does not match the per-node layout", k)
+		}
+		for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+			var ev store.Event
+			if err := json.Unmarshal(line, &ev); err != nil {
+				t.Errorf("connection-log line in %s is not valid JSON: %q (%v)", k, line, err)
+				continue
+			}
+			if ev.Tunnel == ident.Name {
+				events++
+			}
+		}
+	}
+	if events < 2 {
+		t.Errorf("the objects must carry at least the phone start and end events of %s, got %d", ident.Name, events)
 	}
 }
 

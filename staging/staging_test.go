@@ -441,7 +441,7 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: true,
 		ACMEDirLE: tc.leDir, ACMEDirGTS: tc.gtsDir, ACMEDirZeroSSL: unreachableDir,
 		ACMEEmail: "ops@free.example.com", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
-		ACMEAccountDir: accountDir, ACMEDNSProvider: "",
+		ACMEAccountDir: accountDir, ACMEDNSProvider: "", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl,
 		ACMEHTTPListen:      net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)),
 		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,

@@ -60,22 +60,6 @@ type Event struct {
 // tsNanosLayout sorts chronologically as a string in an S3 listing.
 const tsNanosLayout = "20060102T150405.000000000Z"
 
-// LogKey is the S3 key for a connection-log event:
-// tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<tsNanos>-<conn8>-<event>.json (conn8 = first 8 conn chars).
-func LogKey(ev Event) string {
-	ts := ev.TSStart
-	if ev.Event == "end" && !ev.TSEnd.IsZero() {
-		ts = ev.TSEnd
-	}
-	ts = ts.UTC()
-	conn8 := ev.Conn
-	if len(conn8) > 8 {
-		conn8 = conn8[:8]
-	}
-	return fmt.Sprintf("tunnel-logs/%s/%04d/%02d/%02d/%s-%s-%s.json",
-		ev.Tunnel, ts.Year(), ts.Month(), ts.Day(), ts.Format(tsNanosLayout), conn8, ev.Event)
-}
-
 // connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure
 // path that exercises MustConnID's fallback. Production always uses crypto/rand.
 var connIDRand = rand.Read

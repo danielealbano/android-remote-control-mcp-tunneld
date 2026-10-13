@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/edge"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
@@ -304,4 +306,8 @@ func parseCSRPEM(pemStr string) (*x509.CertificateRequest, error) {
 		return nil, errors.New("server: malformed CSR PEM")
 	}
 	return x509.ParseCertificateRequest(block.Bytes)
+}
+
+func connLogDropped(c prometheus.Counter) func(int) {
+	return func(n int) { c.Add(float64(n)) }
 }

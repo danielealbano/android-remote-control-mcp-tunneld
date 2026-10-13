@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -97,16 +98,18 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	}
 
 	found := waitBool(15*time.Second, func() bool {
-		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/"+ident.Name+"/") {
-			if !strings.HasSuffix(k, "-end.json") {
+		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/") {
+			if !strings.HasSuffix(k, ".jsonl") {
 				continue
 			}
-			var ev store.Event
-			if err := json.Unmarshal(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k), &ev); err != nil {
-				t.Fatalf("connection log %s is not valid JSON: %v", k, err)
-			}
-			if ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
-				return true
+			for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+				var ev store.Event
+				if err := json.Unmarshal(line, &ev); err != nil {
+					t.Fatalf("connection log %s has an invalid JSON line: %v", k, err)
+				}
+				if ev.Tunnel == ident.Name && ev.Event == "end" && ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
+					return true
+				}
 			}
 		}
 		return false
