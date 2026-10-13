@@ -31,8 +31,9 @@ type S3Config struct {
 // writes, no ETags. Registry writes go through a client with SDK auto-retries DISABLED (a timed-out
 // claim PUT must never be silently replayed into a zombie write); the caller's ctx carries the deadline.
 type S3Store struct {
-	cli    *s3.Client
-	bucket string
+	cli     *s3.Client
+	bucket  string
+	logHTTP s3.HTTPClient
 }
 
 var _ Store = (*S3Store)(nil)
@@ -54,7 +55,7 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 		// write conn logs without their own deadline). A caller ctx with a SHORTER deadline still wins.
 		HTTPClient: awshttp.NewBuildableClient().WithTimeout(30 * time.Second),
 	})
-	return &S3Store{cli: cli, bucket: cfg.Bucket}, nil
+	return &S3Store{cli: cli, bucket: cfg.Bucket, logHTTP: awshttp.NewBuildableClient()}, nil
 }
 
 func nameKey(name string) string { return "names/" + name }
@@ -114,7 +115,7 @@ func (s *S3Store) PutConnLogFile(ctx context.Context, key string, body io.ReadSe
 		Body:          body,
 		ContentLength: aws.Int64(size),
 		ContentType:   aws.String("application/x-ndjson"),
-	})
+	}, func(o *s3.Options) { o.HTTPClient = s.logHTTP })
 	if err != nil {
 		return fmt.Errorf("store: put conn log %q: %w", key, err)
 	}

@@ -32,6 +32,8 @@ const (
 	spoolReadySuffix  = ".jsonl"
 	spoolActiveSuffix = ".jsonl.part"
 	spoolMaxNameTries = 1000
+	spoolUploadBase   = 30 * time.Second
+	spoolUploadRate   = 128 << 10
 )
 
 var spoolName = regexp.MustCompile(`^(\d{8}T\d{6}\.\d{9}Z)-([0-9a-f]+)\.jsonl(\.part)?$`)
@@ -69,6 +71,11 @@ type ConnLogSpool struct {
 	ioMu         sync.Mutex
 	ioLast       time.Time
 	ioSuppressed int
+	ioLastOp     string
+	ioLastPath   string
+	ioLastErr    error
+
+	abandon atomic.Bool
 
 	capWarned time.Time
 	lastStart time.Time
@@ -82,9 +89,9 @@ type ConnLogSpool struct {
 	drainOnce    sync.Once
 }
 
-type SpoolOption func(*ConnLogSpool) error
+type spoolOption func(*ConnLogSpool) error
 
-func WithSpoolClock(now func() time.Time) SpoolOption {
+func withSpoolClock(now func() time.Time) spoolOption {
 	return func(s *ConnLogSpool) error {
 		if now == nil {
 			return errors.New("store: nil conn-log spool clock")
@@ -94,7 +101,7 @@ func WithSpoolClock(now func() time.Time) SpoolOption {
 	}
 }
 
-func WithSpoolTick(d time.Duration) SpoolOption {
+func withSpoolTick(d time.Duration) spoolOption {
 	return func(s *ConnLogSpool) error {
 		if d <= 0 {
 			return fmt.Errorf("store: non-positive conn-log spool tick %v", d)
@@ -104,7 +111,7 @@ func WithSpoolTick(d time.Duration) SpoolOption {
 	}
 }
 
-func WithSpoolRetry(d time.Duration) SpoolOption {
+func withSpoolRetry(d time.Duration) spoolOption {
 	return func(s *ConnLogSpool) error {
 		if d <= 0 {
 			return fmt.Errorf("store: non-positive conn-log upload retry %v", d)
@@ -114,7 +121,7 @@ func WithSpoolRetry(d time.Duration) SpoolOption {
 	}
 }
 
-func WithSpoolLimits(maxFile, maxBytes int64) SpoolOption {
+func withSpoolLimits(maxFile, maxBytes int64) spoolOption {
 	return func(s *ConnLogSpool) error {
 		if maxFile <= 0 || maxBytes <= 0 {
 			return fmt.Errorf("store: non-positive conn-log spool limits %d / %d", maxFile, maxBytes)
@@ -124,7 +131,7 @@ func WithSpoolLimits(maxFile, maxBytes int64) SpoolOption {
 	}
 }
 
-func withFileOps(write func(*os.File, []byte) (int, error), sync func(*os.File) error, truncate func(*os.File, int64) error) SpoolOption {
+func withFileOps(write func(*os.File, []byte) (int, error), sync func(*os.File) error, truncate func(*os.File, int64) error) spoolOption {
 	return func(s *ConnLogSpool) error {
 		if write == nil || sync == nil || truncate == nil {
 			return errors.New("store: nil conn-log spool file op")
@@ -134,7 +141,7 @@ func withFileOps(write func(*os.File, []byte) (int, error), sync func(*os.File) 
 	}
 }
 
-func NewConnLogSpool(dir, nodeID string, up ConnLogUploader, onDrop func(n int), logger *slog.Logger, opts ...SpoolOption) (*ConnLogSpool, error) {
+func NewConnLogSpool(dir, nodeID string, up ConnLogUploader, onDrop func(n int), logger *slog.Logger, opts ...spoolOption) (*ConnLogSpool, error) {
 	switch {
 	case dir == "":
 		return nil, errors.New("store: empty conn-log spool directory")
@@ -290,18 +297,28 @@ func (s *ConnLogSpool) writer() {
 	t := time.NewTicker(s.tick)
 	defer t.Stop()
 	var w activeFile
+	abandoned := 0
 	for {
 		select {
 		case ev, ok := <-s.events:
 			if !ok {
+				if abandoned > 0 {
+					s.logger.Warn("conn-log events dropped at the shutdown deadline", "dir", s.dir, "events", abandoned)
+				}
 				s.rotate(&w)
 				return
+			}
+			if s.abandon.Load() {
+				s.onDrop(1)
+				abandoned++
+				continue
 			}
 			s.append(&w, ev)
 		case <-t.C:
 			if w.f != nil && !s.inWindow(w, s.now()) {
 				s.rotate(&w)
 			}
+			s.flushIOWarn(false)
 		}
 	}
 }
@@ -486,7 +503,9 @@ func (s *ConnLogSpool) uploadFile(name string) (uploaded, failed bool) {
 		s.ioWarn("stat", path, errors.Join(err, f.Close()))
 		return false, false
 	}
-	err = s.up.PutConnLogFile(s.upCtx, key, f, info.Size())
+	uctx, cancel := context.WithTimeout(s.upCtx, uploadTimeout(info.Size()))
+	err = s.up.PutConnLogFile(uctx, key, f, info.Size())
+	cancel()
 	if cerr := f.Close(); cerr != nil {
 		s.ioWarn("close", path, cerr)
 	}
@@ -502,6 +521,10 @@ func (s *ConnLogSpool) uploadFile(name string) (uploaded, failed bool) {
 	}
 	s.spooled.Add(-info.Size())
 	return true, false
+}
+
+func uploadTimeout(size int64) time.Duration {
+	return spoolUploadBase + time.Duration(size)*time.Second/spoolUploadRate
 }
 
 func spoolKey(name string) (string, error) {
@@ -532,9 +555,22 @@ func (s *ConnLogSpool) ioWarn(op, path string, err error) {
 	now := s.now()
 	if !s.ioLast.IsZero() && now.Sub(s.ioLast) < spoolIOLogEvery {
 		s.ioSuppressed++
+		s.ioLastOp, s.ioLastPath, s.ioLastErr = op, path, err
 		return
 	}
 	s.logger.Warn("conn-log spool I/O failed", "op", op, "path", path, "err", err, "suppressed_since_last", s.ioSuppressed)
+	s.ioLast, s.ioSuppressed = now, 0
+}
+
+func (s *ConnLogSpool) flushIOWarn(force bool) {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	now := s.now()
+	if s.ioSuppressed == 0 || (!force && now.Sub(s.ioLast) < spoolIOLogEvery) {
+		return
+	}
+	s.logger.Warn("conn-log spool I/O failures suppressed", "count", s.ioSuppressed,
+		"last_op", s.ioLastOp, "last_path", s.ioLastPath, "last_err", s.ioLastErr)
 	s.ioLast, s.ioSuppressed = now, 0
 }
 
@@ -550,7 +586,8 @@ func (s *ConnLogSpool) Drain(ctx context.Context) {
 		select {
 		case <-s.writerDone:
 		case <-ctx.Done():
-			s.logger.Warn("conn-log spool writer did not finish by the shutdown deadline", "dir", s.dir)
+			s.abandon.Store(true)
+			<-s.writerDone
 		}
 		close(s.stopUp)
 		<-s.uploaderDone
@@ -560,6 +597,7 @@ func (s *ConnLogSpool) Drain(ctx context.Context) {
 		} else if len(names) > 0 {
 			s.logger.Warn("conn-log spool files left for the next start", "dir", s.dir, "files", len(names))
 		}
+		s.flushIOWarn(true)
 		s.releaseLock()
 	})
 }

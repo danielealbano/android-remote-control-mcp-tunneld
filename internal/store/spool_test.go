@@ -49,9 +49,9 @@ func newClock(t time.Time) *fakeClock {
 func (c *fakeClock) now() time.Time      { return time.Unix(0, c.ns.Load()).UTC() }
 func (c *fakeClock) add(d time.Duration) { c.ns.Add(int64(d)) }
 func (c *fakeClock) set(t time.Time)     { c.ns.Store(t.UnixNano()) }
-func (c *fakeClock) option() SpoolOption { return WithSpoolClock(c.now) }
-func fastTicks() []SpoolOption {
-	return []SpoolOption{WithSpoolTick(time.Millisecond), WithSpoolRetry(20 * time.Millisecond)}
+func (c *fakeClock) option() spoolOption { return withSpoolClock(c.now) }
+func fastTicks() []spoolOption {
+	return []spoolOption{withSpoolTick(time.Millisecond), withSpoolRetry(20 * time.Millisecond)}
 }
 func ev(tunnel string, i int) Event {
 	return Event{Schema: 1, Event: "start", Tunnel: tunnel, SrcPort: i}
@@ -63,14 +63,26 @@ type upload struct {
 }
 
 type fakeUploader struct {
-	mu      sync.Mutex
-	uploads []upload
-	failN   int
-	block   bool
+	mu        sync.Mutex
+	uploads   []upload
+	failN     int
+	block     bool
+	gate      chan struct{}
+	deadlines []time.Duration
 }
 
 func (f *fakeUploader) PutConnLogFile(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
+	if f.gate != nil {
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	f.mu.Lock()
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadlines = append(f.deadlines, time.Until(dl))
+	}
 	if f.block {
 		f.mu.Unlock()
 		<-ctx.Done()
@@ -108,7 +120,7 @@ type spoolEnv struct {
 	log   *syncBuf
 }
 
-func newSpool(t *testing.T, dir string, up ConnLogUploader, opts ...SpoolOption) spoolEnv {
+func newSpool(t *testing.T, dir string, up ConnLogUploader, opts ...spoolOption) spoolEnv {
 	t.Helper()
 	drops := &atomic.Int64{}
 	log := &syncBuf{}
@@ -176,6 +188,15 @@ func lines(t *testing.T, body []byte) []Event {
 	return out
 }
 
+func lineSize(t *testing.T, e Event) int64 {
+	t.Helper()
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int64(len(raw) + 1)
+}
+
 func seed(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
@@ -191,7 +212,8 @@ func TestSpool_WindowRotationUploadsAndDeletes(t *testing.T) {
 	up := &fakeUploader{}
 	env := newSpool(t, t.TempDir(), up, append(fastTicks(), clock.option())...)
 	put(t, env.s, ev("a", 1), ev("b", 2))
-	waitFor(t, "the active file", func() bool { return len(spoolFiles(t, env.dir)) == 1 })
+	want := lineSize(t, ev("a", 1)) + lineSize(t, ev("b", 2))
+	waitFor(t, "both lines written", func() bool { return env.s.spooled.Load() == want })
 	if got := up.snapshot(); len(got) != 0 {
 		t.Fatalf("a file must not be uploaded before its window ends, got %d uploads", len(got))
 	}
@@ -210,13 +232,16 @@ func TestSpool_WindowRotationUploadsAndDeletes(t *testing.T) {
 func TestSpool_SizeRotationNamesEachFileByItsStart(t *testing.T) {
 	t.Parallel()
 	clock := newClock(t0)
-	up := &fakeUploader{}
-	env := newSpool(t, t.TempDir(), up, append(fastTicks(), clock.option(), WithSpoolLimits(150, 1<<20))...)
+	up := &fakeUploader{gate: make(chan struct{})}
+	env := newSpool(t, t.TempDir(), up, append(fastTicks(), clock.option(), withSpoolLimits(150, 1<<20))...)
+	var written int64
 	for i := range 6 {
 		put(t, env.s, ev("a", i))
+		written += lineSize(t, ev("a", i))
+		waitFor(t, "the append", func() bool { return env.s.spooled.Load() == written })
 		clock.add(time.Millisecond)
-		waitFor(t, "the append", func() bool { return env.s.spooled.Load() > 0 })
 	}
+	close(up.gate)
 	drainWithin(env.s, 5*time.Second)
 	got := up.snapshot()
 	if len(got) < 2 {
@@ -243,7 +268,6 @@ func TestSpoolKey_LayoutSortAndRejects(t *testing.T) {
 	if err != nil || key != "tunnel-logs/2026/10/13/"+name {
 		t.Fatalf("spoolKey = (%q, %v)", key, err)
 	}
-	// Chronological string sort: a later event sorts after an earlier one under the same day prefix.
 	later := "20261013T235959.123456790Z-" + testNode + ".jsonl"
 	if name >= later {
 		t.Fatal("names must sort chronologically")
@@ -345,7 +369,7 @@ func TestSpool_UnreadableFileDoesNotBlockNewer(t *testing.T) {
 func TestSpool_CapDropsWithOneWarnPerWindow(t *testing.T) {
 	t.Parallel()
 	clock := newClock(t0)
-	env := newSpool(t, t.TempDir(), &fakeUploader{block: true}, append(fastTicks(), clock.option(), WithSpoolLimits(1<<20, 200))...)
+	env := newSpool(t, t.TempDir(), &fakeUploader{block: true}, append(fastTicks(), clock.option(), withSpoolLimits(1<<20, 200))...)
 	for i := range 20 {
 		put(t, env.s, ev("a", i))
 	}
@@ -591,16 +615,16 @@ func TestNewConnLogSpool_RejectsInvalidInput(t *testing.T) {
 			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, nil)
 		}},
 		{name: "zero tick", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, WithSpoolTick(0))
+			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolTick(0))
 		}},
 		{name: "zero retry", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, WithSpoolRetry(0))
+			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolRetry(0))
 		}},
 		{name: "zero limits", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, WithSpoolLimits(0, 1))
+			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolLimits(0, 1))
 		}},
 		{name: "nil clock", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, WithSpoolClock(nil))
+			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolClock(nil))
 		}},
 	}
 	for _, tc := range tests {
@@ -610,5 +634,86 @@ func TestNewConnLogSpool_RejectsInvalidInput(t *testing.T) {
 				t.Fatalf("NewConnLogSpool = (%v, %v), want a refusal", s, err)
 			}
 		})
+	}
+}
+
+func TestSpool_DrainDeadlineDropsQueuedEventsAndStopsWriter(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	write := func(f *os.File, b []byte) (int, error) {
+		select {
+		case entered <- struct{}{}:
+			<-release
+		default:
+		}
+		return f.Write(b)
+	}
+	env := newSpool(t, t.TempDir(), &fakeUploader{}, append(fastTicks(), withFileOps(write, (*os.File).Sync, (*os.File).Truncate))...)
+	put(t, env.s, ev("a", 0))
+	<-entered
+	put(t, env.s, ev("a", 1), ev("a", 2), ev("a", 3), ev("a", 4))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan struct{})
+	go func() { env.s.Drain(ctx); close(done) }()
+	waitFor(t, "the deadline to abandon the queue", env.s.abandon.Load)
+	close(release)
+	<-done
+	select {
+	case <-env.s.writerDone:
+	default:
+		t.Fatal("Drain must not return before the writer has stopped")
+	}
+	if env.drops.Load() != 4 {
+		t.Fatalf("events still queued at the deadline must be counted as dropped, drops = %d", env.drops.Load())
+	}
+	if !strings.Contains(env.log.String(), `msg="conn-log events dropped at the shutdown deadline"`) ||
+		!strings.Contains(env.log.String(), "events=4") {
+		t.Fatalf("the abandoned events must be logged with their count; log = %q", env.log.String())
+	}
+}
+
+func TestSpool_SuppressedIOErrorsAreSummarised(t *testing.T) {
+	t.Parallel()
+	failSync := func(*os.File) error { return errors.New("fsync failed") }
+	for _, viaDrain := range []bool{false, true} {
+		clock := newClock(t0)
+		env := newSpool(t, t.TempDir(), &fakeUploader{}, append(fastTicks(), clock.option(),
+			withSpoolLimits(10, 1<<20), withFileOps((*os.File).Write, failSync, (*os.File).Truncate))...)
+		put(t, env.s, ev("a", 1))
+		waitFor(t, "the first fsync failure", func() bool { return strings.Contains(env.log.String(), "op=fsync") })
+		clock.add(time.Millisecond)
+		put(t, env.s, ev("a", 2))
+		waitFor(t, "the suppressed failure", func() bool {
+			env.s.ioMu.Lock()
+			defer env.s.ioMu.Unlock()
+			return env.s.ioSuppressed == 1
+		})
+		if viaDrain {
+			drainWithin(env.s, 5*time.Second)
+		} else {
+			clock.add(spoolIOLogEvery)
+		}
+		waitFor(t, "the suppressed summary", func() bool {
+			return strings.Contains(env.log.String(), `msg="conn-log spool I/O failures suppressed" count=1 last_op=fsync`)
+		})
+	}
+}
+
+func TestSpool_UploadDeadlineScalesWithFileSize(t *testing.T) {
+	t.Parallel()
+	if got := uploadTimeout(16 << 20); got != 158*time.Second {
+		t.Fatalf("a 16 MiB file must get 30 s + 128 s, got %v", got)
+	}
+	dir := t.TempDir()
+	seed(t, dir, "20261013T100000.000000000Z-"+testNode+".jsonl", strings.Repeat("x", 1<<20))
+	up := &fakeUploader{}
+	newSpool(t, dir, up, fastTicks()...)
+	waitFor(t, "the upload", func() bool { return len(up.snapshot()) == 1 })
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if len(up.deadlines) != 1 || up.deadlines[0] > 38*time.Second || up.deadlines[0] < 36*time.Second {
+		t.Fatalf("a 1 MiB upload must get a 38 s deadline, got %v", up.deadlines)
 	}
 }
