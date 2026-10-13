@@ -35,22 +35,22 @@ Why: the deployment runs a redundant Valkey behind Sentinel; tunneld today conne
 DoD: [x] a Sentinel URL passes `Validate()` and connects through the master Sentinel reports; a plain URL is
 unchanged.
 
-## [ ] US2 — Connection logs spooled locally, uploaded as per-node JSONL objects
+## [x] US2 — Connection logs spooled locally, uploaded as per-node JSONL objects
 
 Why: the deployment targets thousands of connections; S3 writes must not scale with tunnels or connections,
 and an S3 outage must not lose connection logs (decision recorded with the user — see Deviations).
 
-- [ ] New required flag `--conn-log-dir` (`TUNNELD_CONN_LOG_DIR`), a directory on a persistent volume.
+- [x] New required flag `--conn-log-dir` (`TUNNELD_CONN_LOG_DIR`), a directory on a persistent volume.
       `Validate()` requires it (and, if it exists, that it is a directory); `server.Run` creates it (0o700) if
       missing and takes an exclusive `flock` on `<dir>/.lock` — a second process using the same directory
       fails fast; the lock is released on every `Run` return path. Spool files are 0o600.
-- [ ] Enqueue stays O(1) and never blocks an admission/splice/teardown path: events go to a bounded in-memory
+- [x] Enqueue stays O(1) and never blocks an admission/splice/teardown path: events go to a bounded in-memory
       channel (5000 events); ONE writer goroutine appends each event as one JSON line straight to the active
       spool file (no user-space buffer). A full channel, a refused post-shutdown event, or a failed append
       drops the event (`tunneld_connlog_dropped_total` +1 each). A failed or short append is repaired before
       the next write: the file is truncated back to its pre-write offset, and if that fails too the file is
       rotated out and the next event opens a new file — a partial line never sits mid-file.
-- [ ] Files follow clock-aligned UTC 5-minute windows (…:00, …:05, …) and are opened only when their first
+- [x] Files follow clock-aligned UTC 5-minute windows (…:00, …:05, …) and are opened only when their first
       event arrives (no empty files). The active file is named `<file-start>-<node-id>.jsonl.part`, where
       `<file-start>` is the UTC time the file was opened with NANOSECOND precision
       (`20060102T150405.000000000Z`) — a second file in the same window (16 MiB split, clock step)
@@ -60,40 +60,40 @@ and an S3 outage must not lose connection logs (decision recorded with the user 
       `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (all tunnels mixed, every line carries
       `tunnel`; still under `tunnel-logs/`, so the 90-day lifecycle is unchanged; window alignment keeps every
       object inside one UTC day) — so a re-upload after a crash overwrites the same object.
-- [ ] A separate uploader goroutine (never blocking the writer) uploads ready files oldest-first and deletes
+- [x] A separate uploader goroutine (never blocking the writer) uploads ready files oldest-first and deletes
       each one locally ONLY after its upload succeeds. A pass stops at the first S3 failure (one Warn per pass
       with the file and the error) and is retried every minute; once uploads succeed the backlog drains
       continuously. A file that cannot be read locally is logged and skipped for that pass (it never blocks
       newer files). Local I/O errors (append, truncate, fsync, rename, delete, list) are logged at most once
       per minute; a failed fsync still rotates and uploads the file (best effort — the page-cache content is
       uploaded).
-- [ ] An S3 outage drops nothing while the spool is below its 1 GiB cap; at the cap, new events are dropped
+- [x] An S3 outage drops nothing while the spool is below its 1 GiB cap; at the cap, new events are dropped
       (`tunneld_connlog_dropped_total` +1 each) with at most one Warn per window. Only files matching the
       spool naming pattern are counted, recovered or uploaded (`.lock`, `lost+found` etc. are ignored).
-- [ ] Startup recovery (before the writer starts, never blocking the listeners): each leftover `.part` file
+- [x] Startup recovery (before the writer starts, never blocking the listeners): each leftover `.part` file
       is truncated to its last newline (a Warn reports any dropped bytes) and renamed to `.jsonl`; an empty
       one is removed. Leftover ready files simply head the uploader's oldest-first queue.
-- [ ] Shutdown (where the conn-log queue was drained before): intake stops, the writer rotates the active
+- [x] Shutdown (where the conn-log queue was drained before): intake stops, the writer rotates the active
       file, and the uploader runs until the spool is empty or `--shutdown-grace` expires — what remains stays
       on disk for the next start. The writer and uploader goroutines stop on EVERY `Run` return path, and the
       flush is bounded by the single shutdown deadline (no second full grace period).
 
-### [ ] Task 2.1 — Spool writer + uploader
+### [x] Task 2.1 — Spool writer + uploader
 
-- [ ] `internal/config`: `--conn-log-dir` (required for serve; must be a directory if it exists).
-- [ ] `internal/store`: replace the in-memory per-tunnel batcher (`AsyncConnLog`, `ConnLogBatch`,
+- [x] `internal/config`: `--conn-log-dir` (required for serve; must be a directory if it exists).
+- [x] `internal/store`: replace the in-memory per-tunnel batcher (`AsyncConnLog`, `ConnLogBatch`,
       `PutConnLogBatch`, `event.go`'s batch key) with the spool writer + uploader and an S3 upload of one spool
       file under its derived key; update `internal/tunneltest/store.go`'s fake to the new store surface.
-- [ ] `internal/server`: create + lock `--conn-log-dir`, wire the node id, keep the shutdown order (spool
+- [x] `internal/server`: create + lock `--conn-log-dir`, wire the node id, keep the shutdown order (spool
       flushed where the conn-log queue was drained), make the early-return cleanup a no-op once the normal
       shutdown has flushed, and name the `tunneld_connlog_dropped_total` wiring so it is unit-testable.
-- [ ] `internal/metrics`: `tunneld_connlog_dropped_total` help text → events dropped (channel full, append
+- [x] `internal/metrics`: `tunneld_connlog_dropped_total` help text → events dropped (channel full, append
       failure, spool cap, post-shutdown).
-- [ ] `deploy/` + `README.md` + `.gitignore`: compose bind mount `./conn-logs:/conn-logs`,
+- [x] `deploy/` + `README.md` + `.gitignore`: compose bind mount `./conn-logs:/conn-logs`,
       `TUNNELD_CONN_LOG_DIR=/conn-logs` in `tunneld.env.example`, the writable-mount comments
       (`docker-compose.yml`, `.env.example`), the quickstart `mkdir`, and `/deploy/conn-logs/` ignored (the
       spool holds source IPs and identity fingerprints).
-- [ ] Tests: unit (temp dir, fake clock, fake uploader) — append + clock-aligned window rotation, size
+- [x] Tests: unit (temp dir, fake clock, fake uploader) — append + clock-aligned window rotation, size
       rotation (a new nanosecond-named file), key derivation from the file name + chronological sort, no empty
       files, an existing name advancing by 1 ns (the size-rotation test advances its fake clock), fsync
       + rename on rotation, a failed fsync still rotating + uploading, a short append repaired (the next line
@@ -109,10 +109,10 @@ and an S3 outage must not lose connection logs (decision recorded with the user 
       `ServeCmd` builder set `--conn-log-dir` to its own temp dir (the integration, e2e and staging harnesses,
       the unit `lifecycleConfig`, the `cmd/tunneld` dispatch test, the config `validCfg` base); a second `Run`
       on the same directory succeeds once the first has returned (lock released).
-- [ ] Docs: `docs/PROJECT.md` §5/§6/§7, `docs/ARCHITECTURE.md` §1/§6/§8/§9 (shutdown text + its Mermaid
+- [x] Docs: `docs/PROJECT.md` §5/§6/§7, `docs/ARCHITECTURE.md` §1/§6/§8/§9 (shutdown text + its Mermaid
       chart)/§10, `.claude/rules/project.md` (durable state + Observability).
 
-DoD: [ ] connection logs land as per-node 5-minute JSONL objects; no event path blocks; an S3 outage loses
+DoD: [x] connection logs land as per-node 5-minute JSONL objects; no event path blocks; an S3 outage loses
 nothing below the spool cap; a process crash loses at most the torn last line (a host crash can also lose
 the un-fsynced tail since the last rotation).
 
@@ -206,3 +206,10 @@ DoD: [x] the release config uses `dockers_v2` only.
   process on the same `--conn-log-dir` fail fast; values — 16 MiB size rotation, 1 GiB spool cap, 1-minute
   upload retry, 5000-event channel. Code review #3's CR-002 (double shutdown grace) and
   CR-005 (untested dropped-metric wiring) are resolved inside the rewritten Task 2.1.
+- Task 2.1 (deploy): the writable-mount comments in `docker-compose.yml` / `.env.example` were NOT extended
+  to mention `./conn-logs` — the user's standing rule forbids adding comments to code/config; the new bind
+  mount and `TUNNELD_CONN_LOG_DIR` lines carry no comment, the README quickstart `mkdir` and `.gitignore`
+  carry the change. Why: the comment rule overrides the plan item.
+- Task 2.1 (server): `--conn-log-dir` is created (0o700) and `flock`ed inside `store.NewConnLogSpool`, which
+  `server.Run` calls during construction — the store owns the spool directory; `Run` still triggers it and
+  releases it on every return path via the idempotent `Drain`.

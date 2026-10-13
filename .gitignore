@@ -7,6 +7,7 @@
 /deploy/tunneld.env
 /deploy/logs/
 /deploy/acme/
+/deploy/conn-logs/
 /deploy/banfiles/
 /deploy/attest/
 /deploy/ntfy-alertmanager/config.scfg

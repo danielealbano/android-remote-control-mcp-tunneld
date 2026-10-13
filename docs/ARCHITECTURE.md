@@ -13,7 +13,8 @@ mesh, and the internal metrics listener are separate servers. ALL construction c
 socket is never bound while unserved. A valid reserved-host certificate cached on disk is loaded before the
 bind (replaced by the Valkey-shared one when that expires later); reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
 the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded; tunnel
-splicing is unaffected) and issuance is retried every minute.
+splicing is unaffected) and issuance is retried every minute. The connection-log spool directory is created,
+locked and recovered before the bind; uploading its leftover files runs in the background.
 
 ```mermaid
 flowchart TD
@@ -175,8 +176,9 @@ and retries (bounded), so the owner-conditional guarantee is deterministic, not 
 ## 6. Durable S3 state
 
 `internal/store` uses plain `GetObject`/`PutObject`/`DeleteObject` only (no conditional writes): the name
-registry (`names/<name>`), connection logs (JSONL batches `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl`;
-a connection's start and end may land in different batches), and rejected-enroll evidence
+registry (`names/<name>`), connection logs (per-node JSONL objects
+`tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed; a connection's start and
+end may land in different objects), and rejected-enroll evidence
 (`rejected-enroll/…`). Name uniqueness is the **write-verify claim**: GET (absent) → PUT a claim nonce
 under a hard timeout (SDK retries disabled) → settle wait (strictly > the PUT timeout) → GET-verify the
 nonce. Object-lifecycle expiration (logs 90d, rejected-enroll 30d) is applied programmatically at
@@ -242,14 +244,20 @@ summary/min) for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel
 attacker-controlled (raw SNI / unrouted name), so it is metric + Debug-line only — it never keys the
 dedup map nor emits a WARN, making log-flooding via that path impossible.
 
-Connection-log writes to S3 are ASYNC and BATCHED (`store.AsyncConnLog`): enqueue is O(1) and never blocks
-an admission, splice, or teardown path. Events are grouped per tunnel and UTC day into one JSONL batch
-written when it reaches 100 events or 5 minutes after its first event; at most 5000 events are buffered or
-in flight per node, and a full buffer drops the newest event (`tunneld_connlog_dropped_total` +1). A fixed
-pool of 8 workers writes the batches with exponential retry (5 attempts, 1/2/4/8 s); a batch whose retries
-are exhausted is dropped, adds its event count to `tunneld_connlog_dropped_total`, and logs a Warn with the
-tunnel, day, node and error. Every pending batch is written (bounded) at shutdown so `server-shutdown` end
-events land.
+Connection logs are SPOOLED locally and uploaded per node (`store.ConnLogSpool`): enqueue is O(1) and never
+blocks an admission, splice, or teardown path — events go to a 5000-event channel and ONE writer goroutine
+appends each as a JSON line to the active file in `--conn-log-dir` (`<file-start>-<node-id>.jsonl.part`,
+`<file-start>` = the UTC nanosecond the file was opened, created exclusively — an existing name advances by
+1 ns). A failed or short append is truncated back (or the file is rotated out), so a partial line never sits
+mid-file. The file is fsynced and renamed to `.jsonl` at the end of its clock-aligned 5-minute window, at
+16 MiB, and at shutdown. A separate uploader goroutine uploads ready files oldest-first to
+`tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (the key comes from the file name, so a
+re-upload overwrites) and deletes each only after its upload succeeds; a pass stops at the first S3 failure
+(one Warn) and retries every minute, and a locally unreadable file is skipped without blocking newer ones.
+At startup the directory is created (0o700) and `flock`ed (a second process fails fast), a crashed run's
+`.part` is truncated to its last newline (Warn on dropped bytes) and queued. `tunneld_connlog_dropped_total`
+counts events lost to a full channel, a failed append, the 1 GiB spool cap (one Warn per window) or arriving
+after shutdown; local I/O errors are logged at most once per minute.
 
 A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
 fan-out handler counts every failed record in `tunneld_log_sink_errors_total` and writes the sink's
@@ -266,7 +274,7 @@ flowchart LR
   phones --> drain["Shutdown enroll / control / mesh / internal / acme-http servers"]
   drain --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
   join --> group["errgroup unwinds: schedulers + watchers on the drain ctx"]
-  group --> queue["flush pending conn-log batches: server-shutdown end events land"]
+  group --> queue["rotate + upload the conn-log spool: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
   flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
 ```
@@ -274,11 +282,14 @@ flowchart LR
 Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
 (`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload, `admin-terminate` for an admin
 terminate). The ordering is load-bearing:
-the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then every pending conn-log
-batch is written, and only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
+the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the conn-log spool is
+rotated and uploaded (what does not upload within `--shutdown-grace` stays on disk for the next start), and
+only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
 
 ## 10. Configuration
 
 Config is a kong flag surface with `TUNNELD_*` env twins (note `--s3-*` → `TUNNELD_S_3_*`), validated
 fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are DECIMAL bits
-(`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) replaced by `[redacted]` — so no part of a credential can reach the log, at the cost of also hiding non-secret URL parts. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01`).
+(`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. `--conn-log-dir` (required) is the
+connection-log spool directory; `Validate()` rejects a path that exists but is not a directory, and startup
+creates and locks it. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) replaced by `[redacted]` — so no part of a credential can reach the log, at the cost of also hiding non-secret URL parts. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01`).

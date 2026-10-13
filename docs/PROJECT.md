@@ -127,14 +127,17 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
   day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
-- **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (JSONL batches under
-  `tunnel-logs/<name>/<yyyy>/<mm>/<dd>/<first-event-ts>-<node-id>.jsonl` — each batch holds one tunnel's
-  events for one UTC day on one node; a batch is written at 100 events, 5 minutes after its first event, or
-  at shutdown, so a busy tunnel gets many objects per day), and
+- **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (per-node JSONL objects
+  `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
+  `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
+  window, or per 16 MiB, then deletes it locally), and
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
   claim protocol, not storage semantics. **PRE-GO-LIVE**, validate a provider with a read-after-write
   probe (PUT → GET → overwrite-PUT → GET returns the newest body).
+- **Connection-log spool (local, transient):** `--conn-log-dir` (a persistent volume, locked by one process)
+  holds the not-yet-uploaded files; an S3 outage loses nothing below its 1 GiB cap, and leftover files are
+  uploaded at the next start.
 - **Retention** (object-lifecycle rules applied programmatically at startup): name registry
   **indefinite**, connection logs **90 days**, rejected-enrollment evidence **30 days**, tunnel content
   **never** (it is opaque and never stored).
@@ -150,8 +153,8 @@ only), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions
 over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
-batched per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to a full
-5000-event buffer or to a batch whose write exhausted its retries. The compose stack
+spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
+a full 5000-event queue, a failed local append, the 1 GiB spool cap, or arriving after shutdown. The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on
 `127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
 Secrets, key material, and tunnel payloads are NEVER logged.
@@ -159,6 +162,8 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 ## 7. Operations
 
 - **Deployment quickstart** (CA generation, `.env`, S3, ACME/DNS): [README](../README.md).
+- **Connection-log spool**: give every node its own persistent `--conn-log-dir` (two processes on one
+  directory are refused at startup); files left after a crash or an S3 outage are uploaded on the next start.
 - **Releases**: `v*` tags → goreleaser → linux amd64/arm64 archives + multi-arch image
   `ghcr.io/danielealbano/tunneld`.
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
