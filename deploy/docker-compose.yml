@@ -70,9 +70,8 @@ services:
       - minio-data:/data
     logging: *caplog
 
-  # One-shot: create the durable-state bucket (object-lifecycle expiration is applied PROGRAMMATICALLY by
-  # tunneld's store.EnsureLifecycles at startup — no manual lifecycle config here). Production uses the
-  # provider's own bucket; document the PRE-GO-LIVE read-after-write probe in docs/PROJECT.md.
+  # One-shot: create the durable-state bucket. Production uses the provider's own bucket; document the
+  # PRE-GO-LIVE read-after-write probe in docs/PROJECT.md.
   createbuckets:
     image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
     depends_on:

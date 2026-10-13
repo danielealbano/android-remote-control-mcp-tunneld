@@ -301,10 +301,6 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	g, gctx := errgroup.WithContext(ctx)
 
-	// Startup provisioning (best-effort at boot, then retried until it lands — the 90d/30d retention
-	// rules are a documented compliance property, so one transient S3 error must not skip them).
-	g.Go(func() error { return ensureLifecyclesRetry(gctx, st, logger) })
-
 	// Reserved-host + mesh + internal servers.
 	g.Go(func() error {
 		return serveTLS(gctx, enrollSrv, tls.NewListener(ed.EnrollListener(), enrollSrv.TLSConfig), logger, "enroll")

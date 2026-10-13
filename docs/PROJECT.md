@@ -134,13 +134,18 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a write-verify
   claim protocol, not storage semantics. **PRE-GO-LIVE**, validate a provider with a read-after-write
-  probe (PUT → GET → overwrite-PUT → GET returns the newest body).
+  probe (PUT → GET → overwrite-PUT → GET returns the newest body; a GET of a missing key returns 404
+  `NoSuchKey`).
 - **Connection-log spool (local, transient):** `--conn-log-dir` (a persistent volume, locked by one process)
   holds the not-yet-uploaded files; an S3 outage loses nothing below its 1 GiB cap, and leftover files are
   uploaded at the next start.
-- **Retention** (object-lifecycle rules applied programmatically at startup): name registry
-  **indefinite**, connection logs **90 days**, rejected-enrollment evidence **30 days**, tunnel content
-  **never** (it is opaque and never stored).
+- **Retention** (a one-time lifecycle setup on the bucket by the operator; tunneld never reads or writes
+  bucket configuration, so its S3 credential needs only read, write and delete on the objects plus list on
+  the bucket — on AWS-style IAM `s3:GetObject` / `s3:PutObject` / `s3:DeleteObject` on the objects and
+  `s3:ListBucket` on the bucket, without which a missing key answers 403 instead of 404): name registry
+  **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
+  rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), tunnel
+  content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules.
 
 ## 6. Observability
 

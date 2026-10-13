@@ -205,24 +205,6 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise,
 	}
 }
 
-// ensureLifecyclesRetry applies the S3 retention lifecycle rules (conn logs 90d, rejected-enroll 30d),
-// retrying every 5 minutes until they land or ctx ends — retention is a documented compliance property
-// and must not be skipped for the whole process lifetime on one transient boot-time S3 error.
-func ensureLifecyclesRetry(ctx context.Context, st *store.S3Store, logger *slog.Logger) error {
-	for {
-		err := st.EnsureLifecycles(ctx, 90, 30)
-		if err == nil {
-			return nil
-		}
-		logger.Warn("ensure lifecycles failed (retrying in 5m)", "err", err)
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(5 * time.Minute):
-		}
-	}
-}
-
 // renewalWatcher periodically scans this node's connected tunnels and nudges the phone to renew any cert
 // the chain says is due (NotAfter−margin floor for LE, fixed cadence otherwise). The nudge carries a fresh single-use
 // challenge nonce and is best-effort: the phone drives the actual renewal by calling the mTLS POST /api/v1/issue

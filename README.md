@@ -63,7 +63,11 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
 5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
    images are no longer published) the compose creates the bucket automatically. For a real
    provider, set the `S3_*` / `TUNNELD_S_3_*` values and **run a pre-go-live read-after-write probe**
-   (PUT → GET → overwrite-PUT → GET returns the newest body) — the name-claim protocol relies on it.
+   (PUT → GET → overwrite-PUT → GET returns the newest body; a GET of a missing key returns 404
+   `NoSuchKey`) — the name-claim protocol relies on it. Also set the two retention rules on that bucket once
+   (`tunnel-logs/` 90 days, `rejected-enroll/` 30 days); tunneld's credential needs only read, write and
+   delete on the objects plus list on the bucket (see `docs/PROJECT.md` §5). The local MinIO stays without
+   rules.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.
 7. **ntfy** (first start): copy the bridge config
    (`cp deploy/ntfy-alertmanager/config.scfg.example deploy/ntfy-alertmanager/config.scfg` — the real

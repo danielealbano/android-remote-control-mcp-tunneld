@@ -34,17 +34,9 @@ type EvidenceStore interface {
 	PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollment) error
 }
 
-// LifecycleStore provisions the object-expiration rules (consumer: server.Run, once at startup).
-type LifecycleStore interface {
-	// EnsureLifecycles is idempotent: it expires objects under tunnel-logs/ after connLogDays and
-	// under rejected-enroll/ after rejectedDays.
-	EnsureLifecycles(ctx context.Context, connLogDays, rejectedDays int) error
-}
-
 // Store is the full composition implemented by the S3 backend and the tunneltest fake.
 type Store interface {
 	NameStore
 	ConnLogUploader
 	EvidenceStore
-	LifecycleStore
 }

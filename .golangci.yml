@@ -15,7 +15,7 @@ linters:
       # inherent, provably-safe patterns — consistent with the revive curation + test-file gosec
       # exclusion below:
       #   G115 — integer-overflow conversions are all bounded len()/small-config values (control-frame
-      #          length ≤ maxControlPayload=1MiB, lifecycle-days, round-robin index) — cannot overflow.
+      #          length ≤ maxControlPayload=1MiB, round-robin index) — cannot overflow.
       #   G304 — file reads are of OPERATOR-CONFIGURED paths (CA cert/key, ACME account keys, ban files);
       #          reading operator config is the whole point, not an inclusion vulnerability.
       #   G402 — the replica mesh client intentionally verifies peers by CA-chain + mesh-role (NOT
