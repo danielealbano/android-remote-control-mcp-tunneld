@@ -536,7 +536,17 @@ func TestSpool_ShutdownPastDeadlineKeepsFile(t *testing.T) {
 	env := newSpool(t, dir, up, fastTicks()...)
 	put(t, env.s, ev("a", 1))
 	waitFor(t, "the append", func() bool { return env.s.spooled.Load() == lineSize(t, ev("a", 1)) })
-	drainWithin(env.s, 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { env.s.Drain(ctx); close(done) }()
+	waitFor(t, "the upload in flight", func() bool {
+		up.mu.Lock()
+		defer up.mu.Unlock()
+		return len(up.deadlines) == 1
+	})
+	cancel()
+	<-done
 	up.mu.Lock()
 	ended := append([]error(nil), up.ended...)
 	up.mu.Unlock()
