@@ -65,7 +65,7 @@ flowchart TD
 | `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME cooldown |
-| `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
+| `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | v1 control-frame codec + the ChunkSize pacing constant |
@@ -182,8 +182,8 @@ registry (`names/<name>`), connection logs (per-node JSONL objects
 end may land in different objects), and rejected-enroll evidence
 (`rejected-enroll/…`). Name uniqueness is the **write-verify claim**: GET (absent) → PUT a claim nonce
 under a hard timeout (SDK retries disabled) → settle wait (strictly > the PUT timeout) → GET-verify the
-nonce. Object-lifecycle expiration (logs 90d, rejected-enroll 30d) is applied programmatically at
-startup by `EnsureLifecycles`.
+nonce. Retention (logs 90d, rejected-enroll 30d) is a one-time lifecycle setup on the bucket
+(`docs/PROJECT.md` §5); tunneld only gets, puts and deletes objects.
 
 ## 7. Ban engine
 

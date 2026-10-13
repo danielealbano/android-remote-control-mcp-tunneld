@@ -138,8 +138,9 @@ MUST NOT be relaxed without explicit user direction.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
   Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
-  retries disabled → settle wait > the PUT timeout → GET-verify). Lifecycle expiry (logs 90d,
-  rejected-enroll 30d) is applied programmatically at startup. Connection logs are only SPOOLED on the node
+  retries disabled → settle wait > the PUT timeout → GET-verify). Retention (logs 90d, rejected-enroll
+  30d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
+  `docs/PROJECT.md` §5). Connection logs are only SPOOLED on the node
   (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
@@ -231,7 +232,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME cooldown |
 | `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
-| `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence, lifecycles |
+| `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-CA cooldown/backoff retry-after) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
