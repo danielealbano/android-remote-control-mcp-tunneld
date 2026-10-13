@@ -127,7 +127,8 @@ not due for renewal (no ACME order); otherwise it issues and publishes the new c
 so the next lock holder finds it. At startup and at every renewal check a node takes the shared cert only
 when it expires later than its own (never a downgrade); every cert a node takes is also written to its disk
 cache, which stays the fallback when Valkey is unavailable. The reserved-host private key therefore lives in
-Valkey (TTL'd) — Valkey MUST stay private.
+Valkey (TTL'd) — Valkey MUST stay private. Every shared-cert read is bounded (5 s), so an unreachable Valkey
+never holds the startup bind; the disk cache is used instead.
 
 Each CA validates with its own method (`--acme-challenge-le` / `--acme-challenge-gts` /
 `--acme-challenge-zerossl`: `dns-01`, `http-01`, `tls-alpn-01` — ZeroSSL has no `tls-alpn-01`; defaults LE +
@@ -252,12 +253,15 @@ appends each as a JSON line to the active file in `--conn-log-dir` (`<file-start
 mid-file. The file is fsynced and renamed to `.jsonl` at the end of its clock-aligned 5-minute window, at
 16 MiB, and at shutdown. A separate uploader goroutine uploads ready files oldest-first to
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl` (the key comes from the file name, so a
-re-upload overwrites) and deletes each only after its upload succeeds; a pass stops at the first S3 failure
+re-upload overwrites) and deletes each only after its upload succeeds — each upload gets a deadline of 30 s
+plus the file size at 128 KiB/s (not the S3 client's general 30 s cap); a pass stops at the first S3 failure
 (one Warn) and retries every minute, and a locally unreadable file is skipped without blocking newer ones.
 At startup the directory is created (0o700) and `flock`ed (a second process fails fast), a crashed run's
 `.part` is truncated to its last newline (Warn on dropped bytes) and queued. `tunneld_connlog_dropped_total`
 counts events lost to a full channel, a failed append, the 1 GiB spool cap (one Warn per window) or arriving
-after shutdown; local I/O errors are logged at most once per minute.
+after shutdown; local I/O errors are logged at most once per minute, and a suppressed count (with the last
+op, path and error) is reported once the minute has passed and at shutdown. Shutdown always waits for the
+writer: events still queued when `--shutdown-grace` expires are dropped, counted and logged.
 
 A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
 fan-out handler counts every failed record in `tunneld_log_sink_errors_total` and writes the sink's

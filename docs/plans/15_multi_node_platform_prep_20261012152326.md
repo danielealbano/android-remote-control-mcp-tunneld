@@ -218,3 +218,11 @@ DoD: [x] the release config uses `dockers_v2` only.
   1 ns after the previous one). Why: the size-rotation unit test showed that with a clock that does not
   advance, a file already uploaded and deleted freed its name, so the next file reused it and overwrote the
   object; the local existence check alone cannot see uploaded files.
+- Code review #4 fixes (2026-10-13): (a) Task 2.1 — each conn-log upload gets a deadline of 30 s + its size at
+  128 KiB/s and runs on an S3 HTTP client without the general 30 s cap, so a 16 MiB file is not doomed on
+  links below ~4.5 Mbit/s and cannot block newer files forever; (b) Task 2.1 — `Drain` always waits for the
+  writer; events still queued at the deadline are dropped, counted and logged, so the lock is never released
+  under a running writer; (c) Task 2.1 — a suppressed local-I/O count (with the last op/path/error) is
+  reported once the minute has passed and at `Drain`; (d) Task 3.1 — every shared-cert Valkey read is bounded
+  (5 s), so an unreachable Valkey cannot hold the startup bind for minutes. Why: each closes a failure mode
+  the review found (no silent loss, bounded startup/shutdown, convergence).
