@@ -13,7 +13,7 @@ import (
 // Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
 // per-tunnel/per-direction per-second byte cap (bwRate) and packet cap (pktCap), and the day/week
 // traffic caps, with an injectable clock for tests. Each key gets a TTL in the same round-trip as its
-// mutation — via SET EX (cooldown windows), a SETNX lock (concurrency counter), or a pipelined EXPIRE NX
+// mutation — via SET EX (cooldown windows) or a pipelined EXPIRE NX
 // immediately after the INCR for the bw:/pkt: per-second and traf: day/week windows (self-healing on the
 // next same-window write; see Charge). NO Lua.
 type Limiter struct {
@@ -22,7 +22,7 @@ type Limiter struct {
 	pktCap    int64 // per-second read (packet) cap per tunnel per direction; 0 = disabled
 	dayCap    int64
 	weekCap   int64
-	streamTTL time.Duration // conc:{name} safety TTL (= 3 × --limit-conn-idle), refreshed per chunk
+	streamTTL time.Duration // safety TTL (= 3 × --limit-conn-idle), refreshed per chunk
 	now       func() time.Time
 	logger    *slog.Logger
 }
@@ -81,11 +81,11 @@ func chargeKeys(name, dir string, sec int64) (bwKey, pktKey, dayKey, weekKey str
 
 // Charge records nr bytes + one read against the per-second byte/packet windows AND the per-day/week
 // traffic windows for (name, dir) in a single plain pipelined round-trip (INCRBY/INCR + EXPIRE…NX — no
-// Lua, no TxPipeline; EXPIRE NX self-heals a skipped TTL on the next same-window write), refreshes the
-// conc:{name} TTL, and returns the enforcement action. Kill takes precedence over Wait (an exhausted far
+// Lua, no TxPipeline; EXPIRE NX self-heals a skipped TTL on the next same-window write), and returns the
+// enforcement action. Kill takes precedence over Wait (an exhausted far
 // window can't be waited out); the returned window ("day"/"week") labels a Kill for the metric. The
 // packet cap is skipped when pktCap==0. A Valkey error returns ChargeProceed (fail-open).
-func (l *Limiter) Charge(ctx context.Context, name, dir string, nr int64) (ChargeAction, time.Duration, string, error) {
+func (l *Limiter) Charge(ctx context.Context, name, member, dir string, nr int64) (ChargeAction, time.Duration, string, error) {
 	now := l.now()
 	sec := now.Unix()
 	bwKey, pktKey, dayKey, weekKey := chargeKeys(name, dir, sec)
@@ -98,7 +98,8 @@ func (l *Limiter) Charge(ctx context.Context, name, dir string, nr int64) (Charg
 	pipe.ExpireNX(ctx, pktKey, bwWindowTTL)
 	pipe.ExpireNX(ctx, dayKey, trafDayTTL)
 	pipe.ExpireNX(ctx, weekKey, trafWeekTTL)
-	pipe.PExpire(ctx, "conc:"+name, l.streamTTL) // refresh the live-stream counter TTL (no-op on a missing key)
+	pipe.ZAddXX(ctx, concKey(name), redis.Z{Score: float64(now.Add(l.streamTTL).UnixMilli()), Member: member})
+	pipe.PExpire(ctx, concKey(name), l.streamTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return ChargeProceed, 0, "", err // fail-open
 	}

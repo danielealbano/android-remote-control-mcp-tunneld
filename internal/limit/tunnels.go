@@ -20,8 +20,7 @@ type TunnelStat struct {
 
 // TunnelWindows batch-reads conc + last-complete-second bandwidth + day/week traffic for names, computing
 // every key from name + clock (no metric-keyspace SCAN). These are GLOBAL shared counters, so the values
-// are the cross-replica aggregate. conc:{name} is a HASH, read via HMGET (MGET can't read a hash); the
-// six string windows are one MGET — both in a single pipeline.
+// are the cross-replica aggregate. The six string windows are one MGET, in the same pipeline.
 func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string]TunnelStat, error) {
 	if len(names) == 0 {
 		return map[string]TunnelStat{}, nil
@@ -30,7 +29,7 @@ func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string
 	prev := strconv.FormatInt(sec-1, 10) // last complete second
 	d := strconv.FormatInt(sec/86400, 10)
 	w := strconv.FormatInt(sec/86400/7, 10)
-	const perName = 6 // six string windows; conc:{name} is a HASH, read via HMGET below
+	const perName = 6 // six string windows
 	keys := make([]string, 0, len(names)*perName)
 	for _, n := range names {
 		keys = append(keys,
@@ -40,9 +39,10 @@ func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string
 		)
 	}
 	pipe := l.rdb.Pipeline()
-	concCmds := make([]*redis.SliceCmd, len(names))
+	nowMS := strconv.FormatInt(l.now().UnixMilli(), 10)
+	concCmds := make([]*redis.IntCmd, len(names))
 	for i, n := range names {
-		concCmds[i] = pipe.HMGet(ctx, "conc:"+n, "count") // HMGET on a missing key/field → [nil], no error
+		concCmds[i] = pipe.ZCount(ctx, concKey(n), nowMS, "+inf")
 	}
 	mget := pipe.MGet(ctx, keys...)
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -52,10 +52,7 @@ func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string
 	out := make(map[string]TunnelStat, len(names))
 	for i, n := range names {
 		b := i * perName
-		var conc int64
-		if cv := concCmds[i].Val(); len(cv) > 0 {
-			conc = l.atoiCap("conc:"+n, cv[0]) // atoiCap treats nil / non-string as 0
-		}
+		conc := concCmds[i].Val()
 		out[n] = TunnelStat{
 			Conc: conc, BwIn: l.atoiCap(keys[b], vals[b]), BwOut: l.atoiCap(keys[b+1], vals[b+1]),
 			DayIn: l.atoiCap(keys[b+2], vals[b+2]), DayOut: l.atoiCap(keys[b+3], vals[b+3]),

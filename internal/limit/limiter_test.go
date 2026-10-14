@@ -35,12 +35,12 @@ func TestCharge_ByteWindowWaits(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 125000, 0, 1<<40, 1<<40) // 1mbit; packet cap disabled; huge day/week
 	for i := 1; i <= 30; i++ {
-		action, _, _, err := l.Charge(ctx, "t", "in", 4096)
+		action, _, _, err := l.Charge(ctx, "t", "m1", "in", 4096)
 		if err != nil || action != ChargeProceed {
 			t.Fatalf("read %d: action=%v err=%v, want Proceed", i, action, err)
 		}
 	}
-	action, wait, _, err := l.Charge(ctx, "t", "in", 4096)
+	action, wait, _, err := l.Charge(ctx, "t", "m1", "in", 4096)
 	if err != nil || action != ChargeWait || wait <= 0 || wait > time.Second {
 		t.Fatalf("read 31: action=%v wait=%v err=%v, want Wait 0<wait≤1s", action, wait, err)
 	}
@@ -52,12 +52,12 @@ func TestCharge_PacketWindowWaits(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 1<<30, 100, 1<<40, 1<<40) // huge byte + day/week caps; only packets can trip
 	for i := 1; i <= 100; i++ {
-		action, _, _, err := l.Charge(ctx, "t", "in", 1)
+		action, _, _, err := l.Charge(ctx, "t", "m1", "in", 1)
 		if err != nil || action != ChargeProceed {
 			t.Fatalf("read %d: action=%v err=%v, want Proceed", i, action, err)
 		}
 	}
-	action, wait, _, err := l.Charge(ctx, "t", "in", 1)
+	action, wait, _, err := l.Charge(ctx, "t", "m1", "in", 1)
 	if err != nil || action != ChargeWait || wait <= 0 {
 		t.Fatalf("read 101: action=%v wait=%v err=%v, want Wait", action, wait, err)
 	}
@@ -68,7 +68,7 @@ func TestCharge_PacketWindowWaits(t *testing.T) {
 func TestCharge_DayCapKillsWhenResetFar(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 1<<30, 0, 4, 1<<40) // 4-byte day cap; huge byte/week caps
-	action, wait, win, err := l.Charge(ctx, "t", "in", 10)
+	action, wait, win, err := l.Charge(ctx, "t", "m1", "in", 10)
 	if err != nil || action != ChargeKill || win != "day" || wait != 0 {
 		t.Fatalf("action=%v wait=%v win=%q err=%v, want Kill win=day wait=0", action, wait, win, err)
 	}
@@ -79,7 +79,7 @@ func TestCharge_DayCapKillsWhenResetFar(t *testing.T) {
 func TestCharge_WeekCapKillsAndPrecedesDay(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 1<<30, 0, 4, 4) // both day + week caps tiny
-	action, _, win, err := l.Charge(ctx, "t", "in", 10)
+	action, _, win, err := l.Charge(ctx, "t", "m1", "in", 10)
 	if err != nil || action != ChargeKill || win != "week" {
 		t.Fatalf("action=%v win=%q err=%v, want Kill win=week (week precedes day)", action, win, err)
 	}
@@ -93,7 +93,7 @@ func TestCharge_DayCapWaitsNearBoundary(t *testing.T) {
 	sec := clk.Unix()
 	dayEnd := (sec/86400 + 1) * 86400
 	*clk = time.Unix(dayEnd-3, 0) // 3s before the day boundary → dayReset ≤ maxPacingWait
-	action, wait, _, err := l.Charge(ctx, "t", "in", 10)
+	action, wait, _, err := l.Charge(ctx, "t", "m1", "in", 10)
 	if err != nil || action != ChargeWait || wait <= 0 || wait > maxPacingWait {
 		t.Fatalf("action=%v wait=%v err=%v, want Wait 0<wait≤%s", action, wait, err, maxPacingWait)
 	}
@@ -104,12 +104,12 @@ func TestCharge_DayCapWaitsNearBoundary(t *testing.T) {
 func TestCharge_PerDirectionIsolated(t *testing.T) {
 	ctx := ctxT(t)
 	l, _, _ := newChargeLimiter(t, 1<<30, 0, 4, 1<<40) // 4-byte day cap; clock mid-day (reset far)
-	if action, _, win, err := l.Charge(ctx, "t", "in", 10); err != nil {
+	if action, _, win, err := l.Charge(ctx, "t", "m1", "in", 10); err != nil {
 		t.Fatal(err)
 	} else if action != ChargeKill || win != "day" {
 		t.Fatalf("in charge: action=%v win=%q, want Kill day", action, win)
 	}
-	if action, _, _, err := l.Charge(ctx, "t", "out", 1); err != nil {
+	if action, _, _, err := l.Charge(ctx, "t", "m1", "out", 1); err != nil {
 		t.Fatal(err)
 	} else if action != ChargeProceed {
 		t.Fatalf("out charge: action=%v, want Proceed (in's bytes must not trip out's day counter)", action)
@@ -128,7 +128,7 @@ func TestCharge_ExpireNXHealsMissingTTL(t *testing.T) {
 	if ttl := mr.TTL(dayKey); ttl != 0 {
 		t.Fatalf("precondition: orphan key must have no TTL, got %v", ttl)
 	}
-	if _, _, _, err := l.Charge(ctx, "t", "in", 1); err != nil {
+	if _, _, _, err := l.Charge(ctx, "t", "m1", "in", 1); err != nil {
 		t.Fatal(err)
 	}
 	if ttl := mr.TTL(dayKey); ttl <= 0 {
@@ -141,7 +141,7 @@ func TestCharge_FailOpenOnValkeyError(t *testing.T) {
 	ctx := ctxT(t)
 	l, mr, _ := newChargeLimiter(t, 125000, 100, 1<<40, 1<<40)
 	mr.Close() // every Valkey call now errors
-	action, wait, _, err := l.Charge(ctx, "t", "in", 4096)
+	action, wait, _, err := l.Charge(ctx, "t", "m1", "in", 4096)
 	if err == nil {
 		t.Fatal("a closed Valkey must return an error")
 	}
@@ -212,24 +212,24 @@ func TestCACooldownAndFailures(t *testing.T) {
 func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
-	for range 4 {
-		ok, err := l.AcquireStream(ctx, "t", "conn1", 4)
+	for _, m := range []string{"a", "b", "c", "d"} {
+		ok, err := l.AcquireStream(ctx, "t", m, 4)
 		if err != nil || !ok {
-			t.Fatalf("acquire: ok=%v err=%v", ok, err)
+			t.Fatalf("acquire %s: ok=%v err=%v", m, ok, err)
 		}
 	}
-	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil {
+	if ok, err := l.AcquireStream(ctx, "t", "e", 4); err != nil {
 		t.Fatal(err)
 	} else if ok {
-		t.Error("5th acquire past cap 4 should fail")
+		t.Error("a 5th distinct member past cap 4 should fail")
 	}
-	if err := l.ReleaseStream(ctx, "t", "conn1"); err != nil {
+	if err := l.ReleaseStream(ctx, "t", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil {
+	if ok, err := l.AcquireStream(ctx, "t", "f", 4); err != nil {
 		t.Fatal(err)
 	} else if !ok {
-		t.Error("after release, a slot should be free")
+		t.Error("after release, a slot should be free for a new member")
 	}
 }
 
@@ -270,43 +270,64 @@ func TestTrafficExhausted_PerDirection(t *testing.T) {
 	}
 }
 
-// TestCharge_RefreshesConcTTLOnlyIfExists: the Charge pipeline's PEXPIRE conc:{name} refreshes an
-// EXISTING conc TTL to streamTTL but is a NO-OP on a missing key (a torn-down counter is never
-// resurrected).
-func TestCharge_RefreshesConcTTLOnlyIfExists(t *testing.T) {
+func TestCharge_RefreshesOnlyExistingMember(t *testing.T) {
 	rdb, mr := newTestRedis(t)
 	ctx := ctxT(t)
-	l := NewLimiter(rdb, 1<<30, 1<<40, 1<<40, 45*time.Minute)
+	clk := time.Unix(1_700_000_000, 0)
+	const ttl = 45 * time.Minute
+	l := NewLimiter(rdb, 1<<30, 1<<40, 1<<40, ttl)
+	l.SetClock(func() time.Time { return clk })
 	const name = "t"
 
-	// No conc key yet: Charge must NOT create it (PEXPIRE on a missing key is a no-op).
-	if _, _, _, err := l.Charge(ctx, name, "in", 100); err != nil {
+	if _, _, _, err := l.Charge(ctx, name, "m1", "in", 100); err != nil {
 		t.Fatal(err)
 	}
 	if mr.Exists("conc:" + name) {
-		t.Fatal("Charge must not create the conc counter")
+		t.Fatal("Charge must not create the stream set")
 	}
 
-	// With an existing conc key whose TTL has been shrunk, Charge refreshes it to streamTTL.
-	if ok, err := l.AcquireStream(ctx, name, "conn1", 4); err != nil || !ok {
-		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	for _, m := range []string{"m1", "m2"} {
+		if ok, err := l.AcquireStream(ctx, name, m, 4); err != nil || !ok {
+			t.Fatalf("acquire %s: ok=%v err=%v", m, ok, err)
+		}
 	}
-	mr.SetTTL("conc:"+name, time.Minute)
-	if _, _, _, err := l.Charge(ctx, name, "in", 100); err != nil {
+	if err := l.ReleaseStream(ctx, name, "m2"); err != nil {
 		t.Fatal(err)
 	}
-	if ttl := mr.TTL("conc:" + name); ttl <= time.Minute {
-		t.Fatalf("conc TTL must be refreshed to streamTTL, got %s", ttl)
+	mr.SetTTL("conc:"+name, time.Minute)
+	clk = clk.Add(10 * time.Second)
+	if _, _, _, err := l.Charge(ctx, name, "m1", "in", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := l.Charge(ctx, name, "m2", "in", 100); err != nil {
+		t.Fatal(err)
+	}
+	if got := mr.TTL("conc:" + name); got != ttl {
+		t.Fatalf("set TTL = %s, want refreshed to streamTTL %s", got, ttl)
+	}
+	score, err := mr.ZScore("conc:"+name, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := float64(clk.Add(ttl).UnixMilli()); score != want {
+		t.Errorf("m1 score = %v, want bumped to %v", score, want)
+	}
+	members, err := mr.ZMembers("conc:" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0] != "m1" {
+		t.Fatalf("set = %v, a released member must not be re-added", members)
 	}
 }
 
-// TestAcquireStream_UsesDerivedTTL: the conc counter's safety TTL is the configured streamTTL.
+// TestAcquireStream_UsesDerivedTTL: the stream set's safety TTL is the configured streamTTL.
 func TestAcquireStream_UsesDerivedTTL(t *testing.T) {
 	rdb, mr := newTestRedis(t)
 	ctx := ctxT(t)
 	const ttl = 45 * time.Minute
 	l := NewLimiter(rdb, 0, 0, 0, ttl)
-	if ok, err := l.AcquireStream(ctx, "t", "conn1", 4); err != nil || !ok {
+	if ok, err := l.AcquireStream(ctx, "t", "m1", 4); err != nil || !ok {
 		t.Fatalf("acquire: ok=%v err=%v", ok, err)
 	}
 	if got := mr.TTL("conc:t"); got != ttl {
