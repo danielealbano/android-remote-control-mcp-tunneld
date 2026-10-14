@@ -145,7 +145,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 
 	// FLAG_INCLUDE_STOPPED_PACKAGES (0x20): the freshly-installed app is in the stopped state, so the
 	// broadcast must be allowed to wake its manifest-declared receiver.
-	amBroadcast(t, serial, "enroll",
+	amBroadcast(t, serial, tunnelAppPkg, "enroll",
 		"edgePort", strconv.Itoa(tunnelAppDevicePort),
 		"appNonce", appNonce,
 		"pebbleCaPath", caPath,
@@ -198,7 +198,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// Refresh: force a fresh /api/v1/issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
 	// completion markers first; the app rewrites them after the swap.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error")
-	amBroadcast(t, serial, "refresh")
+	amBroadcast(t, serial, tunnelAppPkg, "refresh")
 	if name2 := strings.TrimSpace(string(pollAppFile(t, serial, tunnelAppPkg, "ready", 150*time.Second))); name2 != name {
 		t.Fatalf("after refresh the assigned name changed: %q -> %q", name, name2)
 	}
@@ -251,16 +251,16 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// streams (the h2 streams multiplex over ONE tunnel connection).
 	runWaitLoad(t, edge, fqdn, inf.pebble.IssuingRoots)
 
-	amBroadcast(t, serial, "stop")
+	amBroadcast(t, serial, tunnelAppPkg, "stop")
 }
 
-// amBroadcast sends `am broadcast -a com.example.tunnelapp.<cmd> -n <pkg>/.CommandReceiver` with
+// amBroadcast sends `am broadcast` with
 // FLAG_INCLUDE_STOPPED_PACKAGES and the given string extras (key, value pairs).
-func amBroadcast(t *testing.T, serial, cmd string, kv ...string) {
+func amBroadcast(t *testing.T, serial, pkg, cmd string, kv ...string) {
 	t.Helper()
 	args := []string{"shell", "am", "broadcast",
-		"-a", tunnelAppPkg + "." + cmd,
-		"-n", tunnelAppPkg + "/.CommandReceiver",
+		"-a", pkg + "." + cmd,
+		"-n", pkg + "/.CommandReceiver",
 		"-f", "0x00000020"}
 	for i := 0; i+1 < len(kv); i += 2 {
 		args = append(args, "-e", kv[i], kv[i+1])
@@ -279,12 +279,12 @@ func pollAppFile(t *testing.T, serial, pkg, name string, timeout time.Duration) 
 				"elif [ -f files/"+name+" ]; then echo OK; cat files/"+name+"; fi"))
 		switch {
 		case strings.HasPrefix(status, "ERR"):
-			t.Fatalf("tunnel-app error before files/%s: %s", name, strings.TrimSpace(strings.TrimPrefix(status, "ERR")))
+			t.Fatalf("%s error before files/%s: %s", pkg, name, strings.TrimSpace(strings.TrimPrefix(status, "ERR")))
 		case strings.HasPrefix(status, "OK"):
 			return []byte(strings.TrimSpace(strings.TrimPrefix(status, "OK")))
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("tunnel-app did not produce files/%s within %s", name, timeout)
+			t.Fatalf("%s did not produce files/%s within %s", pkg, name, timeout)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

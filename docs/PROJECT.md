@@ -183,6 +183,38 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
   `test-integration`, `test-e2e`, `test-staging`, `test-scripts`, `compose-config`, `mermaid-check`). The integration,
   e2e and staging tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble); the staging tier also reaches Let's Encrypt staging + GTS staging through a reverse SSH tunnel and skips without `TUNNELD_STAGING_SSH_KEY`.
+- **Soak test** (manual, against a live deployment): `make soak-app soak-client` (the APK lands in
+  `fixtures/soak-app/` with its sha256 and signer digest, like the reference app). The soak app emulates N
+  phones on one device — each with its own hardware-attested enrollment, public cert, control connection and
+  local HTTPS server answering `POST /op?resp=<bytes>` with `<bytes>` of the pattern `byte(i % 251)`. Allow its
+  signing-cert digest, install it, then `adb shell am broadcast -a com.example.soakapp.start -n
+  com.example.soakapp/.CommandReceiver -f 0x00000020 --es count 10 --es enrollHost <enroll-host> --es
+  controlHost <control-host> --es tunnelDomain <tunnel-domain>` (phones enroll one at a time, `spacingSeconds`
+  apart, default 65 s, because each enrollment spends two of the per-IP enroll-rate slots; `--es parallel true`
+  enrolls them all at once instead, retrying refusals and network errors, and lists phones that still failed in
+  `files/failures.txt`, each new enrollment waiting a random 0–5 s first); `files/names.txt` lists the bound
+  names and `files/ready` holds how many are up (`files/error` on a failure that stops the run). Every phone is
+  saved per environment (its enroll host, control host and tunnel domain) in `files/phones/<env>/<n>.json` (name,
+  keystore aliases, cert chains — rewritten on every renewal), so `start` is additive and resumable: it skips
+  running phones, resumes saved ones (also after `stop`, a crash or an `adb install -r`), and enrolls only the
+  missing ones up to `count` (max 200). Phones of other environments are never touched, and only one environment
+  runs at a time; a saved phone whose keys are unusable fails its start instead of being replaced. The only way to
+  discard saved phones is `forget` (the `forget` action with the same three host extras), which deletes that one
+  environment's phones and keys; uninstalling the app discards every environment. Then run
+  `bin/soak-client --names-file names.txt --domain <tunnel-domain>`: per phone, one operation every
+  `--interval` (1 s) with a request averaging `--req-bytes` (1 KiB) and a response averaging `--resp-bytes`
+  (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte, on a reused connection dropped every
+  `--reconnect` (5 min), for `--duration` (24 h), the phones' starts (and so their reconnects) spread evenly over
+  `--ramp` so a single client IP stays under `--limit-conn-rate`; it writes one CSV row per phone per minute (`--out`) and a
+  summary at the end. `adb shell am broadcast -a com.example.soakapp.stop …` stops the app. Each enrollment
+  issues a real public cert and claims a name in the registry. For a local stack the app takes `edgePort` (every
+  host resolves to `127.0.0.1:<edgePort>`, for `adb reverse`) and `caPath` (a PEM trust anchor in its files dir),
+  and the client takes `--ca-file` and `--connect host:port`; the adb-gated `TestE2E_SoakApp` does exactly that
+  (it never uninstalls the app and forgets only its own local environment, but its reinstall stops any running
+  phones, which resume on the next `start` for their hosts):
+  3 emulated phones with real attestation enrolling in parallel on one replica, scaled to 4 and resumed after
+  a reinstall, the client entering through a second replica (mesh),
+  60 s at 1 op/s with a reconnect every 20 s, zero failed operations required.
 - **Attribution**: country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the
   attribution; it MUST be preserved).
 
@@ -192,8 +224,9 @@ No database / persistent server-side identity store (the phone holds its cert). 
 relayed traffic (it is opaque TLS; the app authenticates). No per-path cap exceptions or bulk transfers.
 No CRL (bans are the only revocation). No cross-replica exact bandwidth accounting (per-second fixed windows; bounded overshoot).
 No server-side content storage or caching. No TLS mutual auth on the public side. The Android (Kotlin)
-client lives with the app, not here. (Two on-device test apps under `support/` are the only exceptions,
-neither the client: a minimal **attestation test probe** (`support/attest-probe/`) driving the adb-gated
-`TestE2E_DeviceAttestation` gate, and a complete **reference tunnel client** (`support/tunnel-app/`) — a
+client lives with the app, not here. (Three on-device test apps under `support/` are the only exceptions,
+none of them the client: a minimal **attestation test probe** (`support/attest-probe/`) driving the adb-gated
+`TestE2E_DeviceAttestation` gate, a complete **reference tunnel client** (`support/tunnel-app/`) — a
 faithful Kotlin implementation of the phone side of `docs/PROTOCOL.md` — driving the adb-gated
-`TestE2E_ReferenceTunnelApp` gate.)
+`TestE2E_ReferenceTunnelApp` gate, and the **soak app** (`support/soak-app/`, see §7) with its Go load client
+`support/soak-client/`.)

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application android:label="soak-app" android:allowBackup="false">
+        <service
+            android:name=".SoakService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <receiver android:name=".CommandReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="com.example.soakapp.start" />
+                <action android:name="com.example.soakapp.stop" />
+                <action android:name="com.example.soakapp.forget" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

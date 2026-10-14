@@ -29,3 +29,9 @@
 /support/tunnel-app/local.properties
 /support/tunnel-app/.idea/
 /support/tunnel-app/.kotlin/
+/support/soak-app/.gradle/
+/support/soak-app/build/
+/support/soak-app/app/build/
+/support/soak-app/local.properties
+/support/soak-app/.idea/
+/support/soak-app/.kotlin/
