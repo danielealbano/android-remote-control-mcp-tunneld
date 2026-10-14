@@ -344,7 +344,6 @@ type fakeMeshControl struct {
 	applied  map[string]bool
 	errs     map[string]error
 	block    chan struct{}
-	delay    time.Duration
 	inflight atomic.Int32
 	maxSeen  atomic.Int32
 	returned atomic.Int32
@@ -367,13 +366,6 @@ func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.Con
 	if f.block != nil {
 		select {
 		case <-f.block:
-		case <-ctx.Done():
-			return mesh.ControlResponse{}, ctx.Err()
-		}
-	}
-	if f.delay > 0 {
-		select {
-		case <-time.After(f.delay):
 		case <-ctx.Done():
 			return mesh.ControlResponse{}, ctx.Err()
 		}
@@ -574,11 +566,7 @@ func TestSpliceEvictor_ConcurrencyBounded(t *testing.T) {
 func TestSpliceEvictor_BroadcastIsAsyncAndDrained(t *testing.T) {
 	mc := &fakeMeshControl{block: make(chan struct{})}
 	s, _, _ := newTestEvictor(t, fakeLiveNodes{nodes: map[string]router.NodeInfo{"nodeB": {Advertise: "b:9443"}}}, mc, testLogger())
-	start := time.Now()
 	s.PhoneConnClosed(context.Background(), "t", "conn-1", store.ClosePhoneClose)
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
-		t.Fatalf("PhoneConnClosed must not wait for the broadcast (took %s)", elapsed)
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for mc.inflight.Load() == 0 {
 		if time.Now().After(deadline) {
@@ -588,7 +576,7 @@ func TestSpliceEvictor_BroadcastIsAsyncAndDrained(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	start = time.Now()
+	start := time.Now()
 	s.Drain(ctx)
 	if elapsed := time.Since(start); elapsed < 150*time.Millisecond || elapsed > 2*time.Second {
 		t.Fatalf("Drain must return shortly after its deadline, took %s", elapsed)
@@ -601,18 +589,32 @@ func TestSpliceEvictor_BroadcastIsAsyncAndDrained(t *testing.T) {
 func TestBroadcastControl(t *testing.T) {
 	buf := &syncBuffer{}
 	mc := &fakeMeshControl{
-		delay:   200 * time.Millisecond,
+		block:   make(chan struct{}),
 		applied: map[string]bool{"b:9443": false, "c:9443": true},
 		errs:    map[string]error{"d:9443": errors.New("peer unreachable")},
 	}
 	nodes := map[string]router.NodeInfo{
 		"nodeA": {Advertise: "a:9443"}, "nodeB": {Advertise: "b:9443"}, "nodeC": {Advertise: "c:9443"}, "nodeD": {Advertise: "d:9443"},
 	}
-	start := time.Now()
-	applied, failed := broadcastControl(context.Background(), "nodeA", nodes, mc, mesh.ControlRequest{Op: "terminate", Tunnel: "t"}, slog.New(slog.NewTextHandler(buf, nil)))
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("the calls must run in parallel (took %s)", elapsed)
+	type result struct {
+		applied bool
+		failed  map[string]bool
 	}
+	done := make(chan result, 1)
+	go func() {
+		applied, failed := broadcastControl(context.Background(), "nodeA", nodes, mc, mesh.ControlRequest{Op: "terminate", Tunnel: "t"}, slog.New(slog.NewTextHandler(buf, nil)))
+		done <- result{applied: applied, failed: failed}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for mc.inflight.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d calls in flight at once, want all 3 in parallel", mc.inflight.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(mc.block)
+	r := <-done
+	applied, failed := r.applied, r.failed
 	if !applied {
 		t.Fatal("applied must be the OR of the replies")
 	}

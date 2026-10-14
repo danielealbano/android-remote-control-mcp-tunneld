@@ -13,9 +13,7 @@ import (
 // Limiter holds the control-plane rate/quota primitives. It carries the Valkey client, the
 // per-tunnel/per-direction per-second byte cap (bwRate) and packet cap (pktCap), and the day/week
 // traffic caps, with an injectable clock for tests. Each key gets a TTL in the same round-trip as its
-// mutation — via SET EX (cooldown windows) or a pipelined EXPIRE NX
-// immediately after the INCR for the bw:/pkt: per-second and traf: day/week windows (self-healing on the
-// next same-window write; see Charge). NO Lua.
+// mutation. NO Lua.
 type Limiter struct {
 	rdb       redis.UniversalClient
 	bwRate    int64 // per-second byte cap per tunnel per direction

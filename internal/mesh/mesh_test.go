@@ -515,8 +515,8 @@ func TestClient_Control_UnblocksOnDeadPeer(t *testing.T) {
 	}
 }
 
-// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an in-flight
-// Control call (active>0) survives the reaper, and is reaped on the first tick after the call returns.
+// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an active
+// stream (active>0) survives the reaper, and is reaped on the first tick after the stream closes.
 func TestClient_ReapSkipsActivePools(t *testing.T) {
 	release := make(chan struct{})
 	peer := startMeshPeer(t, 0, release)

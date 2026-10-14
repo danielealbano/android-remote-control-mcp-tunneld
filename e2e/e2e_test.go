@@ -304,8 +304,8 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 	return c, ident
 }
 
-// TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves that public
-// connections entering A and entering the owner B both work.
+// TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves both the frontend on
+// A → owner B and entering at the owner replica B work.
 // The phone stays bound to B throughout; no route rebinding occurs.
 func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 	inf := startE2EInfra(t)

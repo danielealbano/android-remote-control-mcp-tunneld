@@ -321,7 +321,7 @@ func TestCharge_RefreshesOnlyExistingMember(t *testing.T) {
 	}
 }
 
-// TestAcquireStream_UsesDerivedTTL: the stream set's safety TTL is the configured streamTTL.
+// TestAcquireStream_UsesDerivedTTL: the conc counter's safety TTL is the configured streamTTL.
 func TestAcquireStream_UsesDerivedTTL(t *testing.T) {
 	rdb, mr := newTestRedis(t)
 	ctx := ctxT(t)

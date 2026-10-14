@@ -537,20 +537,20 @@ func TestManager_SendOpen(t *testing.T) {
 	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
 	tests := []struct {
 		name    string
-		setup   func(m *Manager) *conn
+		setup   func(t *testing.T, m *Manager) *conn
 		connID  string
 		fill    bool
 		wantErr error
 	}{
-		{name: "live conn and matching connID", connID: "aabbccdd", setup: func(m *Manager) *conn {
+		{name: "live conn and matching connID", connID: "aabbccdd", setup: func(t *testing.T, m *Manager) *conn {
 			c := newConn("abc")
 			if _, err := m.register(context.Background(), c); err != nil {
 				t.Fatal(err)
 			}
 			return c
 		}},
-		{name: "no conn", connID: "aabbccdd", setup: func(*Manager) *conn { return nil }, wantErr: ErrNoConn},
-		{name: "closed conn", connID: "aabbccdd", setup: func(m *Manager) *conn {
+		{name: "no conn", connID: "aabbccdd", setup: func(*testing.T, *Manager) *conn { return nil }, wantErr: ErrNoConn},
+		{name: "closed conn", connID: "aabbccdd", setup: func(t *testing.T, m *Manager) *conn {
 			c := newConn("abc")
 			if _, err := m.register(context.Background(), c); err != nil {
 				t.Fatal(err)
@@ -558,14 +558,14 @@ func TestManager_SendOpen(t *testing.T) {
 			c.close("phone-close")
 			return c
 		}, wantErr: ErrNoConn},
-		{name: "connID mismatch", connID: "00000000", setup: func(m *Manager) *conn {
+		{name: "connID mismatch", connID: "00000000", setup: func(t *testing.T, m *Manager) *conn {
 			c := newConn("abc")
 			if _, err := m.register(context.Background(), c); err != nil {
 				t.Fatal(err)
 			}
 			return c
 		}, wantErr: ErrNoConn},
-		{name: "full queue and cancelled ctx", connID: "aabbccdd", fill: true, setup: func(m *Manager) *conn {
+		{name: "full queue and cancelled ctx", connID: "aabbccdd", fill: true, setup: func(t *testing.T, m *Manager) *conn {
 			c := newConn("abc")
 			if _, err := m.register(context.Background(), c); err != nil {
 				t.Fatal(err)
@@ -576,7 +576,7 @@ func TestManager_SendOpen(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _, _, _ := newMgr(t)
-			c := tc.setup(m)
+			c := tc.setup(t, m)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.fill {
@@ -614,18 +614,18 @@ func TestManager_SendOpen(t *testing.T) {
 func TestManager_Teardown_NotifiesClosedHook(t *testing.T) {
 	tests := []struct {
 		name       string
-		closeVia   func(m *Manager, c *conn)
+		closeVia   func(t *testing.T, m *Manager, c *conn)
 		wantReason string
 	}{
-		{name: "phone close", closeVia: func(*Manager, *conn) {}, wantReason: "phone-close"},
-		{name: "supersede", closeVia: func(m *Manager, _ *conn) {
+		{name: "phone close", closeVia: func(*testing.T, *Manager, *conn) {}, wantReason: "phone-close"},
+		{name: "supersede", closeVia: func(t *testing.T, m *Manager, _ *conn) {
 			next := newConn("abc")
 			next.connID = "11223344"
 			if _, err := m.register(context.Background(), next); err != nil {
 				t.Fatal(err)
 			}
 		}, wantReason: "phone-close"},
-		{name: "ban-evict", closeVia: func(m *Manager, _ *conn) {
+		{name: "ban-evict", closeVia: func(t *testing.T, m *Manager, _ *conn) {
 			m.EvictBanned(func(name, _ string) bool { return name == "abc" })
 		}, wantReason: store.CloseBanEvict},
 	}
@@ -641,7 +641,7 @@ func TestManager_Teardown_NotifiesClosedHook(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			tc.closeVia(m, c)
+			tc.closeVia(t, m, c)
 			teardown()
 			hook.mu.Lock()
 			calls := append([]closedCall(nil), hook.calls...)

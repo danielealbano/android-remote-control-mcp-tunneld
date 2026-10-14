@@ -2120,6 +2120,12 @@ DoD:
 - Ride-along (user decision, 2026-10-14): the Grafana declutter of `node-detail.json` and `tunneld-detail.json`
   (no CPU `idle` series, no CPU-count line in load, no swap total, no file-descriptor maximum) is committed on
   this branch (`d78f0c0`); it is not part of the dial-back work.
+- Comments (code review): where removing a wrong part alone would leave a broken sentence, the existing
+  comment is minimally reworded instead of extended — the doc comments of the tests the plan renames
+  (`TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure`, `TestClient_Control_UnblocksOnDeadPeer`,
+  `TestClient_ControlErrorDecrementsActive`) carry the new names / operations, `TestControlData_NonPostIs405`
+  names only `/api/v1/control`, the `client` package doc and the mesh pool's `lastUse` field comment drop the
+  data-stream / `OpenStream` references, and the `Limiter` doc drops its (now incomplete) TTL-mechanism list.
 - Code review: the docs state that a node without its control-host certificate can neither hold phone control
   connections nor accept HTTPS dial-backs (tunnel connections entering it fail `no-route`), and that a crashed
   owner's splices end within 10 s after the route expires (`--route-ttl`) or is re-bound (D13 / Actions 11.1.1–

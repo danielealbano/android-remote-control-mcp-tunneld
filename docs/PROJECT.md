@@ -11,7 +11,8 @@ the phone — it can NEVER read tunnel traffic.
 This document is the operational entry point. The system internals live in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); the wire contract lives in [`PROTOCOL.md`](PROTOCOL.md); the
 deployment quickstart lives in the [README](../README.md); the full decision record is
-[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md).
+[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md), and for the dial-back/data path
+[Plan 16](plans/16_entry_node_dial_back_20261014192454.md).
 
 ## 1. Topology
 
@@ -129,9 +130,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
   bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
   (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) the reserved-host issuance lock (`lock:acme-self:`, 10 min) and the shared reserved-host cert (`acme:self-cert:`, until the cert's NotAfter — it holds the private key, so Valkey must stay private). Every
-  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
+  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
-  day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
+  day/week windows, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (per-node JSONL objects
   `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute

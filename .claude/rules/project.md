@@ -70,7 +70,8 @@ does NOT duplicate them.
 
 ## Hard Project Invariants — ABSOLUTE RULES
 
-These come from `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, and the Plan 3 decision record. They
+These come from `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, and the Plan 3 decision record (Plan 16 for the
+dial-back/data path). They
 MUST NOT be relaxed without explicit user direction.
 
 ### Engineering posture — simplest correct design
@@ -124,8 +125,8 @@ MUST NOT be relaxed without explicit user direction.
 - **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry + the `nodes` id
   set, rate-limit windows, the `conc:{name}` stream-cap sorted set, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
   `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
-  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
-  pipelined `EXPIRE NX` right after the `INCR`. `EXPIRE NX` self-heals a skipped TTL on the next
+  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, a
+  pipelined `EXPIRE NX` right after the `INCR`, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets). `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
   counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
   self-healing pipeline, or a `SETNX` lock covers every case.

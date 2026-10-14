@@ -20,7 +20,7 @@ type TunnelStat struct {
 
 // TunnelWindows batch-reads conc + last-complete-second bandwidth + day/week traffic for names, computing
 // every key from name + clock (no metric-keyspace SCAN). These are GLOBAL shared counters, so the values
-// are the cross-replica aggregate. The six string windows are one MGET, in the same pipeline.
+// are the cross-replica aggregate. The six string windows are one MGET — both in a single pipeline.
 func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string]TunnelStat, error) {
 	if len(names) == 0 {
 		return map[string]TunnelStat{}, nil

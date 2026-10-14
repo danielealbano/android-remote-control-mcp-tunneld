@@ -55,7 +55,7 @@ func TestEdge_HandleTunnel_QuotaAdmissionRefusal(t *testing.T) {
 }
 
 // TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure covers the one-fresh-lookup retry: a stale route
-// whose open fails is retried ONCE, with the same token, against a re-looked-up (different) route.
+// that fails is retried ONCE against a re-looked-up (different) route.
 func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 	cfg := baseConfig()
 	te := newTestEdge(t, cfg, nil, nil)

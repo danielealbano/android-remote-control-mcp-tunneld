@@ -2,7 +2,8 @@
 
 This document maps the E2E-encrypted tunnel internals. The operational overview is
 [`PROJECT.md`](PROJECT.md); the wire contract is [`PROTOCOL.md`](PROTOCOL.md); the decision record is
-[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md).
+[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md), and for the dial-back/data path
+[Plan 16](plans/16_entry_node_dial_back_20261014192454.md).
 
 ## 1. Process anatomy
 
@@ -169,7 +170,7 @@ never hard-depends on the control plane). Each key's TTL is its window plus a sm
 admission (`TrafficExhausted`, read-only). `wire.ChunkSize` = 16384 is the paced-copy read slice, so the
 per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
 
-## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX; NO Lua/WATCH/MULTI-EXEC)
+## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX / a pipelined PEXPIRE; NO Lua/WATCH/MULTI-EXEC)
 
 Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
 (`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`; plus the
