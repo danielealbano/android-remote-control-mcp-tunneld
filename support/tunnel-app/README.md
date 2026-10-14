@@ -21,7 +21,9 @@ The app is driven over adb (no launcher activity — an exported `CommandReceive
   serving `GET /info` (echoes the app nonce + the current cert digest) and `GET /wait` (a paced,
   hash-trailed stream for throughput checks);
 - opens the **duplex HTTP/2 `/control`** connection (OkHttp), answering `PING`/`OPEN`/`RENEW_NUDGE`, and
-  splices each `OPEN` to a fresh `POST /data` dial-back opaquely to the local server.
+  answers each `OPEN` with a dial-back: a new connection to the `OPEN`'s `addr` (TLS when `use_https`,
+  presenting the identity cert when `use_mtls`, plain TCP otherwise) carrying a `GET /api/v1/data` upgrade
+  with the `OPEN`'s token, then splices it opaquely to the local server.
 
 On `refresh` it forces a fresh `/issue` (rotating the identity + TLS keys and re-obtaining the public
 cert) and hot-swaps the server cert. On `stop` it tears everything down. Status is reported via

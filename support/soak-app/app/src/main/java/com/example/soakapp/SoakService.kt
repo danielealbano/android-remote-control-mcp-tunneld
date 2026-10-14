@@ -106,7 +106,7 @@ class SoakService : Service() {
         val (key, chain) = id.tlsCredential()
         val server = Server(basePort + i).also { it.start(key, chain) }
         val renewLock = Any()
-        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, server::localPort) { nonce ->
+        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), server::localPort) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce)
                 store.save(i, id)
