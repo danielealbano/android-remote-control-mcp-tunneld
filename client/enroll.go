@@ -1,6 +1,6 @@
 // Package client is the Go HTTP/2 tunnel client: the reference (non-attesting) phone implementation used
-// by the integration/e2e tiers. It speaks wire v1 over HTTP/2 — the identity-mTLS control connection,
-// dial-back data streams (full-duplex opaque splice), PING/PONG liveness, and the RENEW_NUDGE → mTLS
+// by the integration/e2e tiers. It speaks the wire protocol — the identity-mTLS HTTP/2 control connection,
+// PING/PONG liveness, and the RENEW_NUDGE → mTLS
 // POST /api/v1/issue renewal — plus a two-phase attestation-optional enrollment path (Phase 1 /api/v1/enroll → Phase 2
 // /api/v1/issue) so tests enroll without a real device.
 package client
