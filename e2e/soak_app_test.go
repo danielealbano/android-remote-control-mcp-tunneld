@@ -62,14 +62,20 @@ func TestE2E_SoakApp(t *testing.T) {
 	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(soakAppDevicePort)) })
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	t.Cleanup(func() { adbCleanup(t, serial, "uninstall", soakAppPkg) })
 	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+soakAppPkg)
 	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+soakAppPkg) })
-	adbRunAs(t, serial, soakAppPkg, "rm -f files/ready files/error files/names.txt")
+	adbRunAs(t, serial, soakAppPkg, "rm -f files/ready files/error files/names.txt files/forgotten")
 
 	caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
 	adbRunAs(t, serial, soakAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")
 	dataDir := strings.TrimSpace(string(adbRunAs(t, serial, soakAppPkg, "pwd")))
+
+	amBroadcast(t, serial, soakAppPkg, "forget",
+		"enrollHost", e2eEnrollHost,
+		"controlHost", e2eControlHost,
+		"tunnelDomain", e2eTunnelDomain,
+	)
+	pollAppFile(t, serial, soakAppPkg, "forgotten", 60*time.Second)
 
 	start := func(count int) []string {
 		t.Helper()
