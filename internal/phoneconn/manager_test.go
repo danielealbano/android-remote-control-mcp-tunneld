@@ -3,6 +3,7 @@ package phoneconn
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // syncBuf is a concurrency-safe io.Writer + reader for capturing slog output from a background goroutine.
@@ -44,7 +46,7 @@ func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	fr.hbErr = errors.New("valkey unreachable")
 	buf := &syncBuf{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
 		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 		RouteTTL: 30 * time.Millisecond, Logger: logger})
 	c := newConn("abc")
@@ -130,6 +132,27 @@ func (f *fakeRouter) wasUnbound(name string) bool {
 
 type fakeRec struct{ opens, closes atomic.Int64 }
 
+type nopClosedHook struct{}
+
+func (nopClosedHook) PhoneConnClosed(context.Context, string, string, string) {}
+
+type closedCall struct{ name, connID, reason string }
+
+type recordingClosedHook struct {
+	fr    *fakeRouter
+	mu    sync.Mutex
+	calls []closedCall
+}
+
+func (h *recordingClosedHook) PhoneConnClosed(_ context.Context, name, connID, reason string) {
+	h.fr.mu.Lock()
+	h.fr.calls = append(h.fr.calls, "PhoneConnClosed")
+	h.fr.mu.Unlock()
+	h.mu.Lock()
+	h.calls = append(h.calls, closedCall{name: name, connID: connID, reason: reason})
+	h.mu.Unlock()
+}
+
 func (r *fakeRec) PhoneConnOpen()        { r.opens.Add(1) }
 func (r *fakeRec) PhoneConnClose(string) { r.closes.Add(1) }
 
@@ -138,7 +161,7 @@ func newMgr(t *testing.T) (*Manager, *fakeRouter, *tunneltest.Store, *fakeRec) {
 	fr := newFakeRouter()
 	st := tunneltest.NewStore()
 	rec := &fakeRec{}
-	m := NewManager(Config{Router: fr, Logs: st, Recorder: rec, NodeID: "nodeA", NodeHost: "host-a",
+	m := NewManager(Config{Router: fr, Logs: st, Recorder: rec, Closed: nopClosedHook{}, NodeID: "nodeA", NodeHost: "host-a",
 		NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	return m, fr, st, rec
 }
@@ -147,7 +170,7 @@ func newConn(name string) *conn {
 	return &conn{name: name, fingerprint: "sha256:fp", keyFP: "sha256:keyfp", certSerial: "0a1b",
 		connID:       "aabbccdd",
 		sessionStart: time.Unix(1_700_000_000, 0), send: make(chan []byte, 8),
-		pending: map[string]chan DataStream{}, cancel: func() {},
+		cancel: func() {},
 		hbDone: make(chan struct{})}
 }
 
@@ -301,140 +324,6 @@ func TestCloseAll(t *testing.T) {
 	}
 }
 
-func TestOpenStreamNoConn(t *testing.T) {
-	m, _, _, _ := newMgr(t)
-	if _, err := m.OpenStream(context.Background(), "missing", "s1"); err != ErrNoConn {
-		t.Errorf("expected ErrNoConn, got %v", err)
-	}
-}
-
-func TestOpenStreamDialbackCorrelates(t *testing.T) {
-	m, _, _, _ := newMgr(t)
-	c := newConn("abc")
-	if _, err := m.register(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-
-	got := make(chan DataStream, 1)
-	go func() {
-		ds, err := m.OpenStream(context.Background(), "abc", "s1")
-		if err == nil {
-			got <- ds
-		}
-	}()
-	// The OPEN frame is queued to the phone.
-	select {
-	case frame := <-c.send:
-		if len(frame) == 0 {
-			t.Fatal("empty OPEN frame")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("OPEN not sent")
-	}
-	// The phone's data stream arrives and is delivered to the waiter.
-	fake := &fakeDataStream{}
-	if !m.deliverStream("abc", "s1", fake) {
-		t.Fatal("deliverStream failed")
-	}
-	select {
-	case ds := <-got:
-		if ds != fake {
-			t.Error("wrong stream delivered")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("stream not delivered to OpenStream")
-	}
-}
-
-// TestDeliverStream_RefusesClosedConn verifies a dial-back arriving after the phone conn was closed
-// (e.g. a ban reload evicted it) is refused EVEN WHEN a matching waiter is still pending, so no splice
-// starts on a torn-down connection. The pending waiter is essential: without it, deliverStream returns
-// false via the pending-miss path regardless of the c.closed guard, and the test would not discriminate.
-func TestDeliverStream_RefusesClosedConn(t *testing.T) {
-	m, _, _, _ := newMgr(t)
-	c := newConn("abc")
-	if _, err := m.register(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-	waiter := make(chan DataStream, 1)
-	c.mu.Lock()
-	c.pending["s1"] = waiter
-	c.mu.Unlock()
-	c.close("ban-evict")
-	if m.deliverStream("abc", "s1", &fakeDataStream{}) {
-		t.Fatal("deliverStream must refuse delivery once the conn is closed")
-	}
-	select {
-	case <-waiter:
-		t.Fatal("a closed conn's waiter must NOT receive a delivery")
-	default:
-	}
-}
-
-// TestOpenStreamTimesOut covers the bounded dial-back wait both the local (edge.openFar) and the mesh
-// (bridgeAdapter.OpenMesh) paths rely on: a connected phone that never opens /api/v1/data must make OpenStream
-// return within the caller's deadline and drop the pending waiter (releasing the caller's stream slot).
-func TestOpenStreamTimesOut(t *testing.T) {
-	m, _, _, _ := newMgr(t)
-	c := newConn("abc")
-	if _, err := m.register(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-	go func() { <-c.send }() // accept the OPEN frame, then never deliver a stream
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	if _, err := m.OpenStream(ctx, "abc", "s1"); err == nil {
-		t.Fatal("OpenStream must fail when the phone never opens the dial-back stream")
-	}
-	if time.Since(start) > time.Second {
-		t.Fatal("OpenStream did not honour the dial-back deadline")
-	}
-	c.mu.Lock()
-	_, pending := c.pending["s1"]
-	c.mu.Unlock()
-	if pending {
-		t.Error("a timed-out OpenStream must drop the pending waiter")
-	}
-}
-
-// TestManager_OpenStream_DuplicateRefused covers the pending-stream duplicate refusal: a second
-// OpenStream with an already-pending stream id is refused (ErrDuplicateStreamID) and the first waiter
-// stays intact.
-func TestManager_OpenStream_DuplicateRefused(t *testing.T) {
-	m, _, _, _ := newMgr(t)
-	c := newConn("abc")
-	if _, err := m.register(context.Background(), c); err != nil {
-		t.Fatal(err)
-	}
-
-	go func() { <-c.send }() // accept the first OPEN frame; never deliver a stream
-	ctx1, cancel1 := context.WithCancel(context.Background())
-	defer cancel1()
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := m.OpenStream(ctx1, "abc", "dup1")
-		firstDone <- err
-	}()
-	waitCond(t, func() bool {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		_, ok := c.pending["dup1"]
-		return ok
-	})
-
-	if _, err := m.OpenStream(context.Background(), "abc", "dup1"); !errors.Is(err, ErrDuplicateStreamID) {
-		t.Fatalf("a duplicate pending stream id must be refused, got %v", err)
-	}
-	c.mu.Lock()
-	_, stillPending := c.pending["dup1"]
-	c.mu.Unlock()
-	if !stillPending {
-		t.Fatal("the first waiter must remain pending after a duplicate is refused")
-	}
-}
-
 func TestHeartbeatNotOwnerCloses(t *testing.T) {
 	m, fr, _, _ := newMgr(t)
 	fr.hbResult = router.HeartbeatNotOwner
@@ -455,43 +344,6 @@ func TestHeartbeatNotOwnerCloses(t *testing.T) {
 		}
 	}
 }
-
-type fakeDataStream struct{}
-
-func (fakeDataStream) Read([]byte) (int, error)    { return 0, nil }
-func (fakeDataStream) Write(p []byte) (int, error) { return len(p), nil }
-func (fakeDataStream) Close() error                { return nil }
-
-// TestCancelPendingClosesRacedDelivery covers the dial-back cancel/deliver race: when
-// deliverStream delivers a stream to the buffered waiter at the same moment the dial-back deadline fires,
-// cancelPending MUST close the orphaned stream (so its /api/v1/data handler cannot leak) and drop the pending
-// registration.
-func TestCancelPendingClosesRacedDelivery(t *testing.T) {
-	c := newConn("abc")
-	waiter := make(chan DataStream, 1)
-	c.pending["s1"] = waiter
-	fake := &closeableStream{}
-	waiter <- fake // deliverStream raced in and delivered before OpenStream observed the cancel
-
-	c.cancelPending("s1", waiter, slog.Default())
-
-	if !fake.isClosed() {
-		t.Fatal("a stream delivered concurrently with the dial-back cancel must be closed, not orphaned")
-	}
-	if _, ok := c.pending["s1"]; ok {
-		t.Fatal("cancelPending must drop the pending registration")
-	}
-}
-
-type closeableStream struct {
-	mu     sync.Mutex
-	closed bool
-}
-
-func (s *closeableStream) Read([]byte) (int, error)    { return 0, nil }
-func (s *closeableStream) Write(p []byte) (int, error) { return len(p), nil }
-func (s *closeableStream) Close() error                { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
-func (s *closeableStream) isClosed() bool              { s.mu.Lock(); defer s.mu.Unlock(); return s.closed }
 
 // TestManager_Teardown_StopsHeartbeatBeforeUnbind proves teardown cancels the conn and waits for
 // the heartbeat loop (incl. any in-flight self-heal) to exit BEFORE unbinding, so no Heartbeat or
@@ -554,7 +406,7 @@ func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := tunneltest.NewStore()
-	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, NodeID: "nodeA",
+	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, Closed: nopClosedHook{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-19T00:00:00Z", RouteTTL: 30 * time.Second})
 
 	const name = "concurrent01"
@@ -653,7 +505,7 @@ func TestHeartbeatLoop_FailureLogging(t *testing.T) {
 				r.heal = tc.heal(cancel)
 			}
 			buf := &syncBuf{}
-			m := NewManager(Config{Router: r, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+			m := NewManager(Config{Router: r, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
 				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 				RouteTTL: 30 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(buf, nil))})
 			c := newConn("abc")
@@ -676,6 +528,141 @@ func TestHeartbeatLoop_FailureLogging(t *testing.T) {
 			}
 			if tc.wantLog == "" && buf.String() != "" {
 				t.Fatalf("a failure caused by the connection's cancellation must not be logged; log = %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestManager_SendOpen(t *testing.T) {
+	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+	tests := []struct {
+		name    string
+		setup   func(m *Manager) *conn
+		connID  string
+		fill    bool
+		wantErr error
+	}{
+		{name: "live conn and matching connID", connID: "aabbccdd", setup: func(m *Manager) *conn {
+			c := newConn("abc")
+			if _, err := m.register(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}},
+		{name: "no conn", connID: "aabbccdd", setup: func(*Manager) *conn { return nil }, wantErr: ErrNoConn},
+		{name: "closed conn", connID: "aabbccdd", setup: func(m *Manager) *conn {
+			c := newConn("abc")
+			if _, err := m.register(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			c.close("phone-close")
+			return c
+		}, wantErr: ErrNoConn},
+		{name: "connID mismatch", connID: "00000000", setup: func(m *Manager) *conn {
+			c := newConn("abc")
+			if _, err := m.register(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}, wantErr: ErrNoConn},
+		{name: "full queue and cancelled ctx", connID: "aabbccdd", fill: true, setup: func(m *Manager) *conn {
+			c := newConn("abc")
+			if _, err := m.register(context.Background(), c); err != nil {
+				t.Fatal(err)
+			}
+			return c
+		}, wantErr: context.Canceled},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _, _ := newMgr(t)
+			c := tc.setup(m)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.fill {
+				for len(c.send) < cap(c.send) {
+					c.send <- nil
+				}
+				cancel()
+			}
+			err := m.SendOpen(ctx, "abc", tc.connID, open)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("SendOpen = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SendOpen = %v", err)
+			}
+			frame := <-c.send
+			typ, body, err := wire.DecodeControl(frame)
+			if err != nil || typ != wire.CtrlOpen {
+				t.Fatalf("queued frame = %d %v, want an OPEN", typ, err)
+			}
+			var got wire.OpenPayload
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got != open {
+				t.Fatalf("OPEN payload = %+v, want %+v", got, open)
+			}
+		})
+	}
+}
+
+func TestManager_Teardown_NotifiesClosedHook(t *testing.T) {
+	tests := []struct {
+		name       string
+		closeVia   func(m *Manager, c *conn)
+		wantReason string
+	}{
+		{name: "phone close", closeVia: func(*Manager, *conn) {}, wantReason: "phone-close"},
+		{name: "supersede", closeVia: func(m *Manager, _ *conn) {
+			next := newConn("abc")
+			next.connID = "11223344"
+			if _, err := m.register(context.Background(), next); err != nil {
+				t.Fatal(err)
+			}
+		}, wantReason: "phone-close"},
+		{name: "ban-evict", closeVia: func(m *Manager, _ *conn) {
+			m.EvictBanned(func(name, _ string) bool { return name == "abc" })
+		}, wantReason: store.CloseBanEvict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fr := newFakeRouter()
+			hook := &recordingClosedHook{fr: fr}
+			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook,
+				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+			c := newConn("abc")
+			close(c.hbDone)
+			teardown, err := m.register(context.Background(), c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.closeVia(m, c)
+			teardown()
+			hook.mu.Lock()
+			calls := append([]closedCall(nil), hook.calls...)
+			hook.mu.Unlock()
+			want := closedCall{name: "abc", connID: "aabbccdd", reason: tc.wantReason}
+			if len(calls) != 1 || calls[0] != want {
+				t.Fatalf("hook calls = %+v, want exactly %+v", calls, want)
+			}
+			fr.mu.Lock()
+			defer fr.mu.Unlock()
+			unbind, hooked := -1, -1
+			for i, name := range fr.calls {
+				switch name {
+				case "Unbind":
+					unbind = i
+				case "PhoneConnClosed":
+					hooked = i
+				}
+			}
+			if unbind < 0 || hooked < unbind {
+				t.Fatalf("the hook must run after Unbind; calls=%v", fr.calls)
 			}
 		})
 	}

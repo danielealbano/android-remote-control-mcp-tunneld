@@ -69,7 +69,7 @@ func (b *blockedReader) close() { b.once.Do(func() { close(b.ch) }) }
 func newTestHandler(t *testing.T, pending int, ping time.Duration) (*Handler, *Manager) {
 	t.Helper()
 	m, _, _, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: ping, StreamPending: pending})
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: ping, StreamPending: pending})
 	return h, m
 }
 
@@ -182,8 +182,35 @@ func TestReadPumpPongStampsLiveness(t *testing.T) {
 func TestServeHTTPIPBanFirst(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	banned := netip.MustParseAddr("198.51.100.99")
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	dialBacks := NewDialBacks(tunneltest.Logger())
+	h := NewHandler(HandlerConfig{DialBacks: dialBacks, Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		BanIP: func(a netip.Addr) bool { return a == banned }})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	registered := make(chan struct{})
+	awaited := make(chan struct{})
+	go func() {
+		defer close(awaited)
+		if _, err := dialBacks.Await(ctx, "TOKEN", "phonex", func(context.Context) error { close(registered); return nil }); !errors.Is(err, context.Canceled) {
+			t.Errorf("Await = %v, want the cancellation", err)
+		}
+	}()
+	<-registered
+	dreq := httptest.NewRequest("GET", wire.DialBackPath, nil)
+	dreq.RemoteAddr = "198.51.100.99:40000"
+	dreq.Header.Set("Upgrade", wire.DialUpgrade)
+	dreq.Header.Set(wire.DialTokenHeader, "TOKEN")
+	drec := httptest.NewRecorder()
+	h.ServeHTTP(drec, dreq)
+	if drec.Code != 403 || drec.Header().Get("Connection") != "close" {
+		t.Fatalf("banned peer IP on the dial-back path = %d Connection=%q, want 403 + close", drec.Code, drec.Header().Get("Connection"))
+	}
+	if !dialBacks.expects("TOKEN", "") {
+		t.Fatal("the ban gate must answer before any token lookup consumes the waiter")
+	}
+	cancel()
+	<-awaited
 
 	req := httptest.NewRequest("GET", "/api/v1/control", nil)
 	req.RemoteAddr = "198.51.100.99:40000"
@@ -211,19 +238,6 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 	}
 }
 
-// TestServeDataNoWaiterIs404 covers the undeliverable dial-back stream: serveData must answer a REAL
-// 404 (no premature 200) when no waiter exists for the stream id.
-func TestServeDataNoWaiterIs404(t *testing.T) {
-	h, _ := newTestHandler(t, 4, time.Hour)
-	rec := newFlushRecorder()
-	req := httptest.NewRequest("POST", "/api/v1/data", newBlockedReader())
-	req.Header.Set("X-Stream-Id", "nosuch")
-	h.serveData(rec, req, "phoneg")
-	if rec.code() != 404 {
-		t.Fatalf("undeliverable stream must answer 404, got %d", rec.code())
-	}
-}
-
 func waitCond(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -248,7 +262,7 @@ func TestBanGatesRecordRejection(t *testing.T) {
 		mu.Unlock()
 	}
 	banned := netip.MustParseAddr("198.51.100.97")
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		BanIP:  func(a netip.Addr) bool { return a == banned },
 		Reject: rej})
 
@@ -297,7 +311,7 @@ func tlsRequest(t *testing.T, path string, leaf *x509.Certificate) *http.Request
 // mesh-role client cert MUST be refused even with a well-formed CN.
 func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
 	m, _, _, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		ValidName: func(string) bool { return true }})
 
 	rec := httptest.NewRecorder()
@@ -310,18 +324,16 @@ func TestServeHTTPRejectsMeshRoleCert(t *testing.T) {
 	}
 }
 
-// TestControlData_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §3–§4): /api/v1/control and
-// /api/v1/data are POST; a GET that passes the cert + CN gates is refused 405.
+// TestControlData_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §3): /api/v1/control is
+// POST; a GET that passes the cert + CN gates is refused 405.
 func TestControlData_NonPostIs405(t *testing.T) {
 	m, _, _, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		ValidName: func(string) bool { return true }})
-	for _, path := range []string{"/api/v1/control", "/api/v1/data"} {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, tlsRequest(t, path, selfSignedCert(t, "abcdef234567", false)))
-		if rec.Code != http.StatusMethodNotAllowed {
-			t.Fatalf("GET %s must be 405, got %d", path, rec.Code)
-		}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, tlsRequest(t, "/api/v1/control", selfSignedCert(t, "abcdef234567", false)))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/v1/control must be 405, got %d", rec.Code)
 	}
 }
 
@@ -329,7 +341,7 @@ func TestControlData_NonPostIs405(t *testing.T) {
 // route bind.
 func TestServeHTTPRejectsInvalidCN(t *testing.T) {
 	m, _, _, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		ValidName: func(name string) bool { return name == "goodname234567" }})
 
 	rec := httptest.NewRecorder()
@@ -386,7 +398,7 @@ func TestServeControl_BindFailureStatuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			m, fr, _, _ := newMgr(t)
 			fr.bindErr = tc.bindErr
-			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
+			h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})
 			rec := newFlushRecorder()
 			req := httptest.NewRequest("GET", "/api/v1/control", newBlockedReader())
 			h.serveControl(rec, req, phoneIdentity{name: "phonex", fingerprint: "sha256:fp"})
@@ -404,7 +416,7 @@ func TestServeControl_BindFailureStatuses(t *testing.T) {
 // closed cert-expired on the ping tick (the CA's exposure bound enforced live, not only at reconnect).
 func TestServeControl_CertExpiryCloses(t *testing.T) {
 	m, _, st, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: 5 * time.Millisecond, StreamPending: 4})
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: 5 * time.Millisecond, StreamPending: 4})
 	body := newBlockedReader()
 	defer body.close()
 	req := httptest.NewRequest("GET", "/api/v1/control", body)
@@ -432,7 +444,7 @@ func TestServeControl_CertExpiryCloses(t *testing.T) {
 
 func TestServeHTTP_UnparseablePeerRefused(t *testing.T) {
 	m, _, _, _ := newMgr(t)
-	h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4,
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		BanIP: func(netip.Addr) bool {
 			t.Error("the ban gate must not be consulted for an unparseable peer")
 			return false
@@ -467,10 +479,10 @@ func TestServeControl_BindFailureLogging(t *testing.T) {
 			fr := newFakeRouter()
 			fr.bindErr = tc.bindErr
 			var buf bytes.Buffer
-			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{},
+			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
 				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 				RouteTTL: 30 * time.Second, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
-			h := NewHandler(HandlerConfig{Manager: m, PingInterval: time.Hour, StreamPending: 4})
+			h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.cancelled {

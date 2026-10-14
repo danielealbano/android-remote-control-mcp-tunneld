@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"log/slog"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,10 +14,6 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
-
-// ErrDuplicateStreamID reports a dial-back stream id already pending on this phone connection (the
-// caller re-mints the id and retries).
-var ErrDuplicateStreamID = errors.New("phoneconn: duplicate stream id")
 
 // Router is the consumer-side routing surface phoneconn needs (BindRoute + owner-conditional
 // heartbeat/unbind + self-heal). BindRoute returns router.ErrConnIDCollision when the connID collides
@@ -40,10 +34,8 @@ type Recorder interface {
 	PhoneConnClose(reason string)
 }
 
-// DataStream is a bidirectional splice handle to a dial-back data stream: Read pulls phone→client
-// bytes, Write pushes client→phone bytes. Close tears the stream down.
-type DataStream interface {
-	io.ReadWriteCloser
+type ConnClosedHook interface {
+	PhoneConnClosed(ctx context.Context, name, connID, reason string)
 }
 
 // conn is one live phone control connection.
@@ -62,10 +54,9 @@ type conn struct {
 	cancel   context.CancelFunc
 	lastPong atomic.Int64 // unix nanos of the last PONG received (liveness)
 
-	mu      sync.Mutex
-	pending map[string]chan DataStream // streamID → dial-back waiter
-	closed  bool
-	reason  string
+	mu     sync.Mutex
+	closed bool
+	reason string
 }
 
 // teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (they run on
@@ -73,11 +64,12 @@ type conn struct {
 const teardownTimeout = 10 * time.Second
 
 // Manager tracks live phone control connections, binds routes, writes conn-log events, and drives
-// dial-back + eviction.
+// eviction.
 type Manager struct {
 	router    Router
 	logs      ConnLogStore
 	rec       Recorder
+	closed    ConnClosedHook
 	logger    *slog.Logger
 	nodeID    string
 	nodeHost  string
@@ -103,6 +95,7 @@ type Config struct {
 	Router    Router
 	Logs      ConnLogStore
 	Recorder  Recorder
+	Closed    ConnClosedHook
 	Logger    *slog.Logger
 	NodeID    string
 	NodeHost  string
@@ -117,13 +110,13 @@ func NewManager(cfg Config) *Manager {
 		logger = slog.Default()
 	}
 	return &Manager{
-		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, logger: logger,
+		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, closed: cfg.Closed, logger: logger,
 		nodeID: cfg.NodeID, nodeHost: cfg.NodeHost, nodeStart: cfg.NodeStart, routeTTL: cfg.RouteTTL,
 		conns: map[string]*conn{}, now: time.Now,
 	}
 }
 
-// Lookup returns the live connection for a tunnel name (fast path / eviction), if any.
+// Lookup returns the live connection for a tunnel name, if any.
 func (m *Manager) lookup(name string) (*conn, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -131,14 +124,7 @@ func (m *Manager) lookup(name string) (*conn, bool) {
 	return c, ok
 }
 
-// OwnsConn reports whether this node holds the live phone connection for name with the given route
-// connID (the mesh owner check before bridging).
-func (m *Manager) OwnsConn(name, connID string) bool {
-	c, ok := m.lookup(name)
-	return ok && c.connID == connID && !c.isClosed()
-}
-
-// HasConn reports whether this node holds a live phone connection for name (the fast-path check).
+// HasConn reports whether this node holds a live phone connection for name.
 func (m *Manager) HasConn(name string) bool {
 	c, ok := m.lookup(name)
 	return ok && !c.isClosed()
@@ -163,9 +149,6 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		c.connID = mustConnID() // collision with the previous conn's id — re-mint and retry
 	}
-	// The route is ours now (BindRoute won). The live concurrent-stream counter needs no reset here: it is
-	// keyed by connID inside conc:{name}, so a fresh connection's first AcquireStream structurally resets it
-	// (a straggler release from the prior connection is a no-op). Identity quotas (day/week traffic) persist.
 	m.mu.Lock()
 	// Supersede any existing local conn for the same name.
 	if old := m.conns[c.name]; old != nil {
@@ -193,6 +176,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		m.writeEvent(tctx, c, "end", c.closeReason())
 		m.rec.PhoneConnClose(c.closeReason())
+		m.closed.PhoneConnClosed(tctx, c.name, c.connID, c.closeReason())
 	}
 	return teardown, nil
 }
@@ -239,73 +223,21 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 	}
 }
 
-// OpenStream sends a dial-back OPEN{streamID} on the control stream and waits for the phone's data
-// stream (correlated by streamID), returning a bidirectional splice handle. Used by the local bridge
-// and the mesh handler. Times out if the phone fails to dial back.
-func (m *Manager) OpenStream(ctx context.Context, name, streamID string) (DataStream, error) {
+func (m *Manager) SendOpen(ctx context.Context, name, connID string, open wire.OpenPayload) error {
 	c, ok := m.lookup(name)
-	if !ok {
-		return nil, ErrNoConn
+	if !ok || c.isClosed() || c.connID != connID {
+		return ErrNoConn
 	}
-	waiter := make(chan DataStream, 1)
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, ErrNoConn
-	}
-	if _, exists := c.pending[streamID]; exists {
-		c.mu.Unlock()
-		return nil, ErrDuplicateStreamID
-	}
-	c.pending[streamID] = waiter
-	c.mu.Unlock()
-
-	// EncodeControl fails only on a non-marshalable payload; OpenPayload is a fixed struct of strings.
-	frame, err := wire.EncodeControl(wire.CtrlOpen, wire.OpenPayload{StreamID: streamID})
+	frame, err := wire.EncodeControl(wire.CtrlOpen, open)
 	if err != nil {
-		c.cancelPending(streamID, waiter, m.logger)
-		return nil, fmt.Errorf("encode OPEN frame: %w", err)
+		return fmt.Errorf("encode OPEN frame for %s: %w", name, err)
 	}
 	select {
 	case c.send <- frame:
+		return nil
 	case <-ctx.Done():
-		c.cancelPending(streamID, waiter, m.logger)
-		return nil, ctx.Err()
+		return fmt.Errorf("queue OPEN for %s: %w", name, ctx.Err())
 	}
-
-	select {
-	case ds := <-waiter:
-		return ds, nil
-	case <-ctx.Done():
-		c.cancelPending(streamID, waiter, m.logger)
-		return nil, ctx.Err()
-	}
-}
-
-// deliverStream hands an arriving dial-back data stream to its waiter (called by the /api/v1/data handler). The
-// check + delete + send happen UNDER the connection lock so they are atomic with OpenStream's cancel
-// (cancelPending): a stream is therefore either delivered to a still-live waiter or reported undeliverable
-// (returns false → the caller closes it) — it can never be sent to an abandoned buffered waiter.
-func (m *Manager) deliverStream(name, streamID string, ds DataStream) bool {
-	c, ok := m.lookup(name)
-	if !ok {
-		return false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		// The conn was evicted/closed (e.g. a ban reload) while this dial-back was in flight: refuse
-		// delivery so the /api/v1/data handler answers 404 and closes the stream, rather than starting a splice
-		// on a torn-down connection.
-		return false
-	}
-	w, ok := c.pending[streamID]
-	if !ok {
-		return false // the waiter was cancelled (dial-back deadline) before we arrived
-	}
-	delete(c.pending, streamID)
-	w <- ds // buffered (cap 1) → non-blocking even under the lock
-	return true
 }
 
 // CloseAll closes every live phone connection with the given close reason. Called at server drain so
@@ -411,24 +343,6 @@ func (c *conn) isClosed() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.closed
-}
-
-// cancelPending abandons a pending dial-back waiter (the dial-back deadline fired or the send failed): it
-// removes the registration under the lock, then drains + closes any stream deliverStream raced in and
-// delivered to the buffered waiter, so an orphaned /api/v1/data handler cannot leak. Because deliverStream
-// sends under the same lock, once the delete returns either a stream is already in `waiter` (drained
-// here) or deliverStream will observe the registration gone and report the stream undeliverable.
-func (c *conn) cancelPending(streamID string, waiter chan DataStream, logger *slog.Logger) {
-	c.mu.Lock()
-	delete(c.pending, streamID)
-	c.mu.Unlock()
-	select {
-	case ds := <-waiter:
-		if err := ds.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Debug("orphaned data stream close failed", "tunnel", c.name, "stream", streamID, "err", err)
-		}
-	default:
-	}
 }
 
 func (c *conn) close(reason string) {
