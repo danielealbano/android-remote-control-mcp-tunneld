@@ -30,7 +30,7 @@ flowchart LR
   tb["tunneld B (owns the phone)"]
   valkey[("Valkey (transient state)")]
   s3[("S3 / MinIO (durable state)")]
-  prom["Prometheus / Grafana / Alertmanager / ntfy"]
+  prom["Prometheus / Grafana"]
 
   phone -- "outbound mTLS control (HTTP/2)" --> tb
   client -- "TLS to name.tunnel-domain" --> ta
@@ -164,9 +164,8 @@ a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being
 dashboards: Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard handshake and
 ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail; they expect
 every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey exporter
-targets). The compose stack
-ships Prometheus, Grafana, Alertmanager, and ntfy on
-`127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
+targets). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
+Prometheus or Grafana.
 Secrets, key material, and tunnel payloads are NEVER logged.
 
 ## 7. Operations
