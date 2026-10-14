@@ -2022,26 +2022,26 @@ DoD:
 
 ---
 
-## [ ] US11 — Documentation
+## [x] US11 — Documentation
 
 Why: `docs/PROTOCOL.md` is the canonical wire contract and the other docs/rules describe the removed mesh data
 path, the old counter and the old `:80` scope.
 
 Acceptance criteria:
-- [ ] `PROTOCOL.md` is titled v2 and states the contract exactly as in this plan's "Wire contract v2".
-- [ ] No document describes a mesh data stream, `X-Stream-Id`, `/api/v1/mesh/data`, the HTTP/2 data stream, the lock-guarded `{connID, count}` hash, or the `:80` listener as http-01-only (plans excepted).
-- [ ] Operators find: the three new flags, that `--dialback-advertise` is the node's own address (never the round-robin name), that dial-backs count against `--limit-conn-rate` and hold a `--max-clients` slot on the entry node, that splices end when the phone's control connection closes, and the TIME_WAIT/conntrack guidance.
+- [x] `PROTOCOL.md` is titled v2 and states the contract exactly as in this plan's "Wire contract v2".
+- [x] No document describes a mesh data stream, `X-Stream-Id`, `/api/v1/mesh/data`, the HTTP/2 data stream, the lock-guarded `{connID, count}` hash, or the `:80` listener as http-01-only (plans excepted).
+- [x] Operators find: the three new flags, that `--dialback-advertise` is the node's own address (never the round-robin name), that dial-backs count against `--limit-conn-rate` and hold a `--max-clients` slot on the entry node, that splices end when the phone's control connection closes, and the TIME_WAIT/conntrack guidance.
 
-### [ ] Task 11.1 — Canonical docs
+### [x] Task 11.1 — Canonical docs
 
-- [ ] **Action 11.1.1** — modify `docs/PROTOCOL.md`:
+- [x] **Action 11.1.1** — modify `docs/PROTOCOL.md`:
   - Title "Wire Protocol (v2 — End-to-End Encrypted)". Intro: "splices the encrypted byte stream to the phone over an internal HTTP/2 mesh" → "splices the encrypted byte stream to a connection the phone dials back to the entry node".
   - §1: the dial-back presents the identity cert when `use_mtls`.
   - §3: the control connection carries the control stream and `/api/v1/issue` only; the `OPEN` row payload `{token, addr, use_https, use_mtls}`; when the control connection closes, every splice opened through it ends (a crashed owner node sends no `evict`: such splices end within 10 s through the entry node's per-splice route check).
   - §4 "Dial-back connection": this plan's "Wire contract v2" dial-back part (request, `101`, statuses, single-use token valid only while the entry node waits, either side closing ends it, one fresh route lookup + retry on a failed open, `ChunkSize` = pacing slice).
   - §5 mesh: control RPC only — ops `renew`, `terminate`, `open`, `evict` (envelopes + `applied` semantics of this plan); every call has a per-request deadline; terminate is sent to every node by the admin endpoint; a closing control connection's node sends `evict` to every node. Delete the mesh data stream paragraph.
   - §6: the `ChunkSize` bullet ends "the dial-back carries no framing"; add "the dial-back token is 128-bit random, single-use, valid only while the entry node waits; without `use_mtls` it is the only authorisation of a dial-back".
-- [ ] **Action 11.1.2** — modify `docs/ARCHITECTURE.md`:
+- [x] **Action 11.1.2** — modify `docs/ARCHITECTURE.md`:
   - §1 table: `internal/wire` "v1 control-frame codec" → "control-frame codec + dial-back constants"; `internal/edge` "bridge (fast path + mesh)" → "dial-back wait + splice on the entry node"; `internal/phoneconn` "`/api/v1/data` dial-back" → "`/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`)"; `internal/mesh` → "replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools". Module graph: drop the `edge --> mesh` edge; the `acmehttp` node label "(only when a CA uses http-01)" → "(http-01 answers; plain dial-backs)"; the §1 text on when `:80` binds.
   - §2 sequence diagram:
 
@@ -2070,8 +2070,8 @@ sequenceDiagram
   - §8: terminate (a bound route required, 404 otherwise) is applied on every node (each evicts its splices, the owner closes the phone connection); reissue still routes to the owner. Keep the `no-route` row of the rejection-reason table accurate (its writers include the failed dial-back open).
   - §9 shutdown chart + text: the node "close raw :443 + HTTP-01 :80 listeners" → "close raw :443 + plain :80 listeners"; a final step after "Node explicitly deregistered": "join, then cancel, the splice-eviction broadcasts".
   - §10: the three new flags; `--acme-http-listen` binds when a CA uses http-01 or `--dialback-https=false`.
-- [ ] **Action 11.1.3** — modify `README.md`: intro "over an internal mTLS mesh" → the entry-node dial-back; the topology Mermaid edges `ta -- "connID-checked mesh stream" --> tb` and `tb -. "dial-back data stream" .-> phone` → `ta -- "mesh control: open" --> tb`, `tb -. "OPEN (control)" .-> phone`, `phone -- "dial-back connection" --> ta`; the sentence "bridges locally (fast path) or over the mesh to the owner (B), which dials back to the phone" → the entry-node dial-back sentence; the `--limit-conn-rate` row notes dial-backs count; the terminate sentence → every node; the quickstart's env step lists `DIALBACK_ADVERTISE`; the two `:80` statements (the "Never publish" line and the listener description further down) say `:80` serves ACME HTTP-01 and, with `--dialback-https=false`, plain dial-backs.
-- [ ] **Action 11.1.4** — modify `docs/PROJECT.md`: §1, §3 and the §4 ban paragraph's `:80` statements (also plain dial-backs when `--dialback-https=false`); every mesh-data/fast-path mention → entry-node dial-back; its topology Mermaid chart edges as in Action 11.1.3; §5 `conc:` text → the sorted-set description of Action 11.1.2; §6 terminate → every node; add to the operations notes:
+- [x] **Action 11.1.3** — modify `README.md`: intro "over an internal mTLS mesh" → the entry-node dial-back; the topology Mermaid edges `ta -- "connID-checked mesh stream" --> tb` and `tb -. "dial-back data stream" .-> phone` → `ta -- "mesh control: open" --> tb`, `tb -. "OPEN (control)" .-> phone`, `phone -- "dial-back connection" --> ta`; the sentence "bridges locally (fast path) or over the mesh to the owner (B), which dials back to the phone" → the entry-node dial-back sentence; the `--limit-conn-rate` row notes dial-backs count; the terminate sentence → every node; the quickstart's env step lists `DIALBACK_ADVERTISE`; the two `:80` statements (the "Never publish" line and the listener description further down) say `:80` serves ACME HTTP-01 and, with `--dialback-https=false`, plain dial-backs.
+- [x] **Action 11.1.4** — modify `docs/PROJECT.md`: §1, §3 and the §4 ban paragraph's `:80` statements (also plain dial-backs when `--dialback-https=false`); every mesh-data/fast-path mention → entry-node dial-back; its topology Mermaid chart edges as in Action 11.1.3; §5 `conc:` text → the sorted-set description of Action 11.1.2; §6 terminate → every node; add to the operations notes:
   - `--dialback-advertise` = this node's own public `IP:443` (plain mode: `IP:80`), never the round-robin hostname.
   - Each public connection holds two `--max-clients` slots on its entry node (client + dial-back); its dial-back counts against `--limit-conn-rate` for the phone's IP — raise it for many tunnels behind one IP.
   - Splices end when the phone's control connection closes (any reason), on every node.
@@ -2079,17 +2079,17 @@ sequenceDiagram
   - The soak/e2e paragraph: device gates reach each replica through its own `adb reverse` port (`--dialback-advertise 127.0.0.1:<device port>`).
 
 DoD:
-- [ ] No other doc section contradicts these changes.
+- [x] No other doc section contradicts these changes.
 
-### [ ] Task 11.2 — Rules + deploy
+### [x] Task 11.2 — Rules + deploy
 
-- [ ] **Action 11.2.1** — modify `.claude/rules/project.md` (concise): STATUS + "Read These First" #4 name Plan 16 as the decision record for the dial-back/data path (Plan 3 stays canonical elsewhere); "Read These First" #2/#3 summaries ("connection lifecycle (fast path + mesh)" → "connection lifecycle (entry-node dial-back)", "v1 control frames, … the mesh stream header" → "control frames, the dial-back upgrade, the mesh control RPCs"); every `:80` mention (Tech Stack deploy row, Source-IP section) also names plain dial-backs; the `wire` commit scope → "control-frame codec + dial-back constants"; intro "splices … over an internal mTLS mesh" → entry-node dial-back; Tech Stack "Phone control + replica mesh" row: data = HTTP/1.1-upgraded dial-back connection, mesh = control RPCs; E2E invariant: dial-back to the entry node, no data crosses nodes; Identity invariant: the dial-back presents the identity cert when `--dialback-mtls` (default on), and splices end when their control connection closes; Wire protocol section: "v1 control frames" → "control frames", `OPEN{token, addr, use_https, use_mtls}`, the dial-back upgrade, mesh = control RPCs only (drop the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` sentence); Valkey section + "Live-vs-identity reset invariant" + Unified limit model: `conc:{name}` is a sorted set (no `conclock`, no connID reset) and the TTL'd `nodes` id set; Commit Scopes `mesh` → "replica↔replica mTLS HTTP/2 control RPCs"; `phoneconn` → "dial-back upgrade".
-- [ ] **Action 11.2.2** — modify `deploy/docker-compose.yml` (tunneld `environment:`, no comment):
+- [x] **Action 11.2.1** — modify `.claude/rules/project.md` (concise): STATUS + "Read These First" #4 name Plan 16 as the decision record for the dial-back/data path (Plan 3 stays canonical elsewhere); "Read These First" #2/#3 summaries ("connection lifecycle (fast path + mesh)" → "connection lifecycle (entry-node dial-back)", "v1 control frames, … the mesh stream header" → "control frames, the dial-back upgrade, the mesh control RPCs"); every `:80` mention (Tech Stack deploy row, Source-IP section) also names plain dial-backs; the `wire` commit scope → "control-frame codec + dial-back constants"; intro "splices … over an internal mTLS mesh" → entry-node dial-back; Tech Stack "Phone control + replica mesh" row: data = HTTP/1.1-upgraded dial-back connection, mesh = control RPCs; E2E invariant: dial-back to the entry node, no data crosses nodes; Identity invariant: the dial-back presents the identity cert when `--dialback-mtls` (default on), and splices end when their control connection closes; Wire protocol section: "v1 control frames" → "control frames", `OPEN{token, addr, use_https, use_mtls}`, the dial-back upgrade, mesh = control RPCs only (drop the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` sentence); Valkey section + "Live-vs-identity reset invariant" + Unified limit model: `conc:{name}` is a sorted set (no `conclock`, no connID reset) and the TTL'd `nodes` id set; Commit Scopes `mesh` → "replica↔replica mTLS HTTP/2 control RPCs"; `phoneconn` → "dial-back upgrade".
+- [x] **Action 11.2.2** — modify `deploy/docker-compose.yml` (tunneld `environment:`, no comment):
   `TUNNELD_DIALBACK_ADVERTISE: ${DIALBACK_ADVERTISE:?DIALBACK_ADVERTISE required (this host public address:443)}`;
   modify `deploy/.env.example`: add `DIALBACK_ADVERTISE=203.0.113.10:443`.
 
 DoD:
-- [ ] `grep -rn 'X-Stream-Id\|mesh/data\|mesh stream\|fast path\|conclock\|{connID, count}' README.md docs/PROTOCOL.md docs/ARCHITECTURE.md docs/PROJECT.md support/tunnel-app/README.md .claude/rules/` is empty.
+- [x] `grep -rn 'X-Stream-Id\|mesh/data\|mesh stream\|fast path\|conclock\|{connID, count}' README.md docs/PROTOCOL.md docs/ARCHITECTURE.md docs/PROJECT.md support/tunnel-app/README.md .claude/rules/` is empty.
 
 ---
 
