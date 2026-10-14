@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseRedisURL_Variants(t *testing.T) {
@@ -58,6 +59,36 @@ func TestParseRedisURL_SentinelCredentials(t *testing.T) {
 	}
 	if f.Username != "masteruser" || f.Password != "masterpw" {
 		t.Fatalf("username= / password= must authenticate to the master, got %q/%q", f.Username, f.Password)
+	}
+}
+
+func TestParseRedisURL_PoolOptionsReachTheClient(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "sentinel", url: "redis://s1.example.test:26379?master_name=tunneld&pool_size=200&conn_max_idle_time=5m"},
+		{name: "single node", url: "redis://valkey.example.test:6379?pool_size=200&conn_max_idle_time=5m"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, err := ParseRedisURL(tc.url)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rdb := c.NewClient()
+			t.Cleanup(func() {
+				if err := rdb.Close(); err != nil {
+					t.Errorf("close client: %v", err)
+				}
+			})
+			o := rdb.Options()
+			if o.PoolSize != 200 || o.ConnMaxIdleTime != 5*time.Minute {
+				t.Fatalf("pool_size = %d, conn_max_idle_time = %s, want 200 / 5m", o.PoolSize, o.ConnMaxIdleTime)
+			}
+		})
 	}
 }
 
