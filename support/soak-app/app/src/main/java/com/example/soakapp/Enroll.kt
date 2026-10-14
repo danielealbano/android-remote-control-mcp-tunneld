@@ -8,6 +8,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.security.ProviderException
 import java.security.PrivateKey
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -28,19 +29,36 @@ class Identity(
     publicChain: Array<X509Certificate>,
     caId: String,
     generation: Int,
+    prevIdentityAlias: String = "",
+    prevTlsAlias: String = "",
 ) {
+    class State(
+        val identityAlias: String,
+        val tlsAlias: String,
+        val identityChain: Array<X509Certificate>,
+        val publicChain: Array<X509Certificate>,
+        val caId: String,
+        val generation: Int,
+        val prevIdentityAlias: String = "",
+        val prevTlsAlias: String = "",
+    )
+
     private val lock = Any()
     val issueLock = Any()
     private var identityAlias = identityAlias
-    private var prevIdentityAlias = ""
+    private var prevIdentityAlias = prevIdentityAlias
     private var tlsAlias = tlsAlias
-    private var prevTlsAlias = ""
+    private var prevTlsAlias = prevTlsAlias
     private var identityChain = identityChain
     private var publicChain = publicChain
     private var caId = caId
     private var generation = generation
 
     fun mtlsClient(): OkHttpClient = net.mtlsClient(this)
+
+    fun state(): State = synchronized(lock) {
+        State(identityAlias, tlsAlias, identityChain, publicChain, caId, generation, prevIdentityAlias, prevTlsAlias)
+    }
 
     fun identityCred(): Cred = synchronized(lock) { Cred(identityAlias, identityChain, Keys.privateKey(identityAlias)) }
 
@@ -88,6 +106,10 @@ object Enroll {
                 if (attempt++ >= MAX_ENROLL_RETRIES) throw e
                 Log.w(TAG, "phone $phone: enrollment network error, retrying in 2s", e)
                 Thread.sleep(2000)
+            } catch (e: ProviderException) {
+                if (attempt++ >= MAX_ENROLL_RETRIES) throw e
+                Log.w(TAG, "phone $phone: key generation failed, retrying in 3s", e)
+                Thread.sleep(3000)
             }
         }
     }
@@ -179,7 +201,10 @@ object Enroll {
             .newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
     }
 
-    private fun parseChain(pem: String): Array<X509Certificate> =
+    fun chainPem(chain: Array<X509Certificate>): String =
+        chain.joinToString("") { Keys.pem("CERTIFICATE", it.encoded) }
+
+    fun parseChain(pem: String): Array<X509Certificate> =
         CertificateFactory.getInstance("X.509").generateCertificates(ByteArrayInputStream(pem.toByteArray()))
             .map { it as X509Certificate }.toTypedArray()
 }

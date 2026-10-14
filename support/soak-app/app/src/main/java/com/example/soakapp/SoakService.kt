@@ -10,15 +10,18 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlin.random.Random
 
 class SoakService : Service() {
-    private class Phone(val server: Server, val tunnel: Tunnel)
+    private class Phone(val name: String, val server: Server, val tunnel: Tunnel)
 
     private val basePort = 18100
-    private val phones = CopyOnWriteArrayList<Phone>()
+    private val maxPhones = 200
+    private val phones = ConcurrentHashMap<Int, Phone>()
     private val lifecycle = Any()
-    private val namesLock = Any()
+    private val startLock = Any()
     @Volatile private var running = false
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -35,7 +38,7 @@ class SoakService : Service() {
 
     private fun doStart(intent: Intent) {
         val count = intent.getStringExtra("count")!!.toInt()
-        require(count in 1..50) { "count must be 1..50, got $count" }
+        require(count in 1..maxPhones) { "count must be 1..$maxPhones, got $count" }
         val spacingSeconds = intent.getStringExtra("spacingSeconds")?.toLong() ?: 65L
         require(spacingSeconds >= 0) { "spacingSeconds must be >= 0" }
         val parallel = intent.getStringExtra("parallel") == "true"
@@ -43,60 +46,95 @@ class SoakService : Service() {
         val controlHost = intent.getStringExtra("controlHost")!!
         val tunnelDomain = intent.getStringExtra("tunnelDomain")!!
         val net = Net(intent.getStringExtra("caPath"), intent.getStringExtra("edgePort")?.toInt())
-        synchronized(lifecycle) {
-            check(!running) { "already running" }
-            running = true
-            wakeLock = getSystemService(PowerManager::class.java)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soakapp:run")
-                .also { it.acquire() }
-        }
-        listOf("names.txt", "ready", "error", "failures.txt").forEach { File(filesDir, it).delete() }
-        Keys.deleteAll("soak-")
-        if (parallel) {
-            val failures = CopyOnWriteArrayList<String>()
-            (0 until count).map { i ->
-                Thread {
-                    try {
-                        startPhone(net, i, enrollHost, controlHost, tunnelDomain)
-                    } catch (t: Throwable) {
-                        Log.e(TAG, "phone $i failed", t)
-                        failures.add("phone $i: $t")
-                    }
-                }.apply { start() }
-            }.forEach { it.join() }
-            if (failures.isNotEmpty()) File(filesDir, "failures.txt").writeText(failures.joinToString("\n", postfix = "\n"))
-        } else {
-            for (i in 0 until count) {
-                if (!running) return
-                if (i > 0) Thread.sleep(spacingSeconds * 1000)
-                startPhone(net, i, enrollHost, controlHost, tunnelDomain)
+        val store = PhoneStore(File(filesDir, "phones"))
+        synchronized(startLock) {
+            synchronized(lifecycle) {
+                running = true
+                if (wakeLock == null) {
+                    wakeLock = getSystemService(PowerManager::class.java)
+                        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soakapp:run")
+                        .also { it.acquire() }
+                }
             }
+            listOf("ready", "error", "failures.txt").forEach { File(filesDir, it).delete() }
+            val todo = (0 until count).filter { !phones.containsKey(it) }
+            val failures = CopyOnWriteArrayList<String>()
+            val bring = { i: Int, jitter: Boolean ->
+                try {
+                    bringUp(net, store, i, enrollHost, controlHost, tunnelDomain, jitter)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "phone $i failed", t)
+                    failures.add("phone $i: $t")
+                }
+            }
+            if (parallel) {
+                todo.map { i -> Thread { bring(i, true) }.apply { start() } }.forEach { it.join() }
+            } else {
+                todo.forEachIndexed { n, i ->
+                    if (!running) return
+                    if (n > 0) Thread.sleep(spacingSeconds * 1000)
+                    bring(i, false)
+                }
+            }
+            if (failures.isNotEmpty()) File(filesDir, "failures.txt").writeText(failures.joinToString("\n", postfix = "\n"))
+            writeNames()
+            File(filesDir, "ready").writeText("${phones.size}\n")
         }
-        File(filesDir, "ready").writeText("${phones.size}\n")
     }
 
-    private fun startPhone(net: Net, i: Int, enrollHost: String, controlHost: String, tunnelDomain: String) {
-        val id = Enroll.enroll(net, i, enrollHost, controlHost, tunnelDomain)
+    private fun bringUp(net: Net, store: PhoneStore, i: Int, enrollHost: String, controlHost: String, tunnelDomain: String, jitter: Boolean) {
+        val saved = store.load(i)
+        val resumed = saved?.takeIf { it.enrollHost == enrollHost && it.controlHost == controlHost && it.tunnelDomain == tunnelDomain }
+            ?.let { restore(net, i, it) }
+        val id = resumed ?: run {
+            if (jitter) Thread.sleep(Random.nextLong(0, 5001))
+            store.delete(i)
+            Keys.deleteAll(Enroll.aliasPrefix(i))
+            Enroll.enroll(net, i, enrollHost, controlHost, tunnelDomain).also { store.save(i, it) }
+        }
         val (key, chain) = id.tlsCredential()
         val server = Server(basePort + i).also { it.start(key, chain) }
         val renewLock = Any()
         val tunnel = Tunnel(i, net, id.mtlsClient(), controlHost, server::localPort) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce)
+                store.save(i, id)
                 id.tlsCredential().let { (k, c) -> server.swapIdentity(k, c) }
             }
         }
-        phones.add(Phone(server, tunnel))
         Thread { tunnel.run() }.apply { isDaemon = true }.start()
-        check(tunnel.awaitBound(60)) { "phone $i (${id.name}): control stream not bound within 60s" }
-        synchronized(namesLock) { File(filesDir, "names.txt").appendText(id.name + "\n") }
-        Log.i(TAG, "phone $i enrolled and bound as ${id.name}")
+        if (!tunnel.awaitBound(60)) {
+            tunnel.stop(); server.stop()
+            error("phone $i (${id.name}): control stream not bound within 60s")
+        }
+        phones[i] = Phone(id.name, server, tunnel)
+        Log.i(TAG, "phone $i bound as ${id.name}${if (resumed != null) " (resumed)" else ""}")
+    }
+
+    private fun restore(net: Net, i: Int, saved: PhoneStore.Saved): Identity? = try {
+        val s = saved.state
+        Keys.privateKey(s.identityAlias)
+        Keys.privateKey(s.tlsAlias)
+        Identity(
+            net, i, saved.name, saved.enrollHost, saved.controlHost, saved.tunnelDomain,
+            s.identityAlias, s.tlsAlias, s.identityChain, s.publicChain, s.caId, s.generation,
+            s.prevIdentityAlias, s.prevTlsAlias,
+        )
+    } catch (t: Throwable) {
+        Log.w(TAG, "phone $i: saved identity ${saved.name} is unusable, enrolling a new one", t)
+        null
+    }
+
+    private fun writeNames() {
+        val tmp = File(filesDir, "names.txt.tmp")
+        tmp.writeText(phones.toSortedMap().values.joinToString("") { it.name + "\n" })
+        check(tmp.renameTo(File(filesDir, "names.txt"))) { "could not move names.txt into place" }
     }
 
     private fun doStop() {
         synchronized(lifecycle) {
             running = false
-            phones.forEach { it.tunnel.stop(); it.server.stop() }
+            phones.values.forEach { it.tunnel.stop(); it.server.stop() }
             phones.clear()
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
