@@ -73,6 +73,7 @@ func TestE2E_SoakApp(t *testing.T) {
 	amBroadcast(t, serial, soakAppPkg, "start",
 		"count", strconv.Itoa(soakPhones),
 		"spacingSeconds", "0",
+		"parallel", "true",
 		"edgePort", strconv.Itoa(soakAppDevicePort),
 		"caPath", dataDir+"/files/pebble-ca.pem",
 		"enrollHost", e2eEnrollHost,
