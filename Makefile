@@ -2,7 +2,7 @@ VERSION ?= dev
 GO_PACKAGES = $(shell go list ./...)
 
 .PHONY: build lint vet govulncheck test-unit test-integration test-e2e test-staging test-all test-scripts \
-        tidy compose-config mermaid-check attest-probe tunnel-app
+        tidy compose-config mermaid-check attest-probe tunnel-app soak-app soak-client
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/tunneld ./cmd/tunneld
@@ -100,3 +100,20 @@ tunnel-app:
 	    { test -n "$$digest" || { echo "no signing-cert digest in the apksigner output" >&2; exit 1; }; } && \
 	    { echo "# Debug signing-cert SHA-256 for the tunnel-app APK (regenerate via 'make tunnel-app')."; \
 	      echo "$$digest"; } > fixtures/tunnel-app/signers.allow
+
+soak-app:
+	@test -n "$(APKSIGNER)" || { echo "apksigner not found under $(ANDROID_SDK)/build-tools; set ANDROID_HOME"; exit 1; }
+	cd support/soak-app && ./gradlew assembleDebug
+	mkdir -p fixtures/soak-app
+	cp support/soak-app/app/build/outputs/apk/debug/app-debug.apk \
+	    fixtures/soak-app/soak-app.apk
+	sum="$$(sha256sum fixtures/soak-app/soak-app.apk)" && \
+	    echo "$${sum%% *}" > fixtures/soak-app/soak-app.apk.sha256
+	certs="$$($(APKSIGNER) verify --print-certs fixtures/soak-app/soak-app.apk)" && \
+	    digest="$$(printf '%s\n' "$$certs" | awk -F': ' '/certificate SHA-256 digest/ {print tolower($$NF); exit}')" && \
+	    { test -n "$$digest" || { echo "no signing-cert digest in the apksigner output" >&2; exit 1; }; } && \
+	    { echo "# Debug signing-cert SHA-256 for the soak-app APK (regenerate via 'make soak-app')."; \
+	      echo "$$digest"; } > fixtures/soak-app/signers.allow
+
+soak-client:
+	go build -o bin/soak-client ./support/soak-client
