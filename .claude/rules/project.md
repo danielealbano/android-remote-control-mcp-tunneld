@@ -5,15 +5,18 @@ Android MCP app (`android-remote-control-mcp`) a stable public hostname. Externa
 **directly with the phone**, which holds a publicly-trusted (WebPKI) certificate for
 `<name>.<tunnel-domain>`. tunneld is the internet edge on **raw TCP `:443`** (there is NO reverse proxy):
 it peeks each ClientHello (SNI/ALPN/version/JA4), routes on SNI, and splices the **opaque encrypted byte
-stream** to the phone over an internal mTLS **mesh** — it can NEVER read tunnel traffic. Run **one
+stream** to a connection the phone dials back to the entry node (the replicas' mTLS **mesh** carries
+control RPCs only) — it can NEVER read tunnel traffic. Run **one
 replica per host**; **Valkey** holds transient control state (TTL'd), a plain **S3** bucket holds the
 durable state (name registry, connection logs, rejected-enroll evidence). Identity is earned by
 **two-phase attested enrollment** (Android hardware key attestation → identity mTLS cert → server-run
 ACME public cert). Abuse is contained by layered caps and a hot-reloadable ban/geo engine.
 
-> **STATUS: Plan 3 (E2E) implemented.** Plan 3 (`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`)
-> replaces the Plan-1 HTTP/WebSocket-proxy architecture end to end. Releases are cut from `v*` tags via
-> goreleaser; multi-arch images are published to `ghcr.io/danielealbano/tunneld`.
+> **STATUS: Plan 3 (E2E) implemented; Plan 16 (entry-node dial-back, wire v2) implemented.** Plan 3
+> (`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`) replaces the Plan-1 HTTP/WebSocket-proxy
+> architecture end to end; Plan 16 (`docs/plans/16_entry_node_dial_back_20261014192454.md`) replaces its
+> dial-back/data path. Releases are cut from `v*` tags via goreleaser; multi-arch images are published to
+> `ghcr.io/danielealbano/tunneld`.
 
 ## MANDATORY: Read These First
 
@@ -22,15 +25,16 @@ You MUST ALWAYS read these documents before ANY work, in this order:
 1. **`docs/PROJECT.md`** — operational reference: what tunneld is, topology, identity/auth,
    caps, ban/geo engine, state + retention, observability, non-goals. **Entry-level read.**
 2. **`docs/ARCHITECTURE.md`** — system map: package layout, the raw `:443` SNI edge, the public
-   connection lifecycle (fast path + mesh), enrollment/issuance/renewal, bandwidth model, Valkey +
+   connection lifecycle (entry-node dial-back), enrollment/issuance/renewal, bandwidth model, Valkey +
    S3 state, shutdown. **Entry-level read.**
 3. **`docs/PROTOCOL.md`** — the wire protocol: two-phase enrollment, the mTLS `/api/v1/issue` endpoint, the
-   v1 control frames, the opaque data splice, the mesh stream header, and the security invariants.
+   control frames, the dial-back upgrade, the mesh control RPCs, and the security invariants.
    **CANONICAL wire contract** — the Go client in `client/` and the future Kotlin client MUST both
    conform. **ESSENTIAL.**
 4. **`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`** — the decision record (every design
    decision was agreed with the user there, incl. the `## Deviations` log). CANONICAL when a design
-   detail is disputed.
+   detail is disputed — except the dial-back/data path, whose decision record is
+   **`docs/plans/16_entry_node_dial_back_20261014192454.md`**.
 
 You MUST ALSO follow `go.md`, `github.md`, `agent.md`, and `development_pipeline.md`. It is
 ABSOLUTELY MANDATORY to pass ALL quality gates before any work is considered done.
@@ -48,7 +52,7 @@ does NOT duplicate them.
 |---|---|---|
 | Language | **Go (see `go.mod` for the pinned version)**, `CGO_ENABLED=0` for released artifacts | Static binary; distroless `nonroot` runtime image. |
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`, `--s3-*` → `TUNNELD_S_3_*`); `Validate()` enforces every cross-field invariant at startup. |
-| Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) + replica↔replica mesh; binary control frames per `docs/PROTOCOL.md`; the data stream is an opaque splice. |
+| Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/issue`) + replica↔replica mesh control RPCs; binary control frames per `docs/PROTOCOL.md`; the data path is an HTTP/1.1-upgraded dial-back connection (`/api/v1/data`) carrying an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
 | Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
 | ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, per-CA cooldown/backoff retry-after, self-heal. |
@@ -58,7 +62,7 @@ does NOT duplicate them.
 | Logging | `log/slog` fan-out + `gopkg.in/natefinch/lumberjack.v2` | Repeatable composite `--log` sinks; `std` splits by severity (info+ → stdout, warn+ → stderr). |
 | Unit-test Valkey | `github.com/alicebob/miniredis/v2` | In-process; UNIT tier only. |
 | Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e` / `staging`); needs Docker. The `staging` tier also uses real LE / GTS staging through a reverse SSH tunnel. |
-| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443 (+ :80 for ACME HTTP-01), valkey, minio (+bucket-create), fetcher; `deploy/prometheus/` + `deploy/grafana/` are the operator-run monitoring configs (not in compose). |
+| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443 (+ :80 for ACME HTTP-01 and plain dial-backs), valkey, minio (+bucket-create), fetcher; `deploy/prometheus/` + `deploy/grafana/` are the operator-run monitoring configs (not in compose). |
 | Release | goreleaser (`v*` tags) | linux amd64+arm64 archives + multi-arch image `ghcr.io/danielealbano/tunneld`. |
 | Source control | **GitHub**, `danielealbano/android-remote-control-mcp-tunneld` | See `github.md`. |
 
@@ -83,7 +87,7 @@ MUST NOT be relaxed without explicit user direction.
 - **tunneld relays OPAQUE TLS bytes and MUST NEVER read, terminate, or inspect tunnel traffic.** The
   phone terminates TLS with its own WebPKI cert. There is NO HTTP request forwarding, NO method/path
   allowlist on relayed traffic, and NO `X-Forwarded-*` handling. The public edge is a raw `:443` SNI
-  splice; `wire.ChunkSize` = 16384 is the paced-copy read-slice size, NOT a framed protocol. A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation addressed to tunneld — answered locally with its challenge certificate and NEVER spliced (it carries no tunnel traffic).
+  splice to the phone's dial-back connection to the ENTRY node — no data crosses nodes; `wire.ChunkSize` = 16384 is the paced-copy read-slice size, NOT a framed protocol. A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation addressed to tunneld — answered locally with its challenge certificate and NEVER spliced (it carries no tunnel traffic).
 
 ### Identity & authentication — SACRED
 - **Two-phase attested enrollment.** Phase 1 (`/api/v1/enroll`, server-TLS): attestation (seven-point
@@ -96,7 +100,8 @@ MUST NOT be relaxed without explicit user direction.
   issuance the name is read from the **mTLS client-cert CN** and the TLS CSR MUST request exactly that.
   Enrollment accepts **ECDSA P-256 keys ONLY**.
 - **mTLS with role separation.** The phone authenticates with its identity cert over the control
-  connection; the replica mesh uses distinct **mesh-role** certs (SAN = node id, verified by chain +
+  connection, and on every dial-back when `--dialback-mtls` (default on); splices end when the control
+  connection they were opened through closes; the replica mesh uses distinct **mesh-role** certs (SAN = node id, verified by chain +
   role, NOT hostname). There is **NO TLS mutual auth on the PUBLIC side** (the edge relays opaque TLS).
   The phone control listener REJECTS a mesh-role cert; the mesh listener REJECTS an identity-role cert.
 - **Revocation is the ban engine ONLY** (no CRL): `tunnel-name` / `tunnel-fingerprint` bans are enforced
@@ -107,17 +112,17 @@ MUST NOT be relaxed without explicit user direction.
 ### Source-IP + ingress — SACRED
 - The IP for ban checks, rate limits, and quotas is the **peer address of the raw TCP connection** (the
   edge is the internet edge — there is no proxy and no `--client-ip-header`).
-- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, the ACME HTTP-01 `:80` listener, `/api/v1/enroll`,
+- **The ban check is the FIRST handler-level check on every ingress edge** (public SNI, the plain `:80` listener (ACME HTTP-01 + plain dial-backs), `/api/v1/enroll`,
   `/api/v1/control`), keyed on that IP. A peer address that does not parse as an IP cannot be ban-checked, so
   every ingress edge REFUSES it before the ban gate (fail closed, Debug-logged). **Never publish** the mesh (`:9443`) or internal (`:9090`) ports —
-  only the raw edge `:443` and the ACME HTTP-01 listener `:80` are public.
+  only the raw edge `:443` and the plain `:80` listener (ACME HTTP-01 + plain dial-backs) are public.
 - The public edge answers a ClientHello whose first ALPN protocol is `acme-tls/1` locally (TLS-ALPN-01), then dispatches by SNI: `<name>.<tunnel-domain>` → route+splice; `--enroll-host` /
   `--control-host` → local termination; anything else → close (`no-route`). Caps are UNIFORM — NO
   per-path exceptions. Operators raise the `--limit-*` values, never the code.
 
 ### Valkey (transient) + S3 (durable) state — SACRED
-- **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry, rate-limit
-  windows, concurrency counters, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
+- **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry + the `nodes` id
+  set, rate-limit windows, the `conc:{name}` stream-cap sorted set, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
   `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
   locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, or a
   pipelined `EXPIRE NX` right after the `INCR`. `EXPIRE NX` self-heals a skipped TTL on the next
@@ -129,12 +134,11 @@ MUST NOT be relaxed without explicit user direction.
   `connID`, so a stale connection can NEVER clobber a re-bound route. The heartbeat only refreshes the TTL
   (`PEXPIRE`) and never rewrites the value; the byte counters co-located in `tunnel:{name}` are written
   existence-guarded (`HINCRBY` + `EXPIRE NX`) so a post-disconnect flush never resurrects a dead route.
-- **Live-vs-identity reset invariant.** `conc:{name}` (concurrent streams) is a lock-guarded `{connID, count}`
-  hash whose reset is STRUCTURAL: a fresh connection resets it at its first acquire because the stored connID
-  differs (a straggler release from the superseded connection is a no-op) — there is NO bind-time `DEL`.
-  Identity-scoped cumulative quotas (`traf:` day/week traffic, issuance/`--issue-per-week`) MUST PERSIST across
-  reconnects — a tunnel MUST NOT reset its quota just by reconnecting. The `conc:` reset MUST NEVER touch the
-  `traf:` counters.
+- **Live-vs-identity invariant.** `conc:{name}` (concurrent streams) is a sorted set with one member per live
+  public connection (its dial-back token) scored by its expiry: expired members are pruned at admission, a
+  release removes only its own member — no lock, no reset on reconnect. Identity-scoped cumulative quotas
+  (`traf:` day/week traffic, issuance/`--issue-per-week`) MUST PERSIST across reconnects — a tunnel MUST NOT
+  reset its quota just by reconnecting.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
   Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
@@ -144,10 +148,11 @@ MUST NOT be relaxed without explicit user direction.
   (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
-- v1 control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
-  values are frozen); the data stream is an OPAQUE unframed splice (`wire.ChunkSize` = 16384 is the
-  pacing slice). A mesh stream identifies itself via the `X-Tunnel`/`X-Conn-Id`/`X-Stream-Id` request
-  headers (replica↔replica only — not part of the phone contract). ANY wire change MUST update
+- Control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
+  values are frozen); `OPEN{token, addr, use_https, use_mtls}`; the phone answers with a NEW connection to
+  `addr` carrying a `GET /api/v1/data` HTTP/1.1 upgrade with the token (`101`, then an OPAQUE unframed splice;
+  `wire.ChunkSize` = 16384 is the pacing slice). The mesh carries control RPCs only (`renew`, `terminate`,
+  `open`, `evict` — replica↔replica, not part of the phone contract). ANY wire change MUST update
   `docs/PROTOCOL.md` and the Go client in `client/` together (the future Kotlin client conforms to the
   spec, not to the Go source).
 
@@ -168,11 +173,10 @@ MUST NOT be relaxed without explicit user direction.
   bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`. `--limit-packets` (default 100)
   is a loose tiny-packet-flood backstop; the byte rate is the primary limit. An exhausted day/week window
   also refuses NEW streams at admission (`TrafficExhausted`, read-only). The blocking wait MUST NEVER be
-  held under a connection write mutex. The global stream-counter key `conc:{name}` is a lock-guarded
-  (`SETNX conclock:{name}`) `{connID, count}` hash — every acquire/release checks ownership, so a fresh
-  connection resets it at its first acquire and a straggler release is a no-op. Its TTL = 3 × `--limit-conn-idle`,
-  refreshed by a `PEXPIRE` piggybacked on the `Charge` pipeline (a no-op on a missing key, so a torn-down
-  counter is never resurrected). See the live-vs-identity reset invariant above.
+  held under a connection write mutex. The global stream-cap key `conc:{name}` is a sorted set (member =
+  the public connection's dial-back token, score = its expiry in unix ms); the `Charge` pipeline refreshes the
+  stream's own member (`ZADD XX`, never resurrecting a released one) and the key TTL = 3 × `--limit-conn-idle`.
+  See the live-vs-identity invariant above.
 
 ### Observability
 - Prometheus metrics live on the INTERNAL listener ONLY (never published) and MUST NOT carry
@@ -238,10 +242,10 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-CA cooldown/backoff retry-after) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
-| `wire` | `internal/wire`: v1 control-frame codec + mesh stream header |
-| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back, renewal, eviction) |
+| `wire` | `internal/wire`: control-frame codec + dial-back constants |
+| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back upgrade, renewal, eviction) |
 | `edge` | `internal/edge`: raw :443 SNI edge (ClientHello peek + JA4), bridge, connection policy |
-| `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 mesh (per-pair pools, connID-checked delivery) |
+| `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 control RPCs (per-pair pools) |
 | `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
 | `admin` | `internal/admin`: tunnels list + batch-stats composer (over router + limit) |

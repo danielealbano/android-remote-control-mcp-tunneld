@@ -9,7 +9,8 @@ This document maps the E2E-encrypted tunnel internals. The operational overview 
 `tunneld serve` assembles everything in `server.Run` (constructor DI — no package globals) and runs it
 under one `errgroup`. The public edge is a raw TCP `:443` listener; the phone control plane, the replica
 mesh, and the internal metrics listener are separate servers. ALL construction completes BEFORE the
-`:443`, `:9443` and `:9090` listeners (and, when a CA uses HTTP-01, the `:80` challenge listener) bind: a
+`:443`, `:9443` and `:9090` listeners (and, when a CA uses HTTP-01 or `--dialback-https=false`, the plain
+`:80` listener) bind: a
 socket is never bound while unserved. A valid reserved-host certificate cached on disk is loaded before the
 bind (replaced by the Valkey-shared one when that expires later); reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
 the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded; tunnel
@@ -30,7 +31,7 @@ flowchart TD
   limit["limit: rate / traffic / concurrency / ACME cooldown"]
   store["store: durable S3 registry + logs + evidence"]
   metrics["metrics: internal listener + PromRecorder"]
-  acmehttp[":80 ACME HTTP-01 challenge listener (only when a CA uses http-01)"]
+  acmehttp[":80 plain listener (http-01 answers; plain dial-backs)"]
 
   run --> edge
   run --> enroll
@@ -40,7 +41,6 @@ flowchart TD
   run --> acmehttp
   edge --> router
   edge --> phone
-  edge --> mesh
   edge --> acme
   acmehttp --> acme
   enroll --> attest
@@ -56,19 +56,19 @@ flowchart TD
 | Package | Role |
 |---|---|
 | `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
-| `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, `acme-tls/1` TLS-ALPN-01 answering, bridge (fast path + mesh), connection policy (idle/min-rate/eviction) |
-| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back, `/api/v1/issue` cert generation |
+| `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, `acme-tls/1` TLS-ALPN-01 answering, dial-back wait + splice on the entry node, connection policy (idle/min-rate/eviction) |
+| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`), `/api/v1/issue` cert generation |
 | `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-CA cooldown/backoff retry-after, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
-| `internal/mesh` | replica↔replica mTLS HTTP/2 mesh: per-pair pools, connID-checked delivery |
+| `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME cooldown |
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
-| `internal/wire` | v1 control-frame codec + the ChunkSize pacing constant |
+| `internal/wire` | control-frame codec + dial-back constants + the ChunkSize pacing constant |
 | `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels/list` & `/stats` composer + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |
@@ -82,21 +82,25 @@ sequenceDiagram
     participant B as tunneld B (owner)
     participant P as Phone
     C->>A: TCP connect :443, TLS ClientHello (SNI name.tunnel-domain)
-    A->>A: ban check, peek SNI/JA4, resolve route (Valkey)
-    alt owner is A (fast path)
-        A->>P: OPEN (dial-back)
-        P-->>A: /api/v1/data stream
-    else owner is B (mesh)
-        A->>B: connID-checked mesh stream
-        B->>P: OPEN (dial-back)
-        P-->>B: /api/v1/data stream
+    A->>A: ban check, peek SNI/JA4, resolve route (Valkey), stream slot, mint token
+    alt owner is A
+        A->>P: OPEN token, addr of A
+    else owner is B
+        A->>B: mesh control open (token, addr of A, connID)
+        B->>P: OPEN token, addr of A
     end
-    C->>P: TLS handshake + app bytes (opaque, spliced through)
-    P-->>C: TLS response (opaque, spliced back)
+    P->>A: new connection to addr, GET /api/v1/data with the token
+    A-->>P: 101 Switching Protocols
+    C->>P: TLS handshake + app bytes (opaque, spliced by A)
+    P-->>C: TLS response (opaque, spliced back by A)
 ```
 
 The entry node accounts bytes (day/week traffic), paces bandwidth against the per-second byte + packet
-windows, and enforces the connection policy; the owner node (on the mesh path) only relays. The phone terminates TLS with its
+windows, and enforces the connection policy on both sockets; no data crosses nodes. When the phone's control
+connection closes, its node sends `evict` to every node and each ends the splices opened through it (keeping
+`ban-evict` / `admin-terminate` when that is the close reason, else `phone-close`); a crashed owner sends
+nothing, so such splices end within 10 s through the entry node's per-splice route check (every 10 s each
+splice re-reads its route). The phone terminates TLS with its
 WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; the staging tier uses Let's Encrypt staging + GTS staging) — tunneld never sees plaintext.
 
 **ACME validations.** A ClientHello whose first ALPN protocol is `acme-tls/1` is a TLS-ALPN-01 validation
@@ -106,7 +110,10 @@ usage `digitalSignature`, critical `id-pe-acmeIdentifier`, one DNS SAN) and neve
 no pending challenge it is closed (`no-route`). When a CA uses HTTP-01, a plain `:80` listener
 (`--acme-http-listen`) serves ONLY `GET`/`HEAD /.well-known/acme-challenge/<token>` from the same store — one
 request per connection (keep-alives off); any other request is a 404 (`acme-http-miss`) — behind the same check
-order (ban → conn-rate → the shared `--max-clients` counter), evaluated off the accept loop.
+order (ban → conn-rate → the shared `--max-clients` counter), evaluated off the accept loop. With
+`--dialback-https=false` the same listener (bound then even without an HTTP-01 CA) also serves the phones'
+plain dial-backs: exactly `GET /api/v1/data` goes to the phone handler, every other request to the ACME
+handler unchanged.
 
 ## 3. Enrollment, issuance, renewal
 
@@ -163,16 +170,19 @@ per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap 
 ## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX; NO Lua/WATCH/MULTI-EXEC)
 
 Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
-(`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`), rate-limit windows, the per-direction day/week traffic windows
+(`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`; plus the
+`nodes` id set — TTL 3 × `--route-ttl`, refreshed by every heartbeat, expired ids pruned on read — used to reach
+every live node), rate-limit windows, the per-direction day/week traffic windows
 (`traf:{name}:{dir}:day/week:{n}`, written via the same pipelined `EXPIRE NX` as the `bw:`/`pkt:` windows),
-the global concurrency counter (`conc:{name}`, a lock-guarded `{connID, count}` hash: a fresh connection's
-first acquire STRUCTURALLY resets it and a straggler release from a superseded connection is a no-op; TTL =
-3 × `--limit-conn-idle`, refreshed by every traffic chunk via the `Charge` pipeline's `PEXPIRE` that no-ops
-on a missing key), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-CA ACME
+the global per-tunnel stream cap (`conc:{name}`, a sorted set: one member per live public connection = its
+dial-back token, score = its expiry in unix ms; expired members are pruned at admission, `Charge` refreshes
+the stream's own member with `ZADD XX` (never resurrecting a released one), release removes it; TTL = 3 ×
+`--limit-conn-idle`), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-CA ACME
 cooldown/backoff, the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private). No permanent Valkey state; a stale connection never clobbers a re-bound route.
-Connection/stream ids are 8 lowercase
+Connection ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
-and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic.
+and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic. Dial-back
+tokens are `crypto/rand.Text` (26 base32 chars, 128 bits).
 
 ## 6. Durable S3 state
 
@@ -212,9 +222,10 @@ process collectors: open/max file descriptors, RSS, CPU), `/healthz`,
 `/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
 `/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
 the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
-`POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's
-in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects). Both route to
-the owner node over the mesh `/api/v1/mesh/control` RPC (see PROTOCOL.md §5).
+`POST /api/v1/admin/tunnels/{name}/terminate` (a bound route required, 404 otherwise: applied on every node —
+each evicts its in-flight public splices, `close_reason=admin-terminate`, and the owner closes the phone
+control connection — ephemeral, the phone reconnects). Reissue routes to the owner node over the mesh
+`/api/v1/mesh/control` RPC; terminate is sent to every node over it (see PROTOCOL.md §5).
 
 Every labelled counter is exposed at 0 from startup for each known label value (the `observ` lists:
 `RejectReasons`, `ACMECAs`, `EnrollResults`, `AttestResults`, `QuotaWindows`, `ByteDirections`; renewals
@@ -231,7 +242,7 @@ other string, so labels cannot be invented at call sites). The writers:
 | Reason(s) | Writer |
 |---|---|
 | `ban` | edge accept, HTTP-01 accept guard, enroll handler, phone control handler (each ban gate) |
-| `no-route` | edge accept/dispatch, edge TLS-ALPN-01 interception (no pending challenge) |
+| `no-route` | edge accept/dispatch, edge TLS-ALPN-01 interception (no pending challenge), bridge (a failed dial-back open) |
 | `handshake-timeout` | edge accept/dispatch |
 | `conn-rate`, `max-clients` | edge accept/dispatch, HTTP-01 accept guard |
 | `quota-day`, `quota-week` | bridge admission (one per NEW stream refused on an exhausted window) |
@@ -285,7 +296,7 @@ the sinks are closed at shutdown.
 
 ```mermaid
 flowchart LR
-  cancel["ctx cancel"] --> close["close raw :443 + HTTP-01 :80 listeners (stop new public conns)"]
+  cancel["ctx cancel"] --> close["close raw :443 + plain :80 listeners (stop new public conns)"]
   close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + enqueues end events"]
   phones --> drain["Shutdown enroll / control / mesh / internal / acme-http servers"]
   drain --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
@@ -293,6 +304,7 @@ flowchart LR
   group --> queue["rotate + upload the conn-log spool: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
   flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
+  dereg --> evictjoin["join, then cancel, the splice-eviction broadcasts"]
 ```
 
 Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
@@ -308,4 +320,8 @@ Config is a kong flag surface with `TUNNELD_*` env twins (note `--s3-*` → `TUN
 fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are DECIMAL bits
 (`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. `--conn-log-dir` (required) is the
 connection-log spool directory; `Validate()` rejects a path that exists but is not a directory, and startup
-creates and locks it. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected; the go-redis pool options such as `pool_size` and `conn_max_idle_time` pass through — the pool size is a ceiling, connections open on demand and idle ones close after `conn_max_idle_time`), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a `net/url` / go-redis parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) AND every delimiter character (space, quote, `:`, `,`, brackets, parentheses) that occurs in the URL replaced by `[redacted]`, adjacent replacements merged into one — so no part of a credential, not even its punctuation, can reach the log, at the cost of also hiding non-secret URL parts and some message punctuation; tunneld's own Sentinel-option errors are emitted verbatim. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01`).
+creates and locks it. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected; the go-redis pool options such as `pool_size` and `conn_max_idle_time` pass through — the pool size is a ceiling, connections open on demand and idle ones close after `conn_max_idle_time`), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a `net/url` / go-redis parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) AND every delimiter character (space, quote, `:`, `,`, brackets, parentheses) that occurs in the URL replaced by `[redacted]`, adjacent replacements merged into one — so no part of a credential, not even its punctuation, can reach the log, at the cost of also hiding non-secret URL parts and some message punctuation; tunneld's own Sentinel-option errors are emitted verbatim. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01` or `--dialback-https=false`). The
+dial-back flags are `--dialback-advertise` (required: this node's own public `host:port` the phones dial back to
+— its `:443` edge, or its plain listener when `--dialback-https=false` — never the round-robin hostname),
+`--dialback-https` (default `true`) and `--dialback-mtls` (default `true`; requires `--dialback-https`; the
+control-host TLS then requires a client certificate, otherwise it only verifies one when given).
