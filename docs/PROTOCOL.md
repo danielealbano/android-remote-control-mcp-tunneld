@@ -135,6 +135,9 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
 - Request: `{nonce, attestation_chain, identity_csr, tls_csr}` — `nonce` is the Phase-1 `issue_nonce`
   (initial) or the `RENEW_NUDGE` nonce (renewal); `tls_csr` MUST request `<name>.<tunnel-domain>`.
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs.
+- **Latency**: the response arrives only after a live ACME order (validation + issuance, possibly spilling
+  over to the next CA), so the phone MUST allow at least 60 s for it; a phone that gives up earlier loses the
+  issued certificate (the server discards an order whose requester is gone).
 - Errors: `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping: `403`
   banned/forbidden identity, `405` non-POST method, `401` unauthorized, `503` retryable (the body's
   `retryable` field is authoritative; `retry_after_seconds` carries the pacing hint when known, e.g.

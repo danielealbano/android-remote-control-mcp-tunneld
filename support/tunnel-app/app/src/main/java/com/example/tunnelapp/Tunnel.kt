@@ -8,6 +8,8 @@ import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONObject
 import java.net.Socket
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val TAG = "TunnelApp"
@@ -22,6 +24,9 @@ class Tunnel(
     private val onRenewNudge: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(true)
+    private val bound = CountDownLatch(1)
+
+    fun awaitBound(seconds: Long): Boolean = bound.await(seconds, TimeUnit.SECONDS)
     fun stop() = running.set(false)
 
     // run opens /api/v1/control and services it until stopped; a torn stream reconnects with backoff.
@@ -47,6 +52,7 @@ class Tunnel(
                     Log.w(TAG, "control request body was not opened")
                     return
                 }
+                bound.countDown()
                 val source = resp.body.source()
                 try {
                     while (running.get()) {
