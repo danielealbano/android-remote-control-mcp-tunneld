@@ -47,19 +47,6 @@ const (
 	itBucket       = "tunneld-it"
 )
 
-// freeAddr binds an ephemeral loopback port, closes it, and returns the address for reuse (small race
-// window; acceptable for tests — server.Run rebinds it immediately).
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	tunneltest.CloseOrLog(t, ln)
-	return addr
-}
-
 func emptyFile(t *testing.T) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "signers.txt")
