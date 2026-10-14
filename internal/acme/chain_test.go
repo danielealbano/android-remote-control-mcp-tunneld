@@ -513,3 +513,52 @@ func TestCAIDs_MatchObservACMECAs(t *testing.T) {
 		t.Fatalf("observ.ACMECAs = %v, want the chain's CA ids %v", observ.ACMECAs, want)
 	}
 }
+
+func TestChain_LogsTheIssuingCA(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		leErr  error
+		gtsErr error
+		issue  func(context.Context, *chainIssuer) error
+		wantCA string
+		wantNm string
+	}{
+		{name: "first CA", issue: func(ctx context.Context, ch *chainIssuer) error {
+			_, _, err := ch.Obtain(ctx, nil, "phone")
+			return err
+		}, wantCA: CALetsEncrypt, wantNm: "phone"},
+		{name: "spillover", leErr: rateLimited(0, errors.New("le quota")), issue: func(ctx context.Context, ch *chainIssuer) error {
+			_, _, err := ch.Obtain(ctx, nil, "phone")
+			return err
+		}, wantCA: CAGTS, wantNm: "phone"},
+		{name: "renewal", issue: func(ctx context.Context, ch *chainIssuer) error {
+			_, _, err := ch.Renew(ctx, nil, "phone", store.CertInfo{CA: CAGTS})
+			return err
+		}, wantCA: CALetsEncrypt, wantNm: "phone"},
+		{name: "reserved host", leErr: transient(errors.New("le down")), gtsErr: transient(errors.New("gts down")), issue: func(ctx context.Context, ch *chainIssuer) error {
+			_, _, _, err := ch.ObtainSelf(ctx, "enroll.example.test")
+			return err
+		}, wantCA: CAZeroSSL, wantNm: "enroll.example.test"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.leErr}
+			gts := &fakeCA{caID: CAGTS, err: tc.gtsErr}
+			zs := &fakeCA{caID: CAZeroSSL}
+			ch, _ := newChain(t, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))}, le, gts, zs)
+			if err := tc.issue(context.Background(), ch); err != nil {
+				t.Fatal(err)
+			}
+			want := `level=INFO msg="acme certificate issued" ca=` + tc.wantCA + ` name=` + tc.wantNm + ` serial=01 not_after=`
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("log is missing %s; log = %q", want, buf.String())
+			}
+			if n := strings.Count(buf.String(), `msg="acme certificate issued"`); n != 1 {
+				t.Fatalf("issuance logged %d times, want once; log = %q", n, buf.String())
+			}
+		})
+	}
+}

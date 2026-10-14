@@ -111,6 +111,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				c.cfg.Logger.Warn("acme CA failure-streak reset failed", "ca", ca.id(), "name", name, "err", rerr)
 			}
 			c.cfg.Recorder.ACMEIssue(ca.id(), "ok")
+			c.cfg.Logger.Info("acme certificate issued", "ca", ca.id(), "name", name, "serial", info.Serial, "not_after", info.NotAfter)
 			return pemChain, info, nil
 		}
 		if ctx.Err() != nil {
