@@ -4,17 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// The node registry maps a node id to its NodeInfo (mesh dial address + ops metadata) so an edge that
-// resolves a tunnel's owning node (via LookupRoute) can find where to dial. node:{id} → JSON value, TTL'd,
-// heartbeat-refreshed at route-ttl/3. Nodes() is an ops/admin SCAN, never on the data path.
+// The node registry maps a node id to its NodeInfo (mesh dial address + ops metadata). node:{id} → JSON
+// value, TTL'd, heartbeat-refreshed at route-ttl/3. Nodes() is an ops/admin SCAN, never on the data path.
 
-// NodeInfo is the node-registry value (JSON in node:{id}). Advertise is the mesh dial address that
-// LookupNode returns to the edge; the rest is ops metadata for /api/v1/admin/nodes.
+// NodeInfo is the node-registry value (JSON in node:{id}). Advertise is the mesh dial address; the rest
+// is ops metadata for /api/v1/admin/nodes.
 type NodeInfo struct {
 	Advertise     string `json:"advertise"`
 	Hostname      string `json:"hostname"`
@@ -25,13 +25,22 @@ type NodeInfo struct {
 
 func nodeKey(id string) string { return "node:" + id }
 
+const nodeSetKey = "nodes"
+
 // RegisterNode writes node:{id} = JSON(info) with a TTL in one call.
 func (r *Registry) RegisterNode(ctx context.Context, nodeID string, info NodeInfo, ttl time.Duration) error {
 	b, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
-	return r.rdb.Set(ctx, nodeKey(nodeID), b, ttl).Err()
+	pipe := r.rdb.Pipeline()
+	pipe.Set(ctx, nodeKey(nodeID), b, ttl)
+	pipe.SAdd(ctx, nodeSetKey, nodeID)
+	pipe.PExpire(ctx, nodeSetKey, 3*ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("register node %s: %w", nodeID, err)
+	}
+	return nil
 }
 
 // RefreshNode extends the node's TTL (re-writing the JSON, incl. the refreshed last_heartbeat).
@@ -42,10 +51,55 @@ func (r *Registry) RefreshNode(ctx context.Context, nodeID string, info NodeInfo
 // DeregisterNode removes node:{id} at drain time so peers stop mesh-dialing a drained node
 // immediately (the TTL remains the crash backstop).
 func (r *Registry) DeregisterNode(ctx context.Context, nodeID string) error {
-	return r.rdb.Del(ctx, nodeKey(nodeID)).Err()
+	pipe := r.rdb.Pipeline()
+	pipe.Del(ctx, nodeKey(nodeID))
+	pipe.SRem(ctx, nodeSetKey, nodeID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("deregister node %s: %w", nodeID, err)
+	}
+	return nil
 }
 
-// LookupNode resolves a node id to its mesh advertise address (the edge dial path).
+func (r *Registry) LiveNodes(ctx context.Context) (map[string]NodeInfo, error) {
+	ids, err := r.rdb.SMembers(ctx, nodeSetKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("list node ids: %w", err)
+	}
+	out := map[string]NodeInfo{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = nodeKey(id)
+	}
+	vals, err := r.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("read node entries: %w", err)
+	}
+	var gone []any
+	for i, v := range vals {
+		s, ok := v.(string)
+		if !ok {
+			gone = append(gone, ids[i])
+			continue
+		}
+		var info NodeInfo
+		if err := json.Unmarshal([]byte(s), &info); err != nil {
+			r.logger.Warn("malformed node registry entry skipped", "node", ids[i], "err", err)
+			continue
+		}
+		out[ids[i]] = info
+	}
+	if len(gone) > 0 {
+		if err := r.rdb.SRem(ctx, nodeSetKey, gone...).Err(); err != nil {
+			r.logger.Debug("expired node ids not pruned (retried on the next read)", "err", err)
+		}
+	}
+	return out, nil
+}
+
+// LookupNode resolves a node id to its mesh advertise address.
 func (r *Registry) LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error) {
 	v, err := r.rdb.Get(ctx, nodeKey(nodeID)).Result()
 	if errors.Is(err, redis.Nil) {
