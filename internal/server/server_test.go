@@ -7,9 +7,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
@@ -230,6 +233,95 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 		t.Fatal("the second Run did not fail on the internal bind")
 	}
 	waitAsyncLogGoroutines(t, baseline)
+}
+
+// freeAddr binds an ephemeral loopback port, closes it, and returns the address for reuse (small race
+// window; acceptable for tests — server.Run rebinds it immediately).
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	tunneltest.CloseOrLog(t, ln)
+	return addr
+}
+
+func TestRun_HTTPServerErrorsGoThroughSlog(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := lifecycleConfig(t, mr.Addr())
+	cfg.Listen = freeAddr(t)
+	cfg.MeshListen = freeAddr(t)
+
+	var std syncBuffer
+	prev := log.Writer()
+	log.SetOutput(&std)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	var out syncBuffer
+	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, logger, "test") }()
+	waitUntil(t, 5*time.Second, func() bool {
+		for _, k := range mr.DB(0).Keys() {
+			if strings.HasPrefix(k, "node:") {
+				return true
+			}
+		}
+		return false
+	})
+
+	failHandshake(t, cfg.Listen, cfg.EnrollHost)
+	failHandshake(t, cfg.MeshListen, "mesh")
+	waitUntil(t, 5*time.Second, func() bool {
+		return logLineHas(out.String(), "level=DEBUG", "TLS handshake error", "no reserved-host certificate yet") &&
+			logLineHas(out.String(), "level=WARN", "TLS handshake error", "client didn't provide a certificate")
+	})
+	if strings.Contains(std.String(), "TLS handshake error") {
+		t.Fatalf("an http.Server error reached the stdlib logger instead of slog: %q", std.String())
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned an error on clean shutdown: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not drain within 15s of context cancellation")
+	}
+}
+
+func failHandshake(t *testing.T, addr, serverName string) {
+	t.Helper()
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+		&tls.Config{ServerName: serverName, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Logf("handshake to %s (%s) failed as intended: %v", addr, serverName, err)
+		return
+	}
+	if _, err := conn.Read(make([]byte, 1)); err != nil {
+		t.Logf("read from %s (%s) failed as intended: %v", addr, serverName, err)
+	}
+	tunneltest.CloseOrLog(t, conn)
+}
+
+func logLineHas(logs string, parts ...string) bool {
+	for _, line := range strings.Split(logs, "\n") {
+		all := true
+		for _, p := range parts {
+			if !strings.Contains(line, p) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
 }
 
 func TestConnLogDropped_AddsEventCount(t *testing.T) {

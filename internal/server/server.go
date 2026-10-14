@@ -226,13 +226,15 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
 	// full-request read and keep-alive idling are tightly bounded (idle TLS conns must not accumulate).
+	publicErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelDebug)
+	internalErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
 	enrollSrv := &http.Server{Handler: enrollHandler, ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute,
+		ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute, ErrorLog: publicErrLog,
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.EnrollHost), MinVersion: tls.VersionTLS12}}
 	// The control server's idle timeout closes mTLS-authenticated HTTP/2 conns holding NO active stream
 	// (a bound phone always keeps its /api/v1/control stream open, so real connections are never idle).
 	controlSrv := &http.Server{Handler: phoneHandler, ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout: 4 * cfg.ControlPingInterval,
+		IdleTimeout: 4 * cfg.ControlPingInterval, ErrorLog: publicErrLog,
 		ConnContext: phoneconn.ConnContext,
 		Protocols:   h2Protocols(),
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.ControlHost),
@@ -241,7 +243,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Mesh server (mTLS mesh-role, HTTP/2); its listener is bound LAST, below.
 	meshSrv := &http.Server{Handler: meshHandler, ReadHeaderTimeout: readHeaderTimeout,
-		Protocols: h2Protocols(),
+		Protocols: h2Protocols(), ErrorLog: internalErrLog,
 		TLSConfig: &tls.Config{GetCertificate: meshCert.getCert, ClientAuth: tls.RequireAndVerifyClientCert,
 			ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12, NextProtos: h2NextProtos()}}
 
@@ -255,7 +257,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		adminActionHandler(nodeID, reg, meshClient, logger, "terminate", "terminated", adminCtl.Terminate))
 	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
-		Handler: internalMux}
+		Handler: internalMux, ErrorLog: internalErrLog}
 
 	var acmeHTTPSrv *http.Server
 	if cfg.UsesChallenge(config.ChallengeHTTP01) {
@@ -263,7 +265,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 			Handler:           acme.HTTPChallengeHandler(chal, func(ip string) { rec.Reject("acme-http-miss", "", ip) }, logger),
 			ReadHeaderTimeout: readHeaderTimeout, ReadTimeout: readHeaderTimeout, WriteTimeout: readHeaderTimeout,
 			IdleTimeout: acmeHTTPIdleTimeout, MaxHeaderBytes: acmeHTTPMaxHeaderBytes,
-			DisableGeneralOptionsHandler: true,
+			DisableGeneralOptionsHandler: true, ErrorLog: publicErrLog,
 		}
 		acmeHTTPSrv.SetKeepAlivesEnabled(false)
 	}
