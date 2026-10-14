@@ -1512,20 +1512,20 @@ DoD:
 
 ---
 
-## [ ] US8 — Go client (`client/`)
+## [x] US8 — Go client (`client/`)
 
 Why: the Go client is the reference implementation of the phone side used by the integration, e2e and staging
 tiers.
 
 Acceptance criteria:
-- [ ] On `OPEN` the client dials `addr` on a new connection (TLS with SNI = control host and ALPN `http/1.1` when `use_https`, its identity cert only when `use_mtls`), sends the upgrade request, requires `101`, and hands the connection (buffered bytes preserved) to the backend.
-- [ ] An `OPEN` without token/addr, or with `use_mtls` but not `use_https`, is logged and ignored; a refused or failed dial-back is logged and the backend is not invoked.
-- [ ] The dial-back (dial + TLS + upgrade) is bounded by 10 s by default, configurable with `WithDialBackTimeout`.
-- [ ] Every dial-back connection closes when `Run`'s context ends (no socket or goroutine outlives it).
+- [x] On `OPEN` the client dials `addr` on a new connection (TLS with SNI = control host and ALPN `http/1.1` when `use_https`, its identity cert only when `use_mtls`), sends the upgrade request, requires `101`, and hands the connection (buffered bytes preserved) to the backend.
+- [x] An `OPEN` without token/addr, or with `use_mtls` but not `use_https`, is logged and ignored; a refused or failed dial-back is logged and the backend is not invoked.
+- [x] The dial-back (dial + TLS + upgrade) is bounded by 10 s by default, configurable with `WithDialBackTimeout`.
+- [x] Every dial-back connection closes when `Run`'s context ends (no socket or goroutine outlives it).
 
-### [ ] Task 8.1 — Dial-back
+### [x] Task 8.1 — Dial-back
 
-- [ ] **Action 8.1.1** — replace `client/datastream.go`:
+- [x] **Action 8.1.1** — replace `client/datastream.go`:
 
 ```go
 package client
@@ -1640,17 +1640,17 @@ type bufferedConn struct {
 func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 ```
 
-- [ ] **Action 8.1.2** — modify `client/control.go`: `Client` gains `dialBackTimeout time.Duration`, set to
+- [x] **Action 8.1.2** — modify `client/control.go`: `Client` gains `dialBackTimeout time.Duration`, set to
   `defaultDialBackTimeout` in `New` before the options run; "v1 " in the `readControlFrame` doc is removed.
-- [ ] **Action 8.1.3** — modify `client/enroll.go`: remove the wrong parts of the package doc ("v1", "over
+- [x] **Action 8.1.3** — modify `client/enroll.go`: remove the wrong parts of the package doc ("v1", "over
   HTTP/2" for the data path, "dial-back data streams (full-duplex opaque splice)").
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 8.2 — Tests
+### [x] Task 8.2 — Tests
 
-- [ ] **Action 8.2.1** — modify `client/harness_test.go` (in full where changed): `testServer` gains
+- [x] **Action 8.2.1** — modify `client/harness_test.go` (in full where changed): `testServer` gains
   `reg *router.Registry`, `dialBacks *phoneconn.DialBacks`, `plainAddr string`;
 
 ```go
@@ -1742,21 +1742,21 @@ func (ts *testServer) dialBack(t *testing.T, token string, useHTTPS, useMTLS boo
 | Delete | `TestDataConn_Close_ReturnsCloseErrorOnce` |
 
 DoD:
-- [ ] Every `phoneconn.NewManager` / `NewHandler` in the client tests passes the new fields.
+- [x] Every `phoneconn.NewManager` / `NewHandler` in the client tests passes the new fields.
 
 ---
 
-## [ ] US9 — Kotlin apps (reference tunnel app + soak app)
+## [x] US9 — Kotlin apps (reference tunnel app + soak app)
 
 Why: both on-device apps implement the phone side and drive the adb-gated gates; they must speak v2.
 
 Acceptance criteria:
-- [ ] On `OPEN` each app dials `addr` with a plain `Socket` (TCP no-delay on), wraps it in an `SSLSocket` (SNI = control host, ALPN `http/1.1`, explicit hostname verification for the control host) when `use_https`, with its identity key manager only when `use_mtls`, sends the upgrade request, requires `101`, then splices the connection with a fresh socket to its local server; either side ending closes both.
-- [ ] The fixture APKs rebuilt in US12 carry these sources.
+- [x] On `OPEN` each app dials `addr` with a plain `Socket` (TCP no-delay on), wraps it in an `SSLSocket` (SNI = control host, ALPN `http/1.1`, explicit hostname verification for the control host) when `use_https`, with its identity key manager only when `use_mtls`, sends the upgrade request, requires `101`, then splices the connection with a fresh socket to its local server; either side ending closes both.
+- [x] The fixture APKs rebuilt in US12 carry these sources.
 
-### [ ] Task 9.1 — Reference tunnel app (`support/tunnel-app/`)
+### [x] Task 9.1 — Reference tunnel app (`support/tunnel-app/`)
 
-- [ ] **Action 9.1.1** — create `app/src/main/java/com/example/tunnelapp/DialBack.kt`:
+- [x] **Action 9.1.1** — create `app/src/main/java/com/example/tunnelapp/DialBack.kt`:
 
 ```kotlin
 package com.example.tunnelapp
@@ -1847,7 +1847,7 @@ class DialBack(
 }
 ```
 
-- [ ] **Action 9.1.2** — modify `Tunnel.kt` (imports: add `java.io.InputStream`, `java.io.OutputStream`; drop the
+- [x] **Action 9.1.2** — modify `Tunnel.kt` (imports: add `java.io.InputStream`, `java.io.OutputStream`; drop the
   unused ones): constructor gains `private val dialBack: DialBack` (after `port`); the `OPEN` branch becomes
   `Frames.OPEN -> JSONObject(String(frame.second)).let { o -> Thread { handleOpen(o) }.apply { isDaemon = true }.start() }`;
   replace `handleOpen` with (an invalid `OPEN` is logged and ignored; a failed dial-back is logged and closes the
@@ -1911,53 +1911,53 @@ class DialBack(
 
   Remove the comments made wrong: in the class doc "and services /api/v1/data dial-backs. Both streams are
   OkHttp DUPLEX (isDuplex()=true)."; the old `handleOpen` comment.
-- [ ] **Action 9.1.3** — modify `TunnelService.kt` `doEnroll`: build
+- [x] **Action 9.1.3** — modify `TunnelService.kt` `doEnroll`: build
   `val dialBack = DialBack(controlHost, Tls.sslContext(Tls.DynamicIdentityKeyManager(id), trust), Tls.sslContext(null, trust))`
   and pass it: `Tunnel(id.mtlsClient(), controlHost, port, dialBack, srv::localPort) { … }`.
-- [ ] **Action 9.1.4** — modify `Frames.kt`: remove `OPEN {stream_id}, ` from the payload comment.
-- [ ] **Action 9.1.5** — modify `support/tunnel-app/README.md` (lines on "splices each OPEN to a fresh POST /data
+- [x] **Action 9.1.4** — modify `Frames.kt`: remove `OPEN {stream_id}, ` from the payload comment.
+- [x] **Action 9.1.5** — modify `support/tunnel-app/README.md` (lines on "splices each OPEN to a fresh POST /data
   dial-back"): describe the v2 dial-back (a new connection to `addr` per `OPEN`, `GET /api/v1/data` upgrade with
   the token, TLS/mTLS per the `OPEN` flags).
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 9.2 — Soak app (`support/soak-app/`)
+### [x] Task 9.2 — Soak app (`support/soak-app/`)
 
-- [ ] **Action 9.2.1** — create `app/src/main/java/com/example/soakapp/DialBack.kt`: identical to Action 9.1.1
+- [x] **Action 9.2.1** — create `app/src/main/java/com/example/soakapp/DialBack.kt`: identical to Action 9.1.1
   with `package com.example.soakapp`.
-- [ ] **Action 9.2.2** — modify `Net.kt`: add
+- [x] **Action 9.2.2** — modify `Net.kt`: add
 
 ```kotlin
     fun dialBack(controlHost: String, id: Identity): DialBack =
         DialBack(controlHost, sslContext(DynamicIdentityKeyManager(id)), sslContext(null))
 ```
 
-- [ ] **Action 9.2.3** — modify `Tunnel.kt` (imports as in 9.1.2): constructor gains `private val dialBack: DialBack`
+- [x] **Action 9.2.3** — modify `Tunnel.kt` (imports as in 9.1.2): constructor gains `private val dialBack: DialBack`
   (after `controlHost`); the same `OPEN` branch, `handleOpen`, `splice`, `copy` as Action 9.1.2 with every log
   message prefixed `"phone $phone: "` like the rest of the file.
-- [ ] **Action 9.2.4** — modify `SoakService.kt` `bringUp`:
+- [x] **Action 9.2.4** — modify `SoakService.kt` `bringUp`:
   `Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), server::localPort) { … }`.
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
 ---
 
-## [ ] US10 — Test configurations + end-to-end gates
+## [x] US10 — Test configurations + end-to-end gates
 
 Why: every server started in tests needs the new flags; the gates must prove all three dial-back modes, both
 entry nodes, the close teardown, and the production failure scenario.
 
 Acceptance criteria:
-- [ ] Every `config.ServeCmd` literal that reaches `server.Run` (e2e, integration, server, staging tests) sets `DialBackAdvertise`, `DialBackHTTPS`, `DialBackMTLS` explicitly (a Go literal gets no kong defaults).
-- [ ] e2e covers https+mtls (existing scenarios), https without mTLS, and plain, each entering through the owner AND the non-owner replica.
-- [ ] e2e proves a splice entered through a non-owner replica ends when the phone's control connection closes, and when an admin terminate is issued.
-- [ ] `TestE2E_DialBackAcrossReplicas` passes on the Realme with requests entering both replicas, and the reference app passes the https-without-mTLS and plain modes on the Realme.
+- [x] Every `config.ServeCmd` literal that reaches `server.Run` (e2e, integration, server, staging tests) sets `DialBackAdvertise`, `DialBackHTTPS`, `DialBackMTLS` explicitly (a Go literal gets no kong defaults).
+- [x] e2e covers https+mtls (existing scenarios), https without mTLS, and plain, each entering through the owner AND the non-owner replica.
+- [x] e2e proves a splice entered through a non-owner replica ends when the phone's control connection closes, and when an admin terminate is issued.
+- [x] `TestE2E_DialBackAcrossReplicas` passes on the Realme with requests entering both replicas, and the reference app passes the https-without-mTLS and plain modes on the Realme.
 
-### [ ] Task 10.1 — Harness + Go-client tiers
+### [x] Task 10.1 — Harness + Go-client tiers
 
-- [ ] **Action 10.1.1** — modify `e2e/e2e_test.go`: `replicaOpts` gains `dialBackAdvertise string`,
+- [x] **Action 10.1.1** — modify `e2e/e2e_test.go`: `replicaOpts` gains `dialBackAdvertise string`,
   `dialBackPlain bool`, `dialBackNoMTLS bool` (keeps `dialBack time.Duration`); in `runReplicaOnce`:
 
 ```go
@@ -1975,7 +1975,7 @@ Acceptance criteria:
   Remove the comment parts made wrong: "the cross-node mesh path, the same-node fast path" in the package doc;
   the `TestE2E_CrossNodeAndFastPath` doc's "mesh path … fast path" wording; "A routes to the owner over
   /api/v1/mesh/control" in the `TestE2E_CrossNodeTerminate` doc.
-- [ ] **Action 10.1.2** — modify `internal/server/integration_test.go`, `internal/server/server_test.go`,
+- [x] **Action 10.1.2** — modify `internal/server/integration_test.go`, `internal/server/server_test.go`,
   `staging/staging_test.go`: each `config.ServeCmd` literal adds `DialBackAdvertise: <that literal's edge
   address>, DialBackHTTPS: true, DialBackMTLS: true`.
 
@@ -1989,21 +1989,21 @@ Acceptance criteria:
 | `TestIntegration_EnrollConnectRoundtrip` (update) | passes with the new flags | |
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 10.2 — Device gates (adb-gated, the Realme T70)
+### [x] Task 10.2 — Device gates (adb-gated, the Realme T70)
 
-- [ ] **Action 10.2.1** — add `e2e/dialback_test.go` (from the working tree) to the branch and modify it:
+- [x] **Action 10.2.1** — add `e2e/dialback_test.go` (from the working tree) to the branch and modify it:
   replicas get `dialBackAdvertise: "127.0.0.1:18451"` (A) / `"127.0.0.1:18452"` (B) plus
   `adb reverse tcp:18451 tcp:<A edge port>` / `tcp:18452 tcp:<B edge port>` (each with an `adbCleanup` reverse
   removal); `dialBackRequests` = 6 and the loop alternates the entry edge between A and B; the all-must-succeed
   assertion and the failure logcat dump stay. Commit `e2e/e2e_test.go`'s `dialBack` option with it.
-- [ ] **Action 10.2.2** — modify `e2e/tunnel_app_test.go`: the replica gets
+- [x] **Action 10.2.2** — modify `e2e/tunnel_app_test.go`: the replica gets
   `dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppDevicePort)`.
-- [ ] **Action 10.2.3** — modify `e2e/soak_app_test.go`: add `soakAppClientDevicePort = 18445`; `phoneEdge` gets
+- [x] **Action 10.2.3** — modify `e2e/soak_app_test.go`: add `soakAppClientDevicePort = 18445`; `phoneEdge` gets
   `dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(soakAppDevicePort)`; `clientEdge` gets
   `"127.0.0.1:" + strconv.Itoa(soakAppClientDevicePort)` plus its `adb reverse` + `adbCleanup` removal.
-- [ ] **Action 10.2.4** — add `TestE2E_ReferenceTunnelAppDialBackModes` to `e2e/tunnel_app_test.go`: subtests
+- [x] **Action 10.2.4** — add `TestE2E_ReferenceTunnelAppDialBackModes` to `e2e/tunnel_app_test.go`: subtests
   `https-no-mtls` and `plain`, each with one replica started with `dialBackNoMTLS` / `dialBackPlain` and
   `dialBackAdvertise: "127.0.0.1:18461"` (`adb reverse tcp:18461` → that replica's edge port, or its plain
   listener port in `plain`), the app enrolled through `tunnelAppDevicePort` as in `TestE2E_ReferenceTunnelApp`,
@@ -2018,7 +2018,7 @@ DoD:
 | `TestE2E_SoakApp` | unchanged assertions on v2 (the client enters through the second replica) |
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
 ---
 
@@ -2133,3 +2133,15 @@ DoD:
 - Action 7.1.1: the `LookupNode` doc's "(the edge dial path)" is removed too (the edge no longer calls it).
 - Action 7.5.1: `TestListenPublic_SetsKeepAlive` lives in `internal/server/serve_linux_test.go` (the
   `TCP_KEEP*` socket options exist only on Linux).
+- Task 8.2: `newClient` takes optional `Option`s (the refused-dial-back test needs a Debug logger); small
+  helpers `newRawListener`, `echoBackend`, `runClient`, `echoThrough`, `dialBackHandshake` and a concurrency-safe
+  `syncBuf` drive the new tests; the `TestControlConnectBindAndDuplex` comment that described the HTTP/2 data
+  stream is reworded.
+- Action 9.1.4: "v1 " is also removed from the `Frames` doc (the protocol is now labelled v2).
+- Task 10.1: `TestE2E_SplicesEndWhenPhoneDisconnects` bounds the teardown at 5 s, not 10 s: the per-splice route
+  check also runs every 10 s, so only a bound below it proves the server-side `evict`. The forwarder gains `cut()`
+  (closes its live connections, keeps listening). `TestIntegration_ACMEHTTPListenerOnlyWhenUsed` becomes two
+  subtests (not bound / bound for plain dial-backs). `TestE2E_DialBackModes` shares one infra across its two
+  mode subtests.
+- Action 10.2.4: the plain subtest pins the replica's `acmeHTTPListen` so its port is known for `adb reverse`; on a
+  failed request the app's logcat is dumped (as in `TestE2E_DialBackAcrossReplicas`).
