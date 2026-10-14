@@ -258,6 +258,19 @@ func TestGoroutineAndMemGaugesPresent(t *testing.T) {
 	}
 }
 
+func TestProcessMetricsPresent(t *testing.T) {
+	m, _, store, _, rdb := setup(t)
+	h := Handler(m.Registry(), rdb, store, &fakeNodeSrc{}, testLog())
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	body := rr.Body.String()
+	for _, name := range []string{"process_open_fds ", "process_max_fds ", "process_resident_memory_bytes ", "process_cpu_seconds_total "} {
+		if !strings.Contains(body, name) {
+			t.Errorf("/metrics must export %s", strings.TrimSpace(name))
+		}
+	}
+}
+
 func TestRejectionIncrementsReasonCounter(t *testing.T) {
 	m, rec, store, _, rdb := setup(t)
 	rec.Reject("stream-cap", "t", "1.1.1.1")
