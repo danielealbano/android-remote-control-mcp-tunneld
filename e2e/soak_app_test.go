@@ -23,7 +23,8 @@ import (
 const (
 	soakAppPkg        = "com.example.soakapp"
 	soakAppDevicePort = 18444
-	soakPhones        = 3
+	soakFirstPhones   = 3
+	soakPhones        = 4
 )
 
 func TestE2E_SoakApp(t *testing.T) {
@@ -70,28 +71,45 @@ func TestE2E_SoakApp(t *testing.T) {
 	adbRunAs(t, serial, soakAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")
 	dataDir := strings.TrimSpace(string(adbRunAs(t, serial, soakAppPkg, "pwd")))
 
-	amBroadcast(t, serial, soakAppPkg, "start",
-		"count", strconv.Itoa(soakPhones),
-		"spacingSeconds", "0",
-		"parallel", "true",
-		"edgePort", strconv.Itoa(soakAppDevicePort),
-		"caPath", dataDir+"/files/pebble-ca.pem",
-		"enrollHost", e2eEnrollHost,
-		"controlHost", e2eControlHost,
-		"tunnelDomain", e2eTunnelDomain,
-	)
+	start := func(count int) []string {
+		t.Helper()
+		adbRunAs(t, serial, soakAppPkg, "rm -f files/ready")
+		amBroadcast(t, serial, soakAppPkg, "start",
+			"count", strconv.Itoa(count),
+			"spacingSeconds", "0",
+			"parallel", "true",
+			"edgePort", strconv.Itoa(soakAppDevicePort),
+			"caPath", dataDir+"/files/pebble-ca.pem",
+			"enrollHost", e2eEnrollHost,
+			"controlHost", e2eControlHost,
+			"tunnelDomain", e2eTunnelDomain,
+		)
+		if got := strings.TrimSpace(string(pollAppFile(t, serial, soakAppPkg, "ready", 300*time.Second))); got != strconv.Itoa(count) {
+			failures := adbRunAs(t, serial, soakAppPkg, "cat files/failures.txt 2>/dev/null; true")
+			t.Fatalf("ready marker = %q, want %d phones; failures: %s", got, count, failures)
+		}
+		names := strings.Fields(string(adbRunAs(t, serial, soakAppPkg, "cat files/names.txt")))
+		if len(names) != count {
+			t.Fatalf("names.txt lists %v, want %d names", names, count)
+		}
+		return names
+	}
 	t.Cleanup(func() {
 		adbCleanup(t, serial, "shell", "am", "broadcast", "-a", soakAppPkg+".stop", "-n", soakAppPkg+"/.CommandReceiver", "-f", "0x00000020")
 	})
 
-	if got := strings.TrimSpace(string(pollAppFile(t, serial, soakAppPkg, "ready", 300*time.Second))); got != strconv.Itoa(soakPhones) {
-		t.Fatalf("ready marker = %q, want %d phones", got, soakPhones)
+	first := start(soakFirstPhones)
+	scaled := start(soakPhones)
+	if strings.Join(scaled[:soakFirstPhones], ",") != strings.Join(first, ",") {
+		t.Fatalf("scaling to %d phones changed the running ones: %v -> %v", soakPhones, first, scaled)
 	}
-	names := strings.Fields(string(adbRunAs(t, serial, soakAppPkg, "cat files/names.txt")))
-	if len(names) != soakPhones {
-		t.Fatalf("names.txt lists %v, want %d names", names, soakPhones)
+	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
+	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+soakAppPkg)
+	names := start(soakPhones)
+	if strings.Join(names, ",") != strings.Join(scaled, ",") {
+		t.Fatalf("after a reinstall the phones were not resumed: %v -> %v", scaled, names)
 	}
-	t.Logf("soak phones bound to replica %s: %v", phoneEdge, names)
+	t.Logf("soak phones bound to replica %s (scaled from %d, resumed after a reinstall): %v", phoneEdge, soakFirstPhones, names)
 
 	dir := t.TempDir()
 	namesFile := filepath.Join(dir, "names.txt")

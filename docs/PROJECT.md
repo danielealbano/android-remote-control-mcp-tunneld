@@ -191,8 +191,12 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   controlHost <control-host> --es tunnelDomain <tunnel-domain>` (phones enroll one at a time, `spacingSeconds`
   apart, default 65 s, because each enrollment spends two of the per-IP enroll-rate slots; `--es parallel true`
   enrolls them all at once instead, retrying refusals and network errors, and lists phones that still failed in
-  `files/failures.txt`); `files/names.txt` lists the bound names and `files/ready` holds how many are up
-  (`files/error` on a failure that stops the run). Then run
+  `files/failures.txt`, each new enrollment waiting a random 0–5 s first); `files/names.txt` lists the bound
+  names and `files/ready` holds how many are up (`files/error` on a failure that stops the run). Every phone is
+  saved in `files/phones/<n>.json` (name, keystore aliases, cert chains — rewritten on every renewal), so `start`
+  is additive and resumable: it skips running phones, resumes saved ones (also after `stop`, a crash or an
+  `adb install -r`), and enrolls only the missing ones up to `count` (max 200); phones saved for other hosts
+  are re-enrolled. Uninstalling the app discards them. Then run
   `bin/soak-client --names-file names.txt --domain <tunnel-domain>`: per phone, one operation every
   `--interval` (1 s) with a request averaging `--req-bytes` (1 KiB) and a response averaging `--resp-bytes`
   (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte, on a reused connection dropped every
@@ -202,7 +206,8 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   issues a real public cert and claims a name in the registry. For a local stack the app takes `edgePort` (every
   host resolves to `127.0.0.1:<edgePort>`, for `adb reverse`) and `caPath` (a PEM trust anchor in its files dir),
   and the client takes `--ca-file` and `--connect host:port`; the adb-gated `TestE2E_SoakApp` does exactly that:
-  3 emulated phones with real attestation enrolling in parallel on one replica, the client entering through a second replica (mesh),
+  3 emulated phones with real attestation enrolling in parallel on one replica, scaled to 4 and resumed after
+  a reinstall, the client entering through a second replica (mesh),
   60 s at 1 op/s with a reconnect every 20 s, zero failed operations required.
 - **Attribution**: country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the
   attribution; it MUST be preserved).
