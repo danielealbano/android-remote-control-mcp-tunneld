@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,7 +22,9 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 func h2Protocols() *http.Protocols {
@@ -50,12 +54,6 @@ func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *sl
 func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("close failed", "what", what, "err", err)
-	}
-}
-
-func closeDebug(logger *slog.Logger, what string, c io.Closer) {
-	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		logger.Debug("close failed", "what", what, "err", err)
 	}
 }
 
@@ -117,79 +115,6 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 	}
 }
 
-// dialBackOpener opens the local phone dial-back stream for a tunnel (satisfied by *phoneconn.Manager).
-// bridgeAdapter depends on this narrow surface so the OpenMesh sentinel translation is unit-testable.
-type dialBackOpener interface {
-	OpenStream(ctx context.Context, name, streamID string) (phoneconn.DataStream, error)
-}
-
-// bridgeAdapter implements mesh.Bridge on the OWNER node: OpenMesh opens the local phone dial-back
-// stream (open phase) and SpliceMesh relays the incoming mesh stream to it. The entry node already
-// accounted bytes + enforced caps, so the owner only relays.
-type bridgeAdapter struct {
-	mgr             dialBackOpener
-	dialBackTimeout time.Duration
-	logger          *slog.Logger
-}
-
-func (b *bridgeAdapter) OpenMesh(ctx context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
-	// Bound the owner-side dial-back wait (mirrors the local fast path in edge.openFar): a phone that never
-	// opens the /api/v1/data stream fails fast so the entry node's held stream slot is released, rather than
-	// pinning it until the idle timeout.
-	timeout := b.dialBackTimeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	octx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel() // bounds ONLY the dial-back wait; the returned ds does not depend on octx
-	ds, err := b.mgr.OpenStream(octx, tunnel, streamID)
-	if err != nil {
-		// Translate the phone-side sentinel to the mesh-owned one (mesh MUST NOT import phoneconn), so the
-		// listener answers 422 and the entry node re-mints the stream id.
-		if errors.Is(err, phoneconn.ErrDuplicateStreamID) {
-			return nil, fmt.Errorf("mesh dial-back: %w", mesh.ErrDuplicateStream)
-		}
-		return nil, err
-	}
-	return ds, nil
-}
-
-func (b *bridgeAdapter) SpliceMesh(ds, client io.ReadWriteCloser) {
-	bridgeCopy(ds, client, b.logger)
-}
-
-// bridgeCopy splices the phone stream `ds` ↔ the mesh stream `client`, returning once the phone→client
-// direction (the ONLY one that writes to `client`, the mesh HTTP/2 response body) has fully stopped —
-// guaranteeing no write to the response writer after the caller returns. Teardown fires as soon as
-// EITHER direction ends, so an abrupt phone-side close (or an entry-side close) propagates PROMPTLY
-// instead of stalling until the entry's idle timeout: closing `ds` EOFs the phone→client copy, and
-// closing `client` marks the response writer done + unblocks the entry. The client→phone copy writes
-// solely to `ds` and never touches the response writer, so it may safely outlive the return by the
-// microseconds until the server closes the request body and unblocks its read.
-func bridgeCopy(ds, client io.ReadWriteCloser, logger *slog.Logger) {
-	inDone := make(chan struct{}, 1) // client→phone finished
-	respDone := make(chan struct{})  // phone→client finished (the one that writes the response body)
-	go func() {
-		if _, err := io.Copy(ds, client); err != nil {
-			logger.Debug("mesh splice to the phone ended with an error", "err", err)
-		}
-		inDone <- struct{}{}
-	}()
-	go func() {
-		if _, err := io.Copy(client, ds); err != nil {
-			logger.Debug("mesh splice from the phone ended with an error", "err", err)
-		}
-		close(respDone)
-	}()
-	select {
-	case <-respDone: // the phone (or a client write error) ended the response direction
-	case <-inDone: // the entry (or a phone write error) ended the request direction
-	}
-	closeDebug(logger, "phone data stream", ds)
-	closeDebug(logger, "mesh stream", client)
-	<-respDone // the response-writer copy has fully stopped — safe to return
-}
-
 // issueFunc adapts the enroll service's Issue path to the phone control handler's mTLS POST /api/v1/issue
 // endpoint: it parses the phone's fresh attestation chain + rotated CSRs and runs the attested issuance
 // (name from the mTLS client-cert CN, validated by the handler), returning the regenerated identity +
@@ -234,15 +159,17 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 type phoneControl interface {
 	SendRenewNudge(name, nonceHex, ariWindow string) bool
 	Close(name, reason string) bool
+	SendOpen(ctx context.Context, name, connID string, open wire.OpenPayload) error
 }
 
 // adminController is this node's mesh.Controller: Renew enqueues a RENEW_NUDGE to the tunnel's LOCAL phone
 // connection; Terminate evicts this node's in-flight public splices then closes that phone connection. Used
-// both by the local admin path and by the mesh /api/v1/mesh/control handler on the owner node.
+// both by the local admin path and by the mesh /api/v1/mesh/control handler.
 type adminController struct {
 	mgr          phoneControl
 	nonce        func(ctx context.Context) (string, error) // mints the single-use renewal challenge nonce
 	evictStreams func(name string)                         // edge.EvictTunnelStreams on this node
+	evictConn    func(name, connID, reason string) bool
 }
 
 func (c *adminController) Renew(ctx context.Context, tunnel string) (bool, error) {
@@ -253,12 +180,189 @@ func (c *adminController) Renew(ctx context.Context, tunnel string) (bool, error
 	return c.mgr.SendRenewNudge(tunnel, nonceHex, ""), nil
 }
 
-// Terminate kicks the tunnel on THIS (owner) node: it first evicts this node's in-flight public splices
+// Terminate kicks the tunnel on this node: it first evicts this node's in-flight public splices
 // (attributed admin-terminate), then closes the live phone control connection. The phone reconnects
 // afterwards — terminate is a force-reconnect, not a keep-down. Returns whether a live phone conn existed.
 func (c *adminController) Terminate(_ context.Context, tunnel string) (bool, error) {
 	c.evictStreams(tunnel)
 	return c.mgr.Close(tunnel, store.CloseAdminTerminate), nil
+}
+
+var errOpenNotApplied = errors.New("server: the owner node does not hold that phone connection")
+
+var publicKeepAlive = net.KeepAliveConfig{Enable: true, Idle: 10 * time.Second, Interval: 5 * time.Second, Count: 3}
+
+func listenPublic(ctx context.Context, addr string) (net.Listener, error) {
+	lc := net.ListenConfig{KeepAliveConfig: publicKeepAlive}
+	ln, err := lc.Listen(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
+func controlClientAuth(mtls bool) tls.ClientAuthType {
+	if mtls {
+		return tls.RequireAndVerifyClientCert
+	}
+	return tls.VerifyClientCertIfGiven
+}
+
+type meshControl interface {
+	Control(ctx context.Context, peer string, req mesh.ControlRequest) (mesh.ControlResponse, error)
+}
+
+type nodeResolver interface {
+	LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error)
+}
+
+type liveNodeLister interface {
+	LiveNodes(ctx context.Context) (map[string]router.NodeInfo, error)
+}
+
+func broadcastControl(ctx context.Context, self string, nodes map[string]router.NodeInfo, mc meshControl,
+	req mesh.ControlRequest, logger *slog.Logger) (applied bool, failed map[string]bool) {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	failed = map[string]bool{}
+	for id, info := range nodes {
+		if id == self {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := mc.Control(ctx, info.Advertise, req)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				logger.Warn("mesh control broadcast failed on a node", "op", req.Op, "tunnel", req.Tunnel, "node", id, "err", err)
+				failed[id] = true
+				return
+			}
+			applied = applied || res.Applied
+		}()
+	}
+	wg.Wait()
+	return applied, failed
+}
+
+type openAdapter struct {
+	nodeID string
+	phones phoneControl
+	nodes  nodeResolver
+	mesh   meshControl
+	open   wire.OpenPayload
+}
+
+func (a *openAdapter) Open(ctx context.Context, nodeID, name, connID, token string) error {
+	open := a.open
+	open.Token = token
+	if nodeID == a.nodeID {
+		if err := a.phones.SendOpen(ctx, name, connID, open); err != nil {
+			return fmt.Errorf("send OPEN to the local phone %s: %w", name, err)
+		}
+		return nil
+	}
+	peer, ok, err := a.nodes.LookupNode(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("resolve owner node %s: %w", nodeID, err)
+	}
+	if !ok {
+		return fmt.Errorf("owner node %s is not registered: %w", nodeID, errOpenNotApplied)
+	}
+	res, err := a.mesh.Control(ctx, peer, mesh.ControlRequest{Op: "open", Tunnel: name, ConnID: connID, Open: &open})
+	if err != nil {
+		return fmt.Errorf("mesh open on node %s: %w", nodeID, err)
+	}
+	if !res.Applied {
+		return fmt.Errorf("mesh open on node %s: %w", nodeID, errOpenNotApplied)
+	}
+	return nil
+}
+
+const (
+	evictBroadcastTimeout     = 10 * time.Second
+	evictBroadcastConcurrency = 32
+)
+
+type spliceEvictor struct {
+	nodeID string
+	nodes  liveNodeLister
+	mesh   meshControl
+	local  func(name, connID, reason string) bool
+	logger *slog.Logger
+	ctx    context.Context
+	cancel context.CancelFunc
+	slots  chan struct{}
+	wg     sync.WaitGroup
+
+	mu       sync.Mutex
+	draining bool
+}
+
+func newSpliceEvictor(nodeID string, nodes liveNodeLister, mc meshControl, logger *slog.Logger) *spliceEvictor {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &spliceEvictor{nodeID: nodeID, nodes: nodes, mesh: mc, logger: logger, ctx: ctx, cancel: cancel,
+		slots: make(chan struct{}, evictBroadcastConcurrency)}
+}
+
+func (s *spliceEvictor) PhoneConnClosed(_ context.Context, name, connID, reason string) {
+	s.local(name, connID, reason)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.draining {
+		s.logger.Warn("splice eviction broadcast skipped: the node is draining", "tunnel", name, "conn", connID)
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ctx, cancel := context.WithTimeout(s.ctx, evictBroadcastTimeout)
+		defer cancel()
+		select {
+		case s.slots <- struct{}{}:
+		case <-ctx.Done():
+			s.logger.Warn("splice eviction broadcast dropped while waiting for a slot", "tunnel", name, "conn", connID, "err", ctx.Err())
+			return
+		}
+		defer func() { <-s.slots }()
+		nodes, err := s.nodes.LiveNodes(ctx)
+		if err != nil {
+			s.logger.Warn("splice eviction after a phone disconnect: node listing failed", "tunnel", name, "conn", connID, "err", err)
+			return
+		}
+		broadcastControl(ctx, s.nodeID, nodes, s.mesh, mesh.ControlRequest{Op: "evict", Tunnel: name, ConnID: connID, Reason: reason}, s.logger)
+	}()
+}
+
+func (s *spliceEvictor) Drain(ctx context.Context) {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+	done := make(chan struct{})
+	go func() { s.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+	}
+	s.cancel()
+	<-done
+}
+
+func (c *adminController) Open(ctx context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error) {
+	if err := c.mgr.SendOpen(ctx, tunnel, connID, open); err != nil {
+		if errors.Is(err, phoneconn.ErrNoConn) {
+			return false, nil
+		}
+		return false, fmt.Errorf("send OPEN to %s: %w", tunnel, err)
+	}
+	return true, nil
+}
+
+func (c *adminController) Evict(_ context.Context, tunnel, connID, reason string) (bool, error) {
+	return c.evictConn(tunnel, connID, reason), nil
 }
 
 // challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the

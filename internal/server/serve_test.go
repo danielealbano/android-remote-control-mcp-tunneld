@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,8 +27,10 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/metrics"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 func serveTestCert(t *testing.T) tls.Certificate {
@@ -166,84 +170,6 @@ func TestServeInternal_DrainsGracefully(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("serveTLS returned %v, want nil (net.ErrClosed is non-fatal)", err)
-	}
-}
-
-// blockingRWC blocks Read forever until Close, and discards Write. It models the mesh request-body
-// reader that never receives bytes from a quiet entry node.
-type blockingRWC struct {
-	ch   chan struct{}
-	once sync.Once
-}
-
-func newBlockingRWC() *blockingRWC { return &blockingRWC{ch: make(chan struct{})} }
-func (b *blockingRWC) Read(p []byte) (int, error) {
-	<-b.ch
-	return 0, io.EOF
-}
-func (b *blockingRWC) Write(p []byte) (int, error) { return len(p), nil }
-func (b *blockingRWC) Close() error {
-	b.once.Do(func() { close(b.ch) })
-	return nil
-}
-
-// eofThenBlockRWC returns EOF on the first Read (the phone terminating its side), then discards writes.
-type eofThenBlockRWC struct {
-	read  chan struct{}
-	once  sync.Once
-	rdone bool
-}
-
-func newEOFThenBlock() *eofThenBlockRWC { return &eofThenBlockRWC{read: make(chan struct{})} }
-func (e *eofThenBlockRWC) Read(p []byte) (int, error) {
-	if !e.rdone {
-		e.rdone = true
-		return 0, io.EOF // phone EOF immediately
-	}
-	<-e.read
-	return 0, io.EOF
-}
-func (e *eofThenBlockRWC) Write(p []byte) (int, error) { return len(p), nil }
-func (e *eofThenBlockRWC) Close() error {
-	e.once.Do(func() { close(e.read) })
-	return nil
-}
-
-// fakeOpener is a dial-back opener stub whose OpenStream always returns err (for the sentinel-translation test).
-type fakeOpener struct{ err error }
-
-func (f fakeOpener) OpenStream(context.Context, string, string) (phoneconn.DataStream, error) {
-	return nil, f.err
-}
-
-// TestBridgeAdapter_TranslatesDuplicateStreamID covers the owner-side sentinel translation: a phone
-// dial-back returning phoneconn.ErrDuplicateStreamID surfaces from OpenMesh as mesh.ErrDuplicateStream
-// (so the mesh listener answers 422), while any other error passes through unchanged.
-func TestBridgeAdapter_TranslatesDuplicateStreamID(t *testing.T) {
-	b := &bridgeAdapter{mgr: fakeOpener{err: phoneconn.ErrDuplicateStreamID}, dialBackTimeout: time.Second}
-	if _, err := b.OpenMesh(context.Background(), "t", "s1"); !errors.Is(err, mesh.ErrDuplicateStream) {
-		t.Fatalf("OpenMesh must translate ErrDuplicateStreamID → mesh.ErrDuplicateStream, got %v", err)
-	}
-
-	other := errors.New("boom")
-	b2 := &bridgeAdapter{mgr: fakeOpener{err: other}, dialBackTimeout: time.Second}
-	if _, err := b2.OpenMesh(context.Background(), "t", "s1"); !errors.Is(err, other) {
-		t.Fatalf("a non-duplicate error must pass through unchanged, got %v", err)
-	}
-}
-
-// TestBridgeCopyReturnsPromptlyOnPhoneEOF proves that when the phone side (ds) EOFs while
-// the mesh client read blocks forever, bridgeCopy must return promptly (via ds.Close/client.Close),
-// NOT stall waiting for the client→phone copy to unblock.
-func TestBridgeCopyReturnsPromptlyOnPhoneEOF(t *testing.T) {
-	ds := newEOFThenBlock()    // phone: response direction EOFs at once
-	client := newBlockingRWC() // entry: request-body read blocks forever
-	done := make(chan struct{})
-	go func() { bridgeCopy(ds, client, testLogger()); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("bridgeCopy stalled on an abrupt phone close (must not wait for the entry idle timeout)")
 	}
 }
 
@@ -391,5 +317,326 @@ func TestRegisterValkeyPool_ReportsTheClientPool(t *testing.T) {
 	}
 	if got["tunneld_valkey_pool_connections"] < 1 {
 		t.Fatalf("tunneld_valkey_pool_connections = %v, want ≥ 1 after a command", got["tunneld_valkey_pool_connections"])
+	}
+}
+
+type fakeNodeResolver struct {
+	adv map[string]string
+	err error
+}
+
+func (f fakeNodeResolver) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	a, ok := f.adv[nodeID]
+	return a, ok, nil
+}
+
+type meshCall struct {
+	peer string
+	req  mesh.ControlRequest
+}
+
+type fakeMeshControl struct {
+	mu       sync.Mutex
+	calls    []meshCall
+	applied  map[string]bool
+	errs     map[string]error
+	block    chan struct{}
+	delay    time.Duration
+	inflight atomic.Int32
+	maxSeen  atomic.Int32
+	returned atomic.Int32
+}
+
+func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.ControlRequest) (mesh.ControlResponse, error) {
+	n := f.inflight.Add(1)
+	defer f.inflight.Add(-1)
+	defer f.returned.Add(1)
+	for {
+		m := f.maxSeen.Load()
+		if n <= m || f.maxSeen.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	f.mu.Lock()
+	f.calls = append(f.calls, meshCall{peer: peer, req: req})
+	applied, err := f.applied[peer], f.errs[peer]
+	f.mu.Unlock()
+	if f.block != nil {
+		select {
+		case <-f.block:
+		case <-ctx.Done():
+			return mesh.ControlResponse{}, ctx.Err()
+		}
+	}
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return mesh.ControlResponse{}, ctx.Err()
+		}
+	}
+	if err != nil {
+		return mesh.ControlResponse{}, err
+	}
+	return mesh.ControlResponse{Applied: applied}, nil
+}
+
+func (f *fakeMeshControl) snapshot() []meshCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]meshCall(nil), f.calls...)
+}
+
+type fakeLiveNodes struct {
+	nodes map[string]router.NodeInfo
+	err   error
+}
+
+func (f fakeLiveNodes) LiveNodes(context.Context) (map[string]router.NodeInfo, error) {
+	return f.nodes, f.err
+}
+
+var testOpen = wire.OpenPayload{Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+
+func TestOpenAdapter_LocalOwnerSendsOpen(t *testing.T) {
+	ph := &fakePhoneControl{order: new(int)}
+	mc := &fakeMeshControl{}
+	a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: fakeNodeResolver{}, mesh: mc, open: testOpen}
+	if err := a.Open(context.Background(), "nodeA", "t", "conn-1", "TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	want := testOpen
+	want.Token = "TOKEN"
+	if ph.openName != "t" || ph.openConnID != "conn-1" || ph.openPayload != want {
+		t.Fatalf("SendOpen got (%q, %q, %+v), want (t, conn-1, %+v)", ph.openName, ph.openConnID, ph.openPayload, want)
+	}
+	if len(mc.snapshot()) != 0 {
+		t.Fatal("a local owner must not use the mesh")
+	}
+}
+
+func TestOpenAdapter_RemoteOwnerUsesMeshOpen(t *testing.T) {
+	ph := &fakePhoneControl{order: new(int)}
+	mc := &fakeMeshControl{applied: map[string]bool{"10.0.0.2:9443": true}}
+	a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: fakeNodeResolver{adv: map[string]string{"nodeB": "10.0.0.2:9443"}}, mesh: mc, open: testOpen}
+	if err := a.Open(context.Background(), "nodeB", "t", "conn-1", "TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	calls := mc.snapshot()
+	want := testOpen
+	want.Token = "TOKEN"
+	if len(calls) != 1 || calls[0].peer != "10.0.0.2:9443" || calls[0].req.Op != "open" || calls[0].req.Tunnel != "t" ||
+		calls[0].req.ConnID != "conn-1" || calls[0].req.Open == nil || *calls[0].req.Open != want {
+		t.Fatalf("mesh calls = %+v, want one open to the owner's advertise address", calls)
+	}
+	if ph.openName != "" {
+		t.Fatal("a remote owner must not be sent a local OPEN")
+	}
+}
+
+func TestOpenAdapter_Failures(t *testing.T) {
+	errLookup := errors.New("valkey down")
+	errMesh := errors.New("peer unreachable")
+	errLocal := errors.New("queue failed")
+	tests := []struct {
+		name    string
+		owner   string
+		nodes   fakeNodeResolver
+		mc      *fakeMeshControl
+		local   error
+		wantErr error
+	}{
+		{name: "not applied", owner: "nodeB", nodes: fakeNodeResolver{adv: map[string]string{"nodeB": "p"}}, mc: &fakeMeshControl{}, wantErr: errOpenNotApplied},
+		{name: "unregistered owner", owner: "nodeB", nodes: fakeNodeResolver{adv: map[string]string{}}, mc: &fakeMeshControl{}, wantErr: errOpenNotApplied},
+		{name: "lookup error", owner: "nodeB", nodes: fakeNodeResolver{err: errLookup}, mc: &fakeMeshControl{}, wantErr: errLookup},
+		{name: "mesh error", owner: "nodeB", nodes: fakeNodeResolver{adv: map[string]string{"nodeB": "p"}}, mc: &fakeMeshControl{errs: map[string]error{"p": errMesh}}, wantErr: errMesh},
+		{name: "local error", owner: "nodeA", nodes: fakeNodeResolver{}, mc: &fakeMeshControl{}, local: errLocal, wantErr: errLocal},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ph := &fakePhoneControl{order: new(int), openErr: tc.local}
+			a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: tc.nodes, mesh: tc.mc, open: testOpen}
+			if err := a.Open(context.Background(), tc.owner, "t", "conn-1", "TOKEN"); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Open = %v, want it to wrap %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+type evictCall struct{ name, connID, reason string }
+
+func newTestEvictor(t *testing.T, nodes liveNodeLister, mc meshControl, logger *slog.Logger) (*spliceEvictor, *[]evictCall, *sync.Mutex) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []evictCall
+	s := newSpliceEvictor("nodeA", nodes, mc, logger)
+	s.local = func(name, connID, reason string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, evictCall{name: name, connID: connID, reason: reason})
+		return true
+	}
+	return s, &calls, &mu
+}
+
+func TestSpliceEvictor_EvictsLocallyAndBroadcasts(t *testing.T) {
+	nodes := map[string]router.NodeInfo{"nodeA": {Advertise: "a:9443"}, "nodeB": {Advertise: "b:9443"}, "nodeC": {Advertise: "c:9443"}}
+	mc := &fakeMeshControl{}
+	s, calls, mu := newTestEvictor(t, fakeLiveNodes{nodes: nodes}, mc, testLogger())
+	s.PhoneConnClosed(context.Background(), "t", "conn-1", store.CloseBanEvict)
+	mu.Lock()
+	local := append([]evictCall(nil), *calls...)
+	mu.Unlock()
+	if len(local) != 1 || local[0] != (evictCall{name: "t", connID: "conn-1", reason: store.CloseBanEvict}) {
+		t.Fatalf("local evictions = %+v, want one synchronous (t, conn-1, ban-evict)", local)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Drain(ctx)
+	peers := map[string]bool{}
+	for _, c := range mc.snapshot() {
+		if c.req.Op != "evict" || c.req.Tunnel != "t" || c.req.ConnID != "conn-1" || c.req.Reason != store.CloseBanEvict {
+			t.Fatalf("broadcast request = %+v", c.req)
+		}
+		peers[c.peer] = true
+	}
+	if len(peers) != 2 || !peers["b:9443"] || !peers["c:9443"] || peers["a:9443"] {
+		t.Fatalf("evict sent to %v, want every other node and never self", peers)
+	}
+
+	buf := &syncBuffer{}
+	s2, calls2, mu2 := newTestEvictor(t, fakeLiveNodes{err: errors.New("valkey down")}, &fakeMeshControl{}, slog.New(slog.NewTextHandler(buf, nil)))
+	s2.PhoneConnClosed(context.Background(), "t", "conn-2", store.ClosePhoneClose)
+	s2.Drain(ctx)
+	mu2.Lock()
+	n := len(*calls2)
+	mu2.Unlock()
+	if n != 1 {
+		t.Fatal("a node-listing failure must not skip the local eviction")
+	}
+	if !strings.Contains(buf.String(), "node listing failed") {
+		t.Fatalf("the node-listing failure must be logged; log = %q", buf.String())
+	}
+}
+
+func TestSpliceEvictor_AfterDrainOnlyEvictsLocally(t *testing.T) {
+	buf := &syncBuffer{}
+	mc := &fakeMeshControl{}
+	s, calls, mu := newTestEvictor(t, fakeLiveNodes{nodes: map[string]router.NodeInfo{"nodeB": {Advertise: "b:9443"}}}, mc, slog.New(slog.NewTextHandler(buf, nil)))
+	s.Drain(context.Background())
+	s.PhoneConnClosed(context.Background(), "t", "conn-1", store.CloseServerShutdown)
+	mu.Lock()
+	n := len(*calls)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatal("a close after the drain started must still evict locally")
+	}
+	if len(mc.snapshot()) != 0 {
+		t.Fatal("a close after the drain started must not broadcast")
+	}
+	if !strings.Contains(buf.String(), "node is draining") {
+		t.Fatalf("the skipped broadcast must be logged; log = %q", buf.String())
+	}
+}
+
+func TestSpliceEvictor_ConcurrencyBounded(t *testing.T) {
+	mc := &fakeMeshControl{block: make(chan struct{})}
+	s, _, _ := newTestEvictor(t, fakeLiveNodes{nodes: map[string]router.NodeInfo{"nodeB": {Advertise: "b:9443"}}}, mc, testLogger())
+	for i := range 2 * evictBroadcastConcurrency {
+		s.PhoneConnClosed(context.Background(), "t", fmt.Sprintf("conn-%d", i), store.ClosePhoneClose)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mc.inflight.Load() < evictBroadcastConcurrency {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d broadcasts started", mc.inflight.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := mc.maxSeen.Load(); got > evictBroadcastConcurrency {
+		t.Fatalf("%d broadcasts in flight, want at most %d", got, evictBroadcastConcurrency)
+	}
+	close(mc.block)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.Drain(ctx)
+	if got := len(mc.snapshot()); got != 2*evictBroadcastConcurrency {
+		t.Fatalf("broadcasts sent = %d, want %d", got, 2*evictBroadcastConcurrency)
+	}
+	if got := mc.maxSeen.Load(); got > evictBroadcastConcurrency {
+		t.Fatalf("%d broadcasts in flight, want at most %d", got, evictBroadcastConcurrency)
+	}
+}
+
+func TestSpliceEvictor_BroadcastIsAsyncAndDrained(t *testing.T) {
+	mc := &fakeMeshControl{block: make(chan struct{})}
+	s, _, _ := newTestEvictor(t, fakeLiveNodes{nodes: map[string]router.NodeInfo{"nodeB": {Advertise: "b:9443"}}}, mc, testLogger())
+	start := time.Now()
+	s.PhoneConnClosed(context.Background(), "t", "conn-1", store.ClosePhoneClose)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("PhoneConnClosed must not wait for the broadcast (took %s)", elapsed)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for mc.inflight.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the broadcast never started")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	s.Drain(ctx)
+	if elapsed := time.Since(start); elapsed < 150*time.Millisecond || elapsed > 2*time.Second {
+		t.Fatalf("Drain must return shortly after its deadline, took %s", elapsed)
+	}
+	if mc.inflight.Load() != 0 || mc.returned.Load() != 1 {
+		t.Fatalf("the drain must cancel and join the broadcast: inflight=%d returned=%d", mc.inflight.Load(), mc.returned.Load())
+	}
+}
+
+func TestBroadcastControl(t *testing.T) {
+	buf := &syncBuffer{}
+	mc := &fakeMeshControl{
+		delay:   200 * time.Millisecond,
+		applied: map[string]bool{"b:9443": false, "c:9443": true},
+		errs:    map[string]error{"d:9443": errors.New("peer unreachable")},
+	}
+	nodes := map[string]router.NodeInfo{
+		"nodeA": {Advertise: "a:9443"}, "nodeB": {Advertise: "b:9443"}, "nodeC": {Advertise: "c:9443"}, "nodeD": {Advertise: "d:9443"},
+	}
+	start := time.Now()
+	applied, failed := broadcastControl(context.Background(), "nodeA", nodes, mc, mesh.ControlRequest{Op: "terminate", Tunnel: "t"}, slog.New(slog.NewTextHandler(buf, nil)))
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("the calls must run in parallel (took %s)", elapsed)
+	}
+	if !applied {
+		t.Fatal("applied must be the OR of the replies")
+	}
+	if len(failed) != 1 || !failed["nodeD"] {
+		t.Fatalf("failed = %v, want nodeD", failed)
+	}
+	for _, c := range mc.snapshot() {
+		if c.peer == "a:9443" {
+			t.Fatal("broadcastControl must skip self")
+		}
+	}
+	if got := len(mc.snapshot()); got != 3 {
+		t.Fatalf("calls = %d, want 3", got)
+	}
+	if !strings.Contains(buf.String(), "node=nodeD") {
+		t.Fatalf("the failed node must be logged; log = %q", buf.String())
+	}
+}
+
+func TestControlClientAuth(t *testing.T) {
+	if got := controlClientAuth(true); got != tls.RequireAndVerifyClientCert {
+		t.Fatalf("mTLS dial-backs: ClientAuth = %v", got)
+	}
+	if got := controlClientAuth(false); got != tls.VerifyClientCertIfGiven {
+		t.Fatalf("no mTLS dial-backs: ClientAuth = %v", got)
 	}
 }
