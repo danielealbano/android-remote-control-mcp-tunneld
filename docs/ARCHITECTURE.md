@@ -216,6 +216,11 @@ the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENE
 in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects). Both route to
 the owner node over the mesh `/api/v1/mesh/control` RPC (see PROTOCOL.md §5).
 
+Every labelled counter is exposed at 0 from startup for each known label value (the `observ` lists:
+`RejectReasons`, `ACMECAs`, `EnrollResults`, `AttestResults`, `QuotaWindows`, `ByteDirections`; renewals
+also `ca="all", result="fail"`). A series that first appeared at 1 would hide its first event from
+`rate()`/`increase()`.
+
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
 The label set is EXACTLY `observ.RejectReasons` (pre-registered; `PromRecorder.Reject` refuses any

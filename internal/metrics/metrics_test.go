@@ -16,6 +16,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/admin"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/caplog"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/redis/go-redis/v9"
@@ -529,5 +530,61 @@ func TestRegisterLogSinkErrors(t *testing.T) {
 	}
 	if err := NewMetrics().RegisterLogSinkErrors(nil); err == nil {
 		t.Fatal("a nil counter must be refused")
+	}
+}
+
+func TestLabelledCountersPreCreatedAtZero(t *testing.T) {
+	want := map[string][]string{}
+	for _, ca := range observ.ACMECAs {
+		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail")
+		want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+ca+",result=ok")
+		want["tunneld_acme_cooldown_total"] = append(want["tunneld_acme_cooldown_total"], "ca="+ca)
+	}
+	want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+observ.ACMERenewAllCAs+",result=fail")
+	for _, r := range observ.EnrollResults {
+		want["tunneld_enrollments_total"] = append(want["tunneld_enrollments_total"], "result="+r)
+	}
+	for _, r := range observ.AttestResults {
+		want["tunneld_attest_verify_total"] = append(want["tunneld_attest_verify_total"], "result="+r)
+	}
+	for _, w := range observ.QuotaWindows {
+		want["tunneld_quota_exhausted_total"] = append(want["tunneld_quota_exhausted_total"], "window="+w)
+	}
+	for _, d := range observ.ByteDirections {
+		want["tunneld_bytes_total"] = append(want["tunneld_bytes_total"], "direction="+d)
+	}
+
+	fams, err := NewMetrics().Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]map[string]float64{}
+	for _, f := range fams {
+		series := map[string]float64{}
+		for _, m := range f.GetMetric() {
+			var pairs []string
+			for _, lp := range m.GetLabel() {
+				pairs = append(pairs, lp.GetName()+"="+lp.GetValue())
+			}
+			series[strings.Join(pairs, ",")] = m.GetCounter().GetValue()
+		}
+		got[f.GetName()] = series
+	}
+
+	for family, labels := range want {
+		t.Run(family, func(t *testing.T) {
+			series := got[family]
+			if len(series) != len(labels) {
+				t.Errorf("%s exposes %d series %v, want %d %v", family, len(series), series, len(labels), labels)
+			}
+			for _, l := range labels {
+				v, ok := series[l]
+				if !ok {
+					t.Errorf("%s{%s} not exposed before any event", family, l)
+				} else if v != 0 {
+					t.Errorf("%s{%s} = %v, want 0", family, l, v)
+				}
+			}
+		})
 	}
 }

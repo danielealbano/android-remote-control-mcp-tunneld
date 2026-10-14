@@ -101,6 +101,25 @@ func NewMetrics() *Metrics {
 	for _, r := range observ.RejectReasons {
 		m.rejections.WithLabelValues(r)
 	}
+	for _, ca := range observ.ACMECAs {
+		m.acmeIssue.WithLabelValues(ca, "ok")
+		m.acmeIssue.WithLabelValues(ca, "fail")
+		m.acmeRenew.WithLabelValues(ca, "ok")
+		m.acmeCooldown.WithLabelValues(ca)
+	}
+	m.acmeRenew.WithLabelValues(observ.ACMERenewAllCAs, "fail")
+	for _, r := range observ.EnrollResults {
+		m.enrollments.WithLabelValues(r)
+	}
+	for _, r := range observ.AttestResults {
+		m.attestVerify.WithLabelValues(r)
+	}
+	for _, w := range observ.QuotaWindows {
+		m.quotaExhausted.WithLabelValues(w)
+	}
+	for _, d := range observ.ByteDirections {
+		m.bytesTotal.WithLabelValues(d)
+	}
 	m.perConnMem.Set(float64(perConnMemEstimateBytes))
 	return m
 }

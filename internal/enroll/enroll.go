@@ -288,7 +288,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if err != nil {
 		s.rec.Reject("acme-failed", name, ip)
 		if renewal {
-			s.rec.ACMERenew("all", "fail")
+			s.rec.ACMERenew(observ.ACMERenewAllCAs, "fail")
 		}
 		return Result{}, classifyIssuerError(err)
 	}
