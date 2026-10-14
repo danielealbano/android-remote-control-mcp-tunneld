@@ -210,12 +210,14 @@ MUST NOT be relaxed without explicit user direction.
   authenticates). No HTTP request inspection / method-path allowlist on relayed traffic. No per-path cap
   exceptions or bulk-transfer support. No CRL (bans are the only revocation). No cross-replica exact
   bandwidth accounting. No server-side content storage or caching. No TLS mutual auth on the public side.
-- The Android (Kotlin) client integration is **out of scope** of this repo — it lives with the app. Two
-  on-device test apps under `support/` are the only exceptions, and neither is the client: a minimal
+- The Android (Kotlin) client integration is **out of scope** of this repo — it lives with the app. Three
+  on-device test apps under `support/` are the only exceptions, and none is the client: a minimal
   **attestation test probe** (`support/attest-probe/`) driving the adb-gated `TestE2E_DeviceAttestation`
-  gate, and a complete **reference tunnel client** (`support/tunnel-app/`) — a faithful Kotlin
+  gate, a complete **reference tunnel client** (`support/tunnel-app/`) — a faithful Kotlin
   implementation of the phone side of `docs/PROTOCOL.md` — driving the adb-gated
-  `TestE2E_ReferenceTunnelApp` gate.
+  `TestE2E_ReferenceTunnelApp` gate, and the **soak app** (`support/soak-app/`, N emulated phones on one
+  device) with its Go load client `support/soak-client/` (`docs/PROJECT.md` §7), driving the adb-gated
+  `TestE2E_SoakApp` gate and manual soak runs.
 
 ---
 
@@ -281,6 +283,7 @@ The `Makefile` is the authoritative command surface:
   `deploy/.env.example`)
 - `make mermaid-check` — validate all Mermaid blocks in `README.md` + `docs/` via `mmdc`
 - `make tidy` — `go mod tidy`
+- `make soak-app` / `make soak-client` — build the soak-test app (into `fixtures/soak-app/`) and its load client (`docs/PROJECT.md` §7)
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
 httptest, temp CA files); the integration + e2e tiers provision everything via testcontainers and need a
