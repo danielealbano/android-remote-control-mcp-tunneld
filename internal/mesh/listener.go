@@ -16,8 +16,16 @@ import (
 // NOT import phoneconn/enroll). Renew enqueues a RENEW_NUDGE; Terminate closes the tunnel's live phone
 // connection and evicts this node's in-flight public splices. Each returns whether it applied.
 type Controller interface {
+	TunnelController
+	ConnController
+}
+
+type TunnelController interface {
 	Renew(ctx context.Context, tunnel string) (bool, error)
 	Terminate(ctx context.Context, tunnel string) (bool, error)
+}
+
+type ConnController interface {
 	Open(ctx context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error)
 	Evict(ctx context.Context, tunnel, connID, reason string) (bool, error)
 }

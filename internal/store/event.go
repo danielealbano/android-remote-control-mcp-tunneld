@@ -76,8 +76,7 @@ func NewConnID() (string, error) {
 }
 
 // MustConnID mints a conn/stream id, falling back to a deterministic non-empty id ("00000000") on the
-// practically impossible crypto/rand failure — an EMPTY id would be refused by the dial-back match
-// and turn every connection into a no-route.
+// practically impossible crypto/rand failure.
 func MustConnID() string {
 	id, err := NewConnID()
 	if err != nil {

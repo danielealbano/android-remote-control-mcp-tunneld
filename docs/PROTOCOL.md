@@ -189,7 +189,9 @@ X-Dial-Token: <token>
 Success: `HTTP/1.1 101 Switching Protocols` + `Connection: Upgrade` + `Upgrade: tunneld-dial`, then the
 connection is a **raw, bidirectional, opaque byte splice** carrying the client↔phone TLS session — NO
 framing; either side closing ends it. Failures (then the connection closes): `400` malformed (not exactly
-HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` client certificate missing/invalid/banned, `404`
+HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` identity certificate rejected (mesh-role, invalid
+name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already fails the TLS
+handshake, with no HTTP response), `404`
 unknown, expired, already-used token or a token of another tunnel, `405` non-`GET`. The token is single-use
 and valid only while the entry node waits (`--limit-dialback-timeout`). If the open fails, the entry node
 takes ONE fresh route lookup and retries once (same token) when the route changed, then closes the client.

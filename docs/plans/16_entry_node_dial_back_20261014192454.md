@@ -61,7 +61,7 @@ X-Dial-Token: <token>
 
 Success: `HTTP/1.1 101 Switching Protocols` + `Connection: Upgrade` + `Upgrade: tunneld-dial`, then the raw
 opaque splice; either side closing ends it. Failures (then the connection closes): `400` malformed (not exactly
-HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` client certificate missing/invalid/banned, `404` unknown,
+HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` identity certificate rejected (mesh-role, invalid name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already fails the TLS handshake, with no HTTP response), `404` unknown,
 expired, already-used token or a token of another tunnel, `405` non-`GET`. The token is single-use and valid
 only while the entry node waits (`--limit-dialback-timeout`). If the open fails, the entry node takes ONE fresh
 route lookup and retries once (same token) when the route changed, then closes the client.
@@ -2126,6 +2126,14 @@ DoD:
   `TestClient_ControlErrorDecrementsActive`) carry the new names / operations, `TestControlData_NonPostIs405`
   names only `/api/v1/control`, the `client` package doc and the mesh pool's `lastUse` field comment drop the
   data-stream / `OpenStream` references, and the `Limiter` doc drops its (now incomplete) TTL-mechanism list.
+- Action 5.1.1 (code review): `mesh.Controller` is composed of two small interfaces — `TunnelController`
+  (`Renew`, `Terminate`) and `ConnController` (`Open`, `Evict`) — per go.md (interfaces of 1–3 methods); the
+  handler still takes the composed `Controller`.
+- Wire contract / Action 11.1.1 (code review): the `403` dial-back status reads "identity certificate rejected
+  (mesh-role, invalid name, banned tunnel)"; with `use_mtls` the control-host TLS requires the client
+  certificate, so a missing or untrusted one fails the handshake before any HTTP response.
+- Action 4.2.5 (code review): the `MustConnID` doc also drops "an EMPTY id would be refused by the dial-back
+  match and turn every connection into a no-route" (dial-backs are matched by token now).
 - Code review: the docs state that a node without its control-host certificate can neither hold phone control
   connections nor accept HTTPS dial-backs (tunnel connections entering it fail `no-route`), and that a crashed
   owner's splices end within 10 s after the route expires (`--route-ttl`) or is re-bound (D13 / Actions 11.1.1–
