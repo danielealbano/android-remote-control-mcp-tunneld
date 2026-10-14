@@ -7,6 +7,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
+import java.io.IOException
 import java.security.PrivateKey
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
@@ -83,6 +84,10 @@ object Enroll {
                 if (!e.retryable || attempt++ >= MAX_ENROLL_RETRIES) throw e
                 Log.w(TAG, "phone $phone: enrollment refused (${e.reason}), retrying in ${e.retryAfterSec}s")
                 Thread.sleep(e.retryAfterSec.coerceAtLeast(1) * 1000)
+            } catch (e: IOException) {
+                if (attempt++ >= MAX_ENROLL_RETRIES) throw e
+                Log.w(TAG, "phone $phone: enrollment network error, retrying in 2s", e)
+                Thread.sleep(2000)
             }
         }
     }
