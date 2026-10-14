@@ -11,7 +11,6 @@
 /.deploy/
 /deploy/banfiles/
 /deploy/attest/
-/deploy/ntfy-alertmanager/config.scfg
 
 # attest-probe Gradle build outputs & machine-specific SDK pointer (the built APK fixture under
 # fixtures/attest-probe/ IS committed — only these are ignored).

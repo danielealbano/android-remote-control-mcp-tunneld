@@ -69,20 +69,9 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    delete on the objects plus list on the bucket (see `docs/PROJECT.md` §5). The local MinIO stays without
    rules.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.
-7. **ntfy** (first start): copy the bridge config
-   (`cp deploy/ntfy-alertmanager/config.scfg.example deploy/ntfy-alertmanager/config.scfg` — the real
-   `config.scfg` is gitignored), then create a read user for the phone and a write token for the bridge
-   INSIDE the ntfy container:
-   ```sh
-   docker compose -f deploy/docker-compose.yml exec ntfy ntfy user add phone
-   docker compose -f deploy/docker-compose.yml exec ntfy ntfy token add phone
-   ```
-   Set that token as `access-token` in `deploy/ntfy-alertmanager/config.scfg`, then restart the bridge so
-   it picks up the token: `docker compose -f deploy/docker-compose.yml restart ntfy-alertmanager`.
 
 **Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and the ACME HTTP-01 listener `:80` are
-public. The observability UIs (Grafana/Prometheus/Alertmanager/ntfy) bind to `127.0.0.1` only; reach
-them via SSH forward.
+public.
 
 **Prebuilt image (optional):** the Compose stack builds tunneld locally via `build:`. Multi-arch images
 (linux/amd64 + linux/arm64) are published to `ghcr.io/danielealbano/tunneld` on `v*` tags — the image
@@ -147,7 +136,8 @@ for the requested names), `GET /api/v1/admin/nodes` (the node registry), and the
 `POST /api/v1/admin/tunnels/{name}/reissue` (force a renewal) and
 `POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's
 in-flight public splices — ephemeral, the phone reconnects), both routed to the owner node over the mesh.
-Grafana/Prometheus/Alertmanager/ntfy publish on `127.0.0.1`-only ports (SSH-forward to reach them).
+`deploy/prometheus/` (scrape config + alert rules) and `deploy/grafana/provisioning/` (datasource +
+dashboards) are the configs for an operator-run Prometheus + Grafana; the compose stack does not run them.
 
 ## Attribution
 

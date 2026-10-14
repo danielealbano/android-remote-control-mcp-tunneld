@@ -8,4 +8,3 @@ deploy/acme
 deploy/logs
 deploy/banfiles
 deploy/attest
-deploy/ntfy-alertmanager/config.scfg

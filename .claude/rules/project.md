@@ -58,7 +58,7 @@ does NOT duplicate them.
 | Logging | `log/slog` fan-out + `gopkg.in/natefinch/lumberjack.v2` | Repeatable composite `--log` sinks; `std` splits by severity (info+ → stdout, warn+ → stderr). |
 | Unit-test Valkey | `github.com/alicebob/miniredis/v2` | In-process; UNIT tier only. |
 | Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e` / `staging`); needs Docker. The `staging` tier also uses real LE / GTS staging through a reverse SSH tunnel. |
-| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443 (+ :80 for ACME HTTP-01), valkey, minio (+bucket-create), fetcher, prometheus/grafana/alertmanager/ntfy on `127.0.0.1`-only ports. |
+| Edge / deployment | NO proxy — raw `:443` + Docker Compose | `deploy/`: one `tunneld` on :443 (+ :80 for ACME HTTP-01), valkey, minio (+bucket-create), fetcher; `deploy/prometheus/` + `deploy/grafana/` are the operator-run monitoring configs (not in compose). |
 | Release | goreleaser (`v*` tags) | linux amd64+arm64 archives + multi-arch image `ghcr.io/danielealbano/tunneld`. |
 | Source control | **GitHub**, `danielealbano/android-remote-control-mcp-tunneld` | See `github.md`. |
 
