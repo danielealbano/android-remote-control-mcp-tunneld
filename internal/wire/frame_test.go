@@ -11,7 +11,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		ct      ControlType
 		payload any
 	}{
-		{CtrlOpen, OpenPayload{StreamID: "aabbccddee"}},
+		{CtrlOpen, OpenPayload{Token: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}},
 		{CtrlPing, nil},
 		{CtrlPong, nil},
 		{CtrlRenewNudge, RenewNudgePayload{Nonce: "00112233", ARIWindow: "2026-08-20T00:00:00Z"}},
@@ -40,10 +40,51 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		} else if len(body) != 0 {
 			t.Errorf("no-payload frame %d has body %q", tc.ct, body)
 		}
+		if op, ok := tc.payload.(OpenPayload); ok {
+			var got OpenPayload
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("unmarshal OPEN: %v", err)
+			}
+			if got != op {
+				t.Errorf("OPEN round-trip = %+v, want %+v", got, op)
+			}
+		}
 	}
 }
 
-// TestControlTypeValuesFrozen pins the numeric wire values of the v1 frame set — docs/PROTOCOL.md §3
+func TestOpenPayload_JSONFieldNames(t *testing.T) {
+	b, err := json.Marshal(OpenPayload{Token: "t", Addr: "a:1", UseHTTPS: true, UseMTLS: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"token", "addr", "use_https", "use_mtls"}
+	if len(m) != len(want) {
+		t.Fatalf("OPEN keys = %v, want exactly %v", m, want)
+	}
+	for _, k := range want {
+		if _, ok := m[k]; !ok {
+			t.Errorf("OPEN JSON lacks %q: %s", k, b)
+		}
+	}
+}
+
+func TestDialBackConstantsFrozen(t *testing.T) {
+	if DialBackPath != "/api/v1/data" {
+		t.Errorf("DialBackPath = %q", DialBackPath)
+	}
+	if DialTokenHeader != "X-Dial-Token" {
+		t.Errorf("DialTokenHeader = %q", DialTokenHeader)
+	}
+	if DialUpgrade != "tunneld-dial" {
+		t.Errorf("DialUpgrade = %q", DialUpgrade)
+	}
+}
+
+// TestControlTypeValuesFrozen pins the numeric wire values of the frame set — docs/PROTOCOL.md §3
 // is the canonical contract the Kotlin client conforms to, so these bytes must never drift.
 func TestControlTypeValuesFrozen(t *testing.T) {
 	want := map[ControlType]byte{CtrlOpen: 1, CtrlPing: 2, CtrlPong: 3, CtrlRenewNudge: 4}
