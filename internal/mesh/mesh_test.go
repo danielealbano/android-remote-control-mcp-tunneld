@@ -25,6 +25,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 func meshCert(t *testing.T, mesh bool) *x509.Certificate {
@@ -50,42 +51,18 @@ func meshCert(t *testing.T, mesh bool) *x509.Certificate {
 	return c
 }
 
-type fakeBridge struct {
-	called   bool
-	openErr  error
-	closeNow bool
-}
-
-func (f *fakeBridge) OpenMesh(_ context.Context, tunnel, streamID string) (io.ReadWriteCloser, error) {
-	f.called = true
-	if f.openErr != nil {
-		return nil, f.openErr
-	}
-	return nopRWC{}, nil
-}
-
-func (f *fakeBridge) SpliceMesh(ds, client io.ReadWriteCloser) {
-	if f.closeNow {
-		tunneltest.CloseLogged(client) // signal done so the handler returns
-	} else {
-		go func() { time.Sleep(10 * time.Millisecond); tunneltest.CloseLogged(client) }()
-	}
-}
-
-// nopRWC is a stand-in phone dial-back stream (OpenMesh's return) for the mesh handler tests.
-type nopRWC struct{}
-
-func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
-func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
-func (nopRWC) Close() error                { return nil }
-
 // fakeController is a func-backed mesh.Controller for the /api/v1/mesh/control tests: it records the call
-// and returns the configured result (nudged for Renew, terminated for Terminate).
+// and returns the configured result.
 type fakeController struct {
 	called     bool
 	tunnel     string
+	connID     string
+	reason     string
+	open       wire.OpenPayload
 	nudged     bool
 	terminated bool
+	opened     bool
+	evicted    bool
 	err        error
 }
 
@@ -99,6 +76,18 @@ func (f *fakeController) Terminate(_ context.Context, tunnel string) (bool, erro
 	f.called = true
 	f.tunnel = tunnel
 	return f.terminated, f.err
+}
+
+func (f *fakeController) Open(_ context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error) {
+	f.called = true
+	f.tunnel, f.connID, f.open = tunnel, connID, open
+	return f.opened, f.err
+}
+
+func (f *fakeController) Evict(_ context.Context, tunnel, connID, reason string) (bool, error) {
+	f.called = true
+	f.tunnel, f.connID, f.reason = tunnel, connID, reason
+	return f.evicted, f.err
 }
 
 // meshRoleReq builds a mesh-role-authenticated request to https://node/<path> with an optional JSON body.
@@ -115,7 +104,7 @@ func meshRoleReq(t *testing.T, method, path string, body []byte) *http.Request {
 
 func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
+	h := newTestHandler(t, &fakeController{})
 	r := httptest.NewRequest("POST", "https://node"+path, nil)
 	if cert != nil {
 		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
@@ -129,119 +118,16 @@ func reqWithCert(t *testing.T, cert *x509.Certificate, path string, headers map[
 }
 
 func TestMeshRejectsIdentityRoleCert(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, false), "/mesh", nil)
+	w := reqWithCert(t, meshCert(t, false), "/api/v1/mesh/control", nil)
 	if w.Code != 403 {
 		t.Errorf("identity-role cert should be forbidden, got %d", w.Code)
 	}
 }
 
 func TestMeshRejectsNoCert(t *testing.T) {
-	w := reqWithCert(t, nil, "/mesh", nil)
+	w := reqWithCert(t, nil, "/api/v1/mesh/control", nil)
 	if w.Code != 403 {
 		t.Errorf("no cert should be forbidden, got %d", w.Code)
-	}
-}
-
-func TestMeshRejectsMissingHeaders(t *testing.T) {
-	w := reqWithCert(t, meshCert(t, true), "/api/v1/mesh/data", nil)
-	if w.Code != 400 {
-		t.Errorf("missing headers should be 400, got %d", w.Code)
-	}
-}
-
-// TestMesh_NonPostIs405 covers the frozen wire contract (docs/PROTOCOL.md §5): a mesh data stream is a
-// POST /api/v1/mesh/data; a GET with a valid mesh-role cert is refused 405.
-func TestMesh_NonPostIs405(t *testing.T) {
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
-	r := httptest.NewRequest("GET", "https://node/api/v1/mesh/data", nil)
-	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 405 {
-		t.Fatalf("GET /api/v1/mesh/data must be 405, got %d", w.Code)
-	}
-}
-
-func TestMeshNotOwner(t *testing.T) {
-	h := newTestHandler(t, func(_, _ string) bool { return false }, &fakeBridge{}, &fakeController{})
-	r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
-	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
-	r.Header.Set("X-Tunnel", "t")
-	r.Header.Set("X-Conn-Id", "c")
-	r.Header.Set("X-Stream-Id", "s")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 409 {
-		t.Errorf("connID mismatch should be 409 (not owner), got %d", w.Code)
-	}
-}
-
-func TestMeshBridgesValidStream(t *testing.T) {
-	fb := &fakeBridge{closeNow: true}
-	h := newTestHandler(t, func(_, _ string) bool { return true }, fb, &fakeController{})
-	r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
-	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
-	r.Header.Set("X-Tunnel", "t")
-	r.Header.Set("X-Conn-Id", "c")
-	r.Header.Set("X-Stream-Id", "s")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 200 || !fb.called {
-		t.Errorf("valid mesh stream should bridge: code=%d called=%v", w.Code, fb.called)
-	}
-}
-
-// TestMeshHandler_DuplicateStreamAnswers422 covers the two-phase open: OpenMesh returning
-// ErrDuplicateStream answers 422, any other open error answers 502, and success answers 200 — the
-// status is picked in the open phase, before the response body commits.
-func TestMeshHandler_DuplicateStreamAnswers422(t *testing.T) {
-	tests := []struct {
-		name     string
-		openErr  error
-		wantCode int
-	}{
-		{name: "duplicate stream → 422", openErr: ErrDuplicateStream, wantCode: http.StatusUnprocessableEntity},
-		{name: "other error → 502", openErr: errors.New("dial-back failed"), wantCode: http.StatusBadGateway},
-		{name: "success → 200", openErr: nil, wantCode: http.StatusOK},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fb := &fakeBridge{openErr: tc.openErr, closeNow: true}
-			h := newTestHandler(t, func(_, _ string) bool { return true }, fb, &fakeController{})
-			r := httptest.NewRequest("POST", "https://node/api/v1/mesh/data", nil)
-			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, true)}}
-			r.Header.Set("X-Tunnel", "t")
-			r.Header.Set("X-Conn-Id", "c")
-			r.Header.Set("X-Stream-Id", "s")
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			if w.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d", w.Code, tc.wantCode)
-			}
-		})
-	}
-}
-
-// TestDataPathRenamed covers the mesh split: the opaque splice serves at POST /api/v1/mesh/data, and the old
-// POST /mesh path no longer exists (404).
-func TestDataPathRenamed(t *testing.T) {
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{closeNow: true}, &fakeController{})
-
-	r := meshRoleReq(t, "POST", "/api/v1/mesh/data", nil)
-	r.Header.Set("X-Tunnel", "t")
-	r.Header.Set("X-Conn-Id", "c")
-	r.Header.Set("X-Stream-Id", "s")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("POST /api/v1/mesh/data must still splice (200), got %d", w.Code)
-	}
-
-	old := meshRoleReq(t, "POST", "/mesh", nil)
-	wOld := httptest.NewRecorder()
-	h.ServeHTTP(wOld, old)
-	if wOld.Code != 404 {
-		t.Fatalf("the old POST /mesh path must be gone (404), got %d", wOld.Code)
 	}
 }
 
@@ -249,7 +135,7 @@ func TestDataPathRenamed(t *testing.T) {
 // invokes the controller and returns {applied:true}.
 func TestControlRenewDispatches(t *testing.T) {
 	fc := &fakeController{nudged: true}
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	h := newTestHandler(t, fc)
 	body, err := json.Marshal(ControlRequest{Op: "renew", Tunnel: "t"})
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +161,7 @@ func TestControlRenewDispatches(t *testing.T) {
 // {op:"terminate",tunnel:"t"} invokes the controller and returns {applied:true}.
 func TestControlTerminateDispatches(t *testing.T) {
 	fc := &fakeController{terminated: true}
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	h := newTestHandler(t, fc)
 	body, err := json.Marshal(ControlRequest{Op: "terminate", Tunnel: "t"})
 	if err != nil {
 		t.Fatal(err)
@@ -297,10 +183,97 @@ func TestControlTerminateDispatches(t *testing.T) {
 	}
 }
 
+func TestControlOpenDispatches(t *testing.T) {
+	fc := &fakeController{opened: true}
+	h := newTestHandler(t, fc)
+	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+	body, err := json.Marshal(ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &open})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+	if w.Code != 200 {
+		t.Fatalf("open must be 200, got %d", w.Code)
+	}
+	var resp ControlResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Applied {
+		t.Error("response applied = false, want the controller's true")
+	}
+	if fc.tunnel != "t" || fc.connID != "c1" || fc.open != open {
+		t.Errorf("controller got tunnel=%q conn=%q open=%+v", fc.tunnel, fc.connID, fc.open)
+	}
+}
+
+func TestControlEvictDispatches(t *testing.T) {
+	fc := &fakeController{evicted: true}
+	h := newTestHandler(t, fc)
+	body, err := json.Marshal(ControlRequest{Op: "evict", Tunnel: "t", ConnID: "c1", Reason: "ban-evict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+	if w.Code != 200 {
+		t.Fatalf("evict must be 200, got %d", w.Code)
+	}
+	var resp ControlResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Applied || fc.tunnel != "t" || fc.connID != "c1" || fc.reason != "ban-evict" {
+		t.Errorf("applied=%v controller got tunnel=%q conn=%q reason=%q", resp.Applied, fc.tunnel, fc.connID, fc.reason)
+	}
+}
+
+func TestControlConnIDValidation(t *testing.T) {
+	full := &wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443"}
+	tests := []struct {
+		name string
+		req  ControlRequest
+	}{
+		{name: "open without conn_id", req: ControlRequest{Op: "open", Tunnel: "t", Open: full}},
+		{name: "evict without conn_id", req: ControlRequest{Op: "evict", Tunnel: "t"}},
+		{name: "open without payload", req: ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1"}},
+		{name: "open without token", req: ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &wire.OpenPayload{Addr: "203.0.113.10:443"}}},
+		{name: "open without addr", req: ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &wire.OpenPayload{Token: "TOKEN"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeController{}
+			h := newTestHandler(t, fc)
+			body, err := json.Marshal(tc.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", w.Code)
+			}
+			if fc.called {
+				t.Fatal("the controller must not be called for an invalid request")
+			}
+		})
+	}
+}
+
+func TestMesh_DataPathGone(t *testing.T) {
+	h := newTestHandler(t, &fakeController{})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/data", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/v1/mesh/data must be 404, got %d", w.Code)
+	}
+}
+
 // TestControlUnknownOp covers an unrecognized op → 400 without touching the controller.
 func TestControlUnknownOp(t *testing.T) {
 	fc := &fakeController{}
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	h := newTestHandler(t, fc)
 	body, err := json.Marshal(ControlRequest{Op: "bogus", Tunnel: "t"})
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +291,7 @@ func TestControlUnknownOp(t *testing.T) {
 // TestControlMissingTunnel covers renew with an empty tunnel → 400 without touching the controller.
 func TestControlMissingTunnel(t *testing.T) {
 	fc := &fakeController{}
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{}, fc)
+	h := newTestHandler(t, fc)
 	body, err := json.Marshal(ControlRequest{Op: "renew", Tunnel: ""})
 	if err != nil {
 		t.Fatal(err)
@@ -335,7 +308,7 @@ func TestControlMissingTunnel(t *testing.T) {
 
 // TestControlNonPostIs405 covers a non-POST to /api/v1/mesh/control with a mesh-role cert → 405.
 func TestControlNonPostIs405(t *testing.T) {
-	h := newTestHandler(t, func(_, _ string) bool { return true }, &fakeBridge{}, &fakeController{})
+	h := newTestHandler(t, &fakeController{})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, meshRoleReq(t, "GET", "/api/v1/mesh/control", nil))
 	if w.Code != 405 {
@@ -395,37 +368,6 @@ func TestControlClient_Errors(t *testing.T) {
 			}
 			if resp.Applied != tc.wantApplied {
 				t.Errorf("applied = %v, want %v", resp.Applied, tc.wantApplied)
-			}
-		})
-	}
-}
-
-// TestMeshClient_Maps422ToDuplicateStream covers the client status mapping: 422 → ErrDuplicateStream,
-// 409 → ErrNoOwner.
-func TestMeshClient_Maps422ToDuplicateStream(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		wantErr error
-	}{
-		{name: "422 → duplicate stream", status: http.StatusUnprocessableEntity, wantErr: ErrDuplicateStream},
-		{name: "409 → no owner", status: http.StatusConflict, wantErr: ErrNoOwner},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.status)
-			}))
-			ts.EnableHTTP2 = true
-			ts.StartTLS()
-			defer ts.Close()
-			peer := strings.TrimPrefix(ts.URL, "https://")
-			c := NewClient(func() *tls.Config {
-				return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-			}, 1)
-			_, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1")
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("status %d: err = %v, want %v", tc.status, err, tc.wantErr)
 			}
 		})
 	}
@@ -525,10 +467,10 @@ func selfSignedServerTLS(t *testing.T) *tls.Config {
 	}
 }
 
-// TestOpenStreamUnblocksOnDeadPeer covers the mesh PING health: a peer that completes the TLS
-// handshake but never speaks HTTP/2 must not pin OpenStream forever — the transport's read-idle PING
-// health kills the dead connection and the dial errors out within the configured bounds.
-func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
+// TestClient_Control_UnblocksOnDeadPeer covers the mesh PING health: a peer that completes the TLS
+// handshake but never speaks HTTP/2 must not pin Control forever — the transport's read-idle PING
+// health kills the dead connection and the call errors out within the configured bounds.
+func TestClient_Control_UnblocksOnDeadPeer(t *testing.T) {
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", selfSignedServerTLS(t))
 	if err != nil {
 		t.Fatal(err)
@@ -561,75 +503,34 @@ func TestOpenStreamUnblocksOnDeadPeer(t *testing.T) {
 
 	c := NewClient(func() *tls.Config {
 		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second))
+	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second), WithControlTimeout(time.Minute))
 
 	start := time.Now()
-	_, err = c.OpenStream(context.Background(), ln.Addr().String(), "t", "conn", "s1")
+	_, err = c.Control(context.Background(), ln.Addr().String(), ControlRequest{Op: "renew", Tunnel: "t"})
 	if err == nil {
-		t.Fatal("a dead peer must error the dial, not hang")
+		t.Fatal("a dead peer must error the call, not hang")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("PING health did not unblock the dial in time (took %s)", elapsed)
-	}
-}
-
-// meshBlockingWriter blocks every Write (holding ownerStream.mu) until release is closed, and signals
-// via entered once the first Write is in progress.
-type meshBlockingWriter struct {
-	entered chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (b *meshBlockingWriter) Write(p []byte) (int, error) {
-	b.once.Do(func() { close(b.entered) })
-	<-b.release
-	return len(p), nil
-}
-
-// TestOwnerStream_CloseUnblocksBlockedWrite proves, on the mesh owner side, that a Write blocked inside the
-// response writer (holding o.mu) must be released by Close via the unblock hook, so Close never deadlocks.
-func TestOwnerStream_CloseUnblocksBlockedWrite(t *testing.T) {
-	bw := &meshBlockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
-	os := &ownerStream{
-		w:       bw,
-		done:    make(chan struct{}),
-		unblock: func() { close(bw.release) },
-	}
-
-	writeReturned := make(chan struct{})
-	go func() {
-		if _, err := os.Write([]byte("hello")); err != nil {
-			tunneltest.Logger().Debug("blocked write released", "err", err)
-		}
-		close(writeReturned)
-	}()
-	<-bw.entered // the Write now holds o.mu, blocked in the writer
-
-	closeReturned := make(chan struct{})
-	go func() {
-		tunneltest.CloseLogged(os)
-		close(closeReturned)
-	}()
-
-	select {
-	case <-closeReturned:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Close deadlocked: unblock did not release the mutex-holding Write")
-	}
-	select {
-	case <-writeReturned:
-	case <-time.After(time.Second):
-		t.Fatal("the blocked Write was not released by unblock")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("PING health did not unblock the call in time (took %s)", elapsed)
 	}
 }
 
-// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an active
-// stream (active>0) survives the reaper, and is reaped on the first tick after the stream closes.
+// TestClient_ReapSkipsActivePools proves a pool that is idle by lastUse but still carries an in-flight
+// Control call (active>0) survives the reaper, and is reaped on the first tick after the call returns.
 func TestClient_ReapSkipsActivePools(t *testing.T) {
-	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1)
-	p := c.pool("10.0.0.9:9443") // active == 1 (simulating an open stream)
-	p.lastUse.Store(0)           // force the pool to look idle so only `active` protects it
+	release := make(chan struct{})
+	peer := startMeshPeer(t, 0, release)
+	c := NewClient(insecureMeshTLS, 1)
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := c.Control(context.Background(), peer.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+		callDone <- err
+	}()
+	waitEntered(t, peer, 1)
+	c.mu.Lock()
+	p := c.pools[peer.addr]
+	c.mu.Unlock()
+	p.lastUse.Store(0) // force the pool to look idle so only `active` protects it
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -645,10 +546,14 @@ func TestClient_ReapSkipsActivePools(t *testing.T) {
 	n := len(c.pools)
 	c.mu.Unlock()
 	if n != 1 {
-		t.Fatalf("a pool with an active stream must not be reaped, pools=%d", n)
+		t.Fatalf("a pool with an in-flight call must not be reaped, pools=%d", n)
 	}
 
-	p.active.Add(-1) // the stream closes
+	close(release)
+	if err := <-callDone; err != nil {
+		t.Fatal(err)
+	}
+	p.lastUse.Store(0)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
@@ -659,18 +564,18 @@ func TestClient_ReapSkipsActivePools(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("an idle pool must be reaped once its active streams close")
+	t.Fatal("an idle pool must be reaped once its in-flight calls return")
 }
 
-// TestClient_OpenStreamErrorDecrementsActive proves a failed OpenStream must not leak the active
+// TestClient_ControlErrorDecrementsActive proves a failed Control must not leak the active
 // count it took in pool(), or the pool would never be reaped.
-func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
+func TestClient_ControlErrorDecrementsActive(t *testing.T) {
 	c := NewClient(func() *tls.Config {
 		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
 	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond))
 
 	const peer = "127.0.0.1:1" // nothing listening → the dial fails
-	if _, err := c.OpenStream(context.Background(), peer, "t", "conn", "s1"); err == nil {
+	if _, err := c.Control(context.Background(), peer, ControlRequest{Op: "renew", Tunnel: "t"}); err == nil {
 		t.Fatal("a dial to a closed port must fail")
 	}
 	c.mu.Lock()
@@ -680,13 +585,14 @@ func TestClient_OpenStreamErrorDecrementsActive(t *testing.T) {
 		t.Fatal("the pool must exist after the attempt")
 	}
 	if got := p.active.Load(); got != 0 {
-		t.Fatalf("active after a failed OpenStream = %d, want 0", got)
+		t.Fatalf("active after a failed Control = %d, want 0", got)
 	}
 }
 
 type meshPeer struct {
 	addr    string
 	accepts atomic.Int64
+	entered atomic.Int64
 	mu      sync.Mutex
 	conns   []net.Conn
 }
@@ -717,7 +623,7 @@ func (p *meshPeer) closeConns(t *testing.T) {
 	p.conns = nil
 }
 
-func startMeshPeer(t *testing.T, maxStreams int) *meshPeer {
+func startMeshPeer(t *testing.T, maxStreams int, release <-chan struct{}) *meshPeer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -729,10 +635,17 @@ func startMeshPeer(t *testing.T, maxStreams int) *meshPeer {
 		TLSConfig: tlsConf, ReadHeaderTimeout: 5 * time.Second,
 		HTTP2: &http.HTTP2Config{MaxConcurrentStreams: maxStreams},
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			w.(http.Flusher).Flush()
-			if _, err := io.Copy(io.Discard, r.Body); err != nil {
-				tunneltest.Logger().Debug("mesh peer request body drain ended", "err", err)
+			p.entered.Add(1)
+			if release != nil {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(ControlResponse{Applied: true}); err != nil {
+				tunneltest.Logger().Debug("mesh peer response write ended", "err", err)
 			}
 		}),
 	}
@@ -742,6 +655,17 @@ func startMeshPeer(t *testing.T, maxStreams int) *meshPeer {
 
 func insecureMeshTLS() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
+}
+
+func waitEntered(t *testing.T, p *meshPeer, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for p.entered.Load() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d calls reached the peer", p.entered.Load(), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestClient_RejectsNonH2Peer(t *testing.T) {
@@ -777,7 +701,7 @@ func TestClient_RejectsNonH2Peer(t *testing.T) {
 		}
 	}()
 	c := NewClient(insecureMeshTLS, 1)
-	_, err = c.OpenStream(context.Background(), ln.Addr().String(), "t", "conn", "s1")
+	_, err = c.Control(context.Background(), ln.Addr().String(), ControlRequest{Op: "renew", Tunnel: "t"})
 	if !errors.Is(err, errPeerNotHTTP2) {
 		t.Fatalf("want errPeerNotHTTP2, got %v", err)
 	}
@@ -785,53 +709,45 @@ func TestClient_RejectsNonH2Peer(t *testing.T) {
 
 func TestClient_OneConnForConcurrentColdStreams(t *testing.T) {
 	t.Parallel()
-	p := startMeshPeer(t, 0)
+	p := startMeshPeer(t, 0, nil)
 	c := NewClient(insecureMeshTLS, 1)
 	var wg sync.WaitGroup
-	streams := make(chan io.ReadWriteCloser, 8)
 	errs := make(chan error, 8)
 	for range 8 {
 		wg.Go(func() {
-			s, err := c.OpenStream(context.Background(), p.addr, "t", "conn", "s1")
-			if err != nil {
+			if _, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"}); err != nil {
 				errs <- err
-				return
 			}
-			streams <- s
 		})
 	}
 	wg.Wait()
 	close(errs)
-	close(streams)
-	for s := range streams {
-		tunneltest.CloseOrLog(t, s)
-	}
 	for err := range errs {
 		t.Fatal(err)
 	}
 	if got := p.accepts.Load(); got != 1 {
-		t.Fatalf("want 1 TCP connection for 8 concurrent cold streams, got %d", got)
+		t.Fatalf("want 1 TCP connection for 8 concurrent cold calls, got %d", got)
 	}
 }
 
 func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 	t.Parallel()
-	p := startMeshPeer(t, 2)
+	release := make(chan struct{})
+	p := startMeshPeer(t, 2, release)
 	c := NewClient(insecureMeshTLS, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var streams []io.ReadWriteCloser
-	defer func() {
-		for _, s := range streams {
-			tunneltest.CloseOrLog(t, s)
+	errs := make(chan error, 3)
+	for range 3 {
+		go func() {
+			_, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+			errs <- err
+		}()
+	}
+	waitEntered(t, p, 3)
+	close(release)
+	for range 3 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
 		}
-	}()
-	for i := range 3 {
-		s, err := c.OpenStream(ctx, p.addr, "t", "conn", "s1")
-		if err != nil {
-			t.Fatalf("stream %d: %v", i+1, err)
-		}
-		streams = append(streams, s)
 	}
 	if got := p.accepts.Load(); got != 2 {
 		t.Fatalf("want a 2nd TCP connection once the first is saturated (2 streams), got %d", got)
@@ -840,31 +756,46 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 
 func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
 	t.Parallel()
-	p := startMeshPeer(t, 0)
+	p := startMeshPeer(t, 0, nil)
 	c := NewClient(insecureMeshTLS, 1)
-	s, err := c.OpenStream(context.Background(), p.addr, "t", "conn", "s1")
-	if err != nil {
+	if _, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	tunneltest.CloseOrLog(t, s)
 	p.closeConns(t)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		s, err = c.OpenStream(ctx, p.addr, "t", "conn", "s2")
+		_, err := c.Control(ctx, p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+		cancel()
 		if err == nil {
-			tunneltest.CloseOrLog(t, s)
-			cancel()
 			break
 		}
-		cancel()
 		if time.Now().After(deadline) {
-			t.Fatalf("no successful OpenStream after the drop: %v", err)
+			t.Fatalf("no successful Control after the drop: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if got := p.accepts.Load(); got != 2 {
 		t.Fatalf("want exactly 2 TCP connections (original + reconnect), got %d", got)
+	}
+}
+
+func TestClient_Control_HonoursTimeout(t *testing.T) {
+	t.Parallel()
+	p := startMeshPeer(t, 0, make(chan struct{}))
+	c := NewClient(insecureMeshTLS, 1, WithControlTimeout(200*time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Control(ctx, p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Control = %v, want the per-request deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("the per-request timeout did not bound the call (took %s)", elapsed)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the caller ctx must still be live: the per-request timeout must fire first")
 	}
 }
 
@@ -883,9 +814,9 @@ func TestClient_NewH2ClientMapsPingTimeouts(t *testing.T) {
 	}
 }
 
-func newTestHandler(t *testing.T, owns OwnerCheck, bridge Bridge, control Controller) *Handler {
+func newTestHandler(t *testing.T, control Controller) *Handler {
 	t.Helper()
-	h, err := NewHandler(owns, bridge, control)
+	h, err := NewHandler(control)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,7 +824,7 @@ func newTestHandler(t *testing.T, owns OwnerCheck, bridge Bridge, control Contro
 }
 
 func TestNewHandler_RejectsNilLogger(t *testing.T) {
-	if _, err := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, &fakeController{}, WithHandlerLogger(nil)); err == nil {
+	if _, err := NewHandler(&fakeController{}, WithHandlerLogger(nil)); err == nil {
 		t.Fatal("a nil logger must be rejected")
 	}
 }
@@ -913,7 +844,7 @@ func TestControl_LogsFailures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			h, err := NewHandler(func(_, _ string) bool { return true }, &fakeBridge{}, &fakeController{err: tc.ctrlErr},
+			h, err := NewHandler(&fakeController{err: tc.ctrlErr},
 				WithHandlerLogger(slog.New(slog.NewTextHandler(&buf, nil))))
 			if err != nil {
 				t.Fatal(err)
@@ -933,22 +864,6 @@ func TestControl_LogsFailures(t *testing.T) {
 type failingBody struct{ io.Reader }
 
 func (failingBody) Close() error { return errors.New("body close failed") }
-
-func TestClientStream_Close_ReturnsCloseErrorOnce(t *testing.T) {
-	_, pw := io.Pipe()
-	p := &peerPool{}
-	p.active.Store(1)
-	s := &clientStream{pw: pw, resp: &http.Response{Body: failingBody{strings.NewReader("")}}, p: p}
-	if err := s.Close(); err == nil || !strings.Contains(err.Error(), "body close failed") {
-		t.Fatalf("Close = %v, want the response-body close error", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("a repeated Close must be a no-op, got %v", err)
-	}
-	if got := p.active.Load(); got != 0 {
-		t.Fatalf("Close must release the pool slot exactly once, active = %d", got)
-	}
-}
 
 type meshRoundTrip func(*http.Request) (*http.Response, error)
 
