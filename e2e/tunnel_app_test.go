@@ -75,11 +75,12 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// the committed debug signer allowlist. Generous bandwidth/concurrency so the /wait pacing does not
 	// throttle the concurrent ~1 MiB/s streams.
 	edge := inf.startReplica(t, replicaOpts{
-		attestRootURL:    googleAttestRootURL,
-		attestStatusURL:  googleAttestStatusURL,
-		attestSignerFile: signersPath,
-		bandwidth:        "100mbit",
-		concurrent:       32,
+		attestRootURL:     googleAttestRootURL,
+		attestStatusURL:   googleAttestStatusURL,
+		attestSignerFile:  signersPath,
+		bandwidth:         "100mbit",
+		concurrent:        32,
+		dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppDevicePort),
 	})
 	_, edgePort, err := net.SplitHostPort(edge)
 	if err != nil {
@@ -252,6 +253,104 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	runWaitLoad(t, edge, fqdn, inf.pebble.IssuingRoots)
 
 	amBroadcast(t, serial, tunnelAppPkg, "stop")
+}
+
+const tunnelAppModesDevicePort = 18461
+
+func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
+	serial, ok := attestDeviceSerial(t)
+	if !ok {
+		t.Skip("no single adb device connected")
+	}
+	apkPath := filepath.Join("..", "fixtures", "tunnel-app", "tunnel-app.apk")
+	shaPath := filepath.Join("..", "fixtures", "tunnel-app", "tunnel-app.apk.sha256")
+	signersPath := filepath.Join("..", "fixtures", "tunnel-app", "signers.allow")
+	wantSum, err := os.ReadFile(shaPath)
+	if err != nil {
+		t.Fatalf("read committed APK sha256: %v", err)
+	}
+	if got := apkSHA256(t, apkPath); got != strings.TrimSpace(string(wantSum)) {
+		t.Fatalf("committed tunnel-app APK sha256 mismatch: got %s want %s (run 'make tunnel-app')",
+			got, strings.TrimSpace(string(wantSum)))
+	}
+	inf := startE2EInfra(t)
+	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
+	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
+	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+tunnelAppPkg)
+	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg) })
+
+	for _, mode := range []struct {
+		name  string
+		plain bool
+	}{
+		{name: "https-no-mtls"},
+		{name: "plain", plain: true},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			opts := replicaOpts{
+				attestRootURL:     googleAttestRootURL,
+				attestStatusURL:   googleAttestStatusURL,
+				attestSignerFile:  signersPath,
+				dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppModesDevicePort),
+				dialBackNoMTLS:    !mode.plain,
+				dialBackPlain:     mode.plain,
+			}
+			if mode.plain {
+				opts.acmeHTTPListen = freeAddr(t)
+			}
+			edge := inf.startReplica(t, opts)
+			dialBackTarget := edge
+			if mode.plain {
+				dialBackTarget = opts.acmeHTTPListen
+			}
+			for _, r := range []struct {
+				devicePort int
+				addr       string
+			}{{tunnelAppDevicePort, edge}, {tunnelAppModesDevicePort, dialBackTarget}} {
+				_, port, err := net.SplitHostPort(r.addr)
+				if err != nil {
+					t.Fatalf("split addr %q: %v", r.addr, err)
+				}
+				adb(t, serial, "reverse", "tcp:"+strconv.Itoa(r.devicePort), "tcp:"+port)
+				t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(r.devicePort)) })
+			}
+			adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
+			caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
+			adbRunAs(t, serial, tunnelAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")
+			dataDir := strings.TrimSpace(string(adbRunAs(t, serial, tunnelAppPkg, "pwd")))
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				adbCleanup(t, serial, "shell", "am", "broadcast", "-a", tunnelAppPkg+".stop", "-n", tunnelAppPkg+"/.CommandReceiver", "-f", "0x00000020")
+			})
+			amBroadcast(t, serial, tunnelAppPkg, "enroll",
+				"edgePort", strconv.Itoa(tunnelAppDevicePort),
+				"appNonce", hex.EncodeToString(nonce[:]),
+				"pebbleCaPath", dataDir+"/files/pebble-ca.pem",
+				"enrollHost", e2eEnrollHost,
+				"controlHost", e2eControlHost,
+				"tunnelDomain", e2eTunnelDomain,
+			)
+			name := strings.TrimSpace(string(pollAppFile(t, serial, tunnelAppPkg, "ready", 150*time.Second)))
+			if name == "" {
+				t.Fatal("app ready marker was empty")
+			}
+			fqdn := name + "." + e2eTunnelDomain
+			for i := 1; i <= 3; i++ {
+				info, err := fetchInfo(edge, fqdn, inf.pebble.IssuingRoots)
+				if err != nil {
+					pid := strings.TrimSpace(string(adb(t, serial, "shell", "pidof", tunnelAppPkg)))
+					t.Logf("tunnel app log (pid %s):\n%s", pid, adb(t, serial, "logcat", "-d", "--pid="+pid))
+					t.Fatalf("%s request %d failed: %v", mode.name, i, err)
+				}
+				if info.Name != name {
+					t.Fatalf("%s request %d reached %q, want %q", mode.name, i, info.Name, name)
+				}
+			}
+		})
+	}
 }
 
 // amBroadcast sends `am broadcast` with

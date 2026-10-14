@@ -2,8 +2,8 @@
 
 // Package e2e is the end-to-end tier: it runs TWO real tunneld replicas (in-process server.Run instances
 // sharing one testcontainers Valkey + MinIO + Pebble/challtestsrv), a raw-TLS frontend connecting
-// directly to a replica's :443, and the reference phone client. It exercises the cross-node mesh path,
-// the same-node fast path, per-tunnel quota exhaustion, and ACME CA spillover. No proxy anywhere.
+// directly to a replica's :443, and the reference phone client. It exercises per-tunnel quota
+// exhaustion and ACME CA spillover. No proxy anywhere.
 package e2e
 
 import (
@@ -80,6 +80,11 @@ type replicaOpts struct {
 	trafficDay string // override --limit-traffic-day; empty = 1gb
 	concurrent int    // override --limit-concurrent; 0 = 8
 	bandwidth  string // override --limit-bandwidth; empty = 10mbit
+	dialBack   time.Duration
+
+	dialBackAdvertise string
+	dialBackPlain     bool
+	dialBackNoMTLS    bool
 	// Real attestation (NOT optional): when attestRootURL is set, the replica runs the full seven-point
 	// attestation gate against these live root/status URLs + signer allowlist (empty = dummy + optional).
 	attestRootURL    string
@@ -142,6 +147,17 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	if opts.bandwidth != "" {
 		bandwidth = opts.bandwidth
 	}
+	dialBack := 10 * time.Second
+	if opts.dialBack != 0 {
+		dialBack = opts.dialBack
+	}
+	advertise := edgeAddr
+	if opts.dialBackPlain {
+		advertise = acmeHTTPListen
+	}
+	if opts.dialBackAdvertise != "" {
+		advertise = opts.dialBackAdvertise
+	}
 
 	challengeLE, challengeGTS, challengeZeroSSL := config.ChallengeDNS01, config.ChallengeDNS01, config.ChallengeDNS01
 	if opts.challengeLE != "" {
@@ -175,6 +191,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		RedisURL: inf.redisURL, Listen: edgeAddr, MeshListen: meshAddr, InternalListen: internalAddr,
 		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
 		TunnelDomain: e2eTunnelDomain, EnrollHost: e2eEnrollHost, ControlHost: e2eControlHost, NameLength: 10,
+		DialBackAdvertise: advertise, DialBackHTTPS: !opts.dialBackPlain, DialBackMTLS: !opts.dialBackPlain && !opts.dialBackNoMTLS,
 		CACert: inf.caCert, CAKey: inf.caKey, CertValidity: 4380 * time.Hour,
 		S3Endpoint: inf.s3URL, S3Region: "us-east-1", S3Bucket: e2eBucket,
 		S3AccessKey: inf.access, S3SecretKey: inf.secret, S3ForcePathStyle: true,
@@ -192,7 +209,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
-		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, LimitPackets: 100000, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, LimitPackets: 100000, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: dialBack,
 		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 1 * time.Second,
 		LimitConnMinRate: "1kb", LimitConnProtectRate: "1mb", LimitBandwidth: bandwidth,
 		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",
@@ -287,8 +304,8 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 	return c, ident
 }
 
-// TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves both the cross-node
-// mesh path (frontend on A → owner B) and the same-node fast path (entering at the owner replica B) work.
+// TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves that public
+// connections entering A and entering the owner B both work.
 // The phone stays bound to B throughout; no route rebinding occurs.
 func TestE2E_CrossNodeAndFastPath(t *testing.T) {
 	inf := startE2EInfra(t)
@@ -361,9 +378,8 @@ func TestE2E_CrossNodeRenewNudge(t *testing.T) {
 }
 
 // TestE2E_CrossNodeTerminate proves the cross-node terminate path: the phone's control connection is owned
-// by replica B, but /api/v1/admin/tunnels/<name>/terminate is POSTed to the NON-owner replica A. A routes to
-// the owner over /api/v1/mesh/control, and B closes the phone control connection (its teardown unbinds the
-// route). The Go reference client does NOT auto-reconnect, so the deterministic observable is the route
+// by replica B, but /api/v1/admin/tunnels/<name>/terminate is POSTed to the NON-owner replica A, and B
+// closes the phone control connection (its teardown unbinds the route). The Go reference client does NOT auto-reconnect, so the deterministic observable is the route
 // transitioning to unbound (LookupRoute ok=false).
 func TestE2E_CrossNodeTerminate(t *testing.T) {
 	inf := startE2EInfra(t)
@@ -395,10 +411,25 @@ func TestE2E_CrossNodeTerminate(t *testing.T) {
 		t.Fatalf("route never bound on the owner replica: %v", rtErr)
 	}
 
+	live, err := dialTunnelTLS(edgeA, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("open a live splice through A: %v", err)
+	}
+	defer tunneltest.CloseLogged(live)
+	if err := echoOn(live); err != nil {
+		t.Fatalf("the live splice through A does not echo: %v", err)
+	}
+
 	// Terminate via the NON-owner replica A; A meshes to the owner B, which closes the phone conn.
 	status, terminated := postAdminTerminate(t, inf.internal[edgeA], ident.Name)
 	if status != http.StatusOK || !terminated {
 		t.Fatalf("terminate on the non-owner replica = (status %d, terminated %v), want (200, true)", status, terminated)
+	}
+	if err := live.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the splice entered through A must be torn down by the terminate, read = %v", err)
 	}
 
 	// The owner's teardown unbinds the route; the Go client does not reconnect, so it stays unbound.

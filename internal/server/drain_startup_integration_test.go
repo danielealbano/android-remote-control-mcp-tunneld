@@ -32,6 +32,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -269,12 +270,185 @@ func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
 }
 
 func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
-	cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
-	if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
-		tunneltest.CloseOrLog(t, c)
-		t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
+	t.Run("not bound without http-01 or plain dial-backs", func(t *testing.T) {
+		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
+		if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
+			tunneltest.CloseOrLog(t, c)
+			t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
+		}
+		stop()
+	})
+	t.Run("bound for plain dial-backs", func(t *testing.T) {
+		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
+			c.ACMEHTTPListen = freeAddr(t)
+			c.DialBackAdvertise = c.ACMEHTTPListen
+			c.DialBackHTTPS, c.DialBackMTLS = false, false
+		})
+		hc := &http.Client{Timeout: 5 * time.Second}
+		get := func(path string) int {
+			t.Helper()
+			resp, err := hc.Get("http://" + cfg.ACMEHTTPListen + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			tunneltest.CloseOrLog(t, resp.Body)
+			return resp.StatusCode
+		}
+		if code := get("/api/v1/data"); code != http.StatusBadRequest {
+			t.Fatalf("GET /api/v1/data without an upgrade = %d, want 400 from the phone handler", code)
+		}
+		if v, err := metricLineValue(cfg.InternalListen, `tunneld_rejections_total{reason="acme-http-miss"}`); err != nil || v != 0 {
+			t.Fatalf("a dial-back request must not count as acme-http-miss (value %v, scrape error %v)", v, err)
+		}
+		if code := get("/.well-known/acme-challenge/unknown-token-0123456789"); code != http.StatusNotFound {
+			t.Fatalf("an unknown ACME challenge = %d, want 404", code)
+		}
+		if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="acme-http-miss"}`,
+			func(v float64) bool { return v == 1 }); !met {
+			t.Fatalf("the ACME path must keep recording acme-http-miss (value %v, scrape error %v)", v, err)
+		}
+		stop()
+	})
+}
+
+func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
+	var grace time.Duration
+	env := startIntegrationServer(t, func(c *config.ServeCmd) { grace = c.ShutdownGrace })
+	ctx := context.Background()
+
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
 	}
-	stop()
+	fqdn := ident.Name + "." + itTunnelDomain
+	phoneTLS := phoneServerTLS(t, ident)
+	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("frontend roundtrip never succeeded (phone never bound): %v", rtErr)
+	}
+	live := dialFrontend(t, env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	defer tunneltest.CloseOrLog(t, live)
+	if _, err := live.Write([]byte("live")); err != nil {
+		t.Fatalf("live write: %v", err)
+	}
+	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
+		t.Fatalf("live echo: %v", err)
+	}
+
+	blackHole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunneltest.CloseOrLog(t, blackHole)
+	var heldMu sync.Mutex
+	var held []net.Conn
+	defer func() {
+		heldMu.Lock()
+		defer heldMu.Unlock()
+		for _, hc := range held {
+			tunneltest.CloseOrLog(t, hc)
+		}
+	}()
+	go func() {
+		for {
+			hc, aerr := blackHole.Accept()
+			if aerr != nil {
+				if !errors.Is(aerr, net.ErrClosed) {
+					testLogger().Warn("black-hole accept failed", "err", aerr)
+				}
+				return
+			}
+			heldMu.Lock()
+			held = append(held, hc)
+			heldMu.Unlock()
+		}
+	}()
+	reg, err := router.NewRegistry(env.rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterNode(ctx, "unreachable-peer", router.NodeInfo{Advertise: blackHole.Addr().String()}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := reg.LiveNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var self string
+	for id := range nodes {
+		if id != "unreachable-peer" {
+			self = id
+		}
+	}
+	if self == "" || len(nodes) != 2 {
+		t.Fatalf("live nodes = %v, want the server and the unreachable peer", nodes)
+	}
+
+	start := time.Now()
+	if err := env.drain(); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > grace+2*time.Second {
+		t.Fatalf("Run returned %s after cancel, want within ShutdownGrace (%s) + 2s", elapsed, grace)
+	}
+	if _, ok, err := reg.LookupNode(ctx, self); err != nil || ok {
+		t.Fatalf("the drained node must be deregistered (ok=%v err=%v)", ok, err)
+	}
+
+	var publicEnd, phoneEnd bool
+	if !waitBool(15*time.Second, func() bool {
+		publicEnd, phoneEnd = false, false
+		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/") {
+			if !strings.HasSuffix(k, ".jsonl") {
+				continue
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+				var ev store.Event
+				if err := json.Unmarshal(line, &ev); err != nil {
+					t.Fatalf("connection log %s has an invalid JSON line: %v", k, err)
+				}
+				if ev.Tunnel != ident.Name || ev.Event != "end" {
+					continue
+				}
+				switch ev.Type {
+				case "public":
+					publicEnd = publicEnd || ev.CloseReason == store.CloseServerShutdown
+				case "phone":
+					phoneEnd = true
+				}
+			}
+		}
+		return publicEnd && phoneEnd
+	}) {
+		t.Fatalf("drain events in MinIO: public server-shutdown end=%v, phone end=%v; want both", publicEnd, phoneEnd)
+	}
 }
 
 func writeReservedBundle(t *testing.T, accountDir, host string, notBefore, notAfter time.Time) []byte {

@@ -86,6 +86,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
 
 		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
+		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
 		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
 
 		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
