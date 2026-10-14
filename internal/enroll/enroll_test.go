@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"maps"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -373,3 +376,21 @@ func TestFirstLabel(t *testing.T) {
 }
 
 func bigOne() *big.Int { return big.NewInt(1) }
+
+func TestAttestReason_MatchesObservAttestResults(t *testing.T) {
+	errs := []error{
+		attest.ErrChainUntrusted, attest.ErrChallengeMismatch, attest.ErrSignerNotAllowed, attest.ErrSecurityLevel,
+		attest.ErrBootState, attest.ErrDeviceUnlocked, attest.ErrRevoked, attest.ErrStatusStale, errors.New("other"),
+	}
+	got := map[string]bool{"ok": true}
+	for _, err := range errs {
+		got[attestReason(err)] = true
+	}
+	want := map[string]bool{}
+	for _, r := range observ.AttestResults {
+		want[r] = true
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("attest results = %v, observ.AttestResults = %v", got, want)
+	}
+}

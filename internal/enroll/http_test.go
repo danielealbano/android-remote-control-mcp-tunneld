@@ -16,7 +16,19 @@ import (
 
 func newTestHandler(t *testing.T, svc *Service, ban BanFunc) *Handler {
 	t.Helper()
-	return NewHandler(svc, ban, observ.Nop{}, 64*1024)
+	rec := &tunneltest.Recorder{}
+	t.Cleanup(func() {
+		known := map[string]bool{}
+		for _, r := range observ.EnrollResults {
+			known[r] = true
+		}
+		for _, c := range rec.Calls {
+			if c.Kind == "enrollmentresult" && !known[c.Result] {
+				t.Errorf("enrollment result %q is not in observ.EnrollResults", c.Result)
+			}
+		}
+	})
+	return NewHandler(svc, ban, rec, 64*1024)
 }
 
 func csrPEM(t *testing.T, csr *x509.CertificateRequest) string {

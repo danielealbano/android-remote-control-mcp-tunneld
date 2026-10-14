@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -502,5 +504,12 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCAIDs_MatchObservACMECAs(t *testing.T) {
+	want := []string{CALetsEncrypt, CAGTS, CAZeroSSL}
+	if !slices.Equal(observ.ACMECAs, want) {
+		t.Fatalf("observ.ACMECAs = %v, want the chain's CA ids %v", observ.ACMECAs, want)
 	}
 }
