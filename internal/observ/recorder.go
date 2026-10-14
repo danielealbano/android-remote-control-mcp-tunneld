@@ -13,6 +13,24 @@ var RejectReasons = []string{
 	"enroll-limit", "issuance-cap", "acme-failed", "acme-http-miss",
 }
 
+var ACMECAs = []string{"letsencrypt", "gts", "zerossl"}
+
+const ACMERenewAllCAs = "all"
+
+var EnrollResults = []string{
+	"ok", "internal", "bad_source_ip", "enroll_rate", "invalid_nonce", "unauthorized", "name_unavailable",
+	"unsupported_key_type", "identity_sign_failed",
+}
+
+var AttestResults = []string{
+	"ok", "attest-untrusted", "attest-challenge", "attest-signer", "attest-security-level", "attest-boot",
+	"attest-device-unlocked", "attest-revoked", "attest-stale",
+}
+
+var QuotaWindows = []string{"day", "week"}
+
+var ByteDirections = []string{"in", "out"}
+
 // Recorder captures metric + cap-hit events. The concrete PromRecorder updates the
 // (per-tunnel-label-free) Prometheus families AND writes the per-tunnel byte counters in tunnel:{name}
 // that back /api/v1/admin/tunnels/stats.
