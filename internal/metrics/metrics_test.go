@@ -588,3 +588,49 @@ func TestLabelledCountersPreCreatedAtZero(t *testing.T) {
 		})
 	}
 }
+
+func TestRegisterValkeyPool(t *testing.T) {
+	m := NewMetrics()
+	if err := m.RegisterValkeyPool(func() ValkeyPoolStats {
+		return ValkeyPoolStats{Conns: 3, IdleConns: 1, MaxConns: 200, Waits: 7, Timeouts: 2}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		for _, mt := range mf.GetMetric() {
+			got[mf.GetName()] = mt.GetGauge().GetValue() + mt.GetCounter().GetValue()
+		}
+	}
+	tests := []struct {
+		name string
+		want float64
+	}{
+		{name: "tunneld_valkey_pool_connections", want: 3},
+		{name: "tunneld_valkey_pool_idle_connections", want: 1},
+		{name: "tunneld_valkey_pool_max_connections", want: 200},
+		{name: "tunneld_valkey_pool_waits_total", want: 7},
+		{name: "tunneld_valkey_pool_timeouts_total", want: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, ok := got[tc.name]
+			if !ok {
+				t.Fatalf("%s not exposed", tc.name)
+			}
+			if v != tc.want {
+				t.Fatalf("%s = %v, want %v", tc.name, v, tc.want)
+			}
+		})
+	}
+	if err := m.RegisterValkeyPool(func() ValkeyPoolStats { return ValkeyPoolStats{} }); err == nil {
+		t.Fatal("a second registration must be refused")
+	}
+	if err := NewMetrics().RegisterValkeyPool(nil); err == nil {
+		t.Fatal("nil stats must be refused")
+	}
+}

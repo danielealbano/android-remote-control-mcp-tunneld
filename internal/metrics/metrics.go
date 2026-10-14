@@ -137,6 +137,39 @@ func (m *Metrics) RegisterLogSinkErrors(count func() float64) error {
 	}, count))
 }
 
+type ValkeyPoolStats struct {
+	Conns, IdleConns, MaxConns, Waits, Timeouts float64
+}
+
+func (m *Metrics) RegisterValkeyPool(stats func() ValkeyPoolStats) error {
+	if stats == nil {
+		return errors.New("metrics: nil valkey pool stats")
+	}
+	collectors := []prometheus.Collector{
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "tunneld_valkey_pool_connections", Help: "Open connections in the Valkey client's main pool.",
+		}, func() float64 { return stats().Conns }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "tunneld_valkey_pool_idle_connections", Help: "Idle connections in the Valkey client's main pool.",
+		}, func() float64 { return stats().IdleConns }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "tunneld_valkey_pool_max_connections", Help: "Configured size of the Valkey client's main pool.",
+		}, func() float64 { return stats().MaxConns }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "tunneld_valkey_pool_waits_total", Help: "Valkey commands that waited for a free pool connection.",
+		}, func() float64 { return stats().Waits }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "tunneld_valkey_pool_timeouts_total", Help: "Valkey commands that gave up waiting for a free pool connection.",
+		}, func() float64 { return stats().Timeouts }),
+	}
+	for _, c := range collectors {
+		if err := m.reg.Register(c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ConnLogDropped returns the dropped-connection-log-events counter (wired to the async conn-log
 // writer's drop callback in server.Run).
 func (m *Metrics) ConnLogDropped() prometheus.Counter { return m.connLogDropped }
