@@ -69,12 +69,18 @@ func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 	conn := newScriptConn("198.51.100.21", nil)
 	done := runTunnel(te, conn, "abcdef012345.example.test")
 	phone := waitPhone(t, te, 0)
-	te.e.smu.Lock()
 	var connIDs []string
-	for s := range te.e.streams {
-		connIDs = append(connIDs, s.connID)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(connIDs) == 0 && time.Now().Before(deadline) {
+		te.e.smu.Lock()
+		for s := range te.e.streams {
+			connIDs = append(connIDs, s.connID)
+		}
+		te.e.smu.Unlock()
+		if len(connIDs) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
-	te.e.smu.Unlock()
 	tunneltest.CloseOrLog(t, phone)
 	waitDone(t, done, 5*time.Second)
 

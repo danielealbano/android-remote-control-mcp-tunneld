@@ -13,8 +13,10 @@ mesh, and the internal metrics listener are separate servers. ALL construction c
 `:80` listener) bind: a
 socket is never bound while unserved. A valid reserved-host certificate cached on disk is loaded before the
 bind (replaced by the Valkey-shared one when that expires later); reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
-the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded; tunnel
-splicing is unaffected) and issuance is retried every minute. The connection-log spool directory is created,
+the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded) and issuance
+is retried every minute; while the control host has none, the node can neither hold phone control
+connections nor accept HTTPS dial-backs, so tunnel connections entering it fail (`no-route`) — splicing on the
+other nodes is unaffected. The connection-log spool directory is created,
 locked and recovered before the bind; uploading its leftover files runs in the background.
 
 ```mermaid
@@ -99,8 +101,8 @@ The entry node accounts bytes (day/week traffic), paces bandwidth against the pe
 windows, and enforces the connection policy on both sockets; no data crosses nodes. When the phone's control
 connection closes, its node sends `evict` to every node and each ends the splices opened through it (keeping
 `ban-evict` / `admin-terminate` when that is the close reason, else `phone-close`); a crashed owner sends
-nothing, so such splices end within 10 s through the entry node's per-splice route check (every 10 s each
-splice re-reads its route). The phone terminates TLS with its
+nothing, so such splices end within 10 s after the route expires (`--route-ttl`) or is re-bound, through the
+entry node's per-splice route check (every 10 s each splice re-reads its route). The phone terminates TLS with its
 WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; the staging tier uses Let's Encrypt staging + GTS staging) — tunneld never sees plaintext.
 
 **ACME validations.** A ClientHello whose first ALPN protocol is `acme-tls/1` is a TLS-ALPN-01 validation
@@ -112,8 +114,8 @@ no pending challenge it is closed (`no-route`). When a CA uses HTTP-01, a plain 
 request per connection (keep-alives off); any other request is a 404 (`acme-http-miss`) — behind the same check
 order (ban → conn-rate → the shared `--max-clients` counter), evaluated off the accept loop. With
 `--dialback-https=false` the same listener (bound then even without an HTTP-01 CA) also serves the phones'
-plain dial-backs: exactly `GET /api/v1/data` goes to the phone handler, every other request to the ACME
-handler unchanged.
+plain dial-backs: every request for exactly `/api/v1/data` goes to the phone handler (a non-`GET` gets `405`),
+every other request to the ACME handler unchanged.
 
 ## 3. Enrollment, issuance, renewal
 

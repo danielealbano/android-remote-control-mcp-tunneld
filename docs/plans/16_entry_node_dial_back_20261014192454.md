@@ -35,7 +35,7 @@ entered; the mesh carries control messages only.
 | D10 | Aggressive server-side TCP keepalive (Idle 10 s, Interval 5 s, Count 3) on every socket of the public `:443` and `:80` listeners (user-confirmed scope). The phone side sets no keepalive (user decision; Android exposes no per-socket keepalive timers). |
 | D11 | The phone control connection stays HTTP/2 + mTLS. |
 | D12 | `--limit-conn-rate` stays as is (10/s); dial-backs count against it at accept; operators raise it (documented). |
-| D13 | When a phone control connection closes (any reason), the node that held it sends a close request to every node, scoped to that connection: tunnel name + the control connection's id. Each node ends the splices it opened through that connection (`close_reason` = `ban-evict` / `admin-terminate` when that is why the control connection closed, else `phone-close` — the request carries the reason). The entry node learns the id from the route it opened through (the owner acts only when that id is its live connection, which its `applied` reply confirms); a locally held connection's id is known directly. "Every node" comes from a node-id set (`nodes`, TTL'd, kept by the node heartbeats) — a teardown never SCANs the keyspace. Edge cases (user decision: a per-splice route check every 10 s): each splice's watcher re-reads its tunnel's route every 10 s and ends the splice (`phone-close`) when the route is gone or carries another connection id — covers a crashed owner (no broadcast) and a broadcast that raced the dial-back; a lookup error keeps the splice. |
+| D13 | When a phone control connection closes (any reason), the node that held it sends a close request to every node, scoped to that connection: tunnel name + the control connection's id. Each node ends the splices it opened through that connection (`close_reason` = `ban-evict` / `admin-terminate` when that is why the control connection closed, else `phone-close` — the request carries the reason). The entry node learns the id from the route it opened through (the owner acts only when that id is its live connection, which its `applied` reply confirms); a locally held connection's id is known directly. "Every node" comes from a node-id set (`nodes`, TTL'd, kept by the node heartbeats) — a teardown never SCANs the keyspace. Edge cases (user decision: a per-splice route check every 10 s): each splice's watcher re-reads its tunnel's route every 10 s and ends the splice (`phone-close`) when the route is gone or carries another connection id — covers a crashed owner (no broadcast: its splices end within 10 s after the route expires or is re-bound) and a broadcast that raced the dial-back; a lookup error keeps the splice. |
 | D14 | Out of this plan: scanner mitigation, benchmarks (after rollout), the production rollout (merge, tag, per-node config incl. `TUNNELD_DIALBACK_ADVERTISE` and `TUNNELD_MAX_CLIENTS` doubled to 4000 since every public connection now also holds its dial-back's slot, the TIME_WAIT/conntrack sysctls, soak app resume, production test — each needs the user's go). |
 | D15 | The final device gates run on the Realme, including `TestE2E_SoakApp`, which reinstalls the v2 soak app: certificates are kept, the 50 production phones stay offline until production runs v2 (user-approved). |
 
@@ -97,7 +97,7 @@ type OpenPayload struct {
 
 const (
 	DialBackPath    = "/api/v1/data"
-	DialTokenHeader = "X-Dial-Token"
+	DialBackHeader = "X-Dial-Token"
 	DialUpgrade     = "tunneld-dial"
 )
 ```
@@ -115,7 +115,7 @@ const (
 |---|---|
 | `TestControlFrameRoundTrip` (update) | an `OPEN` with all four fields round-trips through `EncodeControl`/`DecodeControl` + `json.Unmarshal` |
 | `TestOpenPayload_JSONFieldNames` | the marshalled keys are exactly `token`, `addr`, `use_https`, `use_mtls` |
-| `TestDialBackConstantsFrozen` | `DialBackPath == "/api/v1/data"`, `DialTokenHeader == "X-Dial-Token"`, `DialUpgrade == "tunneld-dial"` |
+| `TestDialBackConstantsFrozen` | `DialBackPath == "/api/v1/data"`, `DialBackHeader == "X-Dial-Token"`, `DialUpgrade == "tunneld-dial"` |
 
 DoD:
 - [x] No added comments; the listed wrong comment parts are gone.
@@ -425,7 +425,7 @@ func (h *Handler) serveDialBack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	token := r.Header.Get(wire.DialTokenHeader)
+	token := r.Header.Get(wire.DialBackHeader)
 	if r.ProtoMajor != 1 || r.ProtoMinor != 1 || token == "" || !strings.EqualFold(r.Header.Get("Upgrade"), wire.DialUpgrade) {
 		http.Error(w, "bad dial-back request", http.StatusBadRequest)
 		return
@@ -630,12 +630,13 @@ type dialBackEnv struct {
 	dialBacks *DialBacks
 	ca        *dbTestCA
 	rejects   chan string
+	mgr       *Manager
 }
 
 func startDialBackEnv(t *testing.T, useTLS bool, auth tls.ClientAuthType, mtls bool, banned string) *dialBackEnv {
 	t.Helper()
 	m, _, _, _ := newMgr(t)
-	env := &dialBackEnv{useTLS: useTLS, dialBacks: NewDialBacks(tunneltest.Logger()), ca: newDBTestCA(t), rejects: make(chan string, 16)}
+	env := &dialBackEnv{useTLS: useTLS, dialBacks: NewDialBacks(tunneltest.Logger()), ca: newDBTestCA(t), rejects: make(chan string, 16), mgr: m}
 	h := NewHandler(HandlerConfig{
 		Manager: m, PingInterval: time.Hour, StreamPending: 4,
 		ValidName: func(n string) bool { return strings.HasPrefix(n, "tun") },
@@ -689,7 +690,7 @@ func sendDialBackRequest(t *testing.T, c net.Conn, method, token, upgrade string
 		req.Header.Set("Upgrade", upgrade)
 	}
 	if token != "" {
-		req.Header.Set(wire.DialTokenHeader, token)
+		req.Header.Set(wire.DialBackHeader, token)
 	}
 	if err := req.Write(c); err != nil {
 		t.Fatal(err)
@@ -1614,7 +1615,7 @@ func upgradeDialBack(ctx context.Context, conn net.Conn, host, token string) (*b
 	}
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", wire.DialUpgrade)
-	req.Header.Set(wire.DialTokenHeader, token)
+	req.Header.Set(wire.DialBackHeader, token)
 	if err := req.Write(conn); err != nil {
 		return nil, fmt.Errorf("write the upgrade request: %w", err)
 	}
@@ -1982,7 +1983,7 @@ Acceptance criteria:
 | Test | Verifies | Setup notes |
 |---|---|---|
 | `TestE2E_DialBackModes` (new) | for `https-no-mtls` and `plain`: echo roundtrips entering the owner A and the non-owner B both succeed | two replicas with the mode's opts; the Go-client phone's control on A |
-| `TestE2E_SplicesEndWhenPhoneDisconnects` (new) | a long-lived echo splice entered through B (owner A) ends within 10 s after the phone's CONTROL connection alone is cut, while the phone keeps its dial-back open — proving the server-side `evict` | the Go-client phone's control connection goes through a single-backend `roundRobinForwarder` (from `e2e/dialback_test.go`) to A; cutting the forwarder's connections ends only the control connection (the dial-back goes straight to B's advertise address and the client's `Run` ctx stays alive) |
+| `TestE2E_SplicesEndWhenPhoneDisconnects` (new) | a long-lived echo splice entered through B (owner A) ends within 5 s after the phone's CONTROL connection alone is cut, while the phone keeps its dial-back open — proving the server-side `evict` | the Go-client phone's control connection goes through a single-backend `roundRobinForwarder` (from `e2e/dialback_test.go`) to A; cutting the forwarder's connections ends only the control connection (the dial-back goes straight to B's advertise address and the client's `Run` ctx stays alive) |
 | `TestE2E_CrossNodeTerminate` (extend) | a live splice entered through the non-owner A is torn down by the terminate before the route-unbind check | open the frontend connection through A first |
 | `TestIntegration_ACMEHTTPListenerOnlyWhenUsed` (extend) | `--dialback-https=false` + `--dialback-mtls=false` (the valid plain pair) binds the plain listener with no http-01 CA; `GET /api/v1/data` without `Upgrade` there → 400 (only the phone handler answers that) and no `acme-http-miss` rejection is recorded, while `/.well-known/…` keeps its behaviour | |
 | `TestIntegration_DrainBoundedWithUnreachablePeer` (new, `drain_startup_integration_test.go`) | with a bound phone, a live public splice and a registered peer node whose mesh address accepts but never answers: `Run` returns within `ShutdownGrace` + 2 s after cancel, the splice's `server-shutdown` end event and the phone's end event land in the conn-log store, and the node is deregistered (`node:{id}` gone) | register the fake node via the shared Valkey before cancelling |
@@ -2037,7 +2038,7 @@ Acceptance criteria:
 - [x] **Action 11.1.1** — modify `docs/PROTOCOL.md`:
   - Title "Wire Protocol (v2 — End-to-End Encrypted)". Intro: "splices the encrypted byte stream to the phone over an internal HTTP/2 mesh" → "splices the encrypted byte stream to a connection the phone dials back to the entry node".
   - §1: the dial-back presents the identity cert when `use_mtls`.
-  - §3: the control connection carries the control stream and `/api/v1/issue` only; the `OPEN` row payload `{token, addr, use_https, use_mtls}`; when the control connection closes, every splice opened through it ends (a crashed owner node sends no `evict`: such splices end within 10 s through the entry node's per-splice route check).
+  - §3: the control connection carries the control stream and `/api/v1/issue` only; the `OPEN` row payload `{token, addr, use_https, use_mtls}`; when the control connection closes, every splice opened through it ends (a crashed owner node sends no `evict`: such splices end within 10 s after the route expires or is re-bound, through the entry node's per-splice route check).
   - §4 "Dial-back connection": this plan's "Wire contract v2" dial-back part (request, `101`, statuses, single-use token valid only while the entry node waits, either side closing ends it, one fresh route lookup + retry on a failed open, `ChunkSize` = pacing slice).
   - §5 mesh: control RPC only — ops `renew`, `terminate`, `open`, `evict` (envelopes + `applied` semantics of this plan); every call has a per-request deadline; terminate is sent to every node by the admin endpoint; a closing control connection's node sends `evict` to every node. Delete the mesh data stream paragraph.
   - §6: the `ChunkSize` bullet ends "the dial-back carries no framing"; add "the dial-back token is 128-bit random, single-use, valid only while the entry node waits; without `use_mtls` it is the only authorisation of a dial-back".
@@ -2065,7 +2066,7 @@ sequenceDiagram
     P-->>C: TLS response (opaque, spliced back by A)
 ```
 
-    and the paragraph after it: the entry node accounts, paces and enforces the policy on both sockets; no data crosses nodes; when the phone's control connection closes, its node sends `evict` to every node and each ends the splices opened through it (keeping `ban-evict` / `admin-terminate` when that is the close reason, else `phone-close`); a crashed owner sends nothing, so such splices end within 10 s through the entry node's per-splice route check (every 10 s each splice re-reads its route). The `:80` paragraph: also serves `GET /api/v1/data` when `--dialback-https=false`.
+    and the paragraph after it: the entry node accounts, paces and enforces the policy on both sockets; no data crosses nodes; when the phone's control connection closes, its node sends `evict` to every node and each ends the splices opened through it (keeping `ban-evict` / `admin-terminate` when that is the close reason, else `phone-close`); a crashed owner sends nothing, so such splices end within 10 s after the route expires or is re-bound, through the entry node's per-splice route check (every 10 s each splice re-reads its route). The `:80` paragraph: also serves `GET /api/v1/data` when `--dialback-https=false`.
   - §5: `conc:{name}` = sorted set (one member per live public connection = its token, score = expiry ms, pruned at admission, refreshed by `Charge`'s `ZADD XX`, removed on release; TTL 3 × `--limit-conn-idle`); the node registry also keeps the `nodes` id set (TTL 3 × `--route-ttl`, refreshed by every heartbeat, expired ids pruned on read) used to reach every live node; the ids paragraph: connection ids 8 hex chars; dial-back tokens `crypto/rand.Text` (26 base32 chars, 128 bits).
   - §8: terminate (a bound route required, 404 otherwise) is applied on every node (each evicts its splices, the owner closes the phone connection); reissue still routes to the owner. Keep the `no-route` row of the rejection-reason table accurate (its writers include the failed dial-back open).
   - §9 shutdown chart + text: the node "close raw :443 + HTTP-01 :80 listeners" → "close raw :443 + plain :80 listeners"; a final step after "Node explicitly deregistered": "join, then cancel, the splice-eviction broadcasts".
@@ -2093,29 +2094,36 @@ DoD:
 
 ---
 
-## [ ] US12 — Ground-up verification
+## [x] US12 — Ground-up verification
 
 Why: confirms everything above, end to end, before the review.
 
 Acceptance criteria:
-- [ ] Every box of US1–US11 is ticked only after it was verified in the code.
-- [ ] All quality gates pass, including every device gate on the Realme (none skipped), and the soak phones' certificates survive.
+- [x] Every box of US1–US11 is ticked only after it was verified in the code.
+- [x] All quality gates pass, including every device gate on the Realme (none skipped), and the soak phones' certificates survive.
 
-### [ ] Task 12.1 — Double-check EVERYTHING implemented, from the ground up
+### [x] Task 12.1 — Double-check EVERYTHING implemented, from the ground up
 
-- [ ] Re-read this plan; walk US1–US11 against `git diff main...HEAD`; tick every box only when verified in the code.
-- [ ] `git diff main...HEAD -- '*.go' '*.kt' '*.yml'` adds no comment lines except the preserved ones moved by Action 6.1.2 / 5.1.1 (auto-generated files exempt); every comment the change made wrong is gone.
-- [ ] `grep -rn 'X-Stream-Id\|OpenStream\|httpDataStream\|ErrDuplicateStream\|conclock\|stream_id' --include=*.go --include=*.kt --include=*.md . | grep -v docs/plans/` is empty, and `grep -rn 'mesh/data' --include=*.go --exclude=*_test.go .` is empty.
-- [ ] Rebuild the apps: `make tunnel-app` and `make soak-app` (tee to `/tmp/plan16-apps-build.log`), no `w:`/`e:` lines in the log; commit the rebuilt `fixtures/tunnel-app/*` and `fixtures/soak-app/*` (APK, `.sha256`, `signers.allow`); the `.sha256` files match the APKs.
-- [ ] Quality gates, each through `tee` to `/tmp/plan16-<gate>.log`: `make lint`, `make vet`, `make govulncheck`, `make build`, `make test-unit`, `make test-integration`, `make test-e2e` (the Realme attached: `TestE2E_DeviceAttestation`, `TestE2E_ReferenceTunnelApp`, `TestE2E_ReferenceTunnelAppDialBackModes`, `TestE2E_SoakApp`, `TestE2E_DialBackAcrossReplicas` MUST run and PASS, not skip — `TestE2E_SoakApp` reinstalls the v2 soak app on the Realme, user-approved: certificates kept, the 50 production phones offline until production runs v2), `make test-staging`, `make test-scripts`, `make compose-config`, `make tidy` (no diff).
-- [ ] Mermaid: `make mermaid-check` passes, covering the charts touched in `README.md`, `docs/ARCHITECTURE.md` and `docs/PROJECT.md`.
-- [ ] Device: after the gates the soak app's production environment still holds its 50 saved phones (`adb exec-out run-as com.example.soakapp sh -c 'ls files/phones/ec783eec7deb8 | wc -l'` = 50).
+- [x] Re-read this plan; walk US1–US11 against `git diff main...HEAD`; tick every box only when verified in the code.
+- [x] `git diff main...HEAD -- '*.go' '*.kt' '*.yml'` adds no comment lines except the preserved ones moved by Action 6.1.2 / 5.1.1 (auto-generated files exempt); every comment the change made wrong is gone.
+- [x] `grep -rn 'X-Stream-Id\|OpenStream\|httpDataStream\|ErrDuplicateStream\|conclock\|stream_id' --include=*.go --include=*.kt --include=*.md . | grep -v docs/plans/` is empty, and `grep -rn 'mesh/data' --include=*.go --exclude=*_test.go .` is empty.
+- [x] Rebuild the apps: `make tunnel-app` and `make soak-app` (tee to `/tmp/plan16-apps-build.log`), no `w:`/`e:` lines in the log; commit the rebuilt `fixtures/tunnel-app/*` and `fixtures/soak-app/*` (APK, `.sha256`, `signers.allow`); the `.sha256` files match the APKs.
+- [x] Quality gates, each through `tee` to `/tmp/plan16-<gate>.log`: `make lint`, `make vet`, `make govulncheck`, `make build`, `make test-unit`, `make test-integration`, `make test-e2e` (the Realme attached: `TestE2E_DeviceAttestation`, `TestE2E_ReferenceTunnelApp`, `TestE2E_ReferenceTunnelAppDialBackModes`, `TestE2E_SoakApp`, `TestE2E_DialBackAcrossReplicas` MUST run and PASS, not skip — `TestE2E_SoakApp` reinstalls the v2 soak app on the Realme, user-approved: certificates kept, the 50 production phones offline until production runs v2), `make test-staging`, `make test-scripts`, `make compose-config`, `make tidy` (no diff).
+- [x] Mermaid: `make mermaid-check` passes, covering the charts touched in `README.md`, `docs/ARCHITECTURE.md` and `docs/PROJECT.md`.
+- [x] Device: after the gates the soak app's production environment still holds its 50 saved phones (`adb exec-out run-as com.example.soakapp sh -c 'ls files/phones/ec783eec7deb8 | wc -l'` = 50).
 
 DoD:
-- [ ] Every check above passed on the final code.
+- [x] Every check above passed on the final code.
 
 ## Deviations
 
+- Ride-along (user decision, 2026-10-14): the Grafana declutter of `node-detail.json` and `tunneld-detail.json`
+  (no CPU `idle` series, no CPU-count line in load, no swap total, no file-descriptor maximum) is committed on
+  this branch (`d78f0c0`); it is not part of the dial-back work.
+- Code review: the docs state that a node without its control-host certificate can neither hold phone control
+  connections nor accept HTTPS dial-backs (tunnel connections entering it fail `no-route`), and that a crashed
+  owner's splices end within 10 s after the route expires (`--route-ttl`) or is re-bound (D13 / Actions 11.1.1–
+  11.1.2 re-aligned); `/api/v1/data` on the plain listener is routed for every method (non-`GET` → `405`).
 - Action 4.3.1: `dialBackEnv` also carries the env's `mgr *Manager` (set in `startDialBackEnv`), so
   `TestServeHTTP_IdentityRequiredWhenTLSClientCertOptional` can assert that no route was bound; small test-local
   helpers (`await`, `delivered`, `readExactly`) drive the waiter and the byte checks.

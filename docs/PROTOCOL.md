@@ -132,9 +132,9 @@ stream. The only phone→server frame is `PONG` (liveness); a stream tears down 
 never a control frame.
 
 When the control connection closes (for any reason), every splice opened through it ends, on every node
-(§5 `evict`). A crashed owner node sends no `evict`: such splices end within 10 s, when the entry node's
-per-splice route check (every 10 s each splice re-reads its tunnel's route) finds the route gone or bound to
-another connection.
+(§5 `evict`). A crashed owner node sends no `evict`: such splices end within 10 s after the route expires
+(`--route-ttl`) or is re-bound, when the entry node's per-splice route check (every 10 s each splice re-reads
+its tunnel's route) finds the route gone or bound to another connection.
 
 ### `POST /api/v1/issue` (mTLS certificate-generation endpoint)
 

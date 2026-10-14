@@ -39,7 +39,7 @@ type activeStream struct {
 	banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over terminated/evicted/shutdown
 	terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
 	phoneGone  atomic.Bool
-	release    func() // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
+	release    func() // frees this stream's global slot exactly once
 	bytesIn    int64
 	bytesOut   int64
 }
@@ -326,8 +326,8 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) 
 // splice copies bytes both directions with byte accounting (day/week traffic) + bandwidth pacing +
 // connection policy (idle timeout + min-rate kill past grace), returning the close reason. It waits for
 // BOTH copy goroutines to exit before returning (so no goroutine touches the stream or the byte counters
-// after handleTunnel reads them); a watcher closes both sides on ctx-cancel (eviction), idle timeout, or a
-// sub-min-rate connection, which unblocks the copies.
+// after handleTunnel reads them); a watcher closes both sides on ctx-cancel (eviction), idle timeout, a
+// sub-min-rate connection, or a route that no longer carries this connection, which unblocks the copies.
 func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.ReadWriteCloser, as *activeStream) string {
 	var reasonOnce sync.Once
 	reason := store.CloseClientClose
@@ -366,8 +366,8 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		done <- struct{}{}
 	}()
 
-	// Policy watcher: closes both sides on eviction (ctx cancel), idle timeout, or a sub-min-rate
-	// connection past grace, then exits; otherwise it exits once signalled after both copies finish. It
+	// Policy watcher: closes both sides on eviction (ctx cancel), idle timeout, a sub-min-rate
+	// connection past grace, or a route that no longer carries this connection, then exits; otherwise it exits once signalled after both copies finish. It
 	// maintains a true rolling-window (rollingWindow, ~60s) byte total from clock-stamped cumulative-byte
 	// samples that feeds BOTH the min-rate kill here and the eviction protect-rate ranking (via as.recent).
 	stopWatch := make(chan struct{})
@@ -386,9 +386,10 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 				return
 			case <-ctx.Done():
 				// The stream ctx cancels on a ban reload (EvictBannedStreams marks banned first), on an
-				// admin terminate (EvictTunnelStreams marks terminated first), on saturation eviction
-				// (evictLeastActive marks evicted first), OR on server drain (the parent ctx) — attribute
-				// each accurately, banned taking precedence.
+				// admin terminate (EvictTunnelStreams marks terminated first), on the close of the phone
+				// control connection it was opened through (EvictConnStreams marks phoneGone first), on
+				// saturation eviction (evictLeastActive marks evicted first), OR on server drain (the parent
+				// ctx) — attribute each accurately, banned taking precedence.
 				if as.banned.Load() {
 					setReason(store.CloseBanEvict)
 				} else if as.terminated.Load() {

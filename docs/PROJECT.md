@@ -85,7 +85,7 @@ The public edge is raw TCP `:443`. It peeks the ClientHello and dispatches by SN
 | `--control-host` | terminate locally: mTLS phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) |
 | anything else / no route | connection closed (`no-route`) |
 
-When a CA uses HTTP-01 or `--dialback-https=false`, a plain `:80` listener (`--acme-http-listen`) serves `/.well-known/acme-challenge/<token>` for pending challenges (one request per connection) and, with `--dialback-https=false`, the phones' plain dial-backs (`GET /api/v1/data`, authorised by the one-time token only); anything else → 404, `acme-http-miss`.
+When a CA uses HTTP-01 or `--dialback-https=false`, a plain `:80` listener (`--acme-http-listen`) serves `/.well-known/acme-challenge/<token>` for pending challenges (one request per connection) and, with `--dialback-https=false`, the phones' plain dial-backs (`GET /api/v1/data`, authorised by the one-time token only; any other method on that path → 405); anything else → 404, `acme-http-miss`.
 
 There is no HTTP method/path allowlist on relayed traffic — the phone terminates TLS and enforces its
 own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
