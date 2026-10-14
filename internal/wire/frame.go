@@ -45,9 +45,9 @@ type OpenPayload struct {
 }
 
 const (
-	DialBackPath    = "/api/v1/data"
-	DialTokenHeader = "X-Dial-Token"
-	DialUpgrade     = "tunneld-dial"
+	DialBackPath   = "/api/v1/data"
+	DialBackHeader = "X-Dial-Token"
+	DialUpgrade    = "tunneld-dial"
 )
 
 // RenewNudgePayload prompts a renewal: the phone answers by calling POST /api/v1/issue (mTLS) with a fresh

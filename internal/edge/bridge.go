@@ -39,7 +39,7 @@ type activeStream struct {
 	banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over terminated/evicted/shutdown
 	terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
 	phoneGone  atomic.Bool
-	release    func()      // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
+	release    func() // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
 	bytesIn    int64
 	bytesOut   int64
 }

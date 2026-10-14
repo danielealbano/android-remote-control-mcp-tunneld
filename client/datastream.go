@@ -84,7 +84,7 @@ func upgradeDialBack(ctx context.Context, conn net.Conn, host, token string) (*b
 	}
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", wire.DialUpgrade)
-	req.Header.Set(wire.DialTokenHeader, token)
+	req.Header.Set(wire.DialBackHeader, token)
 	if err := req.Write(conn); err != nil {
 		return nil, fmt.Errorf("write the upgrade request: %w", err)
 	}

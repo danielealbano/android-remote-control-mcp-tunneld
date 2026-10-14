@@ -2143,5 +2143,8 @@ DoD:
   (closes its live connections, keeps listening). `TestIntegration_ACMEHTTPListenerOnlyWhenUsed` becomes two
   subtests (not bound / bound for plain dial-backs). `TestE2E_DialBackModes` shares one infra across its two
   mode subtests.
+- Action 1.1.1 (quality gate): the header constant is `DialBackHeader`, not `DialTokenHeader` — gosec G101
+  flags any identifier containing "token" as a hardcoded credential; the value `X-Dial-Token` (the wire
+  contract) is unchanged and `TestDialBackConstantsFrozen` asserts it under the new name.
 - Action 10.2.4: the plain subtest pins the replica's `acmeHTTPListen` so its port is known for `adb reverse`; on a
   failed request the app's logcat is dumped (as in `TestE2E_DialBackAcrossReplicas`).

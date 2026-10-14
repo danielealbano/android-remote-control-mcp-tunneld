@@ -25,8 +25,8 @@ const (
 	soakAppDevicePort = 18444
 
 	soakAppClientDevicePort = 18445
-	soakFirstPhones   = 3
-	soakPhones        = 4
+	soakFirstPhones         = 3
+	soakPhones              = 4
 )
 
 func TestE2E_SoakApp(t *testing.T) {

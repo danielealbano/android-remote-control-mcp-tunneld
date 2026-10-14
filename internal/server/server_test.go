@@ -91,9 +91,9 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		MeshPoolSize:   4,
 		MeshCertTTL:    24 * time.Hour,
 
-		EnrollHost:   "enroll.example.test",
-		ControlHost:  "connect.example.test",
-		NameLength:   10,
+		EnrollHost:        "enroll.example.test",
+		ControlHost:       "connect.example.test",
+		NameLength:        10,
 		DialBackAdvertise: "127.0.0.1:0", DialBackHTTPS: true, DialBackMTLS: true,
 		CACert:       caCert,
 		CAKey:        caKey,

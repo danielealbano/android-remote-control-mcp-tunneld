@@ -200,7 +200,7 @@ func TestServeHTTPIPBanFirst(t *testing.T) {
 	dreq := httptest.NewRequest("GET", wire.DialBackPath, nil)
 	dreq.RemoteAddr = "198.51.100.99:40000"
 	dreq.Header.Set("Upgrade", wire.DialUpgrade)
-	dreq.Header.Set(wire.DialTokenHeader, "TOKEN")
+	dreq.Header.Set(wire.DialBackHeader, "TOKEN")
 	drec := httptest.NewRecorder()
 	h.ServeHTTP(drec, dreq)
 	if drec.Code != 403 || drec.Header().Get("Connection") != "close" {

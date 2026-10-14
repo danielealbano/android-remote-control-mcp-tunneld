@@ -732,10 +732,10 @@ func TestEdge_HandleTunnel_StreamMemberIsTheToken(t *testing.T) {
 
 func TestSpliceReason_PhoneGoneAttribution(t *testing.T) {
 	tests := []struct {
-		name          string
-		set           func(as *activeStream)
-		cancelParent  bool
-		want          string
+		name         string
+		set          func(as *activeStream)
+		cancelParent bool
+		want         string
 	}{
 		{name: "banned beats phoneGone", set: func(as *activeStream) { as.banned.Store(true); as.phoneGone.Store(true) }, want: store.CloseBanEvict},
 		{name: "terminated beats phoneGone", set: func(as *activeStream) { as.terminated.Store(true); as.phoneGone.Store(true) }, want: store.CloseAdminTerminate},

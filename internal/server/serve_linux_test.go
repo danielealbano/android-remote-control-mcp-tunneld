@@ -43,9 +43,9 @@ func TestListenPublic_SetsKeepAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := []struct {
-		name         string
-		level, opt   int
-		want         int
+		name       string
+		level, opt int
+		want       int
 	}{
 		{name: "SO_KEEPALIVE", level: syscall.SOL_SOCKET, opt: syscall.SO_KEEPALIVE, want: 1},
 		{name: "TCP_KEEPIDLE", level: syscall.IPPROTO_TCP, opt: syscall.TCP_KEEPIDLE, want: 10},

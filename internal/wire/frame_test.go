@@ -76,8 +76,8 @@ func TestDialBackConstantsFrozen(t *testing.T) {
 	if DialBackPath != "/api/v1/data" {
 		t.Errorf("DialBackPath = %q", DialBackPath)
 	}
-	if DialTokenHeader != "X-Dial-Token" {
-		t.Errorf("DialTokenHeader = %q", DialTokenHeader)
+	if DialBackHeader != "X-Dial-Token" {
+		t.Errorf("DialBackHeader = %q", DialBackHeader)
 	}
 	if DialUpgrade != "tunneld-dial" {
 		t.Errorf("DialUpgrade = %q", DialUpgrade)

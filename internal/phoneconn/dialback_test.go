@@ -144,7 +144,7 @@ func sendDialBackRequest(t *testing.T, c net.Conn, method, token, upgrade string
 		req.Header.Set("Upgrade", upgrade)
 	}
 	if token != "" {
-		req.Header.Set(wire.DialTokenHeader, token)
+		req.Header.Set(wire.DialBackHeader, token)
 	}
 	if err := req.Write(c); err != nil {
 		t.Fatal(err)
@@ -268,9 +268,6 @@ func TestDialBacks_AbandonClosesRacedDelivery(t *testing.T) {
 		t.Fatal("deliver to a registered waiter must succeed")
 	}
 	d.abandon("TOKEN", w)
-	if err := edgeSide.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := edgeSide.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("read from the peer of an abandoned delivery = %v, want EOF (closed)", err)
 	}
@@ -430,7 +427,7 @@ func TestServeDialBack_StatusTable(t *testing.T) {
 			var resp *http.Response
 			if tc.http10 {
 				raw := "GET " + wire.DialBackPath + " HTTP/1.0\r\nHost: connect.example.test\r\nConnection: Upgrade\r\nUpgrade: " +
-					wire.DialUpgrade + "\r\n" + wire.DialTokenHeader + ": TOKEN\r\n\r\n"
+					wire.DialUpgrade + "\r\n" + wire.DialBackHeader + ": TOKEN\r\n\r\n"
 				if _, err := c.Write([]byte(raw)); err != nil {
 					t.Fatal(err)
 				}
@@ -445,7 +442,7 @@ func TestServeDialBack_StatusTable(t *testing.T) {
 			if resp.StatusCode != tc.want {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.want)
 			}
-			if !tc.http10 && resp.Header.Get("Connection") != "close" {
+			if !tc.http10 && !resp.Close {
 				t.Fatalf("an error response must carry Connection: close, got %v", resp.Header)
 			}
 			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
@@ -478,7 +475,7 @@ func TestServeDialBack_StatusTable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set(wire.DialTokenHeader, "TOKEN")
+		req.Header.Set(wire.DialBackHeader, "TOKEN")
 		resp, err := (&http.Client{Transport: tr}).Do(req)
 		if err != nil {
 			t.Fatal(err)

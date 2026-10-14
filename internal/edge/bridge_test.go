@@ -252,9 +252,6 @@ func TestEdge_Splice_RouteCheckEndsOrphanedSplice(t *testing.T) {
 			if !client.isClosed() {
 				t.Fatal("the client socket must be closed")
 			}
-			if err := phone.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-				t.Fatal(err)
-			}
 			if _, err := phone.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 				t.Fatalf("the dial-back socket must be closed, read = %v", err)
 			}

@@ -92,7 +92,7 @@ func (h *Handler) serveDialBack(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	token := r.Header.Get(wire.DialTokenHeader)
+	token := r.Header.Get(wire.DialBackHeader)
 	if r.ProtoMajor != 1 || r.ProtoMinor != 1 || token == "" || !strings.EqualFold(r.Header.Get("Upgrade"), wire.DialUpgrade) {
 		http.Error(w, "bad dial-back request", http.StatusBadRequest)
 		return
