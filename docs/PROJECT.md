@@ -160,11 +160,15 @@ then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-con
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
 spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
 a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being queued when
-`--shutdown-grace` expires, or arriving after shutdown. Grafana provisioning (`deploy/grafana/`) ships five
-dashboards: Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard handshake and
-ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail; they expect
-every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey exporter
-targets). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
+`--shutdown-grace` expires, or arriving after shutdown. Grafana provisioning (`deploy/grafana/`) ships six
+dashboards: Health (one red/green tile per check, grouped, with the failing-check count on top and the
+`eth0` traffic chart), Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard
+handshake and ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail.
+They expect every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey
+exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timestamp_seconds`,
+`wireguard_peer_{receive,transmit}_bytes_total` and `banlist_file_mtime_timestamp_seconds{file}`, and — for
+Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
+for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.
 Secrets, key material, and tunnel payloads are NEVER logged.
 

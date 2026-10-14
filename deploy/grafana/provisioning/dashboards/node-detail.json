@@ -813,7 +813,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "time() - arc_tunnel_wireguard_peer_latest_handshake_timestamp_seconds{node=\"$node\"}",
+     "expr": "time() - wireguard_peer_latest_handshake_timestamp_seconds{node=\"$node\"}",
      "legendFormat": "{{peer}}"
     }
    ],
@@ -867,7 +867,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(arc_tunnel_wireguard_peer_receive_bytes_total{node=\"$node\"}[5m])",
+     "expr": "rate(wireguard_peer_receive_bytes_total{node=\"$node\"}[5m])",
      "legendFormat": "{{peer}} in"
     },
     {
@@ -876,7 +876,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(arc_tunnel_wireguard_peer_transmit_bytes_total{node=\"$node\"}[5m])",
+     "expr": "rate(wireguard_peer_transmit_bytes_total{node=\"$node\"}[5m])",
      "legendFormat": "{{peer}} out"
     }
    ],
@@ -1475,15 +1475,15 @@
   {
    "id": 26,
    "type": "stat",
-   "title": "Ban-list age",
-   "description": "",
+   "title": "DROP list age",
+   "description": "Hours since the last refresh (daily).",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 6,
     "x": 12,
     "y": 92
    },
@@ -1494,8 +1494,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "(time() - arc_tunnel_banlist_file_mtime_timestamp_seconds{node=\"$node\"}) / 3600",
-     "legendFormat": "{{file}}",
+     "expr": "(time() - banlist_file_mtime_timestamp_seconds{file=\"droplist.bans\",node=\"$node\"}) / 3600",
+     "legendFormat": "DROP",
      "instant": true,
      "range": false
     }
@@ -1518,6 +1518,76 @@
        {
         "color": "red",
         "value": 48
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 27,
+   "type": "stat",
+   "title": "DB-IP age",
+   "description": "Days since the last refresh (monthly).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 92
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(time() - banlist_file_mtime_timestamp_seconds{file=\"dbip-country-lite.csv\",node=\"$node\"}) / 86400",
+     "legendFormat": "DB-IP",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "d",
+     "decimals": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 32
+       },
+       {
+        "color": "red",
+        "value": 35
        }
       ]
      },

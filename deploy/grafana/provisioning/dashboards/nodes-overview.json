@@ -684,7 +684,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max by (node) (time() - arc_tunnel_wireguard_peer_latest_handshake_timestamp_seconds{node=~\"$node\"})",
+     "expr": "max by (node) (time() - wireguard_peer_latest_handshake_timestamp_seconds{node=~\"$node\"})",
      "legendFormat": "{{node}}"
     }
    ],
@@ -974,15 +974,15 @@
   {
    "id": 20,
    "type": "stat",
-   "title": "Ban-list age",
-   "description": "Hours since the fetcher last refreshed each ban-list file (it refreshes daily).",
+   "title": "DROP list age",
+   "description": "Hours since the fetcher last refreshed the DROP list (it refreshes daily).",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 5,
-    "w": 8,
+    "w": 4,
     "x": 16,
     "y": 59
    },
@@ -993,8 +993,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "(time() - arc_tunnel_banlist_file_mtime_timestamp_seconds{node=~\"$node\"}) / 3600",
-     "legendFormat": "{{node}} {{file}}",
+     "expr": "(time() - banlist_file_mtime_timestamp_seconds{file=\"droplist.bans\",node=~\"$node\"}) / 3600",
+     "legendFormat": "{{node}}",
      "instant": true,
      "range": false
     }
@@ -1017,6 +1017,76 @@
        {
         "color": "red",
         "value": 48
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 21,
+   "type": "stat",
+   "title": "DB-IP age",
+   "description": "Days since the fetcher last refreshed the DB-IP file (it refreshes monthly).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 59
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(time() - banlist_file_mtime_timestamp_seconds{file=\"dbip-country-lite.csv\",node=~\"$node\"}) / 86400",
+     "legendFormat": "{{node}}",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "d",
+     "decimals": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 32
+       },
+       {
+        "color": "red",
+        "value": 35
        }
       ]
      },
