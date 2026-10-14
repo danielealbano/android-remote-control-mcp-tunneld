@@ -91,7 +91,9 @@ object Enroll {
     private const val MAX_ISSUE_RETRIES = 3
     private const val MAX_ENROLL_RETRIES = 10
 
-    fun aliasPrefix(phone: Int) = "soak-$phone-"
+    fun envAliasPrefix(env: Env) = "soak-${env.key}-"
+
+    fun aliasPrefix(env: Env, phone: Int) = "${envAliasPrefix(env)}$phone-"
 
     fun enroll(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Identity {
         var attempt = 0
@@ -117,7 +119,7 @@ object Enroll {
     private fun enrollOnce(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Identity {
         val server = net.serverClient()
         val nonce = getJson(server, net.url(enrollHost, "/api/v1/enroll/nonce")).getString("nonce")
-        val idAlias = "${aliasPrefix(phone)}identity-0"
+        val idAlias = "${aliasPrefix(Env(enrollHost, controlHost, tunnelDomain), phone)}identity-0"
         Keys.generateEcKey(idAlias, Keys.hexToBytes(nonce))
         val body = JSONObject()
             .put("nonce", nonce)
@@ -151,8 +153,9 @@ object Enroll {
     private fun issueOnce(id: Identity, nonce: String) {
         val base = id.issueBase()
         val gen = base.third + 1
-        val nextId = "${aliasPrefix(id.phone)}identity-$gen"
-        val nextTls = "${aliasPrefix(id.phone)}tls-$gen"
+        val prefix = aliasPrefix(Env(id.enrollHost, id.controlHost, id.tunnelDomain), id.phone)
+        val nextId = "${prefix}identity-$gen"
+        val nextTls = "${prefix}tls-$gen"
         Keys.generateEcKey(nextId, Keys.hexToBytes(nonce))
         Keys.generateEcKey(nextTls)
         val (idChain, pubChain, ca) = try {

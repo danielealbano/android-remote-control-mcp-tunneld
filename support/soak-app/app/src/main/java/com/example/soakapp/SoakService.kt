@@ -23,6 +23,7 @@ class SoakService : Service() {
     private val lifecycle = Any()
     private val startLock = Any()
     @Volatile private var running = false
+    private var runningEnv: String? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -32,9 +33,16 @@ class SoakService : Service() {
         when (intent?.getStringExtra("command")) {
             "start" -> Thread { guarded("start") { doStart(intent) } }.start()
             "stop" -> Thread { guarded("stop") { doStop() } }.start()
+            "forget" -> Thread { guarded("forget") { doForget(intent) } }.start()
         }
         return START_NOT_STICKY
     }
+
+    private fun env(intent: Intent) = Env(
+        intent.getStringExtra("enrollHost")!!,
+        intent.getStringExtra("controlHost")!!,
+        intent.getStringExtra("tunnelDomain")!!,
+    )
 
     private fun doStart(intent: Intent) {
         val count = intent.getStringExtra("count")!!.toInt()
@@ -42,26 +50,30 @@ class SoakService : Service() {
         val spacingSeconds = intent.getStringExtra("spacingSeconds")?.toLong() ?: 65L
         require(spacingSeconds >= 0) { "spacingSeconds must be >= 0" }
         val parallel = intent.getStringExtra("parallel") == "true"
-        val enrollHost = intent.getStringExtra("enrollHost")!!
-        val controlHost = intent.getStringExtra("controlHost")!!
-        val tunnelDomain = intent.getStringExtra("tunnelDomain")!!
+        val env = env(intent)
         val net = Net(intent.getStringExtra("caPath"), intent.getStringExtra("edgePort")?.toInt())
-        val store = PhoneStore(File(filesDir, "phones"))
+        val root = File(filesDir, "phones")
         synchronized(startLock) {
+            listOf("ready", "error", "failures.txt").forEach { File(filesDir, it).delete() }
+            PhoneStore.migrateLegacy(root)
+            val store = PhoneStore(root, env)
             synchronized(lifecycle) {
+                check(phones.isEmpty() || runningEnv == env.key) {
+                    "phones of environment $runningEnv are running; stop them before starting ${env.key}"
+                }
                 running = true
+                runningEnv = env.key
                 if (wakeLock == null) {
                     wakeLock = getSystemService(PowerManager::class.java)
                         .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soakapp:run")
                         .also { it.acquire() }
                 }
             }
-            listOf("ready", "error", "failures.txt").forEach { File(filesDir, it).delete() }
             val todo = (0 until count).filter { !phones.containsKey(it) }
             val failures = CopyOnWriteArrayList<String>()
             val bring = { i: Int, jitter: Boolean ->
                 try {
-                    bringUp(net, store, i, enrollHost, controlHost, tunnelDomain, jitter)
+                    bringUp(net, store, env, i, jitter)
                 } catch (t: Throwable) {
                     Log.e(TAG, "phone $i failed", t)
                     failures.add("phone $i: $t")
@@ -82,20 +94,19 @@ class SoakService : Service() {
         }
     }
 
-    private fun bringUp(net: Net, store: PhoneStore, i: Int, enrollHost: String, controlHost: String, tunnelDomain: String, jitter: Boolean) {
+    private fun bringUp(net: Net, store: PhoneStore, env: Env, i: Int, jitter: Boolean) {
         val saved = store.load(i)
-        val resumed = saved?.takeIf { it.enrollHost == enrollHost && it.controlHost == controlHost && it.tunnelDomain == tunnelDomain }
-            ?.let { restore(net, i, it) }
-        val id = resumed ?: run {
+        val id = if (saved != null) {
+            restore(net, i, saved)
+        } else {
             if (jitter) Thread.sleep(Random.nextLong(0, 5001))
-            store.delete(i)
-            Keys.deleteAll(Enroll.aliasPrefix(i))
-            Enroll.enroll(net, i, enrollHost, controlHost, tunnelDomain).also { store.save(i, it) }
+            Keys.deleteAll(Enroll.aliasPrefix(env, i))
+            Enroll.enroll(net, i, env.enrollHost, env.controlHost, env.tunnelDomain).also { store.save(i, it) }
         }
         val (key, chain) = id.tlsCredential()
         val server = Server(basePort + i).also { it.start(key, chain) }
         val renewLock = Any()
-        val tunnel = Tunnel(i, net, id.mtlsClient(), controlHost, server::localPort) { nonce ->
+        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, server::localPort) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce)
                 store.save(i, id)
@@ -108,21 +119,38 @@ class SoakService : Service() {
             error("phone $i (${id.name}): control stream not bound within 60s")
         }
         phones[i] = Phone(id.name, server, tunnel)
-        Log.i(TAG, "phone $i bound as ${id.name}${if (resumed != null) " (resumed)" else ""}")
+        Log.i(TAG, "phone $i bound as ${id.name}${if (saved != null) " (resumed)" else ""}")
     }
 
-    private fun restore(net: Net, i: Int, saved: PhoneStore.Saved): Identity? = try {
+    private fun restore(net: Net, i: Int, saved: PhoneStore.Saved): Identity {
         val s = saved.state
-        Keys.privateKey(s.identityAlias)
-        Keys.privateKey(s.tlsAlias)
-        Identity(
+        try {
+            Keys.privateKey(s.identityAlias)
+            Keys.privateKey(s.tlsAlias)
+        } catch (t: Throwable) {
+            throw IllegalStateException("phone $i: saved identity ${saved.name} has no usable keys; it is kept, not replaced", t)
+        }
+        return Identity(
             net, i, saved.name, saved.enrollHost, saved.controlHost, saved.tunnelDomain,
             s.identityAlias, s.tlsAlias, s.identityChain, s.publicChain, s.caId, s.generation,
             s.prevIdentityAlias, s.prevTlsAlias,
         )
-    } catch (t: Throwable) {
-        Log.w(TAG, "phone $i: saved identity ${saved.name} is unusable, enrolling a new one", t)
-        null
+    }
+
+    private fun doForget(intent: Intent) {
+        val env = env(intent)
+        val root = File(filesDir, "phones")
+        synchronized(startLock) {
+            listOf("forgotten", "error").forEach { File(filesDir, it).delete() }
+            PhoneStore.migrateLegacy(root)
+            synchronized(lifecycle) {
+                check(phones.isEmpty() || runningEnv != env.key) { "environment ${env.key} is running; stop it before forgetting it" }
+            }
+            val forgotten = PhoneStore(root, env).forgetAll()
+            Keys.deleteAll(Enroll.envAliasPrefix(env))
+            Log.i(TAG, "forgot $forgotten saved phones of environment ${env.key}")
+            File(filesDir, "forgotten").writeText("$forgotten\n")
+        }
     }
 
     private fun writeNames() {
@@ -136,6 +164,7 @@ class SoakService : Service() {
             running = false
             phones.values.forEach { it.tunnel.stop(); it.server.stop() }
             phones.clear()
+            runningEnv = null
             wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = null
         }

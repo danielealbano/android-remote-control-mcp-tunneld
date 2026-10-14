@@ -9,6 +9,7 @@ class CommandReceiver : BroadcastReceiver() {
         val command = when (intent.action) {
             "$PKG.start" -> "start"
             "$PKG.stop" -> "stop"
+            "$PKG.forget" -> "forget"
             else -> return
         }
         val svc = Intent(context, SoakService::class.java).apply {
