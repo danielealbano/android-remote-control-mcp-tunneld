@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -28,6 +29,9 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 	rec.PublicConnOpen()
 	rec.PhoneConnOpen()
 	rec.StreamOpen()
+	if err := m.RegisterLogSinkErrors(func() float64 { return 0 }); err != nil {
+		t.Fatal(err)
+	}
 
 	fams, err := m.Registry().Gather()
 	if err != nil {
@@ -40,20 +44,29 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 	return set
 }
 
-// TestGrafanaDashboardReferencesRealFamilies fails if the shipped dashboard queries any tunneld_*
+// TestGrafanaDashboardReferencesRealFamilies fails if any shipped dashboard queries a tunneld_*
 // family that is not actually registered — the class of stale-artifact drift where a removed metric
 // family leaves the dashboard querying a name that no longer exists (permanently empty panels).
 func TestGrafanaDashboardReferencesRealFamilies(t *testing.T) {
-	data, err := os.ReadFile("../../deploy/grafana/provisioning/dashboards/tunneld.json")
+	paths, err := filepath.Glob("../../deploy/grafana/provisioning/dashboards/*.json")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(paths) == 0 {
+		t.Fatal("no dashboards found")
+	}
 	registered := registeredFamilies(t)
 	re := regexp.MustCompile(`tunneld_[a-z_]+`)
-	for _, ref := range dedup(re.FindAllString(string(data), -1)) {
-		// Histogram/summary suffixes would be stripped, but the E2E families are counters/gauges only.
-		if _, ok := registered[ref]; !ok {
-			t.Errorf("dashboard references unregistered metric family %q", ref)
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ref := range dedup(re.FindAllString(string(data), -1)) {
+			// Histogram/summary suffixes would be stripped, but the E2E families are counters/gauges only.
+			if _, ok := registered[ref]; !ok {
+				t.Errorf("%s references unregistered metric family %q", filepath.Base(path), ref)
+			}
 		}
 	}
 }
