@@ -32,6 +32,9 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 	if err := m.RegisterLogSinkErrors(func() float64 { return 0 }); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.RegisterValkeyPool(func() ValkeyPoolStats { return ValkeyPoolStats{} }); err != nil {
+		t.Fatal(err)
+	}
 
 	fams, err := m.Registry().Gather()
 	if err != nil {
