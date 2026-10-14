@@ -16,7 +16,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -98,8 +97,6 @@ type fakeRouter struct {
 	nodeID, fp, connID string
 	ok                 bool
 	err                error
-	nodeAdv            string
-	nodeOK             bool
 
 	mu      sync.Mutex
 	queue   []fakeRoute
@@ -117,61 +114,64 @@ func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, strin
 	}
 	return r.nodeID, r.fp, r.connID, r.ok, r.err
 }
-func (r *fakeRouter) LookupNode(context.Context, string) (string, bool, error) {
-	return r.nodeAdv, r.nodeOK, nil
+
+func (r *fakeRouter) set(nodeID, fp, connID string, ok bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nodeID, r.fp, r.connID, r.ok, r.err = nodeID, fp, connID, ok, err
 }
 
-// fakeLocal fakes edge.LocalDialer. When `errQueue` is non-empty each OpenStream consumes one entry (a
-// nil entry means success, returning ds); otherwise the static ds/err answer.
-type fakeLocal struct {
-	has, owns bool
-	ds        phoneconn.DataStream
-	err       error
-	opened    int
+type fakeDialBacks struct {
+	mu      sync.Mutex
+	tokens  []string
+	tunnels []string
+	err     error
+	never   bool
+	phones  []net.Conn
+}
+
+func (f *fakeDialBacks) Await(ctx context.Context, token, tunnel string, open func(context.Context) error) (net.Conn, error) {
+	f.mu.Lock()
+	f.tokens = append(f.tokens, token)
+	f.tunnels = append(f.tunnels, tunnel)
+	err, never := f.err, f.never
+	f.mu.Unlock()
+	if oerr := open(ctx); oerr != nil {
+		return nil, oerr
+	}
+	if err != nil {
+		return nil, err
+	}
+	if never {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	edgeSide, phoneSide := net.Pipe()
+	f.mu.Lock()
+	f.phones = append(f.phones, phoneSide)
+	f.mu.Unlock()
+	return edgeSide, nil
+}
+
+func (f *fakeDialBacks) phone(i int) net.Conn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.phones[i]
+}
+
+type openCall struct{ nodeID, name, connID, token string }
+
+type fakeOpener struct {
 	mu        sync.Mutex
-	errQueue  []error
+	calls     []openCall
+	errByNode map[string]error
 }
 
-func (l *fakeLocal) HasConn(string) bool          { return l.has }
-func (l *fakeLocal) OwnsConn(string, string) bool { return l.owns }
-func (l *fakeLocal) OpenStream(context.Context, string, string) (phoneconn.DataStream, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.opened++
-	if len(l.errQueue) > 0 {
-		e := l.errQueue[0]
-		l.errQueue = l.errQueue[1:]
-		if e != nil {
-			return nil, e
-		}
-		return l.ds, nil
-	}
-	return l.ds, l.err
-}
-
-// fakeMesh fakes edge.MeshDialer. When `errQueue` is non-empty each OpenStream consumes one entry (a
-// nil entry means success); otherwise the static rwc/err answer.
-type fakeMesh struct {
-	rwc      io.ReadWriteCloser
-	err      error
-	opened   int
-	mu       sync.Mutex
-	errQueue []error
-}
-
-func (m *fakeMesh) OpenStream(context.Context, string, string, string, string) (io.ReadWriteCloser, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.opened++
-	if len(m.errQueue) > 0 {
-		e := m.errQueue[0]
-		m.errQueue = m.errQueue[1:]
-		if e != nil {
-			return nil, e
-		}
-		return m.rwc, nil
-	}
-	return m.rwc, m.err
+func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token})
+	return o.errByNode[nodeID]
 }
 
 // pipeStream is an in-memory io.ReadWriteCloser backed by a byte source and a sink.
@@ -261,13 +261,13 @@ func (f *fakeACMEChallenges) lookups() []string {
 
 // testEdge builds an Edge wired to fakes + a miniredis-backed limiter.
 type testEdge struct {
-	e     *Edge
-	rec   *recRecorder
-	sink  *fakeSink
-	rtr   *fakeRouter
-	local *fakeLocal
-	mesh  *fakeMesh
-	chal  *fakeACMEChallenges
+	e      *Edge
+	rec    *recRecorder
+	sink   *fakeSink
+	rtr    *fakeRouter
+	dial   *fakeDialBacks
+	opener *fakeOpener
+	chal   *fakeACMEChallenges
 }
 
 func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun func(string, string) bool) *testEdge {
@@ -280,15 +280,15 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	rec := &recRecorder{}
 	sink := &fakeSink{}
 	rtr := &fakeRouter{}
-	local := &fakeLocal{}
-	mesh := &fakeMesh{}
+	dial := &fakeDialBacks{}
+	opener := &fakeOpener{errByNode: map[string]error{}}
 	chal := &fakeACMEChallenges{}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
-	e := New(cfg, banIP, banTun, rec, rtr, local, mesh, lim, sink, chal, addr)
-	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, local: local, mesh: mesh, chal: chal}
+	e := New(cfg, banIP, banTun, rec, rtr, dial, opener, lim, sink, chal, addr)
+	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, dial: dial, opener: opener, chal: chal}
 }
 
 func containsStr(ss []string, want string) bool {
