@@ -160,7 +160,11 @@ then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-con
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
 spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
 a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being queued when
-`--shutdown-grace` expires, or arriving after shutdown. The compose stack
+`--shutdown-grace` expires, or arriving after shutdown. Grafana provisioning (`deploy/grafana/`) ships five
+dashboards: Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard handshake and
+ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail; they expect
+every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey exporter
+targets). The compose stack
 ships Prometheus, Grafana, Alertmanager, and ntfy on
 `127.0.0.1`-only ports (reach them via SSH forward); alerts route to the phone via the ntfy bridge.
 Secrets, key material, and tunnel payloads are NEVER logged.
