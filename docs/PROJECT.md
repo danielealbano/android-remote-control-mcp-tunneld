@@ -59,7 +59,8 @@ of the raw TCP connection.
   [`PROTOCOL.md`](PROTOCOL.md) §2.
 - **Server-run ACME chain**: Let's Encrypt → Google Trust Services → ZeroSSL, with automatic spillover,
   a per-CA validation method (DNS-01 / HTTP-01 / TLS-ALPN-01; defaults LE + GTS TLS-ALPN-01, ZeroSSL HTTP-01 — answered by tunneld's own listeners from Valkey, so any replica answers), and short-lived certs renewed on a uniform ~4.7-day cadence. The phone holds the TLS private key;
-  only CSRs leave it.
+  only CSRs leave it. Every successful issuance — phone cert, renewal or reserved-host cert — logs
+  `acme certificate issued` at Info with the issuing `ca`, the `name`, the `serial` and `not_after`.
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
   **mesh-role** certs (SAN = node id). The public edge does NO client-cert auth (it relays opaque TLS).
