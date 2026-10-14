@@ -263,6 +263,10 @@ after shutdown; local I/O errors are logged at most once per minute, and a suppr
 op, path and error) is reported once the minute has passed and at shutdown. Shutdown always waits for the
 writer: events still queued when `--shutdown-grace` expires are dropped, counted and logged.
 
+Errors the Go HTTP servers report themselves (e.g. a failed TLS handshake) go through slog as well: at Debug on
+the internet-facing enroll / control / `:80` servers (attacker-driven, like `no-route`), at Warn on the
+WireGuard-only mesh and internal servers.
+
 A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
 fan-out handler counts every failed record in `tunneld_log_sink_errors_total` and writes the sink's
 first failure — then at most one summary per minute carrying the suppressed count — directly to stderr;

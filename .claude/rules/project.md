@@ -182,7 +182,7 @@ MUST NOT be relaxed without explicit user direction.
   background flusher — never synchronously on the data plane).
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
   summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
-  value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert.
+  value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert. Go HTTP-server errors (failed TLS handshakes) go through slog: Debug on the public enroll/control/`:80` servers, Warn on mesh/internal.
 - Connection logs are SPOOLED and uploaded per node (`store.ConnLogSpool`): enqueue is O(1) and MUST NEVER
   block an admission/splice/teardown path (a 5000-event channel → ONE writer appending JSON lines to a local
   file in `--conn-log-dir`); files rotate at clock-aligned 5-minute windows / 16 MiB / shutdown and a
