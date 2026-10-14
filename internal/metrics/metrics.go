@@ -94,6 +94,7 @@ func NewMetrics() *Metrics {
 		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
 		m.connLogDropped,
 		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	// Pre-register the EXACT rejection-reason label set so the family always exposes every registered
 	// reason (and only those — PromRecorder.Reject refuses labels outside observ.RejectReasons).

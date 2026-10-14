@@ -14,3 +14,4 @@ scrape_configs:
     # scale. The internal listener (:9090) is scraped on the compose network only — never published.
     static_configs:
       - targets: ["tunneld:9090"]
+        labels: {node: local}

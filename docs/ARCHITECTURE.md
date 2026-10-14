@@ -206,7 +206,8 @@ silently allowing every signer.
 ## 8. Observability wiring
 
 `observ.Recorder` is the consumer-site interface (implemented by `metrics.PromRecorder`, faked in tests).
-The internal listener serves `/metrics` (custom registry, aggregate families only), `/healthz`,
+The internal listener serves `/metrics` (custom registry, aggregate families only, plus the Go runtime and
+process collectors: open/max file descriptors, RSS, CPU), `/healthz`,
 `/api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
 `/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
 `/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
