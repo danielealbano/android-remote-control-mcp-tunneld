@@ -73,7 +73,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * sum by (mode) (rate(node_cpu_seconds_total{node=\"$node\"}[5m])) / scalar(count(node_cpu_seconds_total{mode=\"idle\",node=\"$node\"}))",
+     "expr": "100 * sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\",node=\"$node\"}[5m])) / scalar(count(node_cpu_seconds_total{mode=\"idle\",node=\"$node\"}))",
      "legendFormat": "{{mode}}"
     }
    ],
@@ -109,7 +109,7 @@
   {
    "id": 3,
    "type": "timeseries",
-   "title": "Load vs CPU count",
+   "title": "Load average",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -148,15 +148,6 @@
      },
      "expr": "node_load15{node=\"$node\"}",
      "legendFormat": "load 15m"
-    },
-    {
-     "refId": "D",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "count(node_cpu_seconds_total{mode=\"idle\",node=\"$node\"})",
-     "legendFormat": "CPUs"
     }
    ],
    "fieldConfig": {
@@ -373,15 +364,6 @@
      },
      "expr": "node_memory_SwapTotal_bytes{node=\"$node\"} - node_memory_SwapFree_bytes{node=\"$node\"}",
      "legendFormat": "used"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "node_memory_SwapTotal_bytes{node=\"$node\"}",
-     "legendFormat": "total"
     }
    ],
    "fieldConfig": {
@@ -1157,15 +1139,6 @@
      },
      "expr": "node_filefd_allocated{node=\"$node\"}",
      "legendFormat": "allocated"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "node_filefd_maximum{node=\"$node\"}",
-     "legendFormat": "maximum"
     }
    ],
    "fieldConfig": {
