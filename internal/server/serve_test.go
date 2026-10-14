@@ -19,6 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
+
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/metrics"
@@ -355,5 +358,38 @@ func TestRegisterLogSinkErrors(t *testing.T) {
 				t.Fatalf("tunneld_log_sink_errors_total registered = %v, want %v", found, tc.registered)
 			}
 		})
+	}
+}
+
+func TestRegisterValkeyPool_ReportsTheClientPool(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), PoolSize: 50})
+	t.Cleanup(func() {
+		if err := rdb.Close(); err != nil {
+			t.Errorf("close valkey client: %v", err)
+		}
+	})
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		t.Fatal(err)
+	}
+	m := metrics.NewMetrics()
+	if err := registerValkeyPool(m, rdb); err != nil {
+		t.Fatal(err)
+	}
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]float64{}
+	for _, mf := range mfs {
+		for _, mt := range mf.GetMetric() {
+			got[mf.GetName()] = mt.GetGauge().GetValue()
+		}
+	}
+	if got["tunneld_valkey_pool_max_connections"] != 50 {
+		t.Fatalf("tunneld_valkey_pool_max_connections = %v, want 50", got["tunneld_valkey_pool_max_connections"])
+	}
+	if got["tunneld_valkey_pool_connections"] < 1 {
+		t.Fatalf("tunneld_valkey_pool_connections = %v, want ≥ 1 after a command", got["tunneld_valkey_pool_connections"])
 	}
 }

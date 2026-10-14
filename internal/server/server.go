@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/acme"
@@ -126,6 +127,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Metrics + admin + recorder.
 	m := metrics.NewMetrics()
 	if err := registerLogSinkErrors(m, logger); err != nil {
+		return err
+	}
+	if err := registerValkeyPool(m, rdb); err != nil {
 		return err
 	}
 	adminTunnels := admin.NewTunnels(reg, lim) // composes routing meta (router) + live windows (limiter)
@@ -459,6 +463,20 @@ func registerLogSinkErrors(m *metrics.Metrics, logger *slog.Logger) error {
 	}
 	if err := m.RegisterLogSinkErrors(func() float64 { return float64(c.SinkErrors()) }); err != nil {
 		return fmt.Errorf("register the log sink error metric: %w", err)
+	}
+	return nil
+}
+
+func registerValkeyPool(m *metrics.Metrics, rdb *redis.Client) error {
+	poolSize := float64(rdb.Options().PoolSize)
+	if err := m.RegisterValkeyPool(func() metrics.ValkeyPoolStats {
+		s := rdb.PoolStats()
+		return metrics.ValkeyPoolStats{
+			Conns: float64(s.TotalConns), IdleConns: float64(s.IdleConns), MaxConns: poolSize,
+			Waits: float64(s.WaitCount), Timeouts: float64(s.Timeouts),
+		}
+	}); err != nil {
+		return fmt.Errorf("register the valkey pool metrics: %w", err)
 	}
 	return nil
 }
