@@ -1,7 +1,0 @@
-# Copy this file to config.scfg (which is gitignored) and set the real ntfy write token below.
-http-address :8080
-base-url http://ntfy
-ntfy {
-    topic alerts
-    access-token changeme-write-token
-}

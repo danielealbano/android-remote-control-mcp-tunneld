@@ -7,8 +7,7 @@ x-logging: &caplog
 # per-tunnel TLS here. Multi-replica / mesh deployments run ONE tunneld per host (the cross-node mesh is
 # exercised by the e2e tier); this single-host stack runs one replica. Durable state lives in MinIO (a
 # LOCAL plain-S3 stand-in — production points --s3-endpoint at any plain-S3 provider); transient control
-# state lives in Valkey. The observability UIs publish to 127.0.0.1 ONLY (reach them via SSH forward) —
-# with Traefik gone, nothing else may expose them.
+# state lives in Valkey.
 services:
   tunneld:
     build: { context: .., args: { VERSION: "${TUNNELD_VERSION:-dev}" } }
@@ -20,9 +19,7 @@ services:
     # Run as the OPERATOR's uid (see .env.example): the distroless default uid 65532 cannot read the
     # operator-owned 0600 CA key / attestation files or write the bind-mounted ./logs + ./acme dirs.
     user: "${DEPLOY_UID:?set to your uid — run: id -u}"
-    # ONLY the TUNNELD_* env twins (+ the lego DNS-provider secret) — NEVER `env_file: .env`: the shared
-    # .env carries unrelated ops/grafana credentials that must not enter the process terminating untrusted
-    # public traffic (least privilege).
+    # ONLY the TUNNELD_* env twins (+ the lego DNS-provider secret) — NEVER `env_file: .env`.
     env_file:
       - { path: tunneld.env, required: false }   # required:false so `docker compose config -q` passes on
         # a bare checkout (only the .example exists); at RUNTIME a missing file is caught fast by tunneld's
@@ -84,55 +81,6 @@ services:
         mc mb --ignore-existing "local/${S3_BUCKET}"
     logging: *caplog
 
-  prometheus:
-    image: prom/prometheus:v3.15.0
-    restart: unless-stopped
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
-      - prom-data:/prometheus
-    ports: ["127.0.0.1:9090:9090"]   # localhost-only (SSH-forward); with Traefik gone nothing else exposes it
-    logging: *caplog
-
-  alertmanager:
-    image: prom/alertmanager:v0.34.1
-    restart: unless-stopped
-    volumes:
-      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-    ports: ["127.0.0.1:9093:9093"]
-    logging: *caplog
-
-  grafana:
-    image: grafana/grafana:13.2.3
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD required}
-      GF_SERVER_ROOT_URL: http://localhost:3000
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - grafana-data:/var/lib/grafana
-    ports: ["127.0.0.1:3000:3000"]
-    logging: *caplog
-
-  ntfy:
-    image: binwiederhier/ntfy:v2.29.0
-    restart: unless-stopped
-    command: ["serve"]
-    environment:
-      NTFY_BASE_URL: http://localhost:8080
-    volumes:
-      - ./ntfy/server.yml:/etc/ntfy/server.yml:ro
-      - ntfy-data:/var/lib/ntfy
-    ports: ["127.0.0.1:8080:80"]
-    logging: *caplog
-
-  ntfy-alertmanager:
-    image: xenrox/ntfy-alertmanager:1.0.1
-    restart: unless-stopped
-    volumes:
-      - ./ntfy-alertmanager/config.scfg:/etc/ntfy-alertmanager/config:ro
-    logging: *caplog
-
   fetcher:
     image: alpine:3
     restart: unless-stopped
@@ -146,6 +94,3 @@ services:
 volumes:
   banfiles: {}
   minio-data: {}
-  prom-data: {}
-  grafana-data: {}
-  ntfy-data: {}
