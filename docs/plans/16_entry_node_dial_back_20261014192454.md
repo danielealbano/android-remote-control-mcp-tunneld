@@ -737,19 +737,19 @@ DoD:
 
 ---
 
-## [ ] US5 — Mesh: control only, with deadlines
+## [x] US5 — Mesh: control only, with deadlines
 
 Why: no data crosses nodes any more (D1, D7); the entry node asks the owner to send `OPEN`, and closes are
 announced to every node (D13).
 
 Acceptance criteria:
-- [ ] `POST /api/v1/mesh/control` accepts `op` ∈ {`renew`, `terminate`, `open`, `evict`}; `open` requires `conn_id` and an `open` payload with `token` + `addr`, `evict` requires `conn_id` (400 otherwise); they dispatch to `Controller.Open` / `Controller.Evict`.
-- [ ] `/api/v1/mesh/data`, `OpenStream`, `Stream`, the owner stream, `Bridge`, `OwnerCheck` and `ErrDuplicateStream` are gone; any other path is 404.
-- [ ] Every `Client.Control` call is bounded by a per-request timeout (default 10 s, `WithControlTimeout` for tests) on top of the caller's ctx.
+- [x] `POST /api/v1/mesh/control` accepts `op` ∈ {`renew`, `terminate`, `open`, `evict`}; `open` requires `conn_id` and an `open` payload with `token` + `addr`, `evict` requires `conn_id` (400 otherwise); they dispatch to `Controller.Open` / `Controller.Evict`.
+- [x] `/api/v1/mesh/data`, `OpenStream`, `Stream`, the owner stream, `Bridge`, `OwnerCheck` and `ErrDuplicateStream` are gone; any other path is 404.
+- [x] Every `Client.Control` call is bounded by a per-request timeout (default 10 s, `WithControlTimeout` for tests) on top of the caller's ctx.
 
-### [ ] Task 5.1 — Listener
+### [x] Task 5.1 — Listener
 
-- [ ] **Action 5.1.1** — modify `internal/mesh/listener.go` (imports: add `internal/wire`; drop `sync`, `time`):
+- [x] **Action 5.1.1** — modify `internal/mesh/listener.go` (imports: add `internal/wire`; drop `sync`, `time`):
   - Delete `ErrDuplicateStream`, `Bridge`, `OwnerCheck`, `serveData`, `ownerStream` and its methods; `Handler` keeps `control` and `logger`; `NewHandler(control Controller, opts ...HandlerOption)`.
   - `Controller` gains `Open(ctx context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error)` and `Evict(ctx context.Context, tunnel, connID, reason string) (bool, error)`.
   - `ControlRequest` (the still-correct `// the tunnel name to act on` on `Tunnel` stays):
@@ -783,11 +783,11 @@ type ControlRequest struct {
   - Remove the comment parts made wrong: the `Handler` doc sentences about the X-Tunnel / X-Conn-Id / X-Stream-Id headers, the connID check and bridging; the `"renew" | "terminate"` op comment; the op list in the `serveControl` doc; "on THIS (owner) node" in the `Controller` doc.
 
 DoD:
-- [ ] No added comments; `// the tunnel name to act on` kept.
+- [x] No added comments; `// the tunnel name to act on` kept.
 
-### [ ] Task 5.2 — Client
+### [x] Task 5.2 — Client
 
-- [ ] **Action 5.2.1** — modify `internal/mesh/client.go`: delete `Stream`, `OpenStream`, `clientStream` and its
+- [x] **Action 5.2.1** — modify `internal/mesh/client.go`: delete `Stream`, `OpenStream`, `clientStream` and its
   methods, `ErrNoOwner` if unused, and imports left unused; add
 
 ```go
@@ -808,11 +808,11 @@ func WithControlTimeout(d time.Duration) Option { return func(c *Client) { c.con
   streams" in the `Client` doc; "last OpenStream" / "next OpenStream" mentions in the pool comments.
 
 DoD:
-- [ ] `grep -rn 'X-Tunnel\|X-Conn-Id\|OpenStream\|ownerStream\|clientStream' internal/mesh/*.go` and `grep -rn 'mesh/data' internal/mesh --include='*.go' --exclude='*_test.go'` are empty; no added comments.
+- [x] `grep -rn 'X-Tunnel\|X-Conn-Id\|OpenStream\|ownerStream\|clientStream' internal/mesh/*.go` and `grep -rn 'mesh/data' internal/mesh --include='*.go' --exclude='*_test.go'` are empty; no added comments.
 
-### [ ] Task 5.3 — Tests
+### [x] Task 5.3 — Tests
 
-- [ ] **Action 5.3.1** — tests in `internal/mesh/mesh_test.go` (the fake `Controller` gains `Open`/`Evict`):
+- [x] **Action 5.3.1** — tests in `internal/mesh/mesh_test.go` (the fake `Controller` gains `Open`/`Evict`):
 
 | Test | Verifies |
 |---|---|
@@ -828,27 +828,27 @@ DoD:
 | Delete | `TestMeshRejectsMissingHeaders`, `TestMesh_NonPostIs405`, `TestMeshNotOwner`, `TestMeshBridgesValidStream`, `TestMeshHandler_DuplicateStreamAnswers422`, `TestDataPathRenamed`, `TestMeshClient_Maps422ToDuplicateStream`, `TestOwnerStream_CloseUnblocksBlockedWrite`, `TestClientStream_Close_ReturnsCloseErrorOnce`, and the helpers left unused (`fakeBridge`, `nopRWC`, `meshBlockingWriter`); the test handler builder takes only the fake `Controller` |
 
 DoD:
-- [ ] Every remaining mesh test compiles against the new `NewHandler`/`Controller`.
+- [x] Every remaining mesh test compiles against the new `NewHandler`/`Controller`.
 
 ---
 
-## [ ] US6 — Edge: wait for the dial-back locally
+## [x] US6 — Edge: wait for the dial-back locally
 
 Why: the entry node now owns the whole public connection: token, stream slot, `OPEN` request, dial-back wait,
 splice, and its teardown when the phone's control connection closes.
 
 Acceptance criteria:
-- [ ] Per public connection one token (`crypto/rand.Text`) is the stream-slot member, the `Charge` member and the dial-back token; a retry after a fresh route lookup reuses it.
-- [ ] `openFar` bounds the `OPEN` request + the wait by `--limit-dialback-timeout` and returns the phone's raw connection.
-- [ ] Each splice records the control-connection id it was opened through; `EvictConnStreams(name, connID, reason)` ends exactly those splices — `close_reason` `ban-evict` / `admin-terminate` when that is why the control connection closed, `phone-close` otherwise.
-- [ ] A stream slot is always released when its public connection ends (also after a fail-open admission: `ZREM` of an absent member is a no-op).
-- [ ] Every 10 s (`routeCheckInterval`) each splice's watcher re-reads its tunnel's route and ends the splice with `phone-close` when the route is gone or carries another connID (a lookup error keeps the splice).
-- [ ] The conn-log `conn` id stays an 8-hex `store.MustConnID()` (the token is never logged).
-- [ ] The edge no longer depends on phoneconn's manager or the mesh client.
+- [x] Per public connection one token (`crypto/rand.Text`) is the stream-slot member, the `Charge` member and the dial-back token; a retry after a fresh route lookup reuses it.
+- [x] `openFar` bounds the `OPEN` request + the wait by `--limit-dialback-timeout` and returns the phone's raw connection.
+- [x] Each splice records the control-connection id it was opened through; `EvictConnStreams(name, connID, reason)` ends exactly those splices — `close_reason` `ban-evict` / `admin-terminate` when that is why the control connection closed, `phone-close` otherwise.
+- [x] A stream slot is always released when its public connection ends (also after a fail-open admission: `ZREM` of an absent member is a no-op).
+- [x] Every 10 s (`routeCheckInterval`) each splice's watcher re-reads its tunnel's route and ends the splice with `phone-close` when the route is gone or carries another connID (a lookup error keeps the splice).
+- [x] The conn-log `conn` id stays an 8-hex `store.MustConnID()` (the token is never logged).
+- [x] The edge no longer depends on phoneconn's manager or the mesh client.
 
-### [ ] Task 6.1 — Interfaces + openFar + handleTunnel
+### [x] Task 6.1 — Interfaces + openFar + handleTunnel
 
-- [ ] **Action 6.1.1** — modify `internal/edge/edge.go` (drop the `internal/phoneconn` import if nothing else in
+- [x] **Action 6.1.1** — modify `internal/edge/edge.go` (drop the `internal/phoneconn` import if nothing else in
   the file uses it):
   - `Router` keeps only `LookupRoute`.
   - Replace `LocalDialer` and `MeshDialer` with:
@@ -866,7 +866,7 @@ type Opener interface {
   - `StreamLimiter`: `AcquireStream(ctx context.Context, name, member string, maxN int) (bool, error)`, `ReleaseStream(ctx context.Context, name, member string) error`, `Charge(ctx context.Context, name, member, dir string, nr int64) (…)`.
   - `Edge` fields `local`/`mesh` → `dialBacks DialBackWaiter`, `opener Opener`; `New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool, rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, lim StreamLimiter, logs PhoneEventSink, chal ACMEChallenges, addr net.Addr)`.
   - Delete `errNoOwner` if unused.
-- [ ] **Action 6.1.2** — modify `internal/edge/bridge.go` (imports: add `crypto/rand`; drop `fmt`, `internal/mesh`,
+- [x] **Action 6.1.2** — modify `internal/edge/bridge.go` (imports: add `crypto/rand`; drop `fmt`, `internal/mesh`,
   `internal/phoneconn` if unused):
   - `activeStream` gains `member string`, `connID string`, `phoneGone atomic.Bool`, `parent context.Context` (the `handleTunnel` ctx); `pacedCopy` calls `e.lim.Charge(ctx, name, as.member, dir, int64(nr))`.
   - Add:
@@ -965,15 +965,15 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) 
 
   - Delete `isDuplicateStream`.
   - Remove the comment parts made wrong: the stream-id fallback comment; the `releaseSlot` sentences "Release against the connID … slots were reset)" and "a fail-open admission must not DECR a slot" / "counter self-heals at its TTL" (the counter is now a per-member set); the duplicate-retry and "(local or mesh)" mentions; the citation "docs/PROTOCOL.md §5" in the fresh-lookup comment (the behaviour moves to PROTOCOL §4 — keep the rest of that comment); "closeFar" in the post-track comment; the old `openFar` doc; "(local dial-back or mesh stream)" on the phone→client copy; in the `EvictTunnelStreams` doc "Streams ingested on other nodes are not tracked here — they are torn down when the owner's phone connection drops.".
-- [ ] **Action 6.1.3** — modify `internal/edge/clienthello.go`: remove "(local fast path or mesh)" from the file
+- [x] **Action 6.1.3** — modify `internal/edge/clienthello.go`: remove "(local fast path or mesh)" from the file
   comment.
 
 DoD:
-- [ ] No added comments; every comment the change makes wrong is removed.
+- [x] No added comments; every comment the change makes wrong is removed.
 
-### [ ] Task 6.2 — Tests
+### [x] Task 6.2 — Tests
 
-- [ ] **Action 6.2.1** — modify `internal/edge/harness_test.go`: delete `fakeLocal`, `fakeMesh` and
+- [x] **Action 6.2.1** — modify `internal/edge/harness_test.go`: delete `fakeLocal`, `fakeMesh` and
   `fakeRouter.LookupNode` (+ its `nodeAdv`/`nodeOK` fields); keep `pipeStream` (the paced-copy and splice tests
   use it as a byte source / far side); add (in full):
 
@@ -1053,27 +1053,27 @@ func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token string)
 | Delete | `TestEdge_OpenFar_LocalWhenOwner`, `TestEdge_OpenFar_MeshWhenRemote`, `TestEdge_HandleTunnel_DuplicateStreamRetries`, `TestEdge_HandleTunnel_MeshDuplicateRetries` |
 
 DoD:
-- [ ] No edge test references `fakeLocal`, `fakeMesh`, `te.local`, `te.mesh` or `LookupNode`.
+- [x] No edge test references `fakeLocal`, `fakeMesh`, `te.local`, `te.mesh` or `LookupNode`.
 
 ---
 
-## [ ] US7 — Server wiring
+## [x] US7 — Server wiring
 
 Why: assembles the new flow: the opener (local or mesh), the mesh `open`/`evict` ops, the connection-close
 broadcast, the TLS client-auth mode, the plain listener, keepalive, and the terminate broadcast.
 
 Acceptance criteria:
-- [ ] `OPEN` carries `--dialback-advertise`, `--dialback-https`, `--dialback-mtls` and the token; the local owner queues it directly, a remote owner through mesh `open`; `applied=false` / unregistered owner / errors fail the open.
-- [ ] A phone control connection's teardown ends its splices locally (synchronously) and sends `evict` (tunnel + connID + close reason) to every other live node in a tracked background broadcast (parallel, at most 32 broadcasts at once, each bounded by 10 s, joined and cancelled at the end of the drain; closes after the drain started evict locally only); failures are logged.
-- [ ] The live-node list comes from the `nodes` id set (`SADD` + `PEXPIRE` 3 × route TTL in the node register/refresh pipeline, `SREM` on deregister, ids whose `node:{id}` expired are pruned on read) — one `SMEMBERS` + one `MGET`, never a keyspace SCAN.
-- [ ] Control-host TLS uses `RequireAndVerifyClientCert` with `--dialback-mtls`, else `VerifyClientCertIfGiven`.
-- [ ] The `:80` listener is bound when `ServesPlainHTTP()`; with `--dialback-https=false` it routes exactly `/api/v1/data` to the phone handler, every other request goes to the ACME HTTP-01 handler unchanged (no `ServeMux` path cleaning).
-- [ ] The raw `:443` and the `:80` listeners set TCP keepalive Idle 10 s, Interval 5 s, Count 3 on every accepted socket.
-- [ ] Admin terminate (route bound; 404 otherwise, unchanged) is applied locally and sent to every other live node in parallel; as today, 502 only when the owner is unreachable or its terminate failed; a non-owner failure is logged and the JSON result is still returned.
+- [x] `OPEN` carries `--dialback-advertise`, `--dialback-https`, `--dialback-mtls` and the token; the local owner queues it directly, a remote owner through mesh `open`; `applied=false` / unregistered owner / errors fail the open.
+- [x] A phone control connection's teardown ends its splices locally (synchronously) and sends `evict` (tunnel + connID + close reason) to every other live node in a tracked background broadcast (parallel, at most 32 broadcasts at once, each bounded by 10 s, joined and cancelled at the end of the drain; closes after the drain started evict locally only); failures are logged.
+- [x] The live-node list comes from the `nodes` id set (`SADD` + `PEXPIRE` 3 × route TTL in the node register/refresh pipeline, `SREM` on deregister, ids whose `node:{id}` expired are pruned on read) — one `SMEMBERS` + one `MGET`, never a keyspace SCAN.
+- [x] Control-host TLS uses `RequireAndVerifyClientCert` with `--dialback-mtls`, else `VerifyClientCertIfGiven`.
+- [x] The `:80` listener is bound when `ServesPlainHTTP()`; with `--dialback-https=false` it routes exactly `/api/v1/data` to the phone handler, every other request goes to the ACME HTTP-01 handler unchanged (no `ServeMux` path cleaning).
+- [x] The raw `:443` and the `:80` listeners set TCP keepalive Idle 10 s, Interval 5 s, Count 3 on every accepted socket.
+- [x] Admin terminate (route bound; 404 otherwise, unchanged) is applied locally and sent to every other live node in parallel; as today, 502 only when the owner is unreachable or its terminate failed; a non-owner failure is logged and the JSON result is still returned.
 
-### [ ] Task 7.1 — Live node set (router)
+### [x] Task 7.1 — Live node set (router)
 
-- [ ] **Action 7.1.1** — modify `internal/router/nodes.go` (import `fmt`):
+- [x] **Action 7.1.1** — modify `internal/router/nodes.go` (import `fmt`):
 
 ```go
 const nodeSetKey = "nodes"
@@ -1145,7 +1145,7 @@ func (r *Registry) LiveNodes(ctx context.Context) (map[string]NodeInfo, error) {
 
   (the existing `RegisterNode` / `DeregisterNode` doc comments stay; `RefreshNode` keeps delegating to `RegisterNode`.)
   Remove the comment parts made wrong: in the file header "so an edge that resolves a tunnel's owning node (via LookupRoute) can find where to dial" and in the `NodeInfo` doc "that LookupNode returns to the edge" (the edge no longer calls `LookupNode`).
-- [ ] **Action 7.1.2** — tests in `internal/router/` (miniredis):
+- [x] **Action 7.1.2** — tests in `internal/router/` (miniredis):
 
 | Test | Verifies |
 |---|---|
@@ -1154,11 +1154,11 @@ func (r *Registry) LiveNodes(ctx context.Context) (map[string]NodeInfo, error) {
 | `TestRegistry_DeregisterNode_RemovesFromSet` | deregister → absent from `LiveNodes` and from the set |
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 7.2 — Opener, controller, broadcasts, keepalive, client auth
+### [x] Task 7.2 — Opener, controller, broadcasts, keepalive, client auth
 
-- [ ] **Action 7.2.1** — modify `internal/server/serve.go` (imports: add `crypto/tls`, `sync`,
+- [x] **Action 7.2.1** — modify `internal/server/serve.go` (imports: add `crypto/tls`, `sync`,
   `internal/router`, `internal/wire`; drop what becomes unused): delete `dialBackOpener`, `bridgeAdapter`
   (+ methods), `bridgeCopy`, `closeDebug`; `phoneControl` gains
   `SendOpen(ctx context.Context, name, connID string, open wire.OpenPayload) error`; `adminController` gains
@@ -1347,11 +1347,11 @@ func (c *adminController) Evict(_ context.Context, tunnel, connID, reason string
   `Terminate` docs, and the `mesh.Controller` "used by the mesh handler on the owner node" wording.
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 7.3 — Terminate broadcast
+### [x] Task 7.3 — Terminate broadcast
 
-- [ ] **Action 7.3.1** — modify `internal/server/server.go`: add
+- [x] **Action 7.3.1** — modify `internal/server/server.go`: add
 
 ```go
 func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, log *slog.Logger,
@@ -1407,11 +1407,11 @@ func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, 
 ```
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 7.4 — Assembly in `Run`
+### [x] Task 7.4 — Assembly in `Run`
 
-- [ ] **Action 7.4.1** — modify `internal/server/server.go` (import `internal/wire`):
+- [x] **Action 7.4.1** — modify `internal/server/server.go` (import `internal/wire`):
   - Move the mesh cert + `meshClient` construction before the phone manager, then:
 
 ```go
@@ -1476,11 +1476,11 @@ DoD:
   - `/api/v1/admin/tunnels/{name}/terminate` → `adminTerminateHandler(nodeID, reg, meshClient, logger, adminCtl.Terminate)`; renew keeps `adminActionHandler`; remove `"terminate"` / `"terminated"` from the `adminActionHandler` doc (now renew only).
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 7.5 — Tests
+### [x] Task 7.5 — Tests
 
-- [ ] **Action 7.5.1** — tests in `internal/server/` (`serve_test.go`, `admin_actions_test.go`,
+- [x] **Action 7.5.1** — tests in `internal/server/` (`serve_test.go`, `admin_actions_test.go`,
   `admin_controller_test.go`; test-local fakes for `phoneControl`, `nodeResolver`, `liveNodeLister`,
   `meshControl`; the old `serve_test.go` helpers `fakeOpener` (returns the deleted `phoneconn.DataStream`),
   `blockingRWC` and `eofThenBlockRWC` are deleted):
@@ -1508,7 +1508,7 @@ DoD:
 | Delete | `TestBridgeAdapter_TranslatesDuplicateStreamID`, `TestBridgeCopyReturnsPromptlyOnPhoneEOF` |
 
 DoD:
-- [ ] `grep -rn 'bridgeAdapter\|bridgeCopy\|OpenMesh\|closeDebug' internal/server` is empty.
+- [x] `grep -rn 'bridgeAdapter\|bridgeCopy\|OpenMesh\|closeDebug' internal/server` is empty.
 
 ---
 
@@ -2123,3 +2123,13 @@ DoD:
   refuses to send one); it asserts the request really went over HTTP/2 and got 400.
 - Action 4.3.1: `stream_test.go` held only the deleted `TestHTTPDataStream_CloseUnblocksBlockedWrite` and its
   `blockingWriter`, so the file is removed.
+- Task 5.3: `startMeshPeer` takes a `release` channel (a handler that blocks until released or the request is
+  cancelled, then answers `{"applied":true}`) and counts handler entries, so the pool tests drive concurrent /
+  blocking `Control` calls; `TestClient_Control_UnblocksOnDeadPeer` sets `WithControlTimeout(time.Minute)` so only
+  the PING health can unblock it.
+- Task 6.2: `fakeRouter` gains a mutex-guarded `set(...)` (the route check reads it concurrently);
+  `countingLimiter` records the members it was called with; small helpers `freeSlots`, `runTunnel`, `waitPhone`,
+  `readFull`, `clientWrites` drive the new tests.
+- Action 7.1.1: the `LookupNode` doc's "(the edge dial path)" is removed too (the edge no longer calls it).
+- Action 7.5.1: `TestListenPublic_SetsKeepAlive` lives in `internal/server/serve_linux_test.go` (the
+  `TCP_KEEP*` socket options exist only on Linux).
