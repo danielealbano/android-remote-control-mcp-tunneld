@@ -74,18 +74,18 @@ Mesh control ops (replica↔replica, `POST /api/v1/mesh/control`):
 
 ---
 
-## [ ] US1 — Wire contract v2
+## [x] US1 — Wire contract v2
 
 Why: the `OPEN` payload and the dial-back request constants are the shared contract of tunneld, the Go client
 and the Kotlin apps.
 
 Acceptance criteria:
-- [ ] `wire.OpenPayload` carries `token`, `addr`, `use_https`, `use_mtls` (JSON names frozen by a test).
-- [ ] The dial-back path, token header and upgrade token are constants in `internal/wire`.
+- [x] `wire.OpenPayload` carries `token`, `addr`, `use_https`, `use_mtls` (JSON names frozen by a test).
+- [x] The dial-back path, token header and upgrade token are constants in `internal/wire`.
 
-### [ ] Task 1.1 — OPEN payload + dial-back constants
+### [x] Task 1.1 — OPEN payload + dial-back constants
 
-- [ ] **Action 1.1.1** — modify `internal/wire/frame.go`: replace `OpenPayload` and add the constants:
+- [x] **Action 1.1.1** — modify `internal/wire/frame.go`: replace `OpenPayload` and add the constants:
 
 ```go
 type OpenPayload struct {
@@ -109,7 +109,7 @@ const (
   "Wire protocol v1", "a v1 control-stream frame", "a v1 control frame") — the protocol is now labelled v2 in
   `docs/PROTOCOL.md`.
 
-- [ ] **Action 1.1.2** — modify `internal/wire/frame_test.go`:
+- [x] **Action 1.1.2** — modify `internal/wire/frame_test.go`:
 
 | Test | Verifies |
 |---|---|
@@ -118,22 +118,22 @@ const (
 | `TestDialBackConstantsFrozen` | `DialBackPath == "/api/v1/data"`, `DialTokenHeader == "X-Dial-Token"`, `DialUpgrade == "tunneld-dial"` |
 
 DoD:
-- [ ] No added comments; the listed wrong comment parts are gone.
+- [x] No added comments; the listed wrong comment parts are gone.
 
 ---
 
-## [ ] US2 — Dial-back configuration
+## [x] US2 — Dial-back configuration
 
 Why: each node must know the address the phone dials back to and which transport the phone must use.
 
 Acceptance criteria:
-- [ ] `--dialback-advertise` (required; `host:port` with a non-empty host and a port in 1–65535), `--dialback-https` (default true), `--dialback-mtls` (default true), env twins `TUNNELD_DIALBACK_ADVERTISE` / `_HTTPS` / `_MTLS`.
-- [ ] `--dialback-mtls` without `--dialback-https` is rejected at startup.
-- [ ] `--acme-http-listen` is validated whenever the plain listener is needed (a CA uses `http-01` OR `--dialback-https=false`).
+- [x] `--dialback-advertise` (required; `host:port` with a non-empty host and a port in 1–65535), `--dialback-https` (default true), `--dialback-mtls` (default true), env twins `TUNNELD_DIALBACK_ADVERTISE` / `_HTTPS` / `_MTLS`.
+- [x] `--dialback-mtls` without `--dialback-https` is rejected at startup.
+- [x] `--acme-http-listen` is validated whenever the plain listener is needed (a CA uses `http-01` OR `--dialback-https=false`).
 
-### [ ] Task 2.1 — Flags + validation
+### [x] Task 2.1 — Flags + validation
 
-- [ ] **Action 2.1.1** — modify `internal/config/config.go` (add import `strconv`). Right after `NameLength`
+- [x] **Action 2.1.1** — modify `internal/config/config.go` (add import `strconv`). Right after `NameLength`
   (no new section comment):
 
 ```go
@@ -174,14 +174,14 @@ func (c ServeCmd) ServesPlainHTTP() bool {
   Change the `--acme-http-listen` check's guard from `c.UsesChallenge(ChallengeHTTP01)` to `c.ServesPlainHTTP()`.
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 2.2 — Tests
+### [x] Task 2.2 — Tests
 
-- [ ] **Action 2.2.1** — modify `internal/config/config_test.go`: the base valid config gets
+- [x] **Action 2.2.1** — modify `internal/config/config_test.go`: the base valid config gets
   `DialBackAdvertise: "203.0.113.10:443", DialBackHTTPS: true, DialBackMTLS: true`; the env-based tests
   `TestEnvTwinOverridesFlag` and the challenge-defaults env-parse test set `TUNNELD_DIALBACK_ADVERTISE`.
-- [ ] **Action 2.2.2** — modify `cmd/tunneld/main_test.go` `TestCLIServeDispatch`: pass
+- [x] **Action 2.2.2** — modify `cmd/tunneld/main_test.go` `TestCLIServeDispatch`: pass
   `--dialback-advertise 203.0.113.10:443`.
 
 | Test | Verifies |
@@ -193,25 +193,25 @@ DoD:
 | `TestDialBackEnvTwins` | kong parses `TUNNELD_DIALBACK_ADVERTISE`, `TUNNELD_DIALBACK_HTTPS=false`, `TUNNELD_DIALBACK_MTLS=false`; unset bools → both true |
 
 DoD:
-- [ ] Every existing config/CLI test that builds a full serve config sets the new required flag.
+- [x] Every existing config/CLI test that builds a full serve config sets the new required flag.
 
 ---
 
-## [ ] US3 — Stream cap as a per-tunnel sorted set
+## [x] US3 — Stream cap as a per-tunnel sorted set
 
 Why: dial-back connections no longer ride on the phone control connection, so the counter that resets on a new
 route connID is wrong; a per-stream member with its own expiry self-heals a dead node or a lost release (D9).
 
 Acceptance criteria:
-- [ ] `conc:{name}` is a sorted set; members are the public connections' tokens; score = expiry (unix ms) = now + `streamTTL` (3 × `--limit-conn-idle`).
-- [ ] Admission prunes expired members, adds its member, counts, and on `count > max` removes its member and refuses; concurrent admissions never admit more than `max`.
-- [ ] Every `Charge` refreshes ONLY its own existing member (`ZADD XX`) and the key TTL; a released or expired member is never resurrected.
-- [ ] Release removes only its own member. The `conclock:{name}` lock and its code are gone.
-- [ ] The admin stats `conc` is the number of unexpired members.
+- [x] `conc:{name}` is a sorted set; members are the public connections' tokens; score = expiry (unix ms) = now + `streamTTL` (3 × `--limit-conn-idle`).
+- [x] Admission prunes expired members, adds its member, counts, and on `count > max` removes its member and refuses; concurrent admissions never admit more than `max`.
+- [x] Every `Charge` refreshes ONLY its own existing member (`ZADD XX`) and the key TTL; a released or expired member is never resurrected.
+- [x] Release removes only its own member. The `conclock:{name}` lock and its code are gone.
+- [x] The admin stats `conc` is the number of unexpired members.
 
-### [ ] Task 3.1 — Limiter
+### [x] Task 3.1 — Limiter
 
-- [ ] **Action 3.1.1** — replace the body of `internal/limit/concurrency.go`:
+- [x] **Action 3.1.1** — replace the body of `internal/limit/concurrency.go`:
 
 ```go
 package limit
@@ -254,11 +254,11 @@ func (l *Limiter) ReleaseStream(ctx context.Context, name, member string) error 
 }
 ```
 
-- [ ] **Action 3.1.2** — modify `internal/limit/lock.go`: delete `concLockTTL`, `ErrConcLockContended`,
+- [x] **Action 3.1.2** — modify `internal/limit/lock.go`: delete `concLockTTL`, `ErrConcLockContended`,
   `concKey`, `concLockKey`, `withConcLock`, `releaseConcLock` (keep `mintToken`, used by the issuance lock), the
   imports left unused (`context`, `errors`, `time`, `redis`), and the sentence "Shared by the concurrency lock
   here and the issuance lock." of the `mintToken` doc.
-- [ ] **Action 3.1.3** — modify `internal/limit/limiter.go`: `Charge` takes the stream's member and refreshes it:
+- [x] **Action 3.1.3** — modify `internal/limit/limiter.go`: `Charge` takes the stream's member and refreshes it:
 
 ```go
 func (l *Limiter) Charge(ctx context.Context, name, member, dir string, nr int64) (ChargeAction, time.Duration, string, error) {
@@ -272,7 +272,7 @@ func (l *Limiter) Charge(ctx context.Context, name, member, dir string, nr int64
 ```
 
   Remove the comment parts made wrong: "a SETNX lock (concurrency counter)" (and the now-dangling connector words) in the `Limiter` doc; "conc:{name} " in the `streamTTL` field comment; the "refreshes the conc:{name} TTL" part of the `Charge` doc.
-- [ ] **Action 3.1.4** — modify `internal/limit/tunnels.go`: replace the `HMGet` pipeline entries with
+- [x] **Action 3.1.4** — modify `internal/limit/tunnels.go`: replace the `HMGet` pipeline entries with
 
 ```go
 	nowMS := strconv.FormatInt(l.now().UnixMilli(), 10)
@@ -286,11 +286,11 @@ func (l *Limiter) Charge(ctx context.Context, name, member, dir string, nr int64
   read via HMGET.
 
 DoD:
-- [ ] `grep -rn 'conclock\|withConcLock\|HMGet' internal/limit` is empty; no added comments.
+- [x] `grep -rn 'conclock\|withConcLock\|HMGet' internal/limit` is empty; no added comments.
 
-### [ ] Task 3.2 — Tests
+### [x] Task 3.2 — Tests
 
-- [ ] **Action 3.2.1** — tests in `internal/limit/` (miniredis + `SetClock`):
+- [x] **Action 3.2.1** — tests in `internal/limit/` (miniredis + `SetClock`):
 
 | Test | Verifies |
 |---|---|
@@ -307,28 +307,28 @@ DoD:
 | Delete | `TestLimiter_AcquireStream_SetsTTL` (replaced by `…SetsKeyTTLAndScore`), `TestLimiter_AcquireStream_FreshConnIDResets`, `TestLimiter_ReleaseStream_StragglerNoOp`, `TestLimiter_ReleaseStream_DeleteAtZero`, `TestLimiter_ReleaseConcLock_LogsFailures` (keep `newLoggedLimiter` / `errInjected` in `lock_test.go`, used by `issuance_test.go`) |
 
 DoD:
-- [ ] Every test that calls `Charge`/`AcquireStream`/`ReleaseStream` uses the new signatures.
+- [x] Every test that calls `Charge`/`AcquireStream`/`ReleaseStream` uses the new signatures.
 
 ---
 
-## [ ] US4 — Dial-back reception and connection-close hook (phoneconn)
+## [x] US4 — Dial-back reception and connection-close hook (phoneconn)
 
 Why: the entry node waits for a phone connection carrying the token and hands the raw connection to the splice;
 the owner only queues `OPEN` frames and announces its connection closes (D13).
 
 Acceptance criteria:
-- [ ] `phoneconn.DialBacks` registers a waiter per token, invokes the open callback, waits, and always unregisters; a dial-back that races an abandoned waiter is closed, never leaked.
-- [ ] `GET /api/v1/data` (exactly HTTP/1.1) with `Upgrade: tunneld-dial` + `X-Dial-Token` is answered with `101` and the hijacked connection (deadlines cleared, buffered bytes preserved) is delivered to the waiter; the wire-contract statuses otherwise.
-- [ ] With `DialBackMTLS` the identity cert is required (403 without) and must belong to the token's tunnel; without it the token alone authorises.
-- [ ] Every error response closes the connection (`Connection: close`), on `:443` too.
-- [ ] The peer-IP ban check stays FIRST for `/api/v1/data`; a banned tunnel cert gets 403 and a `ban` rejection.
-- [ ] `Manager.SendOpen` queues an `OPEN` only on the live connection whose connID matches, else `ErrNoConn`.
-- [ ] Every control-connection teardown calls the `ConnClosedHook` with the tunnel and its connID, after the route unbind.
-- [ ] The HTTP/2 data-stream code (`pending`, `OpenStream`, `deliverStream`, `cancelPending`, `httpDataStream`, `DataStream`, `ErrDuplicateStreamID`, `OwnsConn`) is gone (`HasConn` stays, tests use it).
+- [x] `phoneconn.DialBacks` registers a waiter per token, invokes the open callback, waits, and always unregisters; a dial-back that races an abandoned waiter is closed, never leaked.
+- [x] `GET /api/v1/data` (exactly HTTP/1.1) with `Upgrade: tunneld-dial` + `X-Dial-Token` is answered with `101` and the hijacked connection (deadlines cleared, buffered bytes preserved) is delivered to the waiter; the wire-contract statuses otherwise.
+- [x] With `DialBackMTLS` the identity cert is required (403 without) and must belong to the token's tunnel; without it the token alone authorises.
+- [x] Every error response closes the connection (`Connection: close`), on `:443` too.
+- [x] The peer-IP ban check stays FIRST for `/api/v1/data`; a banned tunnel cert gets 403 and a `ban` rejection.
+- [x] `Manager.SendOpen` queues an `OPEN` only on the live connection whose connID matches, else `ErrNoConn`.
+- [x] Every control-connection teardown calls the `ConnClosedHook` with the tunnel and its connID, after the route unbind.
+- [x] The HTTP/2 data-stream code (`pending`, `OpenStream`, `deliverStream`, `cancelPending`, `httpDataStream`, `DataStream`, `ErrDuplicateStreamID`, `OwnsConn`) is gone (`HasConn` stays, tests use it).
 
-### [ ] Task 4.1 — DialBacks registry + upgrade handler
+### [x] Task 4.1 — DialBacks registry + upgrade handler
 
-- [ ] **Action 4.1.1** — create `internal/phoneconn/dialback.go`:
+- [x] **Action 4.1.1** — create `internal/phoneconn/dialback.go`:
 
 ```go
 package phoneconn
@@ -491,11 +491,11 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 ```
 
 DoD:
-- [ ] No added comments.
+- [x] No added comments.
 
-### [ ] Task 4.2 — Handler routing, SendOpen, close hook, removals
+### [x] Task 4.2 — Handler routing, SendOpen, close hook, removals
 
-- [ ] **Action 4.2.1** — modify `internal/phoneconn/listener.go`:
+- [x] **Action 4.2.1** — modify `internal/phoneconn/listener.go`:
   - `HandlerConfig` gains `DialBacks *DialBacks` and `DialBackMTLS bool`; `Handler` gains `dialBacks *DialBacks` and `dialBackMTLS bool`, set in `NewHandler`.
   - First line of `ServeHTTP` (a header, not a check — the ban gate stays the first check):
 
@@ -516,7 +516,7 @@ DoD:
 
   - Delete the `case "/api/v1/data":` branch, `serveData`, and in `serveControl` the `pending: map[string]chan DataStream{}` initialiser.
   - Remove the comment parts made wrong: "and the dial-back /api/v1/data streams, both authenticated by the internal-CA identity client cert (mTLS)" in the `Handler` doc, and the `serveData` doc.
-- [ ] **Action 4.2.2** — modify `internal/phoneconn/manager.go`: delete `ErrDuplicateStreamID`, `DataStream`,
+- [x] **Action 4.2.2** — modify `internal/phoneconn/manager.go`: delete `ErrDuplicateStreamID`, `DataStream`,
   the `pending` field of `conn`, `OpenStream`, `deliverStream`, `cancelPending`, `OwnsConn` (with their
   comments) and the imports left unused (`io`, `net`); keep `HasConn` (tests use it) but remove its now-wrong
   parenthetical "(the fast-path check)"; add:
@@ -555,18 +555,18 @@ func (m *Manager) SendOpen(ctx context.Context, name, connID string, open wire.O
   Remove the comment parts made wrong: "dial-back +" in the `Manager` doc ("drives dial-back + eviction");
   "(fast path / eviction)" on `lookup`; the `register` comment sentences about the stream counter being keyed by
   connID inside `conc:{name}` and structurally reset by a fresh connection (lines "The route is ours now … persist.").
-- [ ] **Action 4.2.3** — modify `internal/phoneconn/stream.go`: delete `httpDataStream` and its methods (keep
+- [x] **Action 4.2.3** — modify `internal/phoneconn/stream.go`: delete `httpDataStream` and its methods (keep
   `readControlFrame`), the imports left unused, and "v1 " in the `readControlFrame` doc.
-- [ ] **Action 4.2.4** — modify `internal/phoneconn/meta.go`: remove "dial-back data streams, " from the package
+- [x] **Action 4.2.4** — modify `internal/phoneconn/meta.go`: remove "dial-back data streams, " from the package
   doc's list and the parenthetical "(edge imports phoneconn for dial-back, never the reverse)".
-- [ ] **Action 4.2.5** — modify `internal/store/event.go` (comments only): remove "pending-stream duplicate refusal" from the `NewConnID` doc and "(serveData / the mesh header check both reject \"\")" from the `MustConnID` doc (both refer to deleted code).
+- [x] **Action 4.2.5** — modify `internal/store/event.go` (comments only): remove "pending-stream duplicate refusal" from the `NewConnID` doc and "(serveData / the mesh header check both reject \"\")" from the `MustConnID` doc (both refer to deleted code).
 
 DoD:
-- [ ] `grep -rn 'X-Stream-Id\|OpenStream\|deliverStream\|httpDataStream\|ErrDuplicateStreamID' internal/phoneconn` is empty; no added comments.
+- [x] `grep -rn 'X-Stream-Id\|OpenStream\|deliverStream\|httpDataStream\|ErrDuplicateStreamID' internal/phoneconn` is empty; no added comments.
 
-### [ ] Task 4.3 — Tests
+### [x] Task 4.3 — Tests
 
-- [ ] **Action 4.3.1** — shared dial-back test environment, new file `internal/phoneconn/dialback_test.go`
+- [x] **Action 4.3.1** — shared dial-back test environment, new file `internal/phoneconn/dialback_test.go`
   (the helpers below in full; the test functions follow the table):
 
 ```go
@@ -733,7 +733,7 @@ func sendDialBackRequest(t *testing.T, c net.Conn, method, token, upgrade string
 | Delete | `TestServeDataNoWaiterIs404`, `TestOpenStreamNoConn`, `TestOpenStreamDialbackCorrelates`, `TestDeliverStream_RefusesClosedConn`, `TestOpenStreamTimesOut`, `TestManager_OpenStream_DuplicateRefused`, `TestCancelPendingClosesRacedDelivery`, `TestHTTPDataStream_CloseUnblocksBlockedWrite`, and the test helpers left unused (`fakeDataStream`, `closeableStream`, `stream_test.go`'s `blockingWriter`, the `pending` field in `newConn`) |
 
 DoD:
-- [ ] Every `NewManager`/`NewHandler` in the package's tests passes the new fields.
+- [x] Every `NewManager`/`NewHandler` in the package's tests passes the new fields.
 
 ---
 
@@ -2116,4 +2116,10 @@ DoD:
 
 ## Deviations
 
-(none yet)
+- Action 4.3.1: `dialBackEnv` also carries the env's `mgr *Manager` (set in `startDialBackEnv`), so
+  `TestServeHTTP_IdentityRequiredWhenTLSClientCertOptional` can assert that no route was bound; small test-local
+  helpers (`await`, `delivered`, `readExactly`) drive the waiter and the byte checks.
+- Action 4.3.1: the h2 case of `TestServeDialBack_StatusTable` sends no `Upgrade` header (Go's HTTP/2 transport
+  refuses to send one); it asserts the request really went over HTTP/2 and got 400.
+- Action 4.3.1: `stream_test.go` held only the deleted `TestHTTPDataStream_CloseUnblocksBlockedWrite` and its
+  `blockingWriter`, so the file is removed.
