@@ -62,7 +62,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 			testLogger().Debug("echo phone stream ended with an error", "err", err)
 		}
 	}
-	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
 	}
 	fqdn := ident.Name + "." + itTunnelDomain
 	phoneTLS := phoneServerTLS(t, ident)
-	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(s io.ReadWriteCloser) {
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {

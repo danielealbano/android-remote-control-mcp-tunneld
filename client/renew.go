@@ -10,6 +10,11 @@ import (
 // renew answers a RENEW_NUDGE by delegating to Renew with the nudge's challenge nonce (best-effort; the
 // connection stays on the current certs on failure).
 func (c *Client) renew(ctx context.Context, payload []byte) {
+	if !c.renewing.CompareAndSwap(false, true) {
+		c.logger.Debug("renewal already in progress; RENEW_NUDGE ignored")
+		return
+	}
+	defer c.renewing.Store(false)
 	var nudge wire.RenewNudgePayload
 	if err := json.Unmarshal(payload, &nudge); err != nil {
 		c.logger.Warn("malformed RENEW_NUDGE payload from the server (ignored)", "err", err)
@@ -34,7 +39,11 @@ func (c *Client) Renew(ctx context.Context, nonceHex string) error {
 	caID := c.ident.CA
 	c.mu.Unlock()
 
-	next, err := issueCerts(ctx, c.hc, c.controlHost, name, c.tunnelDomain, caID, nonceHex)
+	next, err := issueWithRetries(ctx, c.sleep, nonceHex,
+		func(n string) (*Identity, error) {
+			return issueCerts(ctx, c.hc, c.controlHost, name, c.tunnelDomain, caID, n)
+		},
+		func() (string, error) { return FetchIssueNonce(ctx, c.dialAddr, c.enrollHost, c.caPool) })
 	if err != nil {
 		return err
 	}

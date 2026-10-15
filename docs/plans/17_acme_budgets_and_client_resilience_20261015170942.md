@@ -325,18 +325,18 @@ DoD:
 
 ---
 
-## [ ] US3 — Go client: dead-connection detection + issuance retry rule
+## [x] US3 — Go client: dead-connection detection + issuance retry rule
 
 The reference Go client implements both phone rules; `New` learns the enroll host so a renewal retry can fetch fresh nonces.
 
-- [ ] AC1: `ControlSilenceTimeout` without a frame, counted from before the request is sent, ends `Run` with `errControlSilence` and closes the TCP connection; the next `Run` dials a new one.
-- [ ] AC2: `Enroll` (Phase 2) and `Renew` follow the retry rule; a failed nonce fetch is a failed retry.
-- [ ] AC3: Every `client.New` / `newMTLSTransport` call site is updated.
-- [ ] AC4: A `RENEW_NUDGE` that arrives while a nudge-driven renewal (or its retries) is running is ignored, with a Debug log.
+- [x] AC1: `ControlSilenceTimeout` without a frame, counted from before the request is sent, ends `Run` with `errControlSilence` and closes the TCP connection; the next `Run` dials a new one.
+- [x] AC2: `Enroll` (Phase 2) and `Renew` follow the retry rule; a failed nonce fetch is a failed retry.
+- [x] AC3: Every `client.New` / `newMTLSTransport` call site is updated.
+- [x] AC4: A `RENEW_NUDGE` that arrives while a nudge-driven renewal (or its retries) is running is ignored, with a Debug log.
 
-### [ ] T3.1 — retry helper
+### [x] T3.1 — retry helper
 
-- [ ] A3.1.1 `client/issue_retry.go` (create):
+- [x] A3.1.1 `client/issue_retry.go` (create):
 
 ```go
 package client
@@ -402,11 +402,11 @@ func issueWithRetries(ctx context.Context, sleep func(context.Context, time.Dura
 ```
 
 DoD:
-- [ ] Helper in place.
+- [x] Helper in place.
 
-### [ ] T3.2 — `Client`: enroll host, connection tracking, silence watchdog
+### [x] T3.2 — `Client`: enroll host, connection tracking, silence watchdog
 
-- [ ] A3.2.1 `client/control.go` (modify):
+- [x] A3.2.1 `client/control.go` (modify):
   - **Imports:** `sync/atomic`.
   - **`Client` gains:**
 
@@ -464,7 +464,7 @@ func (c *Client) dropConn() {
 			return h2, nil
 ```
 
-- [ ] A3.2.2 `client/control.go` (modify) `Run`. The existing comments stay where they are.
+- [x] A3.2.2 `client/control.go` (modify) `Run`. The existing comments stay where they are.
 
 ```go
 func (c *Client) Run(ctx context.Context) error {
@@ -554,11 +554,11 @@ func (c *Client) Run(ctx context.Context) error {
 ```
 
 DoD:
-- [ ] Silence before or after the request closes the TCP connection before `Run` returns `errControlSilence`. The watchdog runs under `wdMu` and is disarmed (`ended`) before `Run` returns, so a late firing can never touch the next `Run`'s connection. Dial-back sessions and renewals keep using `ctx` as before.
+- [x] Silence before or after the request closes the TCP connection before `Run` returns `errControlSilence`. The watchdog runs under `wdMu` and is disarmed (`ended`) before `Run` returns, so a late firing can never touch the next `Run`'s connection. Dial-back sessions and renewals keep using `ctx` as before.
 
-### [ ] T3.3 — retry rule in Phase 2 and `Renew`
+### [x] T3.3 — retry rule in Phase 2 and `Renew`
 
-- [ ] A3.3.1 `client/enroll.go` (modify) `issueCerts`: the `post` error and the read/close error become transport errors:
+- [x] A3.3.1 `client/enroll.go` (modify) `issueCerts`: the `post` error and the read/close error become transport errors:
 
 ```go
 	resp, err := post(ctx, hc, "https://"+controlHost+"/api/v1/issue", body)
@@ -577,8 +577,8 @@ DoD:
 	}
 ```
 
-- [ ] A3.3.2 same file `fetchNonce`: the `hc.Do` error and the read/close error return `&transportError{…}` (same wrapping); a non-200 status returns `errorFromResponse(resp.StatusCode, raw)` instead of `fmt.Errorf("enroll: nonce status %d", …)`.
-- [ ] A3.3.3 same file:
+- [x] A3.3.2 same file `fetchNonce`: the `hc.Do` error and the read/close error return `&transportError{…}` (same wrapping); a non-200 status returns `errorFromResponse(resp.StatusCode, raw)` instead of `fmt.Errorf("enroll: nonce status %d", …)`.
+- [x] A3.3.3 same file:
   - **`Enroll`** delegates to an unexported `enroll` that takes the sleeper:
 
 ```go
@@ -599,7 +599,7 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 
     - in the comment inside the `if err != nil { … return bootIdent, err }` that follows, only "so the caller can execute the documented retry path (fresh nonce → Renew over the SAME mTLS identity) WITHOUT re-enrolling " is removed. It is made wrong: `enroll` now runs the documented retries itself, and after them the phone gives up. The comment then reads "Preserve the Phase-1 bootstrap identity (name + identity cert + key, no public cert yet) — re-enrolling would orphan this name in the registry (PROTOCOL §2: the name is never rolled back). See docs/PROTOCOL.md §3.".
   - **`FetchIssueNonce` doc:** only ", so this is the documented retry path after a RETRYABLE POST /api/v1/issue failure (which consumed the previous nonce): fetch a fresh nonce, wait retry_after_seconds, then call Client.Renew with it" is removed. It is made wrong: `Renew` now retries internally, and it waits before fetching. The doc then reads "FetchIssueNonce mints a fresh single-use challenge nonce from GET /api/v1/enroll/nonce (per-IP rate-limited). The enroll and issue nonces share one namespace. See docs/PROTOCOL.md §3.".
-- [ ] A3.3.4 `client/renew.go` (modify) `renew` (the nudge handler) becomes single-flight:
+- [x] A3.3.4 `client/renew.go` (modify) `renew` (the nudge handler) becomes single-flight:
 
 ```go
 func (c *Client) renew(ctx context.Context, payload []byte) {
@@ -623,7 +623,7 @@ func (c *Client) renew(ctx context.Context, payload []byte) {
 }
 ```
 
-- [ ] A3.3.5 same file, `Renew`:
+- [x] A3.3.5 same file, `Renew`:
 
 ```go
 	next, err := issueWithRetries(ctx, c.sleep, nonceHex,
@@ -637,20 +637,20 @@ func (c *Client) renew(ctx context.Context, payload []byte) {
 ```
 
 DoD:
-- [ ] Phase 2 and `Renew` retry per the rule; `Enroll` still returns the bootstrap identity on final failure.
+- [x] Phase 2 and `Renew` retry per the rule; `Enroll` still returns the bootstrap identity on final failure.
 
-### [ ] T3.4 — call sites
+### [x] T3.4 — call sites
 
-- [ ] A3.4.1 (modify) pass the enroll host as the new 2nd argument of `client.New`:
+- [x] A3.4.1 (modify) pass the enroll host as the new 2nd argument of `client.New`:
   - `internal/server/integration_test.go`, `challenge_integration_test.go` and `drain_startup_integration_test.go` (both calls): `itEnrollHost`;
   - `e2e/e2e_test.go`: `e2eEnrollHost`;
   - every `New(` in `client/*_test.go`: that test's enroll host.
-- [ ] A3.4.2 `client/control_test.go` (modify): the four `newMTLSTransport(…)` calls (lines 100, 111, 149, 177) get `func(net.Conn) {}` as the new last argument.
+- [x] A3.4.2 `client/control_test.go` (modify): the four `newMTLSTransport(…)` calls (lines 100, 111, 149, 177) get `func(net.Conn) {}` as the new last argument.
 
 DoD:
-- [ ] All call sites updated.
+- [x] All call sites updated.
 
-### [ ] T3.5 — tests (`client/`)
+### [x] T3.5 — tests (`client/`)
 
 | Test | Verifies |
 |---|---|
@@ -717,7 +717,7 @@ func (o *enrollServerOpts) nonces() []string {
 | Every `New(` / `newMTLSTransport(` | new signatures |
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 

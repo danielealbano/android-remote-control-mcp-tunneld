@@ -282,7 +282,7 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 			tunneltest.Logger().Debug("echo phone stream ended with an error", "err", err)
 		}
 	}
-	c, err := client.New(controlAddr, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
+	c, err := client.New(controlAddr, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}

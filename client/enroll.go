@@ -104,6 +104,10 @@ func (e *EnrollError) Error() string {
 // "attestation" chain (accepted because the server runs --attestation-optional). dialAddr is the shared
 // raw :443 edge (SNI routes enrollHost/controlHost to their listeners).
 func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain string, caPool *x509.CertPool) (*Identity, error) {
+	return enroll(ctx, sleepCtx, dialAddr, enrollHost, controlHost, tunnelDomain, caPool)
+}
+
+func enroll(ctx context.Context, sleep func(context.Context, time.Duration) error, dialAddr, enrollHost, controlHost, tunnelDomain string, caPool *x509.CertPool) (*Identity, error) {
 	// --- Phase 1: identity enrollment (server-TLS) ---
 	tr := serverTLSTransport(dialAddr, enrollHost, caPool)
 	defer tr.CloseIdleConnections()
@@ -139,14 +143,15 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 	if err != nil {
 		return nil, err
 	}
-	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert })
+	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert }, func(net.Conn) {})
 	defer mtlsTr.CloseIdleConnections()
 	mtls := &http.Client{Transport: mtlsTr}
-	id, err := issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", er.IssueNonce)
+	id, err := issueWithRetries(ctx, sleep, er.IssueNonce,
+		func(n string) (*Identity, error) { return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", n) },
+		func() (string, error) { return fetchNonce(ctx, hc, enrollHost) })
 	if err != nil {
-		// Preserve the Phase-1 bootstrap identity (name + identity cert + key, no public cert yet) so the
-		// caller can execute the documented retry path (fresh nonce → Renew over the SAME mTLS identity)
-		// WITHOUT re-enrolling — re-enrolling would orphan this name in the registry (PROTOCOL §2: the name
+		// Preserve the Phase-1 bootstrap identity (name + identity cert + key, no public cert yet) —
+		// re-enrolling would orphan this name in the registry (PROTOCOL §2: the name
 		// is never rolled back). See docs/PROTOCOL.md §3.
 		return bootIdent, err
 	}
@@ -186,7 +191,7 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 	}
 	resp, err := post(ctx, hc, "https://"+controlHost+"/api/v1/issue", body)
 	if err != nil {
-		return nil, err
+		return nil, &transportError{err}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
@@ -196,7 +201,7 @@ func issueCerts(ctx context.Context, hc *http.Client, controlHost, name, tunnelD
 		err = errors.Join(err, fmt.Errorf("issue: close response: %w", cerr))
 	}
 	if err != nil {
-		return nil, err
+		return nil, &transportError{err}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, errorFromResponse(resp.StatusCode, raw)
@@ -260,7 +265,7 @@ func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", err
+		return "", &transportError{err}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
@@ -270,10 +275,10 @@ func fetchNonce(ctx context.Context, hc *http.Client, enrollHost string) (string
 		err = errors.Join(err, fmt.Errorf("enroll: close nonce response: %w", cerr))
 	}
 	if err != nil {
-		return "", err
+		return "", &transportError{err}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("enroll: nonce status %d", resp.StatusCode)
+		return "", errorFromResponse(resp.StatusCode, raw)
 	}
 	var nr nonceResponse
 	if err := json.Unmarshal(raw, &nr); err != nil {
@@ -338,9 +343,7 @@ func serverTLSTransport(dialAddr, host string, caPool *x509.CertPool) *http.Tran
 }
 
 // FetchIssueNonce mints a fresh single-use challenge nonce from GET /api/v1/enroll/nonce (per-IP
-// rate-limited). The enroll and issue nonces share one namespace, so this is the documented retry
-// path after a RETRYABLE POST /api/v1/issue failure (which consumed the previous nonce): fetch a fresh
-// nonce, wait retry_after_seconds, then call Client.Renew with it. See docs/PROTOCOL.md §3.
+// rate-limited). The enroll and issue nonces share one namespace. See docs/PROTOCOL.md §3.
 func FetchIssueNonce(ctx context.Context, dialAddr, enrollHost string, caPool *x509.CertPool) (string, error) {
 	tr := serverTLSTransport(dialAddr, enrollHost, caPool)
 	defer tr.CloseIdleConnections()
