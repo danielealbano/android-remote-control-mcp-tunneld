@@ -159,15 +159,15 @@ DoD:
 
 ---
 
-## [ ] US2 — Shared test proxy (`internal/tunneltest`)
+## [x] US2 — Shared test proxy (`internal/tunneltest`)
 
 The Go client and the device gates both need a TCP proxy that can black-hole existing connections without closing them.
 
-- [ ] AC1: `BlackholeProxy` forwards, freezes existing connections on demand, passes an end of stream from one side to the other while not frozen (like a real TCP path), counts accepted connections, and never hangs cleanup.
+- [x] AC1: `BlackholeProxy` forwards, freezes existing connections on demand, passes an end of stream from one side to the other while not frozen (like a real TCP path), counts accepted connections, and never hangs cleanup.
 
-### [ ] T2.1 — `internal/tunneltest/blackhole.go` (create; shared test infrastructure)
+### [x] T2.1 — `internal/tunneltest/blackhole.go` (create; shared test infrastructure)
 
-- [ ] A2.1.1:
+- [x] A2.1.1:
 
 ```go
 package tunneltest
@@ -213,7 +213,7 @@ func StartBlackholeProxy(t *testing.T, target string) *BlackholeProxy {
 	t.Cleanup(func() {
 		p.mu.Lock()
 		p.closed = true
-		conns := p.conns
+		conns := slices.Clone(p.conns)
 		p.mu.Unlock()
 		CloseOrLog(t, ln)
 		for _, c := range conns {
@@ -310,9 +310,9 @@ func (p *BlackholeProxy) Addr() string { return p.ln.Addr().String() }
 ```
 
 DoD:
-- [ ] Proxy in place (used by US3 and US10).
+- [x] Proxy in place (used by US3 and US10).
 
-### [ ] T2.2 — tests
+### [x] T2.2 — tests
 
 | Test | Verifies |
 |---|---|
@@ -321,7 +321,7 @@ DoD:
 | `TestBlackholeProxy_CleanupNeverHangs` | connections opened concurrently with cleanup → cleanup returns |
 
 DoD:
-- [ ] Tests added.
+- [x] Tests added.
 
 ---
 
@@ -3880,4 +3880,4 @@ DoD:
 
 ## Deviations
 
-(none yet)
+- **A2.1.1** (`internal/tunneltest/blackhole.go`). The cleanup's `conns := p.conns` became `conns := slices.Clone(p.conns)`. `reap` removes finished pairs with `slices.DeleteFunc`, which since Go 1.22 zeroes the freed tail of the same backing array. The cleanup's view of the old slice header could therefore hold nil entries and dereference them. The action's code block is updated to match.
