@@ -2209,7 +2209,7 @@ DoD:
     - `run` doc: ", skipping any that are cooling (an active Valkey retry-after)" and "; a rate-limited CA gets a retry-after honoring its Retry-After" go, because cooling and skipping are now per account (other accounts of the same CA are still tried), and " with the shortest remaining cooldown" goes, because the answer now adds a jitter and can be the earliest budget slot;
     - `Renew` doc: the clause " (an LE renewal costs nothing)", because an LE renewal now draws the per-name budget, and the sentence "cur is unused: a name already on LE simply renews on LE first; a GTS/ZeroSSL name is retried on LE first.";
     - the inline comment before `if shortest == 0`: " with the shortest remaining cooldown" goes ("Every CA was cooling or failed transiently: retryable.");
-    - `handleFailure` doc: " for ca" goes ("handleFailure applies the reactive cooldown/backoff, returning the cooldown it set (0 for a permanent error) and whether the error is permanent."). It now takes an account;
+    - `handleFailure` doc: " for ca" goes ("handleFailure applies the reactive cooldown/backoff, returning the cooldown (0 for a permanent error) and whether the error is permanent."; "it set" also goes, see `## Deviations`). It now takes an account;
     - `handleFailure`'s `ClassRateLimited` case comment: only "The CA's explicit Retry-After is honored AS-IS (it is the authoritative statement of when a retry will be accepted); " goes, because the wait-until is now never shortened. It reads "--acme-cooldown-default applies only when the CA sent no hint. Cooldown writes are best-effort: …";
     - `ObtainSelf` doc: only "subject to the per-CA cooldowns, but ", because the cooldowns are per account and budgets apply too. It reads "…via the same spillover (NOT the per-tunnel issuance cap — that lives in enroll and is keyed on tunnel names).".
 
@@ -2232,7 +2232,10 @@ type chainIssuer struct {
 }
 
 // NewChainIssuer builds the chain.
-func NewChainIssuer(cfg ChainConfig, accounts ...*account) *chainIssuer {
+func NewChainIssuer(cfg ChainConfig, accounts ...*account) (*chainIssuer, error) {
+	if cfg.Nodes == nil {
+		return nil, errNoNodeLister
+	}
 	if cfg.Recorder == nil {
 		cfg.Recorder = nopRecorder{}
 	}
@@ -2257,7 +2260,7 @@ func NewChainIssuer(cfg ChainConfig, accounts ...*account) *chainIssuer {
 			c.groups = append(c.groups, g)
 		}
 	}
-	return c
+	return c, nil
 }
 
 func cryptoIntN(n int) int {
@@ -2504,7 +2507,7 @@ DoD:
 // NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing clients constructed from
 // the given lego configs. Each client's network-touching construction is deferred to first use, so
 // startup never blocks on CA reachability and an unreachable CA self-heals once it recovers.
-func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
+func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) (*chainIssuer, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -2573,7 +2576,11 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		BackoffMax: cfg.ACMEBackoffMax, RenewMargin: cfg.ACMERenewMargin, ShortlivedLifetime: shortlivedLifetime,
 		NodeID: nodeID, Nodes: nodes, Budgets: budgets, PollEvery: cfg.ACMEPollInterval,
 	}
-	return acme.NewChain(chainCfg, legoCfgs...), nil
+	chain, err := acme.NewChain(chainCfg, legoCfgs...)
+	if err != nil {
+		return nil, err
+	}
+	return chain, nil
 }
 
 func acmeLegoConfigs(cfg config.ServeCmd, chal *acme.ChallengeStore, logger *slog.Logger, nodeID string) ([]acme.LegoConfig, error) {
@@ -3819,8 +3826,8 @@ Canonical docs and the project rules describe what was built.
 > certificate poll after finalize to the CA's median wait + 2 s and spaces the rest 2 s apart, and on a 429
 > resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
 > abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
-> other than a 429 (a CA error, the attempt deadline, or a request tunneld refused or held) puts the account on the
-> exponential backoff. GTS accounts are tried
+> other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
+> tunneld refused or held) puts the account on the exponential backoff. GTS accounts are tried
 > by remaining order budget. When no account can take the order, the issue answer is `acme_rate_limited` with
 > `retry_after_seconds` = the earliest free slot + a random 1–10 s. Decision record:
 > [Plan 17](plans/17_acme_budgets_and_client_resilience_20261015170942.md).
@@ -3892,3 +3899,8 @@ DoD:
 - **A9.2.1** (`support/soak-app/.../Responder.kt`). `readHead` loops `repeat(MAX_HEADERS + 1)` instead of `repeat(MAX_HEADERS)`. The loop also reads the blank line that ends the head, so the planned bound accepted only 63 header lines. `ResponderTest.sixtyFourHeadersAccepted` covers the boundary.
 - **A3.3.3, A5.2.1, A6.2.1** (`client/enroll.go`, `internal/config/config.go`, `internal/acme/budget.go`). The quality gates' `gofmt` (Go 1.27.2, the formatter `make lint` enforces) rewrote three one-line function bodies as multi-line ones (the `issueWithRetries` issue closure, `ZeroSSLEnabled` and `gtsCertPolls`) and realigned the neighbouring one-liners. `gofmt` also realigned `internal/metrics/metrics.go`'s fields around `acmeRateLimited`, the `config_test.go` `validCfg` literal and the `staging_test.go` `ServeCmd` literal. The affected code blocks above are updated to match.
 - **T10.2** (`e2e/app_rules_test.go`, `TestE2E_ReferenceTunnelAppRenewRetrySucceeds`). The scenario first sets `log.tag.TunnelApp` to `W` and restores the previous value at cleanup. The attached device sets the global `log.tag` property to `E`, which drops every app log below ERROR, so the app's `issuance failed; retry …` warning never reached logcat although the retry happened. A per-tag `log.tag.<tag>` overrides the global level; this was checked on the device with a probe tag.
+- **T3.5** (`client/enroll_test.go`). In the doc comment of `TestEnroll_Phase2FailureReturnsBootstrapIdentity`, "retryable" and ", so the caller can retry without re-enrolling (which would orphan the name)" go, and the doc comment of `TestFetchIssueNonce_RetryPathCompletes` ("drives the documented retry path: … Renew over the SAME mTLS identity completes the issuance") is removed. The adapted tests drive a non-retryable failure and `enroll`'s own retries, which made those parts wrong. The plan's T3.5 table did not list these comments.
+- **A6.5.1** (`internal/acme/chain.go`, code review). `setCooldown` returns the wait-until in effect: after `SetCACooldown` it reads `CACooldown` and returns the larger of the two, or the requested duration when the write or the read fails (each logged at Warn). `handleFailure` returns that value. `SetCACooldown` never shortens an existing wait-until, so the requested duration could understate the `retry_after_seconds` the phone receives. The `handleFailure` doc loses "it set" for the same reason. Covered by `TestChain_RetryAfterReportsTheWaitUntilInEffect`.
+- **T6.6** (`internal/acme/lazy.go`, code review). `lazyCA.obtain` keeps the rate-limited class for a client-build failure that `classifyLego` reads as a 429. Every other build failure stays transient. Before, a 429 during the build also bumped the failure streak and the backoff, while the decision record backs off only on failures other than a 429. Covered by `TestChain_BuildRateLimitedSkipsTheBackoff`.
+- **A6.5.1, A6.6.1, A6.7.1** (`internal/acme/chain.go`, `lazy.go`, `budget.go`, `internal/server/acmewire.go`, code review). `NewChainIssuer` and `NewChain` return an error (`errNoNodeLister`) when `ChainConfig.Nodes` is nil, instead of panicking at the first issuance, and `buildACMEChain` returns it. The code blocks above are updated. Covered by `TestNewChainIssuer_RequiresNodes`.
+- **A12.1.2** (`docs/ARCHITECTURE.md`, code review). The backoff sentence also excludes a permanent CA error and a local error, which stop the run without a backoff ("other than a 429, a permanent CA error or a local error (a transient CA error, …)"). The quoted paragraph above is updated.
