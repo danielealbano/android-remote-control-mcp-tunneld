@@ -752,7 +752,7 @@ Acceptance criteria:
 
 - [x] **Action 5.1.1** — modify `internal/mesh/listener.go` (imports: add `internal/wire`; drop `sync`, `time`):
   - Delete `ErrDuplicateStream`, `Bridge`, `OwnerCheck`, `serveData`, `ownerStream` and its methods; `Handler` keeps `control` and `logger`; `NewHandler(control Controller, opts ...HandlerOption)`.
-  - `Controller` gains `Open(ctx context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error)` and `Evict(ctx context.Context, tunnel, connID, reason string) (bool, error)`.
+  - `Controller` is composed of two small interfaces: `TunnelController` (the existing `Renew`, `Terminate`) and `ConnController` (`Open(ctx context.Context, tunnel, connID string, open wire.OpenPayload) (bool, error)`, `Evict(ctx context.Context, tunnel, connID, reason string) (bool, error)`); the existing `Controller` doc comment stays on the composed type.
   - `ControlRequest` (the still-correct `// the tunnel name to act on` on `Tunnel` stays):
 
 ```go
@@ -862,10 +862,14 @@ type DialBackWaiter interface {
 type Opener interface {
 	Open(ctx context.Context, nodeID, name, connID, token string) error
 }
+
+type DialBackReadiness interface {
+	DialBackReady() bool
+}
 ```
 
   - `StreamLimiter`: `AcquireStream(ctx context.Context, name, member string, maxN int) (bool, error)`, `ReleaseStream(ctx context.Context, name, member string) error`, `Charge(ctx context.Context, name, member, dir string, nr int64) (…)`.
-  - `Edge` fields `local`/`mesh` → `dialBacks DialBackWaiter`, `opener Opener`; `New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool, rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, lim StreamLimiter, logs PhoneEventSink, chal ACMEChallenges, addr net.Addr)`.
+  - `Edge` fields `local`/`mesh` → `dialBacks DialBackWaiter`, `opener Opener`, `ready DialBackReadiness`; `New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool, rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, ready DialBackReadiness, lim StreamLimiter, logs PhoneEventSink, chal ACMEChallenges, addr net.Addr)`.
   - Delete `errNoOwner` if unused.
 - [x] **Action 6.1.2** — modify `internal/edge/bridge.go` (imports: add `crypto/rand`; drop `fmt`, `internal/mesh`,
   `internal/phoneconn` if unused):
@@ -895,6 +899,17 @@ func (e *Edge) EvictConnStreams(name, connID, reason string) bool {
 	}
 	return len(victims) > 0
 }
+```
+
+  - `handleTunnel`, right after the tunnel name is parsed (before the route lookup, the stream slot and any `OPEN`):
+
+```go
+	if !e.ready.DialBackReady() {
+		e.cfg.Logger.Debug("tunnel refused: this node cannot accept dial-backs yet", "tunnel", name)
+		e.rec.Reject("no-route", name, peerAddr(client))
+		closeLogged(e.cfg.Logger, "public client", client)
+		return
+	}
 ```
 
   - `handleTunnel`: `token := rand.Text()` replaces `streamID := store.MustConnID()` (and its comment); `AcquireStream`/`ReleaseStream` use `token`; `slotHeld` is deleted so `releaseSlot` always releases (once) — a fail-open admission's member may exist in Valkey, and removing an absent member is a no-op; the open block becomes:
@@ -1040,6 +1055,7 @@ func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token string)
 | Test | Verifies |
 |---|---|
 | `TestEdge_OpenFar_OpensThenAwaitsWithOneToken` | `Opener.Open` gets the route's nodeID/connID and the token `Await` registered; bytes written by the client reach `dial.phone(0)` and back |
+| `TestEdge_HandleTunnel_RefusedWhileDialBacksUnavailable` | readiness false → the client is closed with `no-route` before any stream slot, `Opener.Open` or `Await` |
 | `TestEdge_OpenFar_BoundedByDialBackTimeout` | `never` waiter → closed after `DialBackTimeout`, the slot released, `no-route` recorded |
 | `TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure` (from `…OnMeshFailure`) | a changed route is retried once with the SAME token; the splice records the new connID |
 | `TestEdge_HandleTunnel_NoRetryOnIdenticalRoute` (update) | unchanged |
@@ -1177,6 +1193,20 @@ func listenPublic(ctx context.Context, addr string) (net.Listener, error) {
 		return nil, fmt.Errorf("listen %s: %w", addr, err)
 	}
 	return ln, nil
+}
+
+type reservedCertLookup interface {
+	has(host string) bool
+}
+
+type dialBackReadiness struct {
+	https bool
+	host  string
+	certs reservedCertLookup
+}
+
+func (r dialBackReadiness) DialBackReady() bool {
+	return !r.https || r.certs.has(r.host)
 }
 
 func controlClientAuth(mtls bool) tls.ClientAuthType {
@@ -1323,7 +1353,11 @@ func (s *spliceEvictor) Drain(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+		select {
+		case <-done:
+		default:
+			s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+		}
 	}
 	s.cancel()
 	<-done
@@ -1426,6 +1460,9 @@ DoD:
 ```
 
   - `phoneconn.HandlerConfig` gets `DialBacks: dialBacks, DialBackMTLS: cfg.DialBackMTLS`.
+  - The reserved-cert store (`newReservedCerts` + `loadCache`, with its existing comment) moves before the opener
+    and the edge; `internal/server/reserved.go` gains
+    `func (rc *reservedCerts) has(host string) bool { rh := rc.hosts[host]; return rh != nil && rh.cur.Load() != nil }`.
   - Opener + edge:
 
 ```go
@@ -1439,7 +1476,8 @@ DoD:
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, dialBacks, opener, lim, &edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+		reg, dialBacks, opener, dialBackReadiness{https: cfg.DialBackHTTPS, host: cfg.ControlHost, certs: reserved}, lim,
+		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 	evictor.local = ed.EvictConnStreams
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams}
 	meshHandler, err := mesh.NewHandler(adminCtl, mesh.WithHandlerLogger(logger))
@@ -1498,6 +1536,8 @@ DoD:
 | `TestSpliceEvictor_ConcurrencyBounded` | with 2× `evictBroadcastConcurrency` closes against blocking peers, at most `evictBroadcastConcurrency` broadcasts are in flight |
 | `TestSpliceEvictor_BroadcastIsAsyncAndDrained` | `PhoneConnClosed` returns at once while a peer blocks; `Drain(ctx 200 ms)` returns shortly after its deadline, cancels the broadcast, and leaves no goroutine running |
 | `TestBroadcastControl` | calls run in parallel (two blocking peers finish within one peer's delay), self skipped, `applied` = OR, each failed node id reported and logged |
+| `TestDialBackReadiness` (table) | plain dial-backs → ready; HTTPS without the control-host certificate → not ready; HTTPS with it → ready |
+| `TestReservedCerts_Has` | false for a host without a loaded certificate or an unknown host, true once its certificate is loaded |
 | `TestControlClientAuth` | true → `RequireAndVerifyClientCert`, false → `VerifyClientCertIfGiven` |
 | `TestListenPublic_SetsKeepAlive` (linux) | an accepted socket reports `SO_KEEPALIVE`=1, `TCP_KEEPIDLE`=10, `TCP_KEEPINTVL`=5, `TCP_KEEPCNT`=3 (`syscall.GetsockoptInt` via `SyscallConn`) |
 | `TestAdminTerminate_BroadcastsToEveryNode` | local + every other registered node called once, self skipped; `terminated` = OR; `owner` from the route |
@@ -1596,7 +1636,20 @@ func (c *Client) dialBack(ctx context.Context, op wire.OpenPayload) (net.Conn, e
 	if err != nil {
 		return nil, fmt.Errorf("dial-back to %s: %w", op.Addr, err)
 	}
+	if dl, ok := dctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			return nil, errors.Join(fmt.Errorf("dial-back to %s: set the upgrade deadline: %w", op.Addr, err), conn.Close())
+		}
+	}
+	stopInterrupt := context.AfterFunc(dctx, func() {
+		if err := conn.SetDeadline(time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
+			c.logger.Debug("dial-back upgrade interrupt failed", "addr", op.Addr, "err", err)
+		}
+	})
 	br, err := upgradeDialBack(dctx, conn, c.controlHost, op.Token)
+	if !stopInterrupt() && err == nil {
+		err = dctx.Err()
+	}
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("dial-back upgrade at %s: %w", op.Addr, err), conn.Close())
 	}
@@ -1604,11 +1657,6 @@ func (c *Client) dialBack(ctx context.Context, op wire.OpenPayload) (net.Conn, e
 }
 
 func upgradeDialBack(ctx context.Context, conn net.Conn, host, token string) (*bufio.Reader, error) {
-	if dl, ok := ctx.Deadline(); ok {
-		if err := conn.SetDeadline(dl); err != nil {
-			return nil, fmt.Errorf("set the upgrade deadline: %w", err)
-		}
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+wire.DialBackPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build the upgrade request: %w", err)
@@ -1737,6 +1785,7 @@ func (ts *testServer) dialBack(t *testing.T, token string, useHTTPS, useMTLS boo
 | `TestClient_HandleOpen_InvalidOpenIgnored` (extends `TestClient_HandleOpen_LogsBadPayload`) | malformed JSON / empty token / empty addr / mtls without https → Warn, nothing dialled |
 | `TestClient_DialBack_KeepsBytesSentWithThe101` | a raw test listener answers `101` + `hello` in one write → the backend reads `hello` first |
 | `TestClient_DialBack_HonoursTimeout` | `WithDialBackTimeout(200ms)` + a listener that never answers → the backend is not invoked and `handleOpen` returns within 1 s |
+| `TestClient_DialBack_UpgradeAbortedWhenRunStops` | `Run`'s ctx cancelled while the server never answers the upgrade → `handleOpen` returns promptly, the backend is not invoked, the socket is closed |
 | `TestNew_RejectsNonPositiveDialBackTimeout` | `WithDialBackTimeout(0)` → error |
 | `TestClient_DialBack_ClosedWhenRunStops` | a live dial-back whose backend blocks on `Read` is closed (the backend's `Read` returns) once `Run`'s ctx is cancelled |
 | `TestControlConnectBindAndDuplex` (update) | the data half uses `ts.dialBack` |
@@ -2152,6 +2201,10 @@ DoD:
   `TestDialBackReadiness`, `TestReservedCerts_Has`.
 - Action 8.1.1 (code review): `dialBack` sets the upgrade deadline itself before arming the interrupt (so a
   cancellation can never be overwritten by it); `upgradeDialBack` no longer sets it.
+- Code review: the `Run` comment on the reserved-host terminators says "control: TLS with ConnMeta" (the
+  control host's client-certificate mode follows `--dialback-mtls` and it also serves the HTTP/1.1 dial-back).
+- Code review: the later review fixes are re-aligned into their actions (5.1.1, 6.1.1, 6.1.2, 7.2.1, 7.4.1,
+  8.1.1) and test tables (6.2, 7.5, 8.2).
 - Code review: `spliceEvictor.Drain` logs its "drain deadline reached" Warn only when broadcasts are still running.
 - Code review: the docs state that a node without its control-host certificate can neither hold phone control
   connections nor accept HTTPS dial-backs (it refuses tunnel connections at once), and that a crashed

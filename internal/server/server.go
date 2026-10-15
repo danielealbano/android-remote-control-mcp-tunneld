@@ -233,7 +233,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return fmt.Errorf("mesh handler: %w", err)
 	}
 
-	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
+	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: TLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
 	// full-request read and keep-alive idling are tightly bounded (idle TLS conns must not accumulate).
 	publicErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelDebug)
