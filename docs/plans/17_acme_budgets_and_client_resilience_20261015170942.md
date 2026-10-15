@@ -721,18 +721,18 @@ DoD:
 
 ---
 
-## [ ] US4 — Budget primitives in Valkey (`internal/limit`)
+## [x] US4 — Budget primitives in Valkey (`internal/limit`)
 
 Token buckets, per-node in-flight reservations and the per-CA lock, with the same TTL-on-every-write discipline as every other key; plus a wait-until that is never shortened.
 
-- [ ] AC1: Reserve/commit/release/take/resync/level behave per the decision record.
-- [ ] AC2: Every key written carries a TTL in the same round-trip.
-- [ ] AC3: `SetCACooldown` never shortens an existing wait-until. The value is rounded up to whole seconds (at least 1 s), and `EXPIRE GT` runs before `SET NX EX` in one pipeline. So an existing key is extended, or already outlives the new value, before `SET NX` checks for it.
-- [ ] AC4: A reservation never shortens the TTL of its node's in-flight set.
+- [x] AC1: Reserve/commit/release/take/resync/level behave per the decision record.
+- [x] AC2: Every key written carries a TTL in the same round-trip.
+- [x] AC3: `SetCACooldown` never shortens an existing wait-until. The value is rounded up to whole seconds (at least 1 s), and `EXPIRE GT` runs before `SET NX EX` in one pipeline. So an existing key is extended, or already outlives the new value, before `SET NX` checks for it.
+- [x] AC4: A reservation never shortens the TTL of its node's in-flight set.
 
-### [ ] T4.1 — wait-until never shortened
+### [x] T4.1 — wait-until never shortened
 
-- [ ] A4.1.1 `internal/limit/acme_cooldown.go` (modify):
+- [x] A4.1.1 `internal/limit/acme_cooldown.go` (modify):
   - **Imports:** `math`.
   - **`SetCACooldown`:** `d` is rounded UP to whole seconds. go-redis v9.23.0 has no `PExpireGT`: `ExpireGT` sends whole seconds, while `SetNX` switches to `PX` for a fractional duration. Rounding first makes both commands carry the same value.
 
@@ -753,11 +753,11 @@ func (l *Limiter) SetCACooldown(ctx context.Context, ca string, d time.Duration)
     - the package doc: "per-CA " goes ("…, and the ACME cooldown/backoff.").
 
 DoD:
-- [ ] A longer existing wait-until survives a shorter write.
+- [x] A longer existing wait-until survives a shorter write.
 
-### [ ] T4.2 — `internal/limit/acme_budget.go` (create)
+### [x] T4.2 — `internal/limit/acme_budget.go` (create)
 
-- [ ] A4.2.1:
+- [x] A4.2.1:
 
 ```go
 package limit
@@ -1077,9 +1077,9 @@ func (l *Limiter) ACMEBudgetLevel(ctx context.Context, b Bucket, live []string) 
 ```
 
 DoD:
-- [ ] No Lua/WATCH/MULTI; every write pipelines its TTL.
+- [x] No Lua/WATCH/MULTI; every write pipelines its TTL.
 
-### [ ] T4.3 — tests (`internal/limit`, miniredis + `SetClock`)
+### [x] T4.3 — tests (`internal/limit`, miniredis + `SetClock`)
 
 | Test | Verifies |
 |---|---|
@@ -1103,7 +1103,7 @@ DoD:
 Existing `SetCACooldown` tests asserting that a shorter value overwrites are updated to the never-shorten rule.
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 
