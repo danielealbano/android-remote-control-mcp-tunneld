@@ -13,6 +13,7 @@ import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 internal const val TAG = "TunnelApp"
 
@@ -27,6 +28,7 @@ class Tunnel(
 ) {
     private val running = AtomicBoolean(true)
     private val bound = CountDownLatch(1)
+    private val renewals = SingleFlight()
 
     fun awaitBound(seconds: Long): Boolean = bound.await(seconds, TimeUnit.SECONDS)
     fun stop() = running.set(false)
@@ -44,8 +46,12 @@ class Tunnel(
     private fun serveControlOnce() {
         var sink: BufferedSink? = null
         val body = duplexBody { sink = it }
-        client.newCall(Request.Builder().url("https://$controlHost:$port/api/v1/control").post(body).build())
-            .execute().use { resp ->
+        val call = client.newCall(Request.Builder().url("https://$controlHost:$port/api/v1/control").post(body).build())
+        val lastFrameAt = AtomicLong(System.nanoTime())
+        val silent = AtomicBoolean(false)
+        val watch = ControlWatchdog.watch("control", call, lastFrameAt, silent)
+        try {
+            call.execute().use { resp ->
                 if (resp.code != 200) {
                     Log.w(TAG, "control connect rejected: ${resp.code}")
                     return
@@ -59,6 +65,7 @@ class Tunnel(
                 try {
                     while (running.get()) {
                         val frame = Frames.read(source) ?: break
+                        lastFrameAt.set(System.nanoTime())
                         when (frame.first) {
                             Frames.PING -> { s.write(Frames.PONG_FRAME); s.flush() }
                             Frames.OPEN -> JSONObject(String(frame.second)).let { o ->
@@ -69,9 +76,10 @@ class Tunnel(
                             Frames.RENEW_NUDGE -> JSONObject(String(frame.second)).optString("nonce")
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
-                                    Thread {
+                                    val started = renewals.launch("renewal") {
                                         try { onRenewNudge(n) } catch (t: Throwable) { Log.w(TAG, "renewal failed; keeping the current certs", t) }
-                                    }.apply { isDaemon = true }.start()
+                                    }
+                                    if (!started) Log.i(TAG, "renewal already in progress; RENEW_NUDGE ignored")
                                 }
                                 ?: Log.w(TAG, "RENEW_NUDGE without a nonce ignored")
                         }
@@ -80,6 +88,10 @@ class Tunnel(
                     try { s.close() } catch (t: Throwable) { Log.d(TAG, "control request body close failed", t) }
                 }
             }
+        } finally {
+            watch.cancel(false)
+            if (silent.get()) client.connectionPool.evictAll()
+        }
     }
 
     private fun handleOpen(open: JSONObject) {

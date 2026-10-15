@@ -89,8 +89,6 @@ class EnrollError(val reason: String, val retryable: Boolean, val retryAfterSec:
     RuntimeException("enroll: $reason (status $status)")
 
 object Enroll {
-    private const val MAX_ISSUE_RETRIES = 3
-
     // enroll: two-phase attested enrollment → a fully-issued Identity.
     fun enroll(port: Int, enrollHost: String, controlHost: String, tunnelDomain: String, trust: X509TrustManager): Identity {
         val server = Tls.serverClient(trust)
@@ -113,21 +111,17 @@ object Enroll {
     }
 
     // issue: Phase 2 / every renewal, serialized by id.issueLock so two overlapping renewals cannot collide
-    // on the next generation's alias. On a RETRYABLE server error it follows the documented retry path
-    // (docs/PROTOCOL.md §3): fetch a FRESH nonce from GET /api/v1/enroll/nonce, wait retry_after, then re-issue (bounded).
-    fun issue(id: Identity, nonce: String) {
+    // on the next generation's alias.
+    fun issue(id: Identity, nonce: String?) {
         synchronized(id.issueLock) {
-            var attempt = 0
-            var n = nonce
-            while (true) {
-                try { issueOnce(id, n); return } catch (e: EnrollError) {
-                    if (!e.retryable || attempt++ >= MAX_ISSUE_RETRIES) throw e
-                    n = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/api/v1/enroll/nonce").getString("nonce")
-                    Thread.sleep(e.retryAfterSec.coerceAtLeast(1) * 1000)
-                }
+            IssueRetry.run(nonce, { n -> issueOnce(id, n) }, { freshNonce(id) }, { Thread.sleep(it) }) { n, wait, t ->
+                Log.w(TAG, "issuance failed; retry $n in ${wait}ms", t)
             }
         }
     }
+
+    private fun freshNonce(id: Identity): String =
+        getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/api/v1/enroll/nonce").getString("nonce")
 
     // issueOnce: one /api/v1/issue attempt (holds id.issueLock via issue). Fresh attested identity key (over nonce) +
     // fresh TLS key, mTLS-auth'd with the current live identity; on 200 install the rotated certs/aliases
@@ -164,8 +158,7 @@ object Enroll {
     // renew: the MANUAL refresh path (no RENEW_NUDGE frame to carry a nonce) mints a fresh nonce, then
     // issues. A RENEW_NUDGE passes its frame's nonce straight to issue().
     fun renew(id: Identity) {
-        val nonce = getJson(Tls.serverClient(id.trust), "https://${id.enrollHost}:${id.port}/api/v1/enroll/nonce").getString("nonce")
-        issue(id, nonce)
+        issue(id, null)
     }
 
     private fun fail(status: Int, resp: String): Nothing {
@@ -184,14 +177,14 @@ object Enroll {
     private fun getJson(client: OkHttpClient, url: String): JSONObject {
         client.newCall(Request.Builder().url(url).get().build()).execute().use { resp ->
             val b = resp.body.string()
-            require(resp.code == 200) { "GET $url -> ${resp.code} $b" }
+            if (resp.code != 200) fail(resp.code, b)
             return JSONObject(b)
         }
     }
 
     private fun postJson(client: OkHttpClient, url: String, json: String): Pair<Int, String> {
         val req = Request.Builder().url(url).post(json.toRequestBody("application/json".toMediaType())).build()
-        client.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+        client.newBuilder().readTimeout(300, TimeUnit.SECONDS).build()
             .newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
     }
 

@@ -2963,17 +2963,17 @@ DoD:
 
 ---
 
-## [ ] US8 — Reference tunnel app (`support/tunnel-app`)
+## [x] US8 — Reference tunnel app (`support/tunnel-app`)
 
 The faithful Kotlin client implements both phone rules and the 300 s issuance wait; its retry and single-flight logic are pure, JVM-tested types.
 
-- [ ] AC1: 90 s without a control frame cancels the call, evicts the connection and reconnects on a new one.
-- [ ] AC2: Issuance follows the retry rule, network errors and failed nonce fetches included.
-- [ ] AC3: A `RENEW_NUDGE` that arrives while a nudge-driven renewal (or its retries) is running is ignored; no thread is started for it.
+- [x] AC1: 90 s without a control frame cancels the call, evicts the connection and reconnects on a new one.
+- [x] AC2: Issuance follows the retry rule, network errors and failed nonce fetches included.
+- [x] AC3: A `RENEW_NUDGE` that arrives while a nudge-driven renewal (or its retries) is running is ignored; no thread is started for it.
 
-### [ ] T8.1 — watchdog
+### [x] T8.1 — watchdog
 
-- [ ] A8.1.1 `.../tunnelapp/ControlWatchdog.kt` (create):
+- [x] A8.1.1 `.../tunnelapp/ControlWatchdog.kt` (create):
 
 ```kotlin
 package com.example.tunnelapp
@@ -3003,7 +3003,7 @@ internal object ControlWatchdog {
 }
 ```
 
-- [ ] A8.1.2 `.../tunnelapp/SingleFlight.kt` (create):
+- [x] A8.1.2 `.../tunnelapp/SingleFlight.kt` (create):
 
 ```kotlin
 package com.example.tunnelapp
@@ -3028,7 +3028,7 @@ internal class SingleFlight {
 }
 ```
 
-- [ ] A8.1.3 `.../tunnelapp/Tunnel.kt` (modify):
+- [x] A8.1.3 `.../tunnelapp/Tunnel.kt` (modify):
   - **Imports:** add `java.util.concurrent.atomic.AtomicLong`.
   - **`serveControlOnce`:** the existing comments in the method and in `duplexBody` stay.
 
@@ -3088,11 +3088,11 @@ internal class SingleFlight {
   - **`Tunnel` gains** the field `private val renewals = SingleFlight()` (A8.1.2). It lives as long as the `Tunnel`, so it spans reconnections.
 
 DoD:
-- [ ] One shared scheduler thread; after silence the dead pooled connection is evicted; at most one renewal thread per tunnel.
+- [x] One shared scheduler thread; after silence the dead pooled connection is evicted; at most one renewal thread per tunnel.
 
-### [ ] T8.2 — pure retry logic + 300 s
+### [x] T8.2 — pure retry logic + 300 s
 
-- [ ] A8.2.1 `.../tunnelapp/IssueRetry.kt` (create):
+- [x] A8.2.1 `.../tunnelapp/IssueRetry.kt` (create):
 
 ```kotlin
 package com.example.tunnelapp
@@ -3138,7 +3138,7 @@ internal object IssueRetry {
 }
 ```
 
-- [ ] A8.2.2 `.../tunnelapp/Enroll.kt` (modify):
+- [x] A8.2.2 `.../tunnelapp/Enroll.kt` (modify):
   - **Removed:** `MAX_ISSUE_RETRIES`.
   - **`getJson`:** `require(resp.code == 200) { … }` → `if (resp.code != 200) fail(resp.code, b)`, so a refused nonce fetch is a typed, possibly retryable `EnrollError`.
   - **`postJson`:** `readTimeout(60, …)` → `readTimeout(300, TimeUnit.SECONDS)`.
@@ -3159,13 +3159,13 @@ internal object IssueRetry {
 ```
 
   - **`renew(id)`** becomes `issue(id, null)`, so the manual refresh's first nonce fetch is covered by the retry rule too. Its comment ("renew: the MANUAL refresh path (no RENEW_NUDGE frame to carry a nonce) mints a fresh nonce, then issues. …") stays true.
-- [ ] A8.2.3 `support/tunnel-app/app/build.gradle.kts` (modify): `testImplementation("junit:junit:4.13.2")`.
-- [ ] A8.2.4 `Makefile` (modify) `tunnel-app`: `./gradlew assembleDebug` → `./gradlew testDebugUnitTest assembleDebug`.
+- [x] A8.2.3 `support/tunnel-app/app/build.gradle.kts` (modify): `testImplementation("junit:junit:4.13.2")`.
+- [x] A8.2.4 `Makefile` (modify) `tunnel-app`: `./gradlew assembleDebug` → `./gradlew testDebugUnitTest assembleDebug`.
 
 DoD:
-- [ ] Issuance uses `IssueRetry`; the issuance wait is 300 s; a refused nonce fetch is an `EnrollError`; `make tunnel-app` runs the JVM unit tests.
+- [x] Issuance uses `IssueRetry`; the issuance wait is 300 s; a refused nonce fetch is an `EnrollError`; `make tunnel-app` runs the JVM unit tests.
 
-### [ ] T8.3 — tests (JUnit 4, `support/tunnel-app/app/src/test/java/com/example/tunnelapp/`)
+### [x] T8.3 — tests (JUnit 4, `support/tunnel-app/app/src/test/java/com/example/tunnelapp/`)
 
 | Test | Verifies |
 |---|---|
@@ -3181,7 +3181,7 @@ DoD:
 | `SingleFlightTest.releasedAfterBlockThrows` | a block that throws, with `Thread.setDefaultUncaughtExceptionHandler` temporarily set to record it and restored after: the next `launch` returns true |
 
 DoD:
-- [ ] Tests added; `make tunnel-app` runs them.
+- [x] Tests added; `make tunnel-app` runs them.
 
 ---
 

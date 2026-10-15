@@ -89,7 +89,7 @@ attest-probe:
 # fixtures/tunnel-app/.
 tunnel-app:
 	@test -n "$(APKSIGNER)" || { echo "apksigner not found under $(ANDROID_SDK)/build-tools; set ANDROID_HOME"; exit 1; }
-	cd support/tunnel-app && ./gradlew assembleDebug
+	cd support/tunnel-app && ./gradlew testDebugUnitTest assembleDebug
 	mkdir -p fixtures/tunnel-app
 	cp support/tunnel-app/app/build/outputs/apk/debug/app-debug.apk \
 	    fixtures/tunnel-app/tunnel-app.apk
