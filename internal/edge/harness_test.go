@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,6 +160,10 @@ func (f *fakeDialBacks) phone(i int) net.Conn {
 	return f.phones[i]
 }
 
+type fakeReadiness struct{ notReady atomic.Bool }
+
+func (f *fakeReadiness) DialBackReady() bool { return !f.notReady.Load() }
+
 type openCall struct{ nodeID, name, connID, token string }
 
 type fakeOpener struct {
@@ -267,6 +272,7 @@ type testEdge struct {
 	rtr    *fakeRouter
 	dial   *fakeDialBacks
 	opener *fakeOpener
+	ready  *fakeReadiness
 	chal   *fakeACMEChallenges
 }
 
@@ -282,13 +288,14 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool, banTun f
 	rtr := &fakeRouter{}
 	dial := &fakeDialBacks{}
 	opener := &fakeOpener{errByNode: map[string]error{}}
+	ready := &fakeReadiness{}
 	chal := &fakeACMEChallenges{}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
-	e := New(cfg, banIP, banTun, rec, rtr, dial, opener, lim, sink, chal, addr)
-	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, dial: dial, opener: opener, chal: chal}
+	e := New(cfg, banIP, banTun, rec, rtr, dial, opener, ready, lim, sink, chal, addr)
+	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, dial: dial, opener: opener, ready: ready, chal: chal}
 }
 
 func containsStr(ss []string, want string) bool {

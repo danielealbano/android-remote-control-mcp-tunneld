@@ -642,3 +642,40 @@ func TestControlClientAuth(t *testing.T) {
 		t.Fatalf("no mTLS dial-backs: ClientAuth = %v", got)
 	}
 }
+
+type fakeCertLookup map[string]bool
+
+func (f fakeCertLookup) has(host string) bool { return f[host] }
+
+func TestDialBackReadiness(t *testing.T) {
+	tests := []struct {
+		name  string
+		https bool
+		certs fakeCertLookup
+		want  bool
+	}{
+		{name: "plain dial-backs need no certificate", https: false, certs: fakeCertLookup{}, want: true},
+		{name: "https without the control-host certificate", https: true, certs: fakeCertLookup{"enroll.example.test": true}, want: false},
+		{name: "https with the control-host certificate", https: true, certs: fakeCertLookup{"connect.example.test": true}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := dialBackReadiness{https: tc.https, host: "connect.example.test", certs: tc.certs}
+			if got := r.DialBackReady(); got != tc.want {
+				t.Fatalf("DialBackReady() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReservedCerts_Has(t *testing.T) {
+	rh := &reservedHost{host: "connect.example.test"}
+	rc := &reservedCerts{hosts: map[string]*reservedHost{rh.host: rh}}
+	if rc.has(rh.host) {
+		t.Fatal("a host without a loaded certificate must report false")
+	}
+	rh.cur.Store(&tls.Certificate{})
+	if !rc.has(rh.host) || rc.has("unknown.example.test") {
+		t.Fatal("has must report a loaded certificate for its host only")
+	}
+}

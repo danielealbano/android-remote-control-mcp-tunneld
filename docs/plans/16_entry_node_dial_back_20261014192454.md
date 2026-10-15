@@ -2143,8 +2143,18 @@ DoD:
 - Comments (code review): stale comments elsewhere in the change's reach are trimmed by removal — "RefreshNode
   is a plain SET" (heartbeat scheduler + its test), the "empty id would be refused by the dial-back match"
   justification in the `store` tests, and "routed to the tunnel's owner node" on the e2e `postAdminTerminate`.
+- Action 6.1.1 / 7.4.1 (code review): a node that cannot accept HTTPS dial-backs (`--dialback-https` on and no
+  control-host certificate loaded yet) refuses tunnel connections at once (`no-route`) — before the stream slot and
+  before any `OPEN` — instead of waiting out `--limit-dialback-timeout` while holding a slot of the cluster-wide
+  `conc:{name}` set. `edge.New` takes a `DialBackReadiness` (`DialBackReady() bool`) after the `Opener`;
+  `server.Run` passes `dialBackReadiness{https, control host, reserved certs}` (`reservedCerts.has`), and the
+  reserved-cert store is now built before the edge. Tested by `TestEdge_HandleTunnel_RefusedWhileDialBacksUnavailable`,
+  `TestDialBackReadiness`, `TestReservedCerts_Has`.
+- Action 8.1.1 (code review): `dialBack` sets the upgrade deadline itself before arming the interrupt (so a
+  cancellation can never be overwritten by it); `upgradeDialBack` no longer sets it.
+- Code review: `spliceEvictor.Drain` logs its "drain deadline reached" Warn only when broadcasts are still running.
 - Code review: the docs state that a node without its control-host certificate can neither hold phone control
-  connections nor accept HTTPS dial-backs (tunnel connections entering it fail `no-route`), and that a crashed
+  connections nor accept HTTPS dial-backs (it refuses tunnel connections at once), and that a crashed
   owner's splices end within 10 s after the route expires (`--route-ttl`) or is re-bound (D13 / Actions 11.1.1–
   11.1.2 re-aligned); `/api/v1/data` on the plain listener is routed for every method (non-`GET` → `405`).
 - Action 4.3.1: `dialBackEnv` also carries the env's `mgr *Manager` (set in `startDialBackEnv`), so

@@ -142,16 +142,18 @@ func TestAdminController_Open(t *testing.T) {
 }
 
 func TestAdminController_Evict(t *testing.T) {
-	var got [3]string
-	c := &adminController{evictConn: func(name, connID, reason string) bool {
-		got = [3]string{name, connID, reason}
-		return true
-	}}
-	applied, err := c.Evict(context.Background(), "t", "conn-1", store.CloseBanEvict)
-	if err != nil || !applied {
-		t.Fatalf("Evict = (%v, %v), want (true, nil)", applied, err)
-	}
-	if got != [3]string{"t", "conn-1", store.CloseBanEvict} {
-		t.Fatalf("evictConn got %v", got)
+	for _, ended := range []bool{true, false} {
+		var got [3]string
+		c := &adminController{evictConn: func(name, connID, reason string) bool {
+			got = [3]string{name, connID, reason}
+			return ended
+		}}
+		applied, err := c.Evict(context.Background(), "t", "conn-1", store.CloseBanEvict)
+		if err != nil || applied != ended {
+			t.Fatalf("Evict = (%v, %v), want (%v, nil)", applied, err, ended)
+		}
+		if got != [3]string{"t", "conn-1", store.CloseBanEvict} {
+			t.Fatalf("evictConn got %v", got)
+		}
 	}
 }

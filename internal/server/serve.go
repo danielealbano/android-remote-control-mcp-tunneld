@@ -201,6 +201,20 @@ func listenPublic(ctx context.Context, addr string) (net.Listener, error) {
 	return ln, nil
 }
 
+type reservedCertLookup interface {
+	has(host string) bool
+}
+
+type dialBackReadiness struct {
+	https bool
+	host  string
+	certs reservedCertLookup
+}
+
+func (r dialBackReadiness) DialBackReady() bool {
+	return !r.https || r.certs.has(r.host)
+}
+
 func controlClientAuth(mtls bool) tls.ClientAuthType {
 	if mtls {
 		return tls.RequireAndVerifyClientCert
@@ -345,7 +359,11 @@ func (s *spliceEvictor) Drain(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+		select {
+		case <-done:
+		default:
+			s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+		}
 	}
 	s.cancel()
 	<-done

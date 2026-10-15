@@ -208,6 +208,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", cfg.Listen, err)
 	}
+	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
+	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
+		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
+	reserved.loadCache(ctx)
+
 	opener := &openAdapter{nodeID: nodeID, phones: phoneMgr, nodes: reg, mesh: meshClient,
 		open: wire.OpenPayload{Addr: cfg.DialBackAdvertise, UseHTTPS: cfg.DialBackHTTPS, UseMTLS: cfg.DialBackMTLS}}
 	ed := edge.New(edge.Config{
@@ -218,7 +223,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, dialBacks, opener, lim, &edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+		reg, dialBacks, opener, dialBackReadiness{https: cfg.DialBackHTTPS, host: cfg.ControlHost, certs: reserved}, lim,
+		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 	evictor.local = ed.EvictConnStreams
 
 	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams}
@@ -226,11 +232,6 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err != nil {
 		return fmt.Errorf("mesh handler: %w", err)
 	}
-
-	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
-	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
-	reserved.loadCache(ctx)
 
 	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the

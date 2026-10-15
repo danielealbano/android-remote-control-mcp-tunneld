@@ -65,6 +65,11 @@ func (c *Client) dialBack(ctx context.Context, op wire.OpenPayload) (net.Conn, e
 	if err != nil {
 		return nil, fmt.Errorf("dial-back to %s: %w", op.Addr, err)
 	}
+	if dl, ok := dctx.Deadline(); ok {
+		if err := conn.SetDeadline(dl); err != nil {
+			return nil, errors.Join(fmt.Errorf("dial-back to %s: set the upgrade deadline: %w", op.Addr, err), conn.Close())
+		}
+	}
 	stopInterrupt := context.AfterFunc(dctx, func() {
 		if err := conn.SetDeadline(time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
 			c.logger.Debug("dial-back upgrade interrupt failed", "addr", op.Addr, "err", err)
@@ -81,11 +86,6 @@ func (c *Client) dialBack(ctx context.Context, op wire.OpenPayload) (net.Conn, e
 }
 
 func upgradeDialBack(ctx context.Context, conn net.Conn, host, token string) (*bufio.Reader, error) {
-	if dl, ok := ctx.Deadline(); ok {
-		if err := conn.SetDeadline(dl); err != nil {
-			return nil, fmt.Errorf("set the upgrade deadline: %w", err)
-		}
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+host+wire.DialBackPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build the upgrade request: %w", err)

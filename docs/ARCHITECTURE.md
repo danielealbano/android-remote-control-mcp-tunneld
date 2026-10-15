@@ -16,8 +16,8 @@ socket is never bound while unserved. A valid reserved-host certificate cached o
 bind (replaced by the Valkey-shared one when that expires later); reserved-host issuance runs AFTER the bind, because HTTP-01 / TLS-ALPN-01 validations are answered by
 the node's own listeners. Until a reserved host has a certificate its TLS is refused (degraded) and issuance
 is retried every minute; while the control host has none, the node can neither hold phone control
-connections nor accept HTTPS dial-backs, so tunnel connections entering it fail (`no-route`) — splicing on the
-other nodes is unaffected. The connection-log spool directory is created,
+connections nor accept HTTPS dial-backs, so it refuses tunnel connections at once (`no-route`) — before taking a
+stream slot or requesting an `OPEN` — and the other nodes are unaffected. The connection-log spool directory is created,
 locked and recovered before the bind; uploading its leftover files runs in the background.
 
 ```mermaid
@@ -245,7 +245,7 @@ other string, so labels cannot be invented at call sites). The writers:
 | Reason(s) | Writer |
 |---|---|
 | `ban` | edge accept, HTTP-01 accept guard, enroll handler, phone control handler (each ban gate) |
-| `no-route` | edge accept/dispatch, edge TLS-ALPN-01 interception (no pending challenge), bridge (a failed dial-back open) |
+| `no-route` | edge accept/dispatch, edge TLS-ALPN-01 interception (no pending challenge), bridge (a failed dial-back open, or a node that cannot accept HTTPS dial-backs yet) |
 | `handshake-timeout` | edge accept/dispatch |
 | `conn-rate`, `max-clients` | edge accept/dispatch, HTTP-01 accept guard |
 | `quota-day`, `quota-week` | bridge admission (one per NEW stream refused on an exhausted window) |

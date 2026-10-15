@@ -159,6 +159,12 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
+	if !e.ready.DialBackReady() {
+		e.cfg.Logger.Debug("tunnel refused: this node cannot accept dial-backs yet", "tunnel", name)
+		e.rec.Reject("no-route", name, peerAddr(client))
+		closeLogged(e.cfg.Logger, "public client", client)
+		return
+	}
 	nodeID, fp, connID, ok, err := e.router.LookupRoute(ctx, name)
 	if err != nil {
 		e.cfg.Logger.Debug("route lookup failed", "tunnel", name, "err", err)

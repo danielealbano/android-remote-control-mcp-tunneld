@@ -184,48 +184,52 @@ func TestControlTerminateDispatches(t *testing.T) {
 }
 
 func TestControlOpenDispatches(t *testing.T) {
-	fc := &fakeController{opened: true}
-	h := newTestHandler(t, fc)
-	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
-	body, err := json.Marshal(ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &open})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
-	if w.Code != 200 {
-		t.Fatalf("open must be 200, got %d", w.Code)
-	}
-	var resp ControlResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !resp.Applied {
-		t.Error("response applied = false, want the controller's true")
-	}
-	if fc.tunnel != "t" || fc.connID != "c1" || fc.open != open {
-		t.Errorf("controller got tunnel=%q conn=%q open=%+v", fc.tunnel, fc.connID, fc.open)
+	for _, applied := range []bool{true, false} {
+		fc := &fakeController{opened: applied}
+		h := newTestHandler(t, fc)
+		open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+		body, err := json.Marshal(ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &open})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+		if w.Code != 200 {
+			t.Fatalf("open must be 200, got %d", w.Code)
+		}
+		var resp ControlResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.Applied != applied {
+			t.Errorf("response applied = %v, want the controller's %v", resp.Applied, applied)
+		}
+		if fc.tunnel != "t" || fc.connID != "c1" || fc.open != open {
+			t.Errorf("controller got tunnel=%q conn=%q open=%+v", fc.tunnel, fc.connID, fc.open)
+		}
 	}
 }
 
 func TestControlEvictDispatches(t *testing.T) {
-	fc := &fakeController{evicted: true}
-	h := newTestHandler(t, fc)
-	body, err := json.Marshal(ControlRequest{Op: "evict", Tunnel: "t", ConnID: "c1", Reason: "ban-evict"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
-	if w.Code != 200 {
-		t.Fatalf("evict must be 200, got %d", w.Code)
-	}
-	var resp ControlResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !resp.Applied || fc.tunnel != "t" || fc.connID != "c1" || fc.reason != "ban-evict" {
-		t.Errorf("applied=%v controller got tunnel=%q conn=%q reason=%q", resp.Applied, fc.tunnel, fc.connID, fc.reason)
+	for _, applied := range []bool{true, false} {
+		fc := &fakeController{evicted: applied}
+		h := newTestHandler(t, fc)
+		body, err := json.Marshal(ControlRequest{Op: "evict", Tunnel: "t", ConnID: "c1", Reason: "ban-evict"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+		if w.Code != 200 {
+			t.Fatalf("evict must be 200, got %d", w.Code)
+		}
+		var resp ControlResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.Applied != applied || fc.tunnel != "t" || fc.connID != "c1" || fc.reason != "ban-evict" {
+			t.Errorf("applied=%v (want %v) controller got tunnel=%q conn=%q reason=%q", resp.Applied, applied, fc.tunnel, fc.connID, fc.reason)
+		}
 	}
 }
 

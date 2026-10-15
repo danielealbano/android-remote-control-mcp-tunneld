@@ -181,6 +181,24 @@ func TestEdge_OpenFar_OpensThenAwaitsWithOneToken(t *testing.T) {
 	}
 }
 
+func TestEdge_HandleTunnel_RefusedWhileDialBacksUnavailable(t *testing.T) {
+	cfg := baseConfig()
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.set("node-a", "fp", "conn-1", true, nil)
+	te.ready.notReady.Store(true)
+	client := newScriptConn("198.51.100.73", nil)
+	waitDone(t, runTunnel(te, client, "abcdef012345.example.test"), 5*time.Second)
+	if !client.isClosed() || !containsStr(te.rec.rejectReasons(), "no-route") {
+		t.Fatalf("closed=%v rejects=%v, want the client refused with no-route", client.isClosed(), te.rec.rejectReasons())
+	}
+	if len(te.opener.calls) != 0 || len(te.dial.tokens) != 0 {
+		t.Fatal("no OPEN may be requested while this node cannot accept dial-backs")
+	}
+	if got := freeSlots(t, te, "abcdef012345", cfg.Concurrent); got != cfg.Concurrent {
+		t.Fatalf("no stream slot may be taken while this node cannot accept dial-backs: %d/%d free", got, cfg.Concurrent)
+	}
+}
+
 func TestEdge_OpenFar_BoundedByDialBackTimeout(t *testing.T) {
 	cfg := baseConfig()
 	cfg.DialBackTimeout = 100 * time.Millisecond
