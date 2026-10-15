@@ -275,6 +275,41 @@ func TestFetchIssueNonce_RetryPathCompletes(t *testing.T) {
 	}
 }
 
+func TestFetchNonce_ErrorClasses(t *testing.T) {
+	answer := func(status int, body string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})}
+	}
+	tests := []struct {
+		name          string
+		hc            *http.Client
+		wantEnroll    bool
+		wantTransport bool
+		wantWait      time.Duration
+		wantRetry     bool
+	}{
+		{name: "retryable refusal", hc: answer(http.StatusServiceUnavailable, `{"reason":"internal","retryable":true,"retry_after_seconds":3}`),
+			wantEnroll: true, wantWait: 3 * time.Second, wantRetry: true},
+		{name: "final refusal", hc: answer(http.StatusBadRequest, `{"reason":"bad_request"}`), wantEnroll: true},
+		{name: "network failure", hc: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errInjected })},
+			wantTransport: true, wantWait: 5 * time.Second, wantRetry: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchNonce(context.Background(), tc.hc, testEnrollHost)
+			_, isEnroll := errors.AsType[*EnrollError](err)
+			_, isTransport := errors.AsType[*transportError](err)
+			if isEnroll != tc.wantEnroll || isTransport != tc.wantTransport {
+				t.Fatalf("fetchNonce = %v (EnrollError %v, transportError %v), want %v / %v", err, isEnroll, isTransport, tc.wantEnroll, tc.wantTransport)
+			}
+			if wait, retry := issueRetryWait(err, 0); retry != tc.wantRetry || wait != tc.wantWait {
+				t.Fatalf("issueRetryWait = %s, %v; want %s, %v", wait, retry, tc.wantWait, tc.wantRetry)
+			}
+		})
+	}
+}
+
 // truncatedRT returns a response whose body errors partway through Read.
 type truncatedRT struct{}
 
