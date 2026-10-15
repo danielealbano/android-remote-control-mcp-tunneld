@@ -14,14 +14,14 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // bandwidthFloorBytesPerSec is the minimum accepted --limit-bandwidth in bytes/sec. It MUST equal
 // wire.ChunkSize (16*1024): each read charges up to one slice against the per-second byte window, so a
 // rate below one slice would make a single read exceed the whole second's budget and throttle every
-// read (the tunnel could never forward more than one slice per second). The literal is duplicated here
-// with this note rather than importing wire (avoids an import cycle).
-const bandwidthFloorBytesPerSec int64 = 16 * 1024
+// read (the tunnel could never forward more than one slice per second).
+const bandwidthFloorBytesPerSec int64 = wire.ChunkSize
 
 // shortlivedLifetime is Let's Encrypt's fixed `shortlived` profile validity (160h). --acme-renew-margin
 // must fit strictly inside it so a renewal is attempted before expiry.
@@ -331,6 +331,9 @@ func (c ServeCmd) Validate() error {
 		if d.v <= 0 {
 			return fmt.Errorf("%s must be > 0, got %s", d.name, d.v)
 		}
+	}
+	if c.ControlPingInterval > wire.MaxControlPingInterval {
+		return fmt.Errorf("--control-ping-interval must be ≤ %s: phones treat %s without a control frame as a dead connection (docs/PROTOCOL.md §3), got %s", wire.MaxControlPingInterval, wire.ControlSilenceTimeout, c.ControlPingInterval)
 	}
 	if c.AttestStatusMaxStale <= c.AttestRefresh {
 		return fmt.Errorf("--attest-status-max-stale (%s) must exceed --attest-refresh (%s): a staleness bound at or below the refresh cadence refuses enrollment for the tail of every refresh window", c.AttestStatusMaxStale, c.AttestRefresh)

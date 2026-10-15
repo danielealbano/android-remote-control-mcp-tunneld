@@ -77,16 +77,16 @@ Branch: `feat/plan-17-acme-budgets-client-resilience`.
 
 ---
 
-## [ ] US1 — Protocol contract: control liveness + issuance retries
+## [x] US1 — Protocol contract: control liveness + issuance retries
 
 Phones must notice a dead control connection and retry issuance in a bounded, uniform way.
 
-- [ ] AC1: `wire` exports the liveness and retry constants; `Validate()` refuses `--control-ping-interval` > 30 s.
-- [ ] AC2: `docs/PROTOCOL.md` §3 states the 90 s rule, the 300 s issuance wait and the retry rule.
+- [x] AC1: `wire` exports the liveness and retry constants; `Validate()` refuses `--control-ping-interval` > 30 s.
+- [x] AC2: `docs/PROTOCOL.md` §3 states the 90 s rule, the 300 s issuance wait and the retry rule.
 
-### [ ] T1.1 — wire constants
+### [x] T1.1 — wire constants
 
-- [ ] A1.1.1 `internal/wire/frame.go` (modify): add `"time"` to the imports and append:
+- [x] A1.1.1 `internal/wire/frame.go` (modify): add `"time"` to the imports and append:
 
 ```go
 const (
@@ -99,11 +99,11 @@ func IssueRetryWait(retry int) time.Duration { return time.Duration(retry+1) * 5
 ```
 
 DoD:
-- [ ] Constants and `IssueRetryWait` exported.
+- [x] Constants and `IssueRetryWait` exported.
 
-### [ ] T1.2 — ping-interval cap
+### [x] T1.2 — ping-interval cap
 
-- [ ] A1.2.1 `internal/config/config.go` (modify): import `github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire`. In `Validate()`, right after the `d.v <= 0` duration loop:
+- [x] A1.2.1 `internal/config/config.go` (modify): import `github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire`. In `Validate()`, right after the `d.v <= 0` duration loop:
 
 ```go
 	if c.ControlPingInterval > wire.MaxControlPingInterval {
@@ -111,14 +111,14 @@ DoD:
 	}
 ```
 
-- [ ] A1.2.2 same file: `config` now imports `wire` (A1.2.1), so the duplicated literal loses its only reason, and its comment's last sentence ("The literal is duplicated here with this note rather than importing wire (avoids an import cycle).") becomes false. That sentence is removed, and the constant takes the value from its single source: `const bandwidthFloorBytesPerSec int64 = wire.ChunkSize` (untyped constant, no conversion needed). The rest of the comment stays (still true).
+- [x] A1.2.2 same file: `config` now imports `wire` (A1.2.1), so the duplicated literal loses its only reason, and its comment's last sentence ("The literal is duplicated here with this note rather than importing wire (avoids an import cycle).") becomes false. That sentence is removed, and the constant takes the value from its single source: `const bandwidthFloorBytesPerSec int64 = wire.ChunkSize` (untyped constant, no conversion needed). The rest of the comment stays (still true).
 
 DoD:
-- [ ] Cap enforced; no comment states something false.
+- [x] Cap enforced; no comment states something false.
 
-### [ ] T1.3 — PROTOCOL.md §3
+### [x] T1.3 — PROTOCOL.md §3
 
-- [ ] A1.3.1 `docs/PROTOCOL.md` (modify), §3, after the first bullet list (ending "the mTLS `POST /api/v1/issue` exchanges (below).") insert:
+- [x] A1.3.1 `docs/PROTOCOL.md` (modify), §3, after the first bullet list (ending "the mTLS `POST /api/v1/issue` exchanges (below).") insert:
 
 > **Liveness.** The server sends a `PING` every `--control-ping-interval` (at most 30 s) and drops a phone that
 > misses three `PONG`s. The phone MUST treat 90 s without ANY control frame as a dead connection: it closes the
@@ -126,8 +126,8 @@ DoD:
 > rule a half-open TCP connection (a NAT that dropped the mapping, a server that is gone) is never noticed,
 > because the phone writes only to answer a `PING`.
 
-- [ ] A1.3.2 same file, `/api/v1/issue` **Latency** bullet: `the phone MUST allow at least 60 s for it` → `the phone MUST allow at least 300 s for it`.
-- [ ] A1.3.3 same file: replace the **Retrying a retryable failure** bullet with:
+- [x] A1.3.2 same file, `/api/v1/issue` **Latency** bullet: `the phone MUST allow at least 60 s for it` → `the phone MUST allow at least 300 s for it`.
+- [x] A1.3.3 same file: replace the **Retrying a retryable failure** bullet with:
 
 > - **Retrying a failed issuance**: the phone retries `POST /api/v1/issue` at most 3 times, and only the issuance — it
 >   NEVER re-enrolls (a new enrollment assigns a new name and orphans the old one). A network error, a timeout, or
@@ -143,9 +143,9 @@ DoD:
 >   `RENEW_NUDGE{nonce}` on its next scan.
 
 DoD:
-- [ ] §3 states the three rules exactly as above.
+- [x] §3 states the three rules exactly as above.
 
-### [ ] T1.4 — tests
+### [x] T1.4 — tests
 
 | Test | Verifies |
 |---|---|
@@ -155,7 +155,7 @@ DoD:
 **Existing test to adapt:** `TestEnvTwinOverridesFlag` (`internal/config/config_test.go`). kong runs `Validate()` on parse, so `TUNNELD_CONTROL_PING_INTERVAL` `45s` and the asserted `45*time.Second` become `25s` / `25*time.Second`.
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 

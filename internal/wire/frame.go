@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // Wire protocol (the E2E contract). The phone's HTTP/2 CONTROL stream carries length-framed control
@@ -96,3 +97,11 @@ func DecodeControl(data []byte) (ControlType, []byte, error) {
 	}
 	return ControlType(data[0]), data[5:], nil
 }
+
+const (
+	MaxControlPingInterval = 30 * time.Second
+	ControlSilenceTimeout  = 3 * MaxControlPingInterval
+	IssueRetries           = 3
+)
+
+func IssueRetryWait(retry int) time.Duration { return time.Duration(retry+1) * 5 * time.Second }

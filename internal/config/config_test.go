@@ -342,6 +342,30 @@ func TestValidate_DurationLowerBounds(t *testing.T) {
 	}
 }
 
+func TestValidate_ControlPingIntervalCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		wantErr  bool
+	}{
+		{name: "at the cap", interval: 30 * time.Second},
+		{name: "over the cap", interval: 31 * time.Second, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ControlPingInterval = tc.interval
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "--control-ping-interval") {
+				t.Fatalf("error %q must name --control-ping-interval", err)
+			}
+		})
+	}
+}
+
 func TestValidate_ZeroSizeRejected(t *testing.T) {
 	cases := []struct {
 		name string
@@ -484,7 +508,7 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 	t.Setenv("TUNNELD_MAX_CLIENTS", "42")            // int twin
 	t.Setenv("TUNNELD_S_3_BUCKET", "envbucket")      // plain string twin (digit-boundary env name)
 	t.Setenv("TUNNELD_LIMIT_TRAFFIC_DAY", "2gb")     // size string twin
-	t.Setenv("TUNNELD_CONTROL_PING_INTERVAL", "45s") // duration twin
+	t.Setenv("TUNNELD_CONTROL_PING_INTERVAL", "25s") // duration twin
 	t.Setenv("TUNNELD_ACME_DNS_PROVIDER", "route53") // plain string twin
 	t.Setenv("TUNNELD_LOG", "output=std;level=warn") // repeatable []string twin
 
@@ -507,7 +531,7 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 	if cli.Serve.LimitTrafficDay != "2gb" {
 		t.Errorf("limit-traffic-day twin = %q", cli.Serve.LimitTrafficDay)
 	}
-	if cli.Serve.ControlPingInterval != 45*time.Second {
+	if cli.Serve.ControlPingInterval != 25*time.Second {
 		t.Errorf("control-ping-interval twin = %s", cli.Serve.ControlPingInterval)
 	}
 	if cli.Serve.ACMEDNSProvider != "route53" {

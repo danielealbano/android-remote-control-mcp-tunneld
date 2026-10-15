@@ -114,6 +114,12 @@ carries:
   each frame. The stream stays open for the connection's lifetime.
 - the mTLS `POST /api/v1/issue` exchanges (below).
 
+**Liveness.** The server sends a `PING` every `--control-ping-interval` (at most 30 s) and drops a phone that
+misses three `PONG`s. The phone MUST treat 90 s without ANY control frame as a dead connection: it closes the
+control CONNECTION — the TCP/TLS connection, not only the stream — and reconnects on a new one. Without this
+rule a half-open TCP connection (a NAT that dropped the mapping, a server that is gone) is never noticed,
+because the phone writes only to answer a `PING`.
+
 Public traffic never rides on this connection: each public connection gets its own **dial-back
 connection** (§4).
 
@@ -145,18 +151,24 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   (initial) or the `RENEW_NUDGE` nonce (renewal); `tls_csr` MUST request `<name>.<tunnel-domain>`.
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs.
 - **Latency**: the response arrives only after a live ACME order (validation + issuance, possibly spilling
-  over to the next CA), so the phone MUST allow at least 60 s for it; a phone that gives up earlier loses the
+  over to the next CA), so the phone MUST allow at least 300 s for it; a phone that gives up earlier loses the
   issued certificate (the server discards an order whose requester is gone).
 - Errors: `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping: `403`
   banned/forbidden identity, `405` non-POST method, `401` unauthorized, `503` retryable (the body's
   `retryable` field is authoritative; `retry_after_seconds` carries the pacing hint when known, e.g.
   an ACME rate-limit cooldown), `400` otherwise.
-- **Retrying a retryable failure**: every `/api/v1/issue` attempt CONSUMES its single-use nonce, including a
-  failed one. The enroll and issue nonces share ONE namespace, so the retry path is: fetch a fresh
-  challenge from `GET /api/v1/enroll/nonce` (server-TLS, per-IP rate-limited), wait `retry_after_seconds`,
-  and repeat `POST /api/v1/issue` with a fresh attestation over the new nonce (fresh keys/CSRs, as always).
-  A phone that is already BOUND on the control stream is also re-nudged: the renewal watcher sees a
-  cert-less or renewal-due tunnel and sends a fresh `RENEW_NUDGE{nonce}` on its next scan.
+- **Retrying a failed issuance**: the phone retries `POST /api/v1/issue` at most 3 times, and only the issuance — it
+  NEVER re-enrolls (a new enrollment assigns a new name and orphans the old one). A network error, a timeout, or
+  an error answer with `retryable: true` is retried; `retryable: false` ends the attempts at once. Retry n
+  (1–3) waits the answer's `retry_after_seconds` when it carries one, otherwise 5 s, 10 s, 15 s. Every attempt
+  CONSUMES its single-use nonce, including a failed one, and the enroll and issue nonces share ONE namespace, so
+  after the wait the phone fetches a fresh challenge from `GET /api/v1/enroll/nonce` (server-TLS, per-IP
+  rate-limited) and repeats `POST /api/v1/issue` with a fresh attestation over it (fresh keys/CSRs, as always);
+  a failed nonce fetch is a failed retry like any other. After the third failed retry the phone gives up. When
+  every CA is out of issuance budget the server answers `503` `acme_rate_limited` with `retry_after_seconds` =
+  the earliest free budget slot plus a random 1–10 s. A phone that is already BOUND on the control stream is
+  also re-nudged: the renewal watcher sees a cert-less or renewal-due tunnel and sends a fresh
+  `RENEW_NUDGE{nonce}` on its next scan.
 
 **Renewal rotates the identity key**: on a `RENEW_NUDGE{nonce}` the phone calls `POST /api/v1/issue` with a
 FRESH identity key + fresh TLS key + fresh attestation over the nonce; the server re-runs the full
