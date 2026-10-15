@@ -286,6 +286,45 @@ func TestClient_DialBack_HonoursTimeout(t *testing.T) {
 	}
 }
 
+func TestClient_DialBack_UpgradeAbortedWhenRunStops(t *testing.T) {
+	accepted := make(chan net.Conn, 1)
+	addr, _ := newRawListener(t, func(c net.Conn) { accepted <- c })
+	c, _ := newLoggedClient()
+	c.controlHost = testControlHost
+	c.dialBackTimeout = time.Minute
+	var invoked atomic.Bool
+	c.backend = func(io.ReadWriteCloser) { invoked.Store(true) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan struct{})
+	go func() {
+		c.handleOpen(ctx, []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false}`))
+		close(returned)
+	}()
+	var srv net.Conn
+	select {
+	case srv = <-accepted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the dial-back never connected")
+	}
+	defer tunneltest.CloseOrLog(t, srv)
+	cancel()
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the dial-back upgrade outlived Run's context")
+	}
+	if invoked.Load() {
+		t.Fatal("the backend must not be invoked for an aborted upgrade")
+	}
+	if err := srv.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, srv); err != nil {
+		t.Fatalf("the aborted dial-back socket must be closed, read = %v", err)
+	}
+}
+
 func TestNew_RejectsNonPositiveDialBackTimeout(t *testing.T) {
 	if _, err := New("127.0.0.1:1", testControlHost, testTunnelDomain, nil, nil, nil, WithDialBackTimeout(0)); err == nil {
 		t.Fatal("a zero dial-back timeout must be rejected")

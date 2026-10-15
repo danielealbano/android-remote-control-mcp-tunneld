@@ -65,7 +65,15 @@ func (c *Client) dialBack(ctx context.Context, op wire.OpenPayload) (net.Conn, e
 	if err != nil {
 		return nil, fmt.Errorf("dial-back to %s: %w", op.Addr, err)
 	}
+	stopInterrupt := context.AfterFunc(dctx, func() {
+		if err := conn.SetDeadline(time.Now()); err != nil && !errors.Is(err, net.ErrClosed) {
+			c.logger.Debug("dial-back upgrade interrupt failed", "addr", op.Addr, "err", err)
+		}
+	})
 	br, err := upgradeDialBack(dctx, conn, c.controlHost, op.Token)
+	if !stopInterrupt() && err == nil {
+		err = dctx.Err()
+	}
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("dial-back upgrade at %s: %w", op.Addr, err), conn.Close())
 	}

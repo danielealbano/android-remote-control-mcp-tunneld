@@ -794,7 +794,7 @@ func postAdminReissue(t *testing.T, internalAddr, name string) (int, bool) {
 	return postAdminAction(t, internalAddr, "reissue", name, "reissued")
 }
 
-// postAdminTerminate terminates name's live phone connection, routed to the tunnel's owner node.
+// postAdminTerminate terminates name's live phone connection.
 func postAdminTerminate(t *testing.T, internalAddr, name string) (int, bool) {
 	t.Helper()
 	return postAdminAction(t, internalAddr, "terminate", name, "terminated")

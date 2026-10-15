@@ -177,9 +177,8 @@ func TestFakePutRejectedEnrollment(t *testing.T) {
 	}
 }
 
-// TestNewConnIDFallback_NonEmpty verifies MustConnID never returns an EMPTY id — an empty id would be
-// 400-refused by the dial-back match (serveData / the mesh header check), turning a connection into a
-// no-route. The rand-failure fallback is a fixed non-empty id.
+// TestNewConnIDFallback_NonEmpty verifies MustConnID never returns an EMPTY id. The rand-failure fallback
+// is a fixed non-empty id.
 func TestNewConnIDFallback_NonEmpty(t *testing.T) {
 	id := store.MustConnID()
 	if id == "" {

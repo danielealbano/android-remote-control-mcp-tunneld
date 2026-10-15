@@ -61,7 +61,7 @@ X-Dial-Token: <token>
 
 Success: `HTTP/1.1 101 Switching Protocols` + `Connection: Upgrade` + `Upgrade: tunneld-dial`, then the raw
 opaque splice; either side closing ends it. Failures (then the connection closes): `400` malformed (not exactly
-HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` identity certificate rejected (mesh-role, invalid name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already fails the TLS handshake, with no HTTP response), `404` unknown,
+HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` banned source IP or identity certificate rejected (mesh-role, invalid name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already fails the TLS handshake, with no HTTP response), `404` unknown,
 expired, already-used token or a token of another tunnel, `405` non-`GET`. The token is single-use and valid
 only while the entry node waits (`--limit-dialback-timeout`). If the open fails, the entry node takes ONE fresh
 route lookup and retries once (same token) when the route changed, then closes the client.
@@ -2134,6 +2134,15 @@ DoD:
   certificate, so a missing or untrusted one fails the handshake before any HTTP response.
 - Action 4.2.5 (code review): the `MustConnID` doc also drops "an EMPTY id would be refused by the dial-back
   match and turn every connection into a no-route" (dial-backs are matched by token now).
+- Action 8.1.1 (code review): `dialBack` also arms `context.AfterFunc(dctx, …)` that sets an immediate socket
+  deadline, so a cancelled `Run` context (or the dial-back timeout) aborts an in-progress upgrade read/write at
+  once; when it fired, the dial-back fails (`dctx.Err()`) and the socket is closed. Tested by
+  `TestClient_DialBack_UpgradeAbortedWhenRunStops`.
+- Wire contract / Action 11.1.1 (code review): the `403` causes also name the banned source IP (the peer-IP ban
+  gate runs first on `/api/v1/data`).
+- Comments (code review): stale comments elsewhere in the change's reach are trimmed by removal — "RefreshNode
+  is a plain SET" (heartbeat scheduler + its test), the "empty id would be refused by the dial-back match"
+  justification in the `store` tests, and "routed to the tunnel's owner node" on the e2e `postAdminTerminate`.
 - Code review: the docs state that a node without its control-host certificate can neither hold phone control
   connections nor accept HTTPS dial-backs (tunnel connections entering it fail `no-route`), and that a crashed
   owner's splices end within 10 s after the route expires (`--route-ttl`) or is re-bound (D13 / Actions 11.1.1–
