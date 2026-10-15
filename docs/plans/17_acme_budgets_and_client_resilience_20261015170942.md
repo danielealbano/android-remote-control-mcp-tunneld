@@ -1107,22 +1107,22 @@ DoD:
 
 ---
 
-## [ ] US5 — Configuration surface
+## [x] US5 — Configuration surface
 
 This story adds the new flags for GTS accounts, budgets, attempt deadlines and polling, and makes every CA optional. The GTS EAB flags go away in US6 (A6.7.4/A6.7.5), together with their only consumer (`acmewire.go`), so every story's commit compiles.
 
-- [ ] AC1: Defaults equal the decision record. `Validate()` rejects:
+- [x] AC1: Defaults equal the decision record. `Validate()` rejects:
   - malformed rates;
   - bad, duplicate or colliding GTS ids;
   - non-positive durations;
   - a lone ZeroSSL EAB value;
   - no enabled CA.
-- [ ] AC2: `UsesChallenge` / `ServesPlainHTTP` consider only enabled CAs.
-- [ ] AC3: Every test config validates, every hermetic tier that lists a GTS account owns its registered key, and a test that relied on ZeroSSL being in the chain still has it.
+- [x] AC2: `UsesChallenge` / `ServesPlainHTTP` consider only enabled CAs.
+- [x] AC3: Every test config validates, every hermetic tier that lists a GTS account owns its registered key, and a test that relied on ZeroSSL being in the chain still has it.
 
-### [ ] T5.1 — rate parser
+### [x] T5.1 — rate parser
 
-- [ ] A5.1.1 `internal/config/rate.go` (create):
+- [x] A5.1.1 `internal/config/rate.go` (create):
 
 ```go
 package config
@@ -1167,11 +1167,11 @@ func ParseRate(s string) (Rate, error) {
 ```
 
 DoD:
-- [ ] Parser in place.
+- [x] Parser in place.
 
-### [ ] T5.2 — flags, enabled CAs, validation
+### [x] T5.2 — flags, enabled CAs, validation
 
-- [ ] A5.2.1 `internal/config/config.go` (modify):
+- [x] A5.2.1 `internal/config/config.go` (modify):
   - **Help texts:**
     - `--acme-dir-le` becomes `"LE ACME directory; empty leaves Let's Encrypt out of the chain."`;
     - `--acme-account-dir` becomes `"Directory holding the ACME account keys (<dir>/accounts/<id>.key: Let's Encrypt and ZeroSSL keys are created per node, GTS keys must already exist) + reserved-host self-certs. Required for serve."` (the old "persisted per-CA ACME account keys" is made wrong);
@@ -1214,7 +1214,7 @@ func (c ServeCmd) UsesChallenge(method string) bool {
 }
 ```
 
-- [ ] A5.2.2 same file, `Validate()`:
+- [x] A5.2.2 same file, `Validate()`:
   - **Imports:** add `regexp` (`errors` is already imported).
   - **URL check:** in the URL loop, `--acme-dir-le` is checked only when `c.LEEnabled()`. The loop's slice is built conditionally:
 
@@ -1283,16 +1283,16 @@ func validGTSAccounts(ids []string) error {
 }
 ```
 
-- [ ] A5.2.3 `deploy/tunneld.env.example` (modify): add `TUNNELD_ACME_GTS_ACCOUNT=` (no comment) right after the `TUNNELD_ACME_CHALLENGE_ZEROSSL=http-01` line.
+- [x] A5.2.3 `deploy/tunneld.env.example` (modify): add `TUNNELD_ACME_GTS_ACCOUNT=` (no comment) right after the `TUNNELD_ACME_CHALLENGE_ZEROSSL=http-01` line.
 
 DoD:
-- [ ] Flags, enabled-CA logic and template consistent.
+- [x] Flags, enabled-CA logic and template consistent.
 
-### [ ] T5.3 — test configs + test GTS accounts
+### [x] T5.3 — test configs + test GTS accounts
 
 Test literals bypass kong defaults; a hermetic tier that lists a GTS account must own its registered key.
 
-- [ ] A5.3.1 `internal/tunneltest/acme_config.go` (create):
+- [x] A5.3.1 `internal/tunneltest/acme_config.go` (create):
 
 ```go
 package tunneltest
@@ -1375,7 +1375,7 @@ func RegisterACMEAccountKey(t *testing.T, accountDir, id, dirURL string) {
 }
 ```
 
-- [ ] A5.3.2 (modify) the shared test harnesses. Every config that reaches `Validate()` or `server.Run` gets the loose budgets and an existing `gts` key. A Pebble tier registers that key at Pebble first. lego's `NewConfig` reads `LEGO_CA_CERTIFICATES` on every call (`lego/client_config.go` `initCertPool`), and both harnesses set it before this point.
+- [x] A5.3.2 (modify) the shared test harnesses. Every config that reaches `Validate()` or `server.Run` gets the loose budgets and an existing `gts` key. A Pebble tier registers that key at Pebble first. lego's `NewConfig` reads `LEGO_CA_CERTIFICATES` on every call (`lego/client_config.go` `initCertPool`), and both harnesses set it before this point.
   - **`internal/server/server_test.go` `lifecycleConfig`:** `return config.ServeCmd{…}` becomes `cfg := config.ServeCmd{…}` followed by:
 
 ```go
@@ -1399,7 +1399,7 @@ func RegisterACMEAccountKey(t *testing.T, accountDir, id, dirURL string) {
 ```
 
   - **Not changed:** `schedulers_test.go`, whose literals feed only `validNameFunc`. The `acmewire_test.go` literals change in US6 (T6.8), together with `buildACMEChain`.
-- [ ] A5.3.3 `internal/config/config_test.go` (modify):
+- [x] A5.3.3 `internal/config/config_test.go` (modify):
   - **Base valid literal (`validCfg`)** gains the lines below, directly, without tunneltest (tunneltest imports config). The ZeroSSL EAB pair keeps ZeroSSL enabled, so the existing ZeroSSL cases of `TestValidate_ACMEHTTPListen` ("http-01 malformed/empty") and `TestValidate_DNSProviderOnlyWithDNS01` ("zerossl dns-01 without provider") keep their meaning:
 
 ```go
@@ -1424,23 +1424,23 @@ func RegisterACMEAccountKey(t *testing.T, accountDir, id, dirURL string) {
 ```
 
   - **`TestServeCmd_UsesChallenge` and `TestServesPlainHTTP`:** their literals enable all three CAs (`ACMEDirLE: "https://le.example.test/dir"`, `ACMEGTSAccounts: []string{"gts"}`, `ACMEEABZeroSSLKID: "k"`, `ACMEEABZeroSSLHMAC: "h"`), so the existing cases keep their meaning.
-- [ ] A5.3.4 `staging/staging_test.go` (modify):
+- [x] A5.3.4 `staging/staging_test.go` (modify):
   - the `config.ServeCmd` literal gains the 16 budget/deadline/poll/GTS field lines of A5.3.3 (not its `k`/`h` EAB pair; A5.3.5 sets this tier's own);
   - `writeAccountKey(t, accountDir, "gts", env.gtsKey)` runs in EVERY case, so `if tc.writeGTSKey` goes away. The `writeGTSKey` field is removed, and the LE cases' GTS directory stays unreachable.
-- [ ] A5.3.5 ZeroSSL in the test tiers.
+- [x] A5.3.5 ZeroSSL in the test tiers.
   - **Pebble tiers** (integration, e2e) set no EAB, so ZeroSSL is out of them; the US10 scenarios rely on that.
   - **Two configs keep ZeroSSL enabled**, so their chain and their `:80` binding stay as today:
     - `internal/server/server_test.go` `TestRun_ACMEHTTPBindFailureIsFatal`: `cfg.ACMEEABZeroSSLKID, cfg.ACMEEABZeroSSLHMAC = "changeme", "changeme"` next to its `ACMEChallengeZeroSSL` line. Its ZeroSSL HTTP-01 is what binds `:80`.
     - The `staging/staging_test.go` literal: `ACMEEABZeroSSLKID: "changeme", ACMEEABZeroSSLHMAC: "changeme"`. Its ZeroSSL directory is unreachable.
 
-- [ ] A5.3.6 `internal/server/acmewire_test.go` (modify). A5.2.1 makes a CA's challenge method count only when that CA is enabled, and LE is enabled only with a directory URL. So the two literals whose cases depend on LE gain `ACMEDirLE: "https://le.example.test/dir"` in this story, keeping them passing at its commit:
+- [x] A5.3.6 `internal/server/acmewire_test.go` (modify). A5.2.1 makes a CA's challenge method count only when that CA is enabled, and LE is enabled only with a directory URL. So the two literals whose cases depend on LE gain `ACMEDirLE: "https://le.example.test/dir"` in this story, keeping them passing at its commit:
   - `TestBuildACMEChain_DNSProviderOnlyWhenUsed`: the "le dns-01" case must still see LE's dns-01 and log the provider warning;
   - `TestBuildACMEChain_CorruptAccountKeyAborts`: LE must stay enabled, so its corrupt key is read once US6 builds only enabled CAs.
 
 DoD:
-- [ ] Every test config sets the new fields; every listed GTS account has its key.
+- [x] Every test config sets the new fields; every listed GTS account has its key.
 
-### [ ] T5.4 — tests (`internal/config`)
+### [x] T5.4 — tests (`internal/config`)
 
 | Test | Verifies |
 |---|---|
@@ -1454,7 +1454,7 @@ DoD:
 | `TestServeCmd_ACMEDefaults` | kong-parsed defaults equal the decision record (GTS list empty) and validate |
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 

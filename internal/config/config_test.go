@@ -70,6 +70,24 @@ func validCfg(t *testing.T) ServeCmd {
 		ACMEChallengeGTS:       ChallengeTLSALPN01,
 		ACMEChallengeZeroSSL:   ChallengeHTTP01,
 		ACMEHTTPListen:         ":80",
+		ACMEEABZeroSSLKID:         "k",
+		ACMEEABZeroSSLHMAC:        "h",
+		ACMEGTSAccounts:           []string{"gts"},
+		ACMEBudgetLEDomain:        "50/168h",
+		ACMEBudgetLEOrders:        "300/3h",
+		ACMEBudgetLEName:          "5/168h",
+		ACMEBudgetGTSOrders:       "100/1h",
+		ACMEBudgetGTSRequests:     "120/1m",
+		ACMEBudgetGTSCertPolls:    "50/1m",
+		ACMEBudgetZeroSSLOrders:   "200/1h:40",
+		ACMEBudgetZeroSSLRequests: "240/1m",
+		ACMEAttemptTimeoutLE:      20 * time.Second,
+		ACMEAttemptTimeoutGTS:     40 * time.Second,
+		ACMEAttemptTimeoutZeroSSL: 90 * time.Second,
+		ACMEPollFirstLE:           2 * time.Second,
+		ACMEPollFirstGTS:          5600 * time.Millisecond,
+		ACMEPollFirstZeroSSL:      15200 * time.Millisecond,
+		ACMEPollInterval:          2 * time.Second,
 		ACMECooldownDefault:    time.Hour,
 		ACMEBackoffInitial:     time.Minute,
 		ACMEBackoffMax:         6 * time.Hour,
@@ -666,7 +684,8 @@ func TestServeCmd_UsesChallenge(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ServeCmd{ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl}
+			c := ServeCmd{ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl,
+				ACMEDirLE: "https://le.example.test/dir", ACMEGTSAccounts: []string{"gts"}, ACMEEABZeroSSLKID: "k", ACMEEABZeroSSLHMAC: "h"}
 			if got := c.UsesChallenge(tc.method); got != tc.want {
 				t.Errorf("UsesChallenge(%q) = %v, want %v", tc.method, got, tc.want)
 			}
@@ -837,7 +856,8 @@ func TestServesPlainHTTP(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := ServeCmd{ACMEChallengeLE: ChallengeTLSALPN01, ACMEChallengeGTS: ChallengeTLSALPN01, ACMEChallengeZeroSSL: tc.zerossl, DialBackHTTPS: tc.https}
+			c := ServeCmd{ACMEChallengeLE: ChallengeTLSALPN01, ACMEChallengeGTS: ChallengeTLSALPN01, ACMEChallengeZeroSSL: tc.zerossl, DialBackHTTPS: tc.https,
+				ACMEDirLE: "https://le.example.test/dir", ACMEGTSAccounts: []string{"gts"}, ACMEEABZeroSSLKID: "k", ACMEEABZeroSSLHMAC: "h"}
 			if got := c.ServesPlainHTTP(); got != tc.want {
 				t.Errorf("ServesPlainHTTP() = %v, want %v", got, tc.want)
 			}
@@ -902,4 +922,223 @@ func TestDialBackEnvTwins(t *testing.T) {
 			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags false", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
 		}
 	})
+}
+
+func setRequiredServeEnv(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S_3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S_3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+}
+
+func TestValidate_ACMEBudgetFlags(t *testing.T) {
+	tests := []struct {
+		flag string
+		set  func(*ServeCmd, string)
+	}{
+		{"--acme-budget-le-domain", func(c *ServeCmd, v string) { c.ACMEBudgetLEDomain = v }},
+		{"--acme-budget-le-orders", func(c *ServeCmd, v string) { c.ACMEBudgetLEOrders = v }},
+		{"--acme-budget-le-name", func(c *ServeCmd, v string) { c.ACMEBudgetLEName = v }},
+		{"--acme-budget-gts-orders", func(c *ServeCmd, v string) { c.ACMEBudgetGTSOrders = v }},
+		{"--acme-budget-gts-requests", func(c *ServeCmd, v string) { c.ACMEBudgetGTSRequests = v }},
+		{"--acme-budget-gts-cert-polls", func(c *ServeCmd, v string) { c.ACMEBudgetGTSCertPolls = v }},
+		{"--acme-budget-zerossl-orders", func(c *ServeCmd, v string) { c.ACMEBudgetZeroSSLOrders = v }},
+		{"--acme-budget-zerossl-requests", func(c *ServeCmd, v string) { c.ACMEBudgetZeroSSLRequests = v }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag, func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c, "bad")
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.flag) {
+				t.Fatalf("Validate() = %v, want an error naming %s", err, tc.flag)
+			}
+		})
+	}
+}
+
+func TestValidate_GTSAccounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		ids     []string
+		wantErr bool
+	}{
+		{name: "none (no GTS)", ids: nil},
+		{name: "two accounts", ids: []string{"gts-1", "gts-2"}},
+		{name: "upper case", ids: []string{"Gts"}, wantErr: true},
+		{name: "duplicate", ids: []string{"gts", "gts"}, wantErr: true},
+		{name: "collides with zerossl", ids: []string{"zerossl"}, wantErr: true},
+		{name: "collides with letsencrypt", ids: []string{"letsencrypt"}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEGTSAccounts = tc.ids
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ACMEDurationsPositive(t *testing.T) {
+	tests := []struct {
+		flag string
+		set  func(*ServeCmd)
+	}{
+		{"--acme-attempt-timeout-le", func(c *ServeCmd) { c.ACMEAttemptTimeoutLE = 0 }},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd) { c.ACMEAttemptTimeoutGTS = 0 }},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd) { c.ACMEAttemptTimeoutZeroSSL = 0 }},
+		{"--acme-poll-first-le", func(c *ServeCmd) { c.ACMEPollFirstLE = 0 }},
+		{"--acme-poll-first-gts", func(c *ServeCmd) { c.ACMEPollFirstGTS = 0 }},
+		{"--acme-poll-first-zerossl", func(c *ServeCmd) { c.ACMEPollFirstZeroSSL = 0 }},
+		{"--acme-poll-interval", func(c *ServeCmd) { c.ACMEPollInterval = 0 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag, func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.flag) {
+				t.Fatalf("Validate() = %v, want an error naming %s", err, tc.flag)
+			}
+		})
+	}
+}
+
+func TestValidate_ZeroSSLEABPair(t *testing.T) {
+	tests := []struct {
+		name      string
+		kid, hmac string
+		wantErr   bool
+	}{
+		{name: "both", kid: "k", hmac: "h"},
+		{name: "neither", kid: "", hmac: ""},
+		{name: "kid only", kid: "k", wantErr: true},
+		{name: "hmac only", hmac: "h", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = tc.kid, tc.hmac
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_NoCAEnabled(t *testing.T) {
+	none := func(c *ServeCmd) {
+		c.ACMEDirLE = ""
+		c.ACMEGTSAccounts = nil
+		c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "", ""
+	}
+	tests := []struct {
+		name    string
+		mut     func(*ServeCmd)
+		wantErr bool
+	}{
+		{name: "no CA left", mut: none, wantErr: true},
+		{name: "only LE", mut: func(c *ServeCmd) { none(c); c.ACMEDirLE = "https://le.example.test/dir" }},
+		{name: "only GTS (empty LE dir is not URL-checked)", mut: func(c *ServeCmd) { none(c); c.ACMEGTSAccounts = []string{"gts"} }},
+		{name: "only ZeroSSL", mut: func(c *ServeCmd) { none(c); c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "k", "h" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestUsesChallenge_OnlyEnabledCAs(t *testing.T) {
+	c := ServeCmd{
+		ACMEDirLE: "https://le.example.test/dir", ACMEChallengeLE: ChallengeTLSALPN01,
+		ACMEChallengeGTS: ChallengeDNS01, ACMEChallengeZeroSSL: ChallengeHTTP01, DialBackHTTPS: true,
+	}
+	if c.UsesChallenge(ChallengeDNS01) {
+		t.Error("GTS is not enabled (no account listed), so its dns-01 must not count")
+	}
+	if c.UsesChallenge(ChallengeHTTP01) || c.ServesPlainHTTP() {
+		t.Error("ZeroSSL is not enabled (no EAB), so its http-01 must not open the plain listener")
+	}
+	if !c.UsesChallenge(ChallengeTLSALPN01) {
+		t.Error("the enabled LE's tls-alpn-01 must count")
+	}
+	c.ACMEGTSAccounts = []string{"gts"}
+	c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "k", "h"
+	if !c.UsesChallenge(ChallengeDNS01) || !c.ServesPlainHTTP() {
+		t.Error("once GTS and ZeroSSL are enabled, their methods must count")
+	}
+}
+
+func TestServeCmd_ACMEDefaults(t *testing.T) {
+	setRequiredServeEnv(t)
+	var cli struct {
+		Serve ServeCmd `cmd:""`
+	}
+	parser, err := kong.New(&cli, kong.Name("tunneld"), kong.DefaultEnvars("TUNNELD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"serve"}); err != nil {
+		t.Fatalf("parse with defaults failed: %v", err)
+	}
+	c := cli.Serve
+	if len(c.ACMEGTSAccounts) != 0 || !c.LEEnabled() || c.GTSEnabled() || c.ZeroSSLEnabled() {
+		t.Fatalf("CA defaults: gts=%v le=%v zerossl=%v, want LE only", c.ACMEGTSAccounts, c.LEEnabled(), c.ZeroSSLEnabled())
+	}
+	for flag, got := range map[string]string{
+		"--acme-budget-le-domain":       c.ACMEBudgetLEDomain,
+		"--acme-budget-le-orders":       c.ACMEBudgetLEOrders,
+		"--acme-budget-le-name":         c.ACMEBudgetLEName,
+		"--acme-budget-gts-orders":      c.ACMEBudgetGTSOrders,
+		"--acme-budget-gts-requests":    c.ACMEBudgetGTSRequests,
+		"--acme-budget-gts-cert-polls":  c.ACMEBudgetGTSCertPolls,
+		"--acme-budget-zerossl-orders":  c.ACMEBudgetZeroSSLOrders,
+		"--acme-budget-zerossl-requests": c.ACMEBudgetZeroSSLRequests,
+	} {
+		want := map[string]string{
+			"--acme-budget-le-domain": "50/168h", "--acme-budget-le-orders": "300/3h", "--acme-budget-le-name": "5/168h",
+			"--acme-budget-gts-orders": "100/1h", "--acme-budget-gts-requests": "120/1m", "--acme-budget-gts-cert-polls": "50/1m",
+			"--acme-budget-zerossl-orders": "200/1h:40", "--acme-budget-zerossl-requests": "240/1m",
+		}[flag]
+		if got != want {
+			t.Errorf("%s default = %q, want %q", flag, got, want)
+		}
+	}
+	for flag, got := range map[string][2]time.Duration{
+		"--acme-attempt-timeout-le":      {c.ACMEAttemptTimeoutLE, 20 * time.Second},
+		"--acme-attempt-timeout-gts":     {c.ACMEAttemptTimeoutGTS, 40 * time.Second},
+		"--acme-attempt-timeout-zerossl": {c.ACMEAttemptTimeoutZeroSSL, 90 * time.Second},
+		"--acme-poll-first-le":           {c.ACMEPollFirstLE, 2 * time.Second},
+		"--acme-poll-first-gts":          {c.ACMEPollFirstGTS, 5600 * time.Millisecond},
+		"--acme-poll-first-zerossl":      {c.ACMEPollFirstZeroSSL, 15200 * time.Millisecond},
+		"--acme-poll-interval":           {c.ACMEPollInterval, 2 * time.Second},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s default = %s, want %s", flag, got[0], got[1])
+		}
+	}
 }

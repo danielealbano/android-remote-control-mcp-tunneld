@@ -405,7 +405,7 @@ type stagingCase struct {
 	le, gts, zerossl        string
 	wantCA                  string
 	served, unused          string
-	writeLEKey, writeGTSKey bool
+	writeLEKey              bool
 }
 
 func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase, redisURL, s3URL, access, secret string, edgePort, httpPort int) {
@@ -419,9 +419,7 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 	if tc.writeLEKey {
 		writeAccountKey(t, accountDir, "letsencrypt", env.leKey)
 	}
-	if tc.writeGTSKey {
-		writeAccountKey(t, accountDir, "gts", env.gtsKey)
-	}
+	writeAccountKey(t, accountDir, "gts", env.gtsKey)
 	enrollHost := randomLabel(t, "e") + "." + env.domain
 	controlHost := randomLabel(t, "c") + "." + env.domain
 	edgeAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(edgePort))
@@ -445,6 +443,23 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 		ACMEAccountDir: accountDir, ACMEDNSProvider: "", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl,
 		ACMEHTTPListen:      net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)),
+		ACMEEABZeroSSLKID:   "changeme", ACMEEABZeroSSLHMAC: "changeme",
+		ACMEGTSAccounts:           []string{"gts"},
+		ACMEBudgetLEDomain:        "50/168h",
+		ACMEBudgetLEOrders:        "300/3h",
+		ACMEBudgetLEName:          "5/168h",
+		ACMEBudgetGTSOrders:       "100/1h",
+		ACMEBudgetGTSRequests:     "120/1m",
+		ACMEBudgetGTSCertPolls:    "50/1m",
+		ACMEBudgetZeroSSLOrders:   "200/1h:40",
+		ACMEBudgetZeroSSLRequests: "240/1m",
+		ACMEAttemptTimeoutLE:      20 * time.Second,
+		ACMEAttemptTimeoutGTS:     40 * time.Second,
+		ACMEAttemptTimeoutZeroSSL: 90 * time.Second,
+		ACMEPollFirstLE:           2 * time.Second,
+		ACMEPollFirstGTS:          5600 * time.Millisecond,
+		ACMEPollFirstZeroSSL:      15200 * time.Millisecond,
+		ACMEPollInterval:          2 * time.Second,
 		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
 		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
@@ -602,12 +617,12 @@ func TestStaging_ACMEValidation(t *testing.T) {
 		{
 			name: "gts-tls-alpn-01", leDir: unreachableDir, gtsDir: gtsStagingDir,
 			le: config.ChallengeTLSALPN01, gts: config.ChallengeTLSALPN01, zerossl: config.ChallengeHTTP01,
-			wantCA: "gts", served: alpnServed, unused: httpServed, writeGTSKey: true,
+			wantCA: "gts", served: alpnServed, unused: httpServed,
 		},
 		{
 			name: "gts-http-01", leDir: unreachableDir, gtsDir: gtsStagingDir,
 			le: config.ChallengeHTTP01, gts: config.ChallengeHTTP01, zerossl: config.ChallengeHTTP01,
-			wantCA: "gts", served: httpServed, unused: alpnServed, writeGTSKey: true,
+			wantCA: "gts", served: httpServed, unused: alpnServed,
 		},
 	}
 	for _, tc := range cases {

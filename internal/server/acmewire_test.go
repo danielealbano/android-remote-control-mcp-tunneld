@@ -154,7 +154,7 @@ func TestBuildACMEChain_CorruptAccountKeyAborts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(accounts, acme.CALetsEncrypt+".key"), []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.ServeCmd{ACMEAccountDir: dir}
+	cfg := config.ServeCmd{ACMEAccountDir: dir, ACMEDirLE: "https://le.example.test/dir"}
 	if _, err := buildACMEChain(cfg, nil, testChallengeStore(t), nil, testLogger()); err == nil {
 		t.Fatal("a corrupt existing account key must abort buildACMEChain")
 	}
@@ -182,7 +182,7 @@ func TestBuildACMEChain_DNSProviderOnlyWhenUsed(t *testing.T) {
 			var buf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 			cfg := config.ServeCmd{
-				ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "no-such-provider",
+				ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "no-such-provider", ACMEDirLE: "https://le.example.test/dir",
 				ACMEChallengeLE: tc.le, ACMEChallengeGTS: config.ChallengeTLSALPN01, ACMEChallengeZeroSSL: config.ChallengeHTTP01,
 			}
 			if _, err := buildACMEChain(cfg, nil, testChallengeStore(t), nil, logger); err != nil {

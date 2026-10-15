@@ -81,7 +81,7 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		t.Fatal(err)
 	}
 	const unreachable = "http://127.0.0.1:1"
-	return config.ServeCmd{
+	cfg := config.ServeCmd{
 		RedisURL:       "redis://" + redisAddr,
 		ConnLogDir:     t.TempDir(),
 		Listen:         "127.0.0.1:0",
@@ -153,6 +153,9 @@ func lifecycleConfig(t *testing.T, redisAddr string) config.ServeCmd {
 		S3SecretKey:      "test-changeme",
 		S3ForcePathStyle: true,
 	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	tunneltest.WriteACMEAccountKey(t, acmeDir, "gts")
+	return cfg
 }
 
 // TestRun_Lifecycle boots the full E2E assembly on loopback (degraded ACME/attestation/S3), lets the
@@ -368,6 +371,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := lifecycleConfig(t, mr.Addr())
 	cfg.ACMEChallengeZeroSSL = config.ChallengeHTTP01
+	cfg.ACMEEABZeroSSLKID, cfg.ACMEEABZeroSSLHMAC = "changeme", "changeme"
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

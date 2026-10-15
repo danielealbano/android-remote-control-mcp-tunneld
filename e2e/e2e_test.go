@@ -215,6 +215,8 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",
 		BanPoll: time.Second, ShutdownGrace: 3 * time.Second, Log: []string{"output=std;level=error"},
 	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", inf.pebble.DirectoryURL)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
