@@ -76,7 +76,7 @@ func TestMeshCert_RotationRetriesOnBackoff(t *testing.T) {
 }
 
 // TestHeartbeatNodeSurvivesTransientError: one failing refresh must not kill the heartbeat — the node
-// re-registers on the next tick (RefreshNode is a plain SET).
+// re-registers on the next tick.
 func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})

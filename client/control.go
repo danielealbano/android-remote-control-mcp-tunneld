@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -39,6 +40,8 @@ type Client struct {
 
 	sendMu sync.Mutex
 	sendW  io.Writer // control request-body writer (phone→server frames)
+
+	dialBackTimeout time.Duration
 }
 
 // New builds a control client that dials dialAddr, negotiates TLS with SNI/Host controlHost (trusting
@@ -48,6 +51,7 @@ func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, iden
 	c := &Client{
 		dialAddr: dialAddr, controlHost: controlHost, tunnelDomain: tunnelDomain,
 		caPool: caPool, backend: backend, ident: ident, logger: slog.Default(),
+		dialBackTimeout: defaultDialBackTimeout,
 	}
 	for _, o := range opts {
 		if err := o(c); err != nil {
@@ -207,7 +211,7 @@ func (c *Client) closeLogged(what string, cl io.Closer) {
 	}
 }
 
-// readControlFrame reads one length-framed v1 control frame ([type:1][len:4 BE][payload]) from r.
+// readControlFrame reads one length-framed control frame ([type:1][len:4 BE][payload]) from r.
 func readControlFrame(r io.Reader) (wire.ControlType, []byte, error) {
 	var hdr [5]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {

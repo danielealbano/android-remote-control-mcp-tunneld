@@ -26,6 +26,9 @@ class Net(caPath: String?, private val port: Int?) {
 
     fun mtlsClient(id: Identity): OkHttpClient = client(sslContext(DynamicIdentityKeyManager(id)))
 
+    fun dialBack(controlHost: String, id: Identity): DialBack =
+        DialBack(controlHost, sslContext(DynamicIdentityKeyManager(id)), sslContext(null))
+
     private fun sslContext(km: X509ExtendedKeyManager?): SSLContext =
         SSLContext.getInstance("TLS").apply { init(km?.let { arrayOf(it) }, arrayOf(trust), SecureRandom()) }
 

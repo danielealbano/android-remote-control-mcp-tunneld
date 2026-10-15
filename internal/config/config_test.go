@@ -32,6 +32,9 @@ func validCfg(t *testing.T) ServeCmd {
 		EnrollHost:             "enroll.example.test",
 		ControlHost:            "connect.example.test",
 		NameLength:             10,
+		DialBackAdvertise:      "203.0.113.10:443",
+		DialBackHTTPS:          true,
+		DialBackMTLS:           true,
 		MeshListen:             ":9443",
 		MeshAdvertise:          "node-a:9443",
 		MeshPoolSize:           4,
@@ -476,6 +479,7 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
 	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
 	// Overrides under test (one per kong type category):
 	t.Setenv("TUNNELD_MAX_CLIENTS", "42")            // int twin
 	t.Setenv("TUNNELD_S_3_BUCKET", "envbucket")      // plain string twin (digit-boundary env name)
@@ -667,6 +671,7 @@ func TestKongDefaults_ACMEChallenge(t *testing.T) {
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
 	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
 
 	newParser := func(cli any) *kong.Kong {
 		t.Helper()
@@ -728,4 +733,149 @@ func TestValidate_ConnLogDir(t *testing.T) {
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("--conn-log-dir %q: ", c.ConnLogDir)) || !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("a --conn-log-dir that cannot be stat'ed must be rejected with the cause, got %v", err)
 	}
+}
+
+func TestValidate_DialBackAdvertise(t *testing.T) {
+	tests := []struct {
+		name      string
+		advertise string
+		wantErr   string
+		wantCause bool
+	}{
+		{name: "missing", advertise: "", wantErr: "--dialback-advertise is required"},
+		{name: "no host", advertise: ":443", wantErr: "needs a host"},
+		{name: "no port", advertise: "node-a.example.test", wantErr: "must be host:port", wantCause: true},
+		{name: "port zero", advertise: "node-a.example.test:0", wantErr: "must be 1-65535"},
+		{name: "port too high", advertise: "node-a.example.test:65536", wantErr: "must be 1-65535"},
+		{name: "port not a number", advertise: "node-a.example.test:x", wantErr: `port "x"`, wantCause: true},
+		{name: "hostname", advertise: "node-a.example.test:443"},
+		{name: "ipv6", advertise: "[2001:db8::1]:443"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.DialBackAdvertise = tc.advertise
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if tc.wantCause && errors.Unwrap(err) == nil {
+				t.Errorf("Validate() = %v, want it to wrap the parse cause", err)
+			}
+		})
+	}
+}
+
+func TestValidate_DialBackMTLSRequiresHTTPS(t *testing.T) {
+	c := validCfg(t)
+	c.DialBackHTTPS = false
+	c.DialBackMTLS = true
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--dialback-mtls requires --dialback-https") {
+		t.Fatalf("Validate() = %v, want the mTLS-without-HTTPS error", err)
+	}
+	c.DialBackMTLS = false
+	if err := c.Validate(); err != nil {
+		t.Fatalf("plain dial-back without mTLS must validate: %v", err)
+	}
+}
+
+func TestValidate_PlainListenerCheckedWhenDialBackPlain(t *testing.T) {
+	c := validCfg(t)
+	c.DialBackHTTPS = false
+	c.DialBackMTLS = false
+	c.ACMEChallengeLE = ChallengeTLSALPN01
+	c.ACMEChallengeGTS = ChallengeTLSALPN01
+	c.ACMEChallengeZeroSSL = ChallengeDNS01
+	c.ACMEDNSProvider = "cloudflare"
+	c.ACMEHTTPListen = "not-an-addr"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--acme-http-listen") {
+		t.Fatalf("Validate() = %v, want the --acme-http-listen error", err)
+	}
+}
+
+func TestServesPlainHTTP(t *testing.T) {
+	tests := []struct {
+		name    string
+		zerossl string
+		https   bool
+		want    bool
+	}{
+		{name: "http-01 and https dial-back", zerossl: ChallengeHTTP01, https: true, want: true},
+		{name: "http-01 and plain dial-back", zerossl: ChallengeHTTP01, https: false, want: true},
+		{name: "no http-01 and plain dial-back", zerossl: ChallengeDNS01, https: false, want: true},
+		{name: "no http-01 and https dial-back", zerossl: ChallengeDNS01, https: true, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ServeCmd{ACMEChallengeLE: ChallengeTLSALPN01, ACMEChallengeGTS: ChallengeTLSALPN01, ACMEChallengeZeroSSL: tc.zerossl, DialBackHTTPS: tc.https}
+			if got := c.ServesPlainHTTP(); got != tc.want {
+				t.Errorf("ServesPlainHTTP() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func setRequiredServeEnv(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S_3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S_3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+}
+
+func TestDialBackEnvTwins(t *testing.T) {
+	parse := func(t *testing.T) ServeCmd {
+		t.Helper()
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), kong.DefaultEnvars("TUNNELD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse([]string{"serve"}); err != nil {
+			t.Fatalf("parse with env twins failed: %v", err)
+		}
+		return cli.Serve
+	}
+	t.Run("defaults", func(t *testing.T) {
+		setRequiredServeEnv(t)
+		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+		c := parse(t)
+		if c.DialBackAdvertise != "203.0.113.10:443" || !c.DialBackHTTPS || !c.DialBackMTLS {
+			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags true", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		}
+	})
+	t.Run("plain", func(t *testing.T) {
+		setRequiredServeEnv(t)
+		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:80")
+		t.Setenv("TUNNELD_DIALBACK_HTTPS", "false")
+		t.Setenv("TUNNELD_DIALBACK_MTLS", "false")
+		c := parse(t)
+		if c.DialBackAdvertise != "203.0.113.10:80" || c.DialBackHTTPS || c.DialBackMTLS {
+			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags false", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		}
+	})
 }

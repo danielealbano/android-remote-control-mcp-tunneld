@@ -301,6 +301,11 @@ func (rc *reservedCerts) getCertificateFor(host string) func(*tls.ClientHelloInf
 	}
 }
 
+func (rc *reservedCerts) has(host string) bool {
+	rh := rc.hosts[host]
+	return rh != nil && rh.cur.Load() != nil
+}
+
 func (rh *reservedHost) store(cert *tls.Certificate, info store.CertInfo) {
 	rh.cur.Store(cert)
 	rh.mu.Lock()

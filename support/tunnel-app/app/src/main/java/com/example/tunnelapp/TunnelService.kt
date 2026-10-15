@@ -48,7 +48,8 @@ class TunnelService : Service() {
         val id = Enroll.enroll(port, enrollHost, controlHost, tunnelDomain, trust)
         val (tlsKey, tlsChain) = id.tlsCredential()
         val srv = Server(fixedLocalPort, appNonce, id.name).also { it.start(tlsKey, tlsChain) }
-        val tun = Tunnel(id.mtlsClient(), controlHost, port, srv::localPort) { nonce ->
+        val dialBack = DialBack(controlHost, Tls.sslContext(Tls.DynamicIdentityKeyManager(id), trust), Tls.sslContext(null, trust))
+        val tun = Tunnel(id.mtlsClient(), controlHost, port, dialBack, srv::localPort) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce); id.tlsCredential().let { (k, c) -> srv.swapIdentity(k, c) }
             }

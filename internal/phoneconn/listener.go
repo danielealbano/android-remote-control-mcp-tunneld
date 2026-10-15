@@ -26,8 +26,7 @@ type NameValidator func(name string) bool
 type BanTunnel func(name, fingerprint string) bool
 
 // Handler is the phone control-plane HTTP handler (mounted behind the reserved --control-host TLS
-// terminator by server.Run). It serves the long-lived /api/v1/control stream and the dial-back /api/v1/data streams,
-// both authenticated by the internal-CA identity client cert (mTLS). The name is DERIVED from the cert
+// terminator by server.Run). It serves the long-lived /api/v1/control stream. The name is DERIVED from the cert
 // CN (the phone dials the single shared --control-host).
 type Handler struct {
 	mgr           *Manager
@@ -39,6 +38,8 @@ type Handler struct {
 	streamPending int
 	onIssue       IssueFunc
 	issueBody     int64
+	dialBacks     *DialBacks
+	dialBackMTLS  bool
 
 	sem chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
 }
@@ -90,6 +91,8 @@ type HandlerConfig struct {
 	StreamPending int
 	OnIssue       IssueFunc
 	IssueBody     int64 // max POST /api/v1/issue body (bytes); defaults to 256 KiB
+	DialBacks     *DialBacks
+	DialBackMTLS  bool
 }
 
 // RejectFunc records one rejection (reason ∈ observ.RejectReasons — satisfied by PromRecorder.Reject).
@@ -111,6 +114,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		mgr: cfg.Manager, validName: cfg.ValidName, banIP: cfg.BanIP, banTunnel: cfg.BanTunnel,
 		reject: reject, pingInterval: cfg.PingInterval, streamPending: cfg.StreamPending,
 		onIssue: cfg.OnIssue, issueBody: cfg.IssueBody,
+		dialBacks: cfg.DialBacks, dialBackMTLS: cfg.DialBackMTLS,
 		sem: make(chan struct{}, cfg.StreamPending),
 	}
 }
@@ -152,6 +156,9 @@ func (h *Handler) identity(r *http.Request) (phoneIdentity, bool) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == wire.DialBackPath {
+		w.Header().Set("Connection", "close")
+	}
 	// Peer-IP ban check FIRST — a newly-banned IP must not keep using an established mTLS identity.
 	ip := peerIP(r)
 	addr, err := netip.ParseAddr(ip)
@@ -163,6 +170,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.banIP != nil && h.banIP(addr) {
 		h.reject("ban", "", ip)
 		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
+		return
+	}
+	if r.URL.Path == wire.DialBackPath {
+		h.serveDialBack(w, r)
 		return
 	}
 	id, ok := h.identity(r)
@@ -182,12 +193,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.serveControl(w, r, id)
-	case "/api/v1/data":
-		if r.Method != http.MethodPost { // docs/PROTOCOL.md §4: the dial-back is a POST /api/v1/data
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.serveData(w, r, id.name)
 	case "/api/v1/issue":
 		h.serveIssue(w, r, id.name, id.fingerprint)
 	default:
@@ -290,7 +295,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 		connID:       mustConnID(),
 		sessionStart: h.mgr.now(), meta: metaFromRequest(r),
 		notAfter: id.notAfter,
-		send:     make(chan []byte, 32), cancel: cancel, pending: map[string]chan DataStream{},
+		send:     make(chan []byte, 32), cancel: cancel,
 		hbDone: make(chan struct{}),
 	}
 	c.lastPong.Store(c.sessionStart.UnixNano())
@@ -379,36 +384,6 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 			c.lastPong.Store(time.Now().UnixNano())
 		}
 	}
-}
-
-// serveData delivers an arriving dial-back data stream to its waiter and blocks (keeping the HTTP
-// handler open) while the bridge splices, until the stream is done. No header is written before the
-// delivery succeeds, so an undeliverable stream gets a REAL 404 (the response commits on the bridge's
-// first Write; only the bridge goroutine touches w after delivery).
-func (h *Handler) serveData(w http.ResponseWriter, r *http.Request, name string) {
-	streamID := r.Header.Get("X-Stream-Id")
-	if streamID == "" {
-		http.Error(w, "missing stream id", http.StatusBadRequest)
-		return
-	}
-	flusher, okf := w.(http.Flusher)
-	if !okf {
-		http.Error(w, "no http/2", http.StatusBadRequest)
-		return
-	}
-	done := make(chan struct{})
-	rc := http.NewResponseController(w)
-	ds := &httpDataStream{r: r.Body, w: w, flush: flusher.Flush, done: done,
-		unblock: func() {
-			if err := rc.SetWriteDeadline(time.Now()); err != nil {
-				h.mgr.logger.Debug("data stream write-deadline unblock failed", "tunnel", name, "stream", streamID, "err", err)
-			}
-		}}
-	if !h.mgr.deliverStream(name, streamID, ds) {
-		http.Error(w, "no such stream", http.StatusNotFound)
-		return
-	}
-	<-done // hold the handler open while the bridge splices
 }
 
 func metaFromRequest(r *http.Request) ConnMeta {

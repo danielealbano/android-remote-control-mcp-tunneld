@@ -19,8 +19,6 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -35,7 +33,7 @@ func TestEdge_HandleTunnel_QuotaAdmissionRefusal(t *testing.T) {
 	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = limit.NewLimiter(rdb, 1<<30, 4, 1<<40, time.Hour) // 4-byte day cap
 	// Exhaust the day window (in direction) before the new stream arrives.
-	if _, _, _, err := te.e.lim.Charge(context.Background(), "abcdef012345", "in", 10); err != nil {
+	if _, _, _, err := te.e.lim.Charge(context.Background(), "abcdef012345", "m", "in", 10); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,43 +49,53 @@ func TestEdge_HandleTunnel_QuotaAdmissionRefusal(t *testing.T) {
 	if !containsStr(te.rec.rejectReasons(), "quota-day") {
 		t.Fatalf("want quota-day reject, got %v", te.rec.rejectReasons())
 	}
-	if te.local.opened != 0 || te.mesh.opened != 0 {
+	if len(te.opener.calls) != 0 || len(te.dial.tokens) != 0 {
 		t.Fatal("a quota-refused stream must never open a dial-back")
 	}
 }
 
-// TestEdge_HandleTunnel_FreshRouteRetryOnMeshFailure covers PROTOCOL §5's one-fresh-lookup retry: a
-// stale route whose mesh dial fails is retried ONCE against a re-looked-up (different) route.
-func TestEdge_HandleTunnel_FreshRouteRetryOnMeshFailure(t *testing.T) {
+// TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure covers the one-fresh-lookup retry: a stale route
+// that fails is retried ONCE against a re-looked-up (different) route.
+func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 	cfg := baseConfig()
 	te := newTestEdge(t, cfg, nil, nil)
 	te.rtr.queue = []fakeRoute{
 		{nodeID: "node-old", fp: "fp", connID: "conn-old", ok: true}, // routing lookup (stale)
 		{nodeID: "node-new", fp: "fp", connID: "conn-new", ok: true}, // fresh lookup after the failure
 	}
-	te.rtr.nodeAdv = "10.0.0.9:9443"
-	te.rtr.nodeOK = true
-	te.local.has = false // not local — mesh path
-	te.mesh.rwc = &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})}
-	te.mesh.errQueue = []error{errNoOwner, nil} // stale dial rejected, fresh dial succeeds
+	te.rtr.set("node-new", "fp", "conn-new", true, nil)
+	te.opener.errByNode["node-old"] = errors.New("owner no longer holds the phone")
 
 	conn := newScriptConn("198.51.100.21", nil)
-	done := make(chan struct{})
-	go func() {
-		te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleTunnel did not finish")
+	done := runTunnel(te, conn, "abcdef012345.example.test")
+	phone := waitPhone(t, te, 0)
+	var connIDs []string
+	deadline := time.Now().Add(5 * time.Second)
+	for len(connIDs) == 0 && time.Now().Before(deadline) {
+		te.e.smu.Lock()
+		for s := range te.e.streams {
+			connIDs = append(connIDs, s.connID)
+		}
+		te.e.smu.Unlock()
+		if len(connIDs) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
+	tunneltest.CloseOrLog(t, phone)
+	waitDone(t, done, 5*time.Second)
 
-	if te.rtr.lookups != 2 {
-		t.Fatalf("want exactly one fresh route re-lookup (2 total), got %d", te.rtr.lookups)
+	te.rtr.mu.Lock()
+	lookups := te.rtr.lookups
+	te.rtr.mu.Unlock()
+	if lookups != 2 {
+		t.Fatalf("want exactly one fresh route re-lookup (2 total), got %d", lookups)
 	}
-	if te.mesh.opened != 2 {
-		t.Fatalf("want exactly one mesh retry (2 dials), got %d", te.mesh.opened)
+	if len(te.opener.calls) != 2 || te.opener.calls[0].token != te.opener.calls[1].token ||
+		te.opener.calls[1].nodeID != "node-new" || te.opener.calls[1].connID != "conn-new" {
+		t.Fatalf("want one retry with the same token against the fresh route, got %+v", te.opener.calls)
+	}
+	if len(connIDs) != 1 || connIDs[0] != "conn-new" {
+		t.Fatalf("the splice must record the fresh route's connID, got %v", connIDs)
 	}
 	if containsStr(te.rec.rejectReasons(), "no-route") {
 		t.Fatalf("the retried stream must not be rejected, got %v", te.rec.rejectReasons())
@@ -102,16 +110,13 @@ func TestEdge_HandleTunnel_NoRetryOnIdenticalRoute(t *testing.T) {
 	te.rtr.ok = true
 	te.rtr.nodeID = "node-a"
 	te.rtr.connID = "conn-1"
-	te.rtr.nodeAdv = "10.0.0.9:9443"
-	te.rtr.nodeOK = true
-	te.local.has = false
-	te.mesh.err = errNoOwner
+	te.opener.errByNode["node-a"] = errors.New("owner unreachable")
 
 	conn := newScriptConn("198.51.100.22", nil)
 	te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
 
-	if te.mesh.opened != 1 {
-		t.Fatalf("an identical fresh route must not be re-dialed, got %d dials", te.mesh.opened)
+	if len(te.opener.calls) != 1 {
+		t.Fatalf("an identical fresh route must not be re-opened, got %d opens", len(te.opener.calls))
 	}
 	if !containsStr(te.rec.rejectReasons(), "no-route") {
 		t.Fatalf("want no-route reject, got %v", te.rec.rejectReasons())
@@ -392,19 +397,18 @@ func TestEdge_HandleTunnel_ConnLogStartEnd(t *testing.T) {
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
 
-	// A local phone that echoes: the client sends some bytes, the phone splices them back, then EOF.
-	te.local.has = true
-	te.local.owns = true
-	phoneSide := &pipeStream{r: bytes.NewReader([]byte("PONG-BYTES")), w: io.Discard, closed: make(chan struct{})}
-	te.local.ds = phoneSide
-
 	client := newScriptConn("198.51.100.40", []byte("CLIENT-BYTES"))
 	done := make(chan struct{})
 	go func() {
 		te.e.handleTunnel(context.Background(), client, ClientHelloInfo{SNI: sni, ALPN: "h2", TLSVersion: "1.3"})
 		close(done)
 	}()
-	// The phone→client copy hits EOF (bytes.Reader drained) → the splice tears down.
+	phone := waitPhone(t, te, 0)
+	readFull(t, phone, "CLIENT-BYTES")
+	if _, err := phone.Write([]byte("PONG-BYTES")); err != nil {
+		t.Fatal(err)
+	}
+	tunneltest.CloseOrLog(t, phone)
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
@@ -511,80 +515,6 @@ func (c *closingConn) Read(p []byte) (int, error) {
 	return c.scriptConn.Read(p)
 }
 
-// TestEdge_HandleTunnel_DuplicateStreamRetries covers the local-path duplicate-stream retry: a
-// dial-back that reports a duplicate pending stream id makes the edge re-mint the streamID once and
-// re-open against the SAME route.
-func TestEdge_HandleTunnel_DuplicateStreamRetries(t *testing.T) {
-	cfg := baseConfig()
-	te := newTestEdge(t, cfg, nil, nil)
-	te.rtr.ok = true
-	te.rtr.nodeID = "node-a"
-	te.rtr.fp = "fp"
-	te.rtr.connID = "conn"
-	te.local.has = true
-	te.local.owns = true
-	te.local.ds = &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})}
-	te.local.errQueue = []error{phoneconn.ErrDuplicateStreamID, nil} // first mint duplicates, re-mint succeeds
-
-	conn := newScriptConn("198.51.100.30", nil)
-	done := make(chan struct{})
-	go func() {
-		te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleTunnel did not finish")
-	}
-	if te.local.opened != 2 {
-		t.Fatalf("want one duplicate-stream re-mint (2 local opens), got %d", te.local.opened)
-	}
-	if te.rtr.lookups != 1 {
-		t.Fatalf("a duplicate-stream retry must reuse the same route (1 lookup), got %d", te.rtr.lookups)
-	}
-	if containsStr(te.rec.rejectReasons(), "no-route") {
-		t.Fatalf("the re-minted stream must not be rejected, got %v", te.rec.rejectReasons())
-	}
-}
-
-// TestEdge_HandleTunnel_MeshDuplicateRetries covers the mesh-path duplicate-stream retry: a mesh dial
-// answering mesh.ErrDuplicateStream makes the edge re-mint the streamID once and re-dial the SAME owner.
-func TestEdge_HandleTunnel_MeshDuplicateRetries(t *testing.T) {
-	cfg := baseConfig()
-	te := newTestEdge(t, cfg, nil, nil)
-	te.rtr.ok = true
-	te.rtr.nodeID = "node-a"
-	te.rtr.fp = "fp"
-	te.rtr.connID = "conn"
-	te.rtr.nodeAdv = "10.0.0.9:9443"
-	te.rtr.nodeOK = true
-	te.local.has = false // mesh path
-	te.mesh.rwc = &pipeStream{r: bytes.NewReader(nil), w: io.Discard, closed: make(chan struct{})}
-	te.mesh.errQueue = []error{mesh.ErrDuplicateStream, nil}
-
-	conn := newScriptConn("198.51.100.31", nil)
-	done := make(chan struct{})
-	go func() {
-		te.e.handleTunnel(context.Background(), conn, ClientHelloInfo{SNI: "abcdef012345.example.test"})
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("handleTunnel did not finish")
-	}
-	if te.mesh.opened != 2 {
-		t.Fatalf("want one duplicate-stream re-mint (2 mesh dials), got %d", te.mesh.opened)
-	}
-	if te.rtr.lookups != 1 {
-		t.Fatalf("a duplicate-stream retry must reuse the same route (1 lookup), got %d", te.rtr.lookups)
-	}
-	if containsStr(te.rec.rejectReasons(), "no-route") {
-		t.Fatalf("the re-minted stream must not be rejected, got %v", te.rec.rejectReasons())
-	}
-}
-
 // --- edge accept-loop, SNI case-insensitivity, slot accounting, ban eviction ---
 
 // countingLimiter wraps a real limiter to (a) force AcquireStream to fail-open and (b) count
@@ -597,26 +527,40 @@ type countingLimiter struct {
 	acquireErr error
 	releases   atomic.Int64
 
+	mu       sync.Mutex
+	acquired []string
+	charged  []string
+	released []string
+
 	chargeAction limit.ChargeAction
 	chargeWait   time.Duration
 	chargeWindow string
 	chargeErr    error
 }
 
-func (c *countingLimiter) AcquireStream(ctx context.Context, name, connID string, maxN int) (bool, error) {
+func (c *countingLimiter) AcquireStream(ctx context.Context, name, member string, maxN int) (bool, error) {
+	c.mu.Lock()
+	c.acquired = append(c.acquired, member)
+	c.mu.Unlock()
 	if c.acquireErr != nil {
 		return false, c.acquireErr
 	}
-	return c.Limiter.AcquireStream(ctx, name, connID, maxN)
+	return c.Limiter.AcquireStream(ctx, name, member, maxN)
 }
 
-func (c *countingLimiter) Charge(_ context.Context, _, _ string, _ int64) (limit.ChargeAction, time.Duration, string, error) {
+func (c *countingLimiter) Charge(_ context.Context, _, member, _ string, _ int64) (limit.ChargeAction, time.Duration, string, error) {
+	c.mu.Lock()
+	c.charged = append(c.charged, member)
+	c.mu.Unlock()
 	return c.chargeAction, c.chargeWait, c.chargeWindow, c.chargeErr
 }
 
-func (c *countingLimiter) ReleaseStream(ctx context.Context, name, connID string) error {
+func (c *countingLimiter) ReleaseStream(ctx context.Context, name, member string) error {
 	c.releases.Add(1)
-	return c.Limiter.ReleaseStream(ctx, name, connID)
+	c.mu.Lock()
+	c.released = append(c.released, member)
+	c.mu.Unlock()
+	return c.Limiter.ReleaseStream(ctx, name, member)
 }
 
 // scriptedListener returns a scripted sequence of Accept results, recording each call's timestamp so a
@@ -716,9 +660,7 @@ func TestTunnelName_CaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestHandleTunnel_FailOpenNeverReleases: an AcquireStream error fails open (admits) but must NEVER
-// release a slot it never took.
-func TestHandleTunnel_FailOpenNeverReleases(t *testing.T) {
+func TestHandleTunnel_FailOpenStillReleases(t *testing.T) {
 	sni := "abcdef01.example.test"
 	cfg := baseConfig()
 	cfg.Concurrent = 4
@@ -738,13 +680,100 @@ func TestHandleTunnel_FailOpenNeverReleases(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.local.has = false // openFar fails → the reject path runs the deferred release-once
-	te.rtr.nodeOK = false
+	te.opener.errByNode["node-a"] = errors.New("owner unreachable")
 
 	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.50", nil), ClientHelloInfo{SNI: sni})
 
-	if cl.releases.Load() != 0 {
-		t.Fatalf("a fail-open admission must never DECR a slot it did not take, releases=%d", cl.releases.Load())
+	if cl.releases.Load() != 1 || len(cl.released) != 1 || len(cl.acquired) != 1 || cl.released[0] != cl.acquired[0] {
+		t.Fatalf("a fail-open admission must release its member exactly once: acquired=%v released=%v", cl.acquired, cl.released)
+	}
+}
+
+func TestEdge_HandleTunnel_StreamMemberIsTheToken(t *testing.T) {
+	sni := "abcdef012345.example.test"
+	te := newTestEdge(t, baseConfig(), nil, nil)
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	cl := &countingLimiter{Limiter: limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour)}
+	te.e.lim = cl
+	te.rtr.set("node-a", "fp", "conn", true, nil)
+
+	client := newScriptConn("198.51.100.51", []byte("PING"))
+	done := runTunnel(te, client, sni)
+	phone := waitPhone(t, te, 0)
+	readFull(t, phone, "PING")
+	if _, err := phone.Write([]byte("PONG")); err != nil {
+		t.Fatal(err)
+	}
+	tunneltest.CloseOrLog(t, phone)
+	waitDone(t, done, 5*time.Second)
+
+	token := te.dial.tokens[0]
+	if te.opener.calls[0].token != token {
+		t.Fatalf("the open must carry the waited token: open=%q wait=%q", te.opener.calls[0].token, token)
+	}
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	if len(cl.acquired) != 1 || cl.acquired[0] != token || len(cl.released) != 1 || cl.released[0] != token {
+		t.Fatalf("acquire/release members = %v / %v, want the token %q", cl.acquired, cl.released, token)
+	}
+	if len(cl.charged) < 2 {
+		t.Fatalf("want a charge per direction, got %v", cl.charged)
+	}
+	for _, m := range cl.charged {
+		if m != token {
+			t.Fatalf("every Charge must carry the token, got %q", m)
+		}
+	}
+	for _, ev := range te.sink.kinds() {
+		if len(ev.Conn) != 8 || ev.Conn == token {
+			t.Fatalf("the conn-log conn id must be 8 hex chars and never the token, got %q", ev.Conn)
+		}
+		if _, err := strconv.ParseUint(ev.Conn, 16, 32); err != nil {
+			t.Fatalf("the conn-log conn id must be hex, got %q", ev.Conn)
+		}
+	}
+}
+
+func TestSpliceReason_PhoneGoneAttribution(t *testing.T) {
+	tests := []struct {
+		name         string
+		set          func(as *activeStream)
+		cancelParent bool
+		want         string
+	}{
+		{name: "banned beats phoneGone", set: func(as *activeStream) { as.banned.Store(true); as.phoneGone.Store(true) }, want: store.CloseBanEvict},
+		{name: "terminated beats phoneGone", set: func(as *activeStream) { as.terminated.Store(true); as.phoneGone.Store(true) }, want: store.CloseAdminTerminate},
+		{name: "phoneGone beats evicted", set: func(as *activeStream) { as.phoneGone.Store(true); as.evicted.Store(true) }, want: store.ClosePhoneClose},
+		{name: "drain keeps server-shutdown", set: func(as *activeStream) { as.phoneGone.Store(true) }, cancelParent: true, want: store.CloseServerShutdown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.IdleTimeout = 0
+			cfg.MinRate = 0
+			te := newTestEdge(t, cfg, nil, nil)
+			client := newScriptConn("203.0.113.60", nil)
+			far := newScriptConn("203.0.113.60", nil)
+			parent, cancelParent := context.WithCancel(context.Background())
+			defer cancelParent()
+			ctx, cancel := context.WithCancel(parent)
+			as := &activeStream{tunnel: "t", parent: parent, started: time.Now(), cancel: cancel}
+			as.lastAct.Store(time.Now().UnixNano())
+			go func() {
+				time.Sleep(20 * time.Millisecond)
+				tc.set(as)
+				if tc.cancelParent {
+					cancelParent()
+				} else {
+					cancel()
+				}
+			}()
+			if got := te.e.splice(ctx, "t", client, far, as); got != tc.want {
+				t.Fatalf("close_reason = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -915,8 +944,7 @@ func TestHandleTunnel_RetryPathBanRecordsBan(t *testing.T) {
 		{nodeID: "node-a", fp: "fp-clean", connID: "conn1", ok: true}, // initial: passes the ban check
 		{nodeID: "node-b", fp: "fp-ban", connID: "conn2", ok: true},   // retry: a DIFFERENT, banned route
 	}
-	te.local.has = false
-	te.rtr.nodeOK = false // openFar (mesh) fails → triggers the fresh-route retry
+	te.opener.errByNode["node-a"] = errors.New("owner unreachable")
 
 	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.60", nil), ClientHelloInfo{SNI: sni})
 

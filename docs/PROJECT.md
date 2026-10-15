@@ -11,13 +11,15 @@ the phone — it can NEVER read tunnel traffic.
 This document is the operational entry point. The system internals live in
 [`ARCHITECTURE.md`](ARCHITECTURE.md); the wire contract lives in [`PROTOCOL.md`](PROTOCOL.md); the
 deployment quickstart lives in the [README](../README.md); the full decision record is
-[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md).
+[Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md), and for the dial-back/data path
+[Plan 16](plans/16_entry_node_dial_back_20261014192454.md).
 
 ## 1. Topology
 
 One binary (`tunneld serve`) is the internet edge AND the tunnel bridge — there is **no reverse proxy**
-(no Cloudflare, no Traefik). Run **one replica per host**; replicas bridge to each other over an
-internal mTLS HTTP/2 **mesh** when a public connection lands on a node that is not the phone's owner.
+(no Cloudflare, no Traefik). Run **one replica per host**; replicas exchange control messages over an
+internal mTLS HTTP/2 **mesh**, and the phone dials back to the node where a public connection entered, so no
+tunnel data crosses nodes.
 **Valkey** holds transient control state (routing/rate-limit/concurrency — everything TTL'd); a plain
 **S3** bucket (any provider; MinIO locally) holds the durable state (name registry, connection logs,
 rejected-enrollment evidence).
@@ -34,8 +36,9 @@ flowchart LR
 
   phone -- "outbound mTLS control (HTTP/2)" --> tb
   client -- "TLS to name.tunnel-domain" --> ta
-  ta -- "connID-checked mesh stream" --> tb
-  tb -. "dial-back data stream" .-> phone
+  ta -- "mesh control: open" --> tb
+  tb -. "OPEN (control)" .-> phone
+  phone -- "dial-back connection" --> ta
   ta <--> valkey
   tb <--> valkey
   ta <--> s3
@@ -43,8 +46,8 @@ flowchart LR
   prom -. "scrape internal listeners" .-> ta
 ```
 
-**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and, when a CA uses HTTP-01, the ACME challenge listener `:80` are
-public; the mesh + metrics are reachable on the internal network only. The tunnel relays opaque TLS, so
+**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and, when a CA uses HTTP-01 or
+`--dialback-https=false`, the plain listener `:80` (ACME HTTP-01 answers and plain dial-backs) are public; the mesh + metrics are reachable on the internal network only. The tunnel relays opaque TLS, so
 there is no proxy trust boundary and no `X-Forwarded-For` handling: the client's IP is the peer address
 of the raw TCP connection.
 
@@ -78,12 +81,12 @@ The public edge is raw TCP `:443`. It peeks the ClientHello and dispatches by SN
 | SNI | Behaviour |
 |---|---|
 | any SNI, first ALPN protocol `acme-tls/1` (checked before the rows below) | ACME TLS-ALPN-01 validation: answered locally with the challenge certificate; no pending challenge → closed (`no-route`); never spliced |
-| `<name>.<tunnel-domain>` | resolve the route → splice opaque TLS to the phone (local fast path or mesh) |
+| `<name>.<tunnel-domain>` | resolve the route → have the owner send `OPEN`, wait for the phone's dial-back to this node, splice opaque TLS to it |
 | `--enroll-host` | terminate locally: server-TLS enrollment endpoint (Phase 1) |
 | `--control-host` | terminate locally: mTLS phone control plane (`/api/v1/control`, `/api/v1/data`, `/api/v1/issue`) |
 | anything else / no route | connection closed (`no-route`) |
 
-When a CA uses HTTP-01, a plain `:80` listener (`--acme-http-listen`) serves ONLY `/.well-known/acme-challenge/<token>` for pending challenges (one request per connection; anything else → 404, `acme-http-miss`).
+When a CA uses HTTP-01 or `--dialback-https=false`, a plain `:80` listener (`--acme-http-listen`) serves `/.well-known/acme-challenge/<token>` for pending challenges (one request per connection) and, with `--dialback-https=false`, the phones' plain dial-backs (`GET /api/v1/data`, authorised by the one-time token only; any other method on that path → 405); anything else → 404, `acme-http-miss`.
 
 There is no HTTP method/path allowlist on relayed traffic — the phone terminates TLS and enforces its
 own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
@@ -114,20 +117,22 @@ Caps are uniform by design — no per-path exceptions, no bulk-transfer carve-ou
 One or more `--ban-file` (hot-reloaded on mtime, entries UNIONed): `ip`, `cidr`, `country XX`,
 `tunnel-name`, `tunnel-fingerprint`. `country` entries expand at reload from a DB-IP Country Lite CSV
 into a longest-prefix-match table (one lookup per connection). The ban check is the FIRST handler-level
-check on every ingress edge (public `:443`, the HTTP-01 `:80` listener, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/CIDR/country ban can fail HTTP-01 / TLS-ALPN-01 issuance (DNS-01 is unaffected). A peer address that does not parse as an IP cannot be ban-checked and is refused before the ban gate (fail closed). Country
+check on every ingress edge (public `:443`, the plain `:80` listener — ACME HTTP-01 and plain dial-backs — `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/CIDR/country ban can fail HTTP-01 / TLS-ALPN-01 issuance (DNS-01 is unaffected). A peer address that does not parse as an IP cannot be ban-checked and is refused before the ban gate (fail closed). Country
 codes in repo artifacts are placeholders (`XX`/`YY`). The `fetcher` compose service keeps a Spamhaus
 DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 
 ## 5. State + retention
 
-- **Valkey (transient, TTL'd):** routing entries, node registry, rate-limit windows, concurrency
-  counters (`conc:{name}` — a lock-guarded `{connID, count}` hash reset structurally at a fresh
-  connection's first acquire; the day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
+- **Valkey (transient, TTL'd):** routing entries, node registry (plus the `nodes` id set used to reach every
+  live node), rate-limit windows, the per-tunnel stream cap (`conc:{name}` — a sorted set: one member per live
+  public connection = its dial-back token, score = its expiry in unix ms; expired members are pruned at
+  admission, `Charge` refreshes the stream's own member, release removes it, TTL 3 × `--limit-conn-idle`; the
+  day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
   bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
   (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) the reserved-host issuance lock (`lock:acme-self:`, 10 min) and the shared reserved-host cert (`acme:self-cert:`, until the cert's NotAfter — it holds the private key, so Valkey must stay private). Every
-  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, or a pipelined
+  key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
-  day/week windows; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
+  day/week windows, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (per-node JSONL objects
   `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
@@ -155,7 +160,7 @@ aggregate families only — NO per-tunnel labels), `GET /healthz` (`200` if Valk
 the Valkey error), `GET /api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step,
 client-driven, no ranking; a malformed `cursor` or a non-positive/malformed `count` is a `400`) + `POST /api/v1/admin/tunnels/stats` (names → per-tunnel node/bytes/conc/bw/day/week, live tunnels
 only), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
-`POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's in-flight public splices, `close_reason=admin-terminate` — ephemeral, the phone reconnects), both routed to the owner node
+`POST /api/v1/admin/tunnels/{name}/terminate` (every node evicts its in-flight public splices, `close_reason=admin-terminate`, and the owner closes the phone control connection — ephemeral, the phone reconnects); reissue is routed to the owner node and terminate is sent to every node
 over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
 then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
@@ -178,6 +183,19 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 - **Deployment quickstart** (CA generation, `.env`, S3, ACME/DNS): [README](../README.md).
 - **Connection-log spool**: give every node its own persistent `--conn-log-dir` (two processes on one
   directory are refused at startup); files left after a crash or an S3 outage are uploaded on the next start.
+- **Dial-back address**: `--dialback-advertise` is this node's own public `IP:443` (plain mode,
+  `--dialback-https=false`: `IP:80`), never the round-robin hostname — the phone must reach exactly the node
+  the public connection entered.
+- **Connection budget**: each public connection holds two `--max-clients` slots on its entry node (the client
+  and its dial-back), and its dial-back counts against `--limit-conn-rate` for the phone's IP — raise it for
+  many tunnels behind one IP.
+- **Splice teardown**: when a phone's control connection closes (any reason), every splice opened through it
+  ends, on every node.
+- **TIME_WAIT / conntrack**: one dial-back per request roughly doubles the short-lived TCP connections;
+  TIME_WAIT (fixed 60 s in Linux) ≈ 2 × new connections/s × 60. Set
+  `net.netfilter.nf_conntrack_tcp_timeout_time_wait=10`; size `net.ipv4.tcp_max_tw_buckets` and
+  `net.netfilter.nf_conntrack_max` from the measured rate (TIME_WAIT is charted on the node dashboards,
+  conntrack has a Health tile).
 - **Releases**: `v*` tags → goreleaser → linux amd64/arm64 archives + multi-arch image
   `ghcr.io/danielealbano/tunneld`.
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
@@ -213,8 +231,10 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   (it never uninstalls the app and forgets only its own local environment, but its reinstall stops any running
   phones, which resume on the next `start` for their hosts):
   3 emulated phones with real attestation enrolling in parallel on one replica, scaled to 4 and resumed after
-  a reinstall, the client entering through a second replica (mesh),
-  60 s at 1 op/s with a reconnect every 20 s, zero failed operations required.
+  a reinstall, the client entering through a second replica,
+  60 s at 1 op/s with a reconnect every 20 s, zero failed operations required. The device gates reach each
+  replica through its own `adb reverse` port (`--dialback-advertise 127.0.0.1:<device port>`), so the phone's
+  dial-back lands on the replica the request entered.
 - **Attribution**: country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the
   attribution; it MUST be preserved).
 

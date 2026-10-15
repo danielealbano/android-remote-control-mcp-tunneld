@@ -2,8 +2,8 @@ package edge
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -23,10 +21,15 @@ import (
 // without a real-time wait.
 var rollingWindow = time.Minute
 
+var routeCheckInterval = 10 * time.Second
+
 // activeStream tracks a live public stream for the connection policy (idle timeout, min-rate, and
 // eviction-on-saturation ranking).
 type activeStream struct {
 	tunnel     string
+	member     string
+	connID     string
+	parent     context.Context
 	fp         string       // the route fingerprint this stream targets (ban sweeps match on it)
 	lastAct    atomic.Int64 // unix nanos of last byte activity
 	recent     atomic.Int64 // bytes in the current rolling window
@@ -35,7 +38,8 @@ type activeStream struct {
 	evicted    atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
 	banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over terminated/evicted/shutdown
 	terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
-	release    func()      // frees this stream's global slot exactly once; a no-op when no slot was actually acquired (fail-open)
+	phoneGone  atomic.Bool
+	release    func() // frees this stream's global slot exactly once
 	bytesIn    int64
 	bytesOut   int64
 }
@@ -107,8 +111,7 @@ func (e *Edge) EvictBannedStreams(match func(name, fingerprint string) bool) {
 }
 
 // EvictTunnelStreams cancels every ACTIVE public splice for the named tunnel (admin terminate) on THIS
-// node, attributing admin-terminate. Streams ingested on other nodes are not tracked here — they are torn
-// down when the owner's phone connection drops.
+// node, attributing admin-terminate.
 func (e *Edge) EvictTunnelStreams(name string) {
 	e.smu.Lock()
 	var victims []*activeStream
@@ -124,12 +127,41 @@ func (e *Edge) EvictTunnelStreams(name string) {
 	}
 }
 
+func (e *Edge) EvictConnStreams(name, connID, reason string) bool {
+	e.smu.Lock()
+	var victims []*activeStream
+	for s := range e.streams {
+		if s.tunnel == name && s.connID == connID {
+			victims = append(victims, s)
+		}
+	}
+	e.smu.Unlock()
+	for _, s := range victims {
+		switch reason {
+		case store.CloseBanEvict:
+			s.banned.Store(true)
+		case store.CloseAdminTerminate:
+			s.terminated.Store(true)
+		default:
+			s.phoneGone.Store(true)
+		}
+		s.cancel()
+	}
+	return len(victims) > 0
+}
+
 // handleTunnel resolves the route, enforces the ban + global stream cap (with one evict-and-retry),
-// opens the far side (local fast path or mesh), and splices with accounting + policy + conn logs.
+// opens the far side, and splices with accounting + policy + conn logs.
 func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHelloInfo) {
 	name, ok := e.tunnelName(info.SNI)
 	if !ok {
 		e.rec.Reject("no-route", info.SNI, peerAddr(client))
+		closeLogged(e.cfg.Logger, "public client", client)
+		return
+	}
+	if !e.ready.DialBackReady() {
+		e.cfg.Logger.Debug("tunnel refused: this node cannot accept dial-backs yet", "tunnel", name)
+		e.rec.Reject("no-route", name, peerAddr(client))
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
@@ -165,19 +197,16 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		return
 	}
 
-	// A stream id is required for the dial-back match: an EMPTY id would be 400-refused by serveData/mesh
-	// and turn the connection into a no-route, so use the non-empty fallback on the (practically
-	// impossible) crypto/rand failure rather than an empty id.
-	streamID := store.MustConnID()
+	token := rand.Text()
 
 	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
-	acq, aerr := e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
+	acq, aerr := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 	if aerr != nil {
 		e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 		acq = true
 	} else if !acq && e.evictLeastActive(name) {
-		acq, aerr = e.lim.AcquireStream(ctx, name, connID, e.cfg.Concurrent)
+		acq, aerr = e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 		if aerr != nil {
 			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 			acq = true
@@ -188,34 +217,23 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
-	// Release-once: fires only when a slot was REALLY acquired (a fail-open admission must not DECR a
-	// slot it never took) and at most once (the saturation evictor releases the victim's slot
-	// synchronously so the retry can admit). The global
-	// conc:{name} counter self-heals at its TTL, so a transient Valkey failure at worst delays freeing
-	// one slot.
-	slotHeld := aerr == nil
+	// Release-once: fires at most once (the saturation evictor releases the victim's slot
+	// synchronously so the retry can admit).
 	var slotOnce sync.Once
 	releaseSlot := func() {
-		if slotHeld {
-			// Release against the connID the slot was acquired with: if the tunnel re-bound meanwhile, the
-			// counter's owner changed and this release is a no-op (the old session's slots were reset).
-			slotOnce.Do(func() {
-				if err := e.lim.ReleaseStream(context.Background(), name, connID); err != nil {
-					e.cfg.Logger.Debug("stream-cap release failed", "tunnel", name, "err", err)
-				}
-			})
-		}
+		slotOnce.Do(func() {
+			if err := e.lim.ReleaseStream(context.Background(), name, token); err != nil {
+				e.cfg.Logger.Debug("stream-cap release failed", "tunnel", name, "err", err)
+			}
+		})
 	}
 	defer releaseSlot()
 
 	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
-	// owner/connID while we held stale values (docs/PROTOCOL.md §5: one fresh route lookup + retry, then
+	// owner/connID while we held stale values (one fresh route lookup + retry, then
 	// close) — and retry once when the fresh route differs (re-checking the ban on its fingerprint).
-	far, closeFar, ferr := e.openFar(ctx, name, nodeID, connID, streamID)
-	if isDuplicateStream(ferr) {
-		streamID = store.MustConnID()
-		far, closeFar, ferr = e.openFar(ctx, name, nodeID, connID, streamID)
-	}
+	openedVia := connID
+	far, ferr := e.openFar(ctx, name, nodeID, connID, token)
 	if ferr != nil {
 		n2, fp2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr != nil {
@@ -228,8 +246,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 				return
 			}
 			fp = fp2 // the splice now targets the re-bound route: the active stream must carry ITS fingerprint (ban sweeps match on it)
-			streamID = store.MustConnID()
-			far, closeFar, ferr = e.openFar(ctx, name, n2, c2, streamID)
+			openedVia = c2
+			far, ferr = e.openFar(ctx, name, n2, c2, token)
 		}
 	}
 	if ferr != nil {
@@ -238,11 +256,11 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
-	defer closeFar()
+	defer closeLogged(e.cfg.Logger, "phone dial-back", far)
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	as := &activeStream{tunnel: name, fp: fp, started: e.now(), cancel: cancel}
+	as := &activeStream{tunnel: name, member: token, connID: openedVia, parent: ctx, fp: fp, started: e.now(), cancel: cancel}
 	as.release = releaseSlot
 	as.lastAct.Store(e.now().UnixNano())
 	e.trackStream(as)
@@ -250,7 +268,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	// A ban reload during the dial-back wait sweeps only TRACKED streams; re-check now that we are
 	// tracked so a tunnel banned in that window does not keep one live splice (docs/PROJECT.md §2 — a
-	// reload stops live traffic, not only new admissions). The deferred untrackStream/closeFar/slot
+	// reload stops live traffic, not only new admissions). The deferred untrackStream/slot
 	// release run on this early return, and the client socket is closed like every sibling rejection.
 	if e.banTun != nil && e.banTun(name, fp) {
 		e.rec.Reject("ban", name, peerAddr(client))
@@ -261,7 +279,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	e.rec.PublicConnOpen()
 	e.rec.StreamOpen()
 	srcIP, srcPort := splitAddr(client.RemoteAddr())
-	ev := PublicEvent{Conn: streamID, Tunnel: name, Event: "start", SrcIP: srcIP, SrcPort: srcPort,
+	ev := PublicEvent{Conn: store.MustConnID(), Tunnel: name, Event: "start", SrcIP: srcIP, SrcPort: srcPort,
 		SNI: info.SNI, ALPN: info.ALPN, TLSVersion: info.TLSVersion, JA4: info.JA4, StartedAt: as.started}
 	if e.logs != nil {
 		e.logs.PutConnLogPublic(ctx, ev)
@@ -283,12 +301,6 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	closeLogged(e.cfg.Logger, "public client", client)
 }
 
-// isDuplicateStream reports whether opening the far side failed because the minted stream id was
-// already pending on the owner's phone connection (local or mesh) — the edge re-mints once and retries.
-func isDuplicateStream(err error) bool {
-	return errors.Is(err, phoneconn.ErrDuplicateStreamID) || errors.Is(err, mesh.ErrDuplicateStream)
-}
-
 // tunnelName derives the bare tunnel name (the phone identity-cert CN, under which the route is bound)
 // from a public SNI `<name>.<tunnel-domain>`. It rejects an SNI that is not a single label under the
 // configured tunnel domain.
@@ -305,45 +317,22 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 	return name, true
 }
 
-// openFar opens the phone data stream locally (fast path) or over the mesh. The local dial-back wait is
-// bounded by --limit-dialback-timeout so a connected phone that never opens the /api/v1/data stream fails fast
-// and releases the stream slot rather than pinning it. On the mesh path the owner node bounds its own
-// dial-back the same way (see server.bridgeAdapter.OpenMesh); the entry node's mesh dial returns once
-// the owner has accepted, so this local timeout governs only the fast path.
-func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, streamID string) (io.ReadWriteCloser, func(), error) {
-	if e.local != nil && e.local.HasConn(name) && e.local.OwnsConn(name, connID) {
-		timeout := e.cfg.DialBackTimeout
-		if timeout <= 0 {
-			timeout = 10 * time.Second
-		}
-		octx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel() // bounds ONLY the dial-back wait; the returned stream does not depend on octx
-		ds, err := e.local.OpenStream(octx, name, streamID)
-		if err != nil {
-			return nil, nil, err
-		}
-		return ds, func() { closeLogged(e.cfg.Logger, "phone data stream", ds) }, nil
+func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) (net.Conn, error) {
+	timeout := e.cfg.DialBackTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
 	}
-	// Mesh: resolve the owner's advertise address.
-	adv, ok, err := e.router.LookupNode(ctx, nodeID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", errNoOwner, err)
-	}
-	if !ok {
-		return nil, nil, errNoOwner
-	}
-	ms, err := e.mesh.OpenStream(ctx, adv, name, connID, streamID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return ms, func() { closeLogged(e.cfg.Logger, "mesh stream", ms) }, nil
+	octx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return e.dialBacks.Await(octx, token, name, func(ctx context.Context) error {
+		return e.opener.Open(ctx, nodeID, name, connID, token)
+	})
 }
 
 // splice copies bytes both directions with byte accounting (day/week traffic) + bandwidth pacing +
 // connection policy (idle timeout + min-rate kill past grace), returning the close reason. It waits for
 // BOTH copy goroutines to exit before returning (so no goroutine touches the stream or the byte counters
-// after handleTunnel reads them); a watcher closes both sides on ctx-cancel (eviction), idle timeout, or a
-// sub-min-rate connection, which unblocks the copies.
+// after handleTunnel reads them); a watcher closes both sides, which unblocks the copies.
 func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.ReadWriteCloser, as *activeStream) string {
 	var reasonOnce sync.Once
 	reason := store.CloseClientClose
@@ -369,7 +358,7 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		}
 		done <- struct{}{}
 	}()
-	// phone → client (out): the source is the phone (local dial-back or mesh stream).
+	// phone → client (out): the source is the phone.
 	go func() {
 		switch e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut) {
 		case quotaHit:
@@ -382,8 +371,7 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		done <- struct{}{}
 	}()
 
-	// Policy watcher: closes both sides on eviction (ctx cancel), idle timeout, or a sub-min-rate
-	// connection past grace, then exits; otherwise it exits once signalled after both copies finish. It
+	// Policy watcher: closes both sides, then exits; otherwise it exits once signalled after both copies finish. It
 	// maintains a true rolling-window (rollingWindow, ~60s) byte total from clock-stamped cumulative-byte
 	// samples that feeds BOTH the min-rate kill here and the eviction protect-rate ranking (via as.recent).
 	stopWatch := make(chan struct{})
@@ -395,19 +383,18 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		type sample struct{ t, bytes int64 }
 		var samples []sample
 		window := int64(rollingWindow)
+		nextRouteCheck := e.now().UnixNano() + int64(routeCheckInterval)
 		for {
 			select {
 			case <-stopWatch:
 				return
 			case <-ctx.Done():
-				// The stream ctx cancels on a ban reload (EvictBannedStreams marks banned first), on an
-				// admin terminate (EvictTunnelStreams marks terminated first), on saturation eviction
-				// (evictLeastActive marks evicted first), OR on server drain (the parent ctx) — attribute
-				// each accurately, banned taking precedence.
 				if as.banned.Load() {
 					setReason(store.CloseBanEvict)
 				} else if as.terminated.Load() {
 					setReason(store.CloseAdminTerminate)
+				} else if as.phoneGone.Load() && as.parent.Err() == nil {
+					setReason(store.ClosePhoneClose)
 				} else if as.evicted.Load() {
 					setReason(store.CloseEvicted)
 				} else {
@@ -444,6 +431,16 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 					closeBoth()
 					return
 				}
+				if now >= nextRouteCheck {
+					nextRouteCheck = now + int64(routeCheckInterval)
+					if _, _, cur, ok, lerr := e.router.LookupRoute(ctx, name); lerr != nil {
+						e.cfg.Logger.Debug("splice route check failed (keeping the splice)", "tunnel", name, "err", lerr)
+					} else if !ok || cur != as.connID {
+						setReason(store.ClosePhoneClose)
+						closeBoth()
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -479,7 +476,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			// forward; Wait → pace out the rest of the (near) window then forward; Kill → the tunnel exceeded
 			// a day/week cap whose reset is too far to wait out. A Valkey error yields Proceed (fail-open —
 			// never kill a live stream on a control-plane blip).
-			if action, wait, win, cerr := e.lim.Charge(ctx, name, dir, int64(nr)); cerr != nil {
+			if action, wait, win, cerr := e.lim.Charge(ctx, name, as.member, dir, int64(nr)); cerr != nil {
 				e.cfg.Logger.Debug("traffic charge failed (proceeding)", "tunnel", name, "dir", dir, "err", cerr)
 			} else {
 				switch action {

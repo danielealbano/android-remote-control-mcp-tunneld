@@ -3,8 +3,8 @@
 `tunneld` gives the Android MCP app a stable public hostname. The phone terminates TLS itself with a
 publicly-trusted (WebPKI) certificate for `<name>.<tunnel-domain>`, earned by **attested enrollment**;
 tunneld is the internet edge on raw TCP `:443`, peeks each ClientHello, routes on SNI, and splices the
-**opaque encrypted byte stream** to the phone over an internal mTLS mesh — it can NEVER read tunnel
-traffic. There is no reverse proxy (no Cloudflare, no Traefik).
+**opaque encrypted byte stream** to a connection the phone dials back to the node where the client
+entered — it can NEVER read tunnel traffic. There is no reverse proxy (no Cloudflare, no Traefik).
 
 See [`docs/PROJECT.md`](docs/PROJECT.md) for the operational reference,
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system map, and
@@ -23,15 +23,17 @@ flowchart LR
 
   phone -- "outbound mTLS control (HTTP/2)" --> tb
   client -- "TLS to name.tunnel-domain" --> ta
-  ta -- "connID-checked mesh stream" --> tb
-  tb -. "dial-back data stream" .-> phone
+  ta -- "mesh control: open" --> tb
+  tb -. "OPEN (control)" .-> phone
+  phone -- "dial-back connection" --> ta
   ta <--> valkey
   tb <--> s3
 ```
 
-The client's TLS lands on any replica (entry node A); A resolves `name → owner` via Valkey and either
-bridges locally (fast path) or over the mesh to the owner (B), which dials back to the phone. The phone
-terminates TLS — tunneld relays opaque bytes end to end.
+The client's TLS lands on any replica (entry node A); A resolves `name → owner` via Valkey and has the
+owner (B, or A itself) send the phone an `OPEN`; the phone dials back to A on a fresh connection and A
+splices the client to it — no data crosses nodes. The phone terminates TLS — tunneld relays opaque bytes end
+to end.
 
 ## Deployment quickstart
 
@@ -50,7 +52,7 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 3. **Configure**:
    ```sh
-   cp deploy/.env.example deploy/.env             # domains, S3 creds, DEPLOY_UID (= id -u), Grafana pw
+   cp deploy/.env.example deploy/.env             # domains, S3 creds, DIALBACK_ADVERTISE (this host's public IP:443), DEPLOY_UID (= id -u), Grafana pw
    cp deploy/tunneld.env.example deploy/tunneld.env # CA/S3/attest/ACME + the lego DNS-provider secret
    ```
 4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host. tunneld
@@ -70,8 +72,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    rules.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.
 
-**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and the ACME HTTP-01 listener `:80` are
-public.
+**Never publish tunneld's mesh (`:9443`) or internal (`:9090`) ports** — only the raw edge `:443` and the plain listener `:80`
+(ACME HTTP-01 and, with `--dialback-https=false`, plain dial-backs) are public.
 
 **Prebuilt image (optional):** the Compose stack builds tunneld locally via `build:`. Multi-arch images
 (linux/amd64 + linux/arm64) are published to `ghcr.io/danielealbano/tunneld` on `v*` tags — the image
@@ -99,7 +101,7 @@ app is the sole authenticator, so a tunnelled deployment MUST keep the app's bea
 | Traffic / tunnel / 24h window (UTC-aligned, per direction) | `--limit-traffic-day` | `1gb` |
 | Traffic / tunnel / 7d window (epoch-aligned, per direction) | `--limit-traffic-week` | `4gb` |
 | Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
-| New connections / source IP | `--limit-conn-rate` | `10`/s |
+| New connections / source IP (phone dial-backs count too) | `--limit-conn-rate` | `10`/s |
 | Enrollments / source IP | `--limit-enroll-hour` / `--limit-enroll-minute` | `20`/h AND `2`/min |
 | Public-cert issuances / tunnel / 7d | `--issue-per-week` | `3` |
 
@@ -121,7 +123,7 @@ tunnel-fingerprint sha256:<hex>
 `country XX` entries are expanded at reload from a DB-IP Country Lite CSV (`--dbip-country-lite-csv`)
 into a longest-prefix-match table (one lookup per connection); a missing CSV skips only the country
 entries. **Country codes in this repo are placeholders (`XX`, `YY`) only.** The ban check is the FIRST
-check on every ingress edge (public `:443`, the HTTP-01 `:80` listener, `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/country ban can fail HTTP-01 / TLS-ALPN-01 issuance.
+check on every ingress edge (public `:443`, the plain `:80` listener — ACME HTTP-01 and, with `--dialback-https=false`, plain dial-backs — `/api/v1/enroll`, `/api/v1/control`), keyed on the trusted client IP — including CA validation connections, so an IP/country ban can fail HTTP-01 / TLS-ALPN-01 issuance.
 
 **Revocation** (there is no CRL — bans are the only revocation): revoke a tunnel or a source by editing
 `deploy/banfiles/bans.txt` on the host (bind-mounted read-only at `/banfiles-manual/bans.txt`); the change
@@ -134,8 +136,9 @@ The internal listener (never published) serves `GET /metrics` (Prometheus; no pe
 paginated tunnel-name list) + `POST /api/v1/admin/tunnels/stats` (per-tunnel node/bytes/conc/bw/day/week
 for the requested names), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions
 `POST /api/v1/admin/tunnels/{name}/reissue` (force a renewal) and
-`POST /api/v1/admin/tunnels/{name}/terminate` (close the phone control connection + evict the owner node's
-in-flight public splices — ephemeral, the phone reconnects), both routed to the owner node over the mesh.
+`POST /api/v1/admin/tunnels/{name}/terminate` (every node evicts its in-flight public splices and the owner
+closes the phone control connection — ephemeral, the phone reconnects); reissue is routed to the owner node and
+terminate is sent to every node over the mesh.
 `deploy/prometheus/` (scrape config + alert rules) and `deploy/grafana/provisioning/` (datasource +
 dashboards) are the configs for an operator-run Prometheus + Grafana; the compose stack does not run them.
 

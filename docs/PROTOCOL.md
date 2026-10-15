@@ -1,4 +1,4 @@
-# tunneld Wire Protocol (v1 — End-to-End Encrypted)
+# tunneld Wire Protocol (v2 — End-to-End Encrypted)
 
 This is the CANONICAL wire contract for the E2E-encrypted tunnel. The Go client in `client/` and the
 Android (Kotlin) client both conform to THIS document, not to the Go source. `internal/wire` holds the
@@ -7,14 +7,15 @@ frame codec.
 tunneld relays **opaque TLS bytes** and can NEVER read tunnel traffic: external clients establish TLS
 directly with the phone, which holds a publicly-trusted (WebPKI) certificate for its assigned hostname.
 tunneld is the internet edge (raw TCP `:443`), peeks the ClientHello (SNI/ALPN/version/JA4), routes on
-SNI (a ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation answered locally by tunneld, never spliced), and splices the encrypted byte stream to the phone over an internal HTTP/2 mesh.
+SNI (a ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN-01 validation answered locally by tunneld, never spliced), and splices the encrypted byte stream to a connection the phone dials back to the entry node.
 
 ## 1. Identity & authentication
 
 - **No TLS mutual auth on the public side.** The phone authenticates to tunneld with an internal-CA
   **identity client certificate** over its outbound HTTP/2 **control connection** (mTLS). The assigned
   tunnel name is the certificate's **CN**; the server DERIVES the name from the CN (the phone dials the
-  single shared `--control-host`, so there is no per-tunnel Host on the control connection).
+  single shared `--control-host`, so there is no per-tunnel Host on the control connection). The phone
+  presents the same identity certificate on each dial-back connection (§4) when the `OPEN` sets `use_mtls`.
 - **Two TEE keys per tunnel**: the identity key (mTLS) and the TLS key (the public WebPKI cert). Both
   are generated in the phone's hardware keystore; only CSRs leave the phone.
 - **Enrollment is gated by Android hardware key attestation** (seven-point predicate, §2) PLUS a
@@ -111,13 +112,16 @@ carries:
   frame stream (only `PONG`) and whose **response body** is the server→phone frame stream (`OPEN`,
   `PING`, `RENEW_NUDGE`). Both bodies are the length-framed control messages below; the server flushes
   each frame. The stream stays open for the connection's lifetime.
-- one **data stream per public connection**, opened by the phone via **dial-back** (below).
+- the mTLS `POST /api/v1/issue` exchanges (below).
+
+Public traffic never rides on this connection: each public connection gets its own **dial-back
+connection** (§4).
 
 Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values are FROZEN:
 
 | Frame | Type | Direction | Payload |
 |---|---|---|---|
-| `OPEN` | `0x01` | server→phone | `{stream_id}` — dial back for one public connection |
+| `OPEN` | `0x01` | server→phone | `{token, addr, use_https, use_mtls}` — dial back to `addr` for one public connection (§4) |
 | `PING` | `0x02` | server→phone | (none) — application liveness |
 | `PONG` | `0x03` | phone→server | (none) — liveness answer |
 | `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window}` — "renew now"; the phone answers by calling `POST /api/v1/issue` |
@@ -126,6 +130,11 @@ The control stream carries only small frames. All certificate material (attestat
 certs) — and every issuance/renewal ERROR — travels over the mTLS `POST /api/v1/issue` endpoint below, NEVER the
 stream. The only phone→server frame is `PONG` (liveness); a stream tears down via HTTP/2 `END_STREAM`,
 never a control frame.
+
+When the control connection closes (for any reason), every splice opened through it ends, on every node
+(§5 `evict`). A crashed owner node sends no `evict`: such splices end within 10 s after the route expires
+(`--route-ttl`) or is re-bound, when the entry node's per-splice route check (every 10 s each splice re-reads
+its tunnel's route) finds the route gone or bound to another connection.
 
 ### `POST /api/v1/issue` (mTLS certificate-generation endpoint)
 
@@ -155,39 +164,71 @@ seven-point predicate + key binding, rotates the identity cert (CN = the mTLS CN
 and returns both in the response. The connection stays up on the old certs until the response installs
 the new ones.
 
-## 4. Data stream (opaque splice)
+## 4. Dial-back connection (opaque splice)
 
-On `OPEN{stream_id}` the phone dials back with a `POST /api/v1/data` request carrying the **`X-Stream-Id`**
-header set to that `stream_id` (this is how the server correlates the dial-back to the waiting public
-connection). The **request body** is the phone→client byte direction; the **response body** is the
-client→phone direction. Both are a **raw, bidirectional, opaque byte splice** carrying the client↔phone
-TLS session — NO framing (HTTP/2 provides framing; `END_STREAM` is the teardown signal). `wire.ChunkSize`
-(16384) is the bandwidth-pacing read-slice size the bridge reads, NOT a wire frame. (An unknown/expired
-`X-Stream-Id` gets a `404`.)
+`OPEN` (`0x01`, server→phone) payload:
 
-## 5. Replica mesh
+```json
+{"token": "<26 chars, crypto/rand.Text, 128 bits>", "addr": "203.0.113.10:443", "use_https": true, "use_mtls": true}
+```
 
-When the accepting edge node is not the node holding the phone, it bridges to the owner over an internal
-HTTP/2 mTLS mesh (mesh-role certs, SAN = node id). A mesh data stream is a `POST /api/v1/mesh/data` whose
-identity travels in the request headers `X-Tunnel`, `X-Conn-Id`, and `X-Stream-Id`; the request/response
-bodies are the opaque splice. The owner verifies `X-Conn-Id` against its live phone connection before
-bridging (the entry node takes one fresh route lookup + retry on a mismatch/stale route, then closes).
-The mesh is replica↔replica only — it is NOT part of the phone-client contract.
+`addr` is the `host:port` of the node where the public connection entered (`--dialback-advertise`). On
+`OPEN` the phone opens a NEW connection to `addr` — TLS with SNI = `--control-host` and ALPN `http/1.1` when
+`use_https`, presenting its identity client certificate when `use_mtls` (`use_mtls` without `use_https` is
+invalid and ignored); plain TCP otherwise — and sends:
 
-The mesh also carries a control RPC, `POST /api/v1/mesh/control`: a JSON request `{op, tunnel}` → response
-`{applied}` (mesh-role mTLS, replica↔replica only). `op` is `renew` (mint a fresh renewal nonce and enqueue a
-`RENEW_NUDGE` to the named tunnel's live phone connection) or `terminate` (close that phone connection and
-evict the owner node's in-flight public splices, `close_reason=admin-terminate`; the phone reconnects
-afterwards). These are the mechanisms behind the internal `POST /api/v1/admin/tunnels/{name}/reissue` and
-`POST /api/v1/admin/tunnels/{name}/terminate` endpoints. Unknown op → `400`, missing tunnel → `400`,
-non-POST → `405`, op failure → `502`.
+```http
+GET /api/v1/data HTTP/1.1
+Host: <control-host>
+Connection: Upgrade
+Upgrade: tunneld-dial
+X-Dial-Token: <token>
+
+```
+
+Success: `HTTP/1.1 101 Switching Protocols` + `Connection: Upgrade` + `Upgrade: tunneld-dial`, then the
+connection is a **raw, bidirectional, opaque byte splice** carrying the client↔phone TLS session — NO
+framing; either side closing ends it. Failures (then the connection closes): `400` malformed (not exactly
+HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` banned source IP or identity certificate rejected
+(mesh-role, invalid name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already
+fails the TLS handshake, with no HTTP response), `404`
+unknown, expired, already-used token or a token of another tunnel, `405` non-`GET`. The token is single-use
+and valid only while the entry node waits (`--limit-dialback-timeout`). If the open fails, the entry node
+takes ONE fresh route lookup and retries once (same token) when the route changed, then closes the client.
+`wire.ChunkSize` (16384) is the bandwidth-pacing read-slice size the splice reads, NOT a wire frame.
+
+## 5. Replica mesh (control RPCs)
+
+Replicas talk over an internal HTTP/2 mTLS mesh (mesh-role certs, SAN = node id) that carries control RPCs
+only — no tunnel data ever crosses nodes. The mesh is replica↔replica only — it is NOT part of the
+phone-client contract. Every call has a per-request deadline.
+
+`POST /api/v1/mesh/control`: a JSON request → response `{applied}` (mesh-role mTLS). The ops:
+
+- `renew`: `{"op":"renew","tunnel":"<name>"}` — mint a fresh renewal nonce and enqueue a `RENEW_NUDGE` to the
+  named tunnel's live phone connection.
+- `terminate`: `{"op":"terminate","tunnel":"<name>"}` — evict this node's in-flight public splices of the
+  tunnel (`close_reason=admin-terminate`) and, on the owner, close its phone connection (the phone reconnects
+  afterwards). The internal `POST /api/v1/admin/tunnels/{name}/terminate` endpoint sends it to EVERY node.
+- `open`: `{"op":"open","tunnel":"<name>","conn_id":"<route connID>","open":{<OPEN payload>}}` →
+  `{"applied":true}` when the receiver holds that live connection and queued the `OPEN`, else
+  `{"applied":false}`. The entry node uses it when another node holds the phone's control connection.
+- `evict`: `{"op":"evict","tunnel":"<name>","conn_id":"<closed connID>","reason":"<the control connection's
+  close reason>"}` → `{"applied":<any splice ended>}`. A node whose phone control connection closes sends it
+  to every node; each ends the splices opened through that connection, keeping `ban-evict` /
+  `admin-terminate` when that is the reason, else `phone-close`.
+
+`renew` is the mechanism behind the internal `POST /api/v1/admin/tunnels/{name}/reissue` endpoint (sent to
+the owner). Unknown op → `400`, missing tunnel → `400`, `open`/`evict` without `conn_id` → `400`, `open`
+without a payload carrying `token` + `addr` → `400`, non-POST → `405`, op failure → `502`.
 
 ## 6. Security invariants
 
 - E2E: forward-secret TLS 1.3 between client and phone; tunneld holds no tunnel cert key, ever.
 - No reverse proxy anywhere; tunneld is the raw `:443` edge; the trusted client IP is the TCP peer.
 - Caps are UNIFORM (no per-path exceptions); rate limiting is global across replicas via Valkey.
-- `ChunkSize == 16384` is the paced-copy slice size only; HTTP/2 framing and flow control use the
-  library defaults (no custom read-limit configuration).
+- `ChunkSize == 16384` is the paced-copy slice size only; the dial-back carries no framing.
+- The dial-back token is 128-bit random, single-use, valid only while the entry node waits; without
+  `use_mtls` it is the only authorisation of a dial-back.
 - No secrets, key material, or tunnel payloads are ever logged.
 - A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME validation addressed to tunneld: it is answered locally with tunneld's challenge certificate and NEVER spliced to a phone.

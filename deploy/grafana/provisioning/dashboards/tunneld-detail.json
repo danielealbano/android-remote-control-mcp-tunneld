@@ -773,7 +773,7 @@
   {
    "id": 14,
    "type": "timeseries",
-   "title": "Open file descriptors vs max",
+   "title": "Open file descriptors",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -794,15 +794,6 @@
      },
      "expr": "process_open_fds{job=\"tunneld\",node=\"$node\"}",
      "legendFormat": "open"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "process_max_fds{job=\"tunneld\",node=\"$node\"}",
-     "legendFormat": "max"
     }
    ],
    "fieldConfig": {

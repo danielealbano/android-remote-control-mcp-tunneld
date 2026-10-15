@@ -14,8 +14,16 @@ func TestLimiter_TunnelWindows_ComputedKeys(t *testing.T) {
 	l.SetClock(func() time.Time { return base })
 	const name = "t"
 	sec := base.Unix()
-	// conc:{name} is a HASH (AcquireStream writes {connID, count}) → read via HMGET, not the MGET.
-	mr.HSet("conc:"+name, "connID", "c1", "count", "3")
+	for _, z := range []struct {
+		member string
+		score  time.Time
+	}{
+		{"live1", base.Add(time.Minute)}, {"live2", base.Add(time.Hour)}, {"expired", base.Add(-time.Second)},
+	} {
+		if _, err := mr.ZAdd("conc:"+name, float64(z.score.UnixMilli()), z.member); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// The last-complete-second bandwidth + day/week windows are string counters.
 	prev := strconv.FormatInt(sec-1, 10)
 	d := strconv.FormatInt(sec/86400, 10)
@@ -35,8 +43,8 @@ func TestLimiter_TunnelWindows_ComputedKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := stats[name]
-	if s.Conc != 3 {
-		t.Errorf("conc (read from the HASH via HMGET) = %d, want 3", s.Conc)
+	if s.Conc != 2 {
+		t.Errorf("conc = %d, want 2 (only the unexpired members)", s.Conc)
 	}
 	if s.BwIn != 2048 || s.DayIn != 1000 || s.WeekOut != 9000 {
 		t.Errorf("windows = %+v", s)
@@ -55,7 +63,7 @@ func TestLimiter_BwWindowTTL_Is3s(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0)
 	l := NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour)
 	l.SetClock(func() time.Time { return base })
-	if _, _, _, err := l.Charge(ctx, "t", "in", 1024); err != nil {
+	if _, _, _, err := l.Charge(ctx, "t", "m1", "in", 1024); err != nil {
 		t.Fatal(err)
 	}
 	bwKey, _, _, _ := chargeKeys("t", "in", base.Unix())

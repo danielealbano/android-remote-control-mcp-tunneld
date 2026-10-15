@@ -36,6 +36,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 const (
@@ -176,19 +177,6 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	})
 	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody)
 
-	// Phone control plane.
-	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger,
-		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
-		RouteTTL: cfg.RouteTTL,
-	})
-	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
-		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,
-		Reject:       rec.Reject,
-		PingInterval: cfg.ControlPingInterval, StreamPending: cfg.LimitStreamPending,
-		OnIssue: issueFunc(enrollSvc),
-	})
-
 	// Mesh cert (hot-swappable) + client + listener. A failed initial mint is fatal — :9443 must never
 	// bind without a servable cert.
 	meshCert, err := newMeshCertHolder(caObj, nodeID, cfg.MeshCertTTL, logger)
@@ -197,6 +185,22 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
 
+	// Phone control plane.
+	dialBacks := phoneconn.NewDialBacks(logger)
+	evictor := newSpliceEvictor(nodeID, reg, meshClient, logger)
+	phoneMgr := phoneconn.NewManager(phoneconn.Config{
+		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger, Closed: evictor,
+		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
+		RouteTTL: cfg.RouteTTL,
+	})
+	phoneHandler := phoneconn.NewHandler(phoneconn.HandlerConfig{
+		Manager: phoneMgr, ValidName: validNameFunc(cfg), BanIP: banIP, BanTunnel: banTunnel,
+		Reject:       rec.Reject,
+		PingInterval: cfg.ControlPingInterval, StreamPending: cfg.LimitStreamPending,
+		OnIssue:   issueFunc(enrollSvc),
+		DialBacks: dialBacks, DialBackMTLS: cfg.DialBackMTLS,
+	})
+
 	// Public edge (constructed from the resolved static address — the raw listener is bound LAST, below,
 	// so the edge never depends on a live socket at construction time). Built BEFORE the admin controller
 	// and mesh handler so the controller can take ed.EvictTunnelStreams (for the terminate action).
@@ -204,6 +208,13 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", cfg.Listen, err)
 	}
+	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
+	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
+		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
+	reserved.loadCache(ctx)
+
+	opener := &openAdapter{nodeID: nodeID, phones: phoneMgr, nodes: reg, mesh: meshClient,
+		open: wire.OpenPayload{Addr: cfg.DialBackAdvertise, UseHTTPS: cfg.DialBackHTTPS, UseMTLS: cfg.DialBackMTLS}}
 	ed := edge.New(edge.Config{
 		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
 		MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
@@ -212,22 +223,17 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, banTunnel, rec,
-		reg, phoneMgr, meshClient, lim, &edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+		reg, dialBacks, opener, dialBackReadiness{https: cfg.DialBackHTTPS, host: cfg.ControlHost, certs: reserved}, lim,
+		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
+	evictor.local = ed.EvictConnStreams
 
-	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams}
-	meshHandler, err := mesh.NewHandler(phoneMgr.OwnsConn,
-		&bridgeAdapter{mgr: phoneMgr, dialBackTimeout: cfg.LimitDialBackTimeout, logger: logger}, adminCtl,
-		mesh.WithHandlerLogger(logger))
+	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams}
+	meshHandler, err := mesh.NewHandler(adminCtl, mesh.WithHandlerLogger(logger))
 	if err != nil {
 		return fmt.Errorf("mesh handler: %w", err)
 	}
 
-	// Reserved-host certs (ObtainSelf via the ACME chain, disk-persisted per node, degraded start).
-	reserved := newReservedCerts(cfg.ACMEAccountDir, []string{cfg.EnrollHost, cfg.ControlHost},
-		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
-	reserved.loadCache(ctx)
-
-	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: HTTP/2 + mTLS with ConnMeta).
+	// Reserved-host TLS terminators (enroll: server-TLS HTTP/1.1; control: TLS with ConnMeta).
 	// The enroll server is an UNAUTHENTICATED surface: its requests are small and short, so both the
 	// full-request read and keep-alive idling are tightly bounded (idle TLS conns must not accumulate).
 	publicErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelDebug)
@@ -242,7 +248,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		ConnContext: phoneconn.ConnContext,
 		Protocols:   h2Protocols(),
 		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.ControlHost),
-			ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12,
+			ClientAuth: controlClientAuth(cfg.DialBackMTLS), ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12,
 			NextProtos: h2NextProtos()}}
 
 	// Mesh server (mTLS mesh-role, HTTP/2); its listener is bound LAST, below.
@@ -258,15 +264,26 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	internalMux.Handle("/api/v1/admin/tunnels/{name}/reissue",
 		adminActionHandler(nodeID, reg, meshClient, logger, "renew", "reissued", adminCtl.Renew))
 	internalMux.Handle("/api/v1/admin/tunnels/{name}/terminate",
-		adminActionHandler(nodeID, reg, meshClient, logger, "terminate", "terminated", adminCtl.Terminate))
+		adminTerminateHandler(nodeID, reg, meshClient, logger, adminCtl.Terminate))
 	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux, ErrorLog: internalErrLog}
 
 	var acmeHTTPSrv *http.Server
-	if cfg.UsesChallenge(config.ChallengeHTTP01) {
+	if cfg.ServesPlainHTTP() {
+		challenges := acme.HTTPChallengeHandler(chal, func(ip string) { rec.Reject("acme-http-miss", "", ip) }, logger)
+		plain := http.Handler(challenges)
+		if !cfg.DialBackHTTPS {
+			plain = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == wire.DialBackPath {
+					phoneHandler.ServeHTTP(w, r)
+					return
+				}
+				challenges.ServeHTTP(w, r)
+			})
+		}
 		acmeHTTPSrv = &http.Server{
-			Handler:           acme.HTTPChallengeHandler(chal, func(ip string) { rec.Reject("acme-http-miss", "", ip) }, logger),
+			Handler:           plain,
 			ReadHeaderTimeout: readHeaderTimeout, ReadTimeout: readHeaderTimeout, WriteTimeout: readHeaderTimeout,
 			IdleTimeout: acmeHTTPIdleTimeout, MaxHeaderBytes: acmeHTTPMaxHeaderBytes,
 			DisableGeneralOptionsHandler: true, ErrorLog: publicErrLog,
@@ -277,9 +294,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Bind the public + mesh listeners LAST: every fallible construction step above
 	// has now succeeded, so no socket is ever left bound
 	// but unserved. A mesh-bind failure closes the already-bound raw listener before returning.
-	rawLn, err := net.Listen("tcp", cfg.Listen)
+	rawLn, err := listenPublic(ctx, cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", cfg.Listen, err)
+		return err
 	}
 	meshLn, err := net.Listen("tcp", cfg.MeshListen)
 	if err != nil {
@@ -296,12 +313,12 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	}
 	var acmeHTTPLn net.Listener
 	if acmeHTTPSrv != nil {
-		acmeHTTPLn, err = net.Listen("tcp", cfg.ACMEHTTPListen)
+		acmeHTTPLn, err = listenPublic(ctx, cfg.ACMEHTTPListen)
 		if err != nil {
 			closeLogged(logger, "raw listener", rawLn)
 			closeLogged(logger, "mesh listener", meshLn)
 			closeLogged(logger, "internal listener", internalLn)
-			return fmt.Errorf("acme http listen %s: %w", cfg.ACMEHTTPListen, err)
+			return fmt.Errorf("acme http %w", err)
 		}
 	}
 
@@ -366,8 +383,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// route unbind + the durable end event — a never-idle control stream would otherwise pin Shutdown for
 	// the full grace and skip both) → drain the HTTP servers → join every in-flight public splice handler
 	// (so their end events are enqueued) → join the errgroup goroutines → flush the async conn-log queue
-	// (the server-shutdown end events land) → final admin-counter flush + pending cap-hit summaries → the
-	// node is explicitly deregistered last. The route/node TTLs remain the crash backstop.
+	// (the server-shutdown end events land) → final admin-counter flush + pending cap-hit summaries. The
+	// route/node TTLs remain the crash backstop.
 	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 	closeLogged(logger, "raw listener", rawLn)
@@ -393,6 +410,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 		logger.Warn("node deregister failed (expires by TTL)", "err", err)
 	}
+	evictor.Drain(sctx)
 	if werr != nil && !errors.Is(werr, context.Canceled) {
 		return werr
 	}
@@ -401,9 +419,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 // adminActionHandler routes a per-tunnel admin action ({name} from the path) to the tunnel's owner node:
 // the local controller method when this node owns the route, else the mesh control RPC. op is the mesh op
-// ("renew" | "terminate"); respField is the operator-facing JSON boolean key ("reissued" | "terminated").
+// ("renew"); respField is the operator-facing JSON boolean key ("reissued").
 // Internal listener only (never published). 404 when no route is bound. local is the mesh.Controller method
-// (adminController.Renew/Terminate) so the owner-local path is unit-testable with a stub.
+// (adminController.Renew) so the owner-local path is unit-testable with a stub.
 func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, log *slog.Logger,
 	op, respField string, local func(ctx context.Context, name string) (bool, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -448,6 +466,57 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied}); err != nil {
 			log.Warn("admin "+op+": response write failed", "tunnel", name, "err", err)
+		}
+	}
+}
+
+func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, log *slog.Logger,
+	local func(ctx context.Context, name string) (bool, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		name := r.PathValue("name")
+		if name == "" {
+			http.Error(w, "missing tunnel", http.StatusBadRequest)
+			return
+		}
+		owner, _, _, ok, err := reg.LookupRoute(r.Context(), name)
+		if err != nil {
+			log.Warn("admin terminate: route lookup failed", "tunnel", name, "err", err)
+			http.Error(w, "route lookup failed", http.StatusInternalServerError)
+			return
+		}
+		if !ok {
+			http.Error(w, "no route bound for tunnel", http.StatusNotFound)
+			return
+		}
+		nodes, err := reg.LiveNodes(r.Context())
+		if err != nil {
+			log.Warn("admin terminate: node listing failed", "tunnel", name, "err", err)
+			http.Error(w, "node listing failed", http.StatusInternalServerError)
+			return
+		}
+		applied, lerr := local(r.Context(), name)
+		if lerr != nil {
+			log.Warn("admin terminate: local terminate failed", "tunnel", name, "err", lerr)
+		}
+		remote, failed := broadcastControl(r.Context(), nodeID, nodes, mc, mesh.ControlRequest{Op: "terminate", Tunnel: name}, log)
+		applied = applied || remote
+		_, ownerLive := nodes[owner]
+		switch {
+		case owner == nodeID && lerr != nil, failed[owner]:
+			http.Error(w, "terminate failed", http.StatusBadGateway)
+			return
+		case owner != nodeID && !ownerLive:
+			log.Warn("admin terminate: owner node unresolved", "tunnel", name, "owner", owner)
+			http.Error(w, "owner node unavailable", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, "terminated": applied}); err != nil {
+			log.Warn("admin terminate: response write failed", "tunnel", name, "err", err)
 		}
 	}
 }

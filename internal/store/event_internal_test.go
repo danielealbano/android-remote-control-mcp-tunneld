@@ -6,7 +6,7 @@ import (
 )
 
 // TestMustConnID_RandFailureFallback forces the crypto/rand failure path and asserts MustConnID returns
-// the deterministic non-empty fallback (an empty id would be 400-refused by the dial-back match).
+// the deterministic non-empty fallback.
 func TestMustConnID_RandFailureFallback(t *testing.T) {
 	orig := connIDRand
 	t.Cleanup(func() { connIDRand = orig })

@@ -7,6 +7,8 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONObject
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -14,12 +16,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 internal const val TAG = "TunnelApp"
 
-// Tunnel maintains the outbound mTLS HTTP/2 control connection and services /api/v1/data dial-backs. Both streams
-// are OkHttp DUPLEX (isDuplex()=true).
+// Tunnel maintains the outbound mTLS HTTP/2 control connection.
 class Tunnel(
     private val client: OkHttpClient,   // the identity-mTLS client (Identity.mtlsClient())
     private val controlHost: String,
     private val port: Int,
+    private val dialBack: DialBack,
     private val localServerPort: () -> Int, // lambda defers reading the server's fixed loopback port
     private val onRenewNudge: (String) -> Unit,
 ) {
@@ -59,10 +61,7 @@ class Tunnel(
                         val frame = Frames.read(source) ?: break
                         when (frame.first) {
                             Frames.PING -> { s.write(Frames.PONG_FRAME); s.flush() }
-                            Frames.OPEN -> JSONObject(String(frame.second)).optString("stream_id")
-                                .takeIf { it.isNotEmpty() }
-                                ?.let { id -> Thread { handleOpen(id) }.apply { isDaemon = true }.start() }
-                                ?: Log.w(TAG, "OPEN without a stream_id ignored")
+                            Frames.OPEN -> JSONObject(String(frame.second)).let { o -> Thread { handleOpen(o) }.apply { isDaemon = true }.start() }
                             Frames.RENEW_NUDGE -> JSONObject(String(frame.second)).optString("nonce")
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
@@ -79,49 +78,57 @@ class Tunnel(
             }
     }
 
-    // handleOpen: duplex /api/v1/data dial-back spliced OPAQUELY to a fresh socket to the local server. Request
-    // body = phone→client (local→sink), response body = client→phone (resp→local). No framing.
-    private fun handleOpen(streamId: String) {
-        val local = try {
-            Socket("127.0.0.1", localServerPort())
-        } catch (t: Throwable) {
-            Log.w(TAG, "local server unreachable for stream $streamId", t)
+    private fun handleOpen(open: JSONObject) {
+        val token = open.optString("token")
+        val addr = open.optString("addr")
+        val useHttps = open.optBoolean("use_https")
+        val useMtls = open.optBoolean("use_mtls")
+        if (token.isEmpty() || addr.isEmpty() || (useMtls && !useHttps)) {
+            Log.w(TAG, "invalid OPEN ignored: addr=$addr use_https=$useHttps use_mtls=$useMtls")
             return
         }
+        val local = try {
+            Socket("127.0.0.1", localServerPort()).apply { tcpNoDelay = true }
+        } catch (t: Throwable) {
+            Log.w(TAG, "local server unreachable for a dial-back to $addr", t)
+            return
+        }
+        val remote = try {
+            dialBack.open(token, addr, useHttps, useMtls)
+        } catch (t: Throwable) {
+            Log.w(TAG, "dial-back to $addr failed", t)
+            try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
+            return
+        }
+        splice(local, remote)
+    }
+
+    private fun splice(local: Socket, remote: DialBack.Conn) {
+        val closed = AtomicBoolean(false)
+        val closeBoth = {
+            if (closed.compareAndSet(false, true)) {
+                try { local.close() } catch (t: Throwable) { Log.d(TAG, "local socket close failed", t) }
+                try { remote.socket.close() } catch (t: Throwable) { Log.d(TAG, "dial-back socket close failed", t) }
+            }
+        }
+        val up = Thread { copy(local.getInputStream(), remote.socket.getOutputStream(), "upstream"); closeBoth() }
+            .apply { isDaemon = true; start() }
+        copy(remote.input, local.getOutputStream(), "downstream")
+        closeBoth()
+        up.join()
+    }
+
+    private fun copy(src: InputStream, dst: OutputStream, dir: String) {
         try {
-            var sink: BufferedSink? = null
-            val body = duplexBody { sink = it }
-            client.newCall(
-                Request.Builder().url("https://$controlHost:$port/api/v1/data")
-                    .addHeader("X-Stream-Id", streamId).post(body).build(),
-            ).execute().use { resp ->
-                if (resp.code != 200) {
-                    Log.w(TAG, "dial-back for stream $streamId refused: ${resp.code}")
-                    return
-                }
-                val s = sink ?: run {
-                    Log.w(TAG, "data request body was not opened for stream $streamId")
-                    return
-                }
-                val up = Thread {
-                    try {
-                        val buf = ByteArray(16384); val ins = local.getInputStream()
-                        while (true) { val n = ins.read(buf); if (n < 0) break; s.write(buf, 0, n); s.flush() }
-                    } catch (t: Throwable) {
-                        Log.d(TAG, "stream $streamId upstream copy ended", t)
-                    } finally {
-                        try { s.close() } catch (t: Throwable) { Log.d(TAG, "stream $streamId body close failed", t) }
-                    }
-                }.apply { isDaemon = true }
-                up.start()
-                val out = local.getOutputStream(); val src = resp.body.byteStream(); val buf = ByteArray(16384)
-                while (true) { val n = src.read(buf); if (n < 0) break; out.write(buf, 0, n); out.flush() }
-                up.join(5000)
+            val buf = ByteArray(16384)
+            while (true) {
+                val n = src.read(buf)
+                if (n < 0) break
+                dst.write(buf, 0, n)
+                dst.flush()
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "stream $streamId ended with an error", t)
-        } finally {
-            try { local.close() } catch (t: Throwable) { Log.d(TAG, "stream $streamId local close failed", t) }
+            Log.d(TAG, "$dir copy ended", t)
         }
     }
 

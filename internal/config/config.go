@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,10 @@ type ServeCmd struct {
 	ControlHost  string `name:"control-host" default:"connect.example.test" help:"Hostname the phone dials for its HTTP/2 control connection (mTLS)."`
 	NamePrefix   string `name:"name-prefix" default:"" help:"Optional prefix on generated tunnel names."`
 	NameLength   int    `name:"name-length" default:"10" help:"Random base32 chars in a generated name."`
+
+	DialBackAdvertise string `name:"dialback-advertise" help:"host:port the phone dials back to on THIS node for a public connection that entered here (this node's own public address, never a round-robin name): its TLS edge (--listen) with --dialback-https, its plain listener (--acme-http-listen) without. Required for serve."`
+	DialBackHTTPS     bool   `name:"dialback-https" default:"true" help:"Phones dial back over TLS (SNI --control-host). false: plain TCP to the --acme-http-listen listener, authorised by the one-time token only."`
+	DialBackMTLS      bool   `name:"dialback-mtls" default:"true" help:"Phones present their identity client certificate on every dial-back. Requires --dialback-https."`
 
 	// --- Mesh (replica↔replica) ---
 	MeshListen    string        `name:"mesh-listen" default:":9443" help:"Replica↔replica HTTP/2 mesh listener (internal network only)."`
@@ -98,7 +103,7 @@ type ServeCmd struct {
 	ACMEChallengeLE      string `name:"acme-challenge-le" default:"tls-alpn-01" enum:"dns-01,http-01,tls-alpn-01" help:"Let's Encrypt validation method: dns-01 | http-01 | tls-alpn-01."`
 	ACMEChallengeGTS     string `name:"acme-challenge-gts" default:"tls-alpn-01" enum:"dns-01,http-01,tls-alpn-01" help:"Google Trust Services validation method: dns-01 | http-01 | tls-alpn-01."`
 	ACMEChallengeZeroSSL string `name:"acme-challenge-zerossl" default:"http-01" enum:"dns-01,http-01" help:"ZeroSSL validation method: dns-01 | http-01 (ZeroSSL has no tls-alpn-01)."`
-	ACMEHTTPListen       string `name:"acme-http-listen" default:":80" help:"Public HTTP-01 challenge listener; bound only when a CA uses http-01."`
+	ACMEHTTPListen       string `name:"acme-http-listen" default:":80" help:"Public plain-HTTP listener: ACME HTTP-01 answers and, with --dialback-https=false, phone dial-backs. Bound only when one of them is in use."`
 
 	// DNS-01 propagation pre-check tuning (split-horizon / internal-DNS deployments; also the hermetic
 	// ACME test tier).
@@ -145,6 +150,10 @@ type ServeCmd struct {
 
 func (c ServeCmd) UsesChallenge(method string) bool {
 	return c.ACMEChallengeLE == method || c.ACMEChallengeGTS == method || c.ACMEChallengeZeroSSL == method
+}
+
+func (c ServeCmd) ServesPlainHTTP() bool {
+	return c.UsesChallenge(ChallengeHTTP01) || !c.DialBackHTTPS
 }
 
 // Validate is invoked automatically by kong for the selected `serve` command. It enforces every
@@ -206,10 +215,26 @@ func (c ServeCmd) Validate() error {
 		{"--acme-email", c.ACMEEmail},
 		{"--acme-account-dir", c.ACMEAccountDir},
 		{"--conn-log-dir", c.ConnLogDir},
+		{"--dialback-advertise", c.DialBackAdvertise},
 	} {
 		if req.v == "" {
 			return fmt.Errorf("%s is required for serve", req.name)
 		}
+	}
+	host, port, err := net.SplitHostPort(c.DialBackAdvertise)
+	if err != nil {
+		return fmt.Errorf("--dialback-advertise must be host:port, got %q: %w", c.DialBackAdvertise, err)
+	}
+	if host == "" {
+		return fmt.Errorf("--dialback-advertise needs a host (this node's own public address), got %q", c.DialBackAdvertise)
+	}
+	if p, perr := strconv.Atoi(port); perr != nil {
+		return fmt.Errorf("--dialback-advertise port %q: %w", port, perr)
+	} else if p < 1 || p > 65535 {
+		return fmt.Errorf("--dialback-advertise port must be 1-65535, got %d", p)
+	}
+	if c.DialBackMTLS && !c.DialBackHTTPS {
+		return errors.New("--dialback-mtls requires --dialback-https: a plain dial-back carries no client certificate")
 	}
 	if fi, err := os.Stat(c.ConnLogDir); err == nil && !fi.IsDir() {
 		return fmt.Errorf("--conn-log-dir %q is not a directory", c.ConnLogDir)
@@ -231,7 +256,7 @@ func (c ServeCmd) Validate() error {
 	if c.UsesChallenge(ChallengeDNS01) && c.ACMEDNSProvider == "" {
 		return fmt.Errorf("--acme-dns-provider is required when a CA uses dns-01")
 	}
-	if c.UsesChallenge(ChallengeHTTP01) {
+	if c.ServesPlainHTTP() {
 		if _, _, err := net.SplitHostPort(c.ACMEHTTPListen); err != nil {
 			return fmt.Errorf("--acme-http-listen must be host:port or :port, got %q: %w", c.ACMEHTTPListen, err)
 		}

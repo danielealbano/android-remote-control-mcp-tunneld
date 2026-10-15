@@ -166,8 +166,8 @@ func TestEdge_ACMETLSALPN_Serves(t *testing.T) {
 	if got := te.chal.lookups(); len(got) != 1 || got[0] != "a.example.test" {
 		t.Fatalf("challenge lookups = %v, want [a.example.test]", got)
 	}
-	if te.rtr.lookups != 0 || te.local.opened != 0 || te.mesh.opened != 0 {
-		t.Fatalf("an ACME validation must never be routed: router=%d local=%d mesh=%d", te.rtr.lookups, te.local.opened, te.mesh.opened)
+	if te.rtr.lookups != 0 || len(te.opener.calls) != 0 || len(te.dial.tokens) != 0 {
+		t.Fatalf("an ACME validation must never be routed: router=%d opens=%d waits=%d", te.rtr.lookups, len(te.opener.calls), len(te.dial.tokens))
 	}
 	if above := logs.aboveDebug(); len(above) != 0 {
 		t.Fatalf("records above Debug: %v", above)

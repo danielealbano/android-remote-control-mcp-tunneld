@@ -1,8 +1,5 @@
 // Package mesh implements the replica↔replica HTTP/2 mesh with internal mTLS (mesh-role certs only):
-// lazily-dialed per-directed-pair connection pools (round-robin, fixed-size, reaped when idle), and
-// connID-checked stream delivery. When a public connection lands on a node that is NOT the phone's owner, the entry
-// node bridges to the owner over the mesh; the owner verifies the connID against its live phone
-// connection before dialing back to the phone.
+// lazily-dialed per-directed-pair connection pools (round-robin, fixed-size, reaped when idle).
 package mesh
 
 import (
@@ -20,16 +17,7 @@ import (
 	"time"
 )
 
-// ErrNoOwner is returned when the owner rejects the stream (stale route / connID mismatch).
-var ErrNoOwner = errors.New("mesh: owner rejected the stream")
-
 var errPeerNotHTTP2 = errors.New("mesh: peer did not negotiate HTTP/2 (ALPN h2)")
-
-// Stream is a bidirectional splice to the owner node: Read pulls phone→client bytes, Write pushes
-// client→phone bytes.
-type Stream interface {
-	io.ReadWriteCloser
-}
 
 // Recorder is the consumer-side observability surface the mesh client needs: it reports each per-peer
 // pool's size when the pool is first created (satisfied by metrics.PromRecorder).
@@ -53,7 +41,11 @@ const (
 	meshDialTimeout     = 10 * time.Second
 )
 
-// Client dials peer nodes over the mesh and opens connID-checked streams. It holds per-peer pools of
+const meshControlTimeout = 10 * time.Second
+
+func WithControlTimeout(d time.Duration) Option { return func(c *Client) { c.controlTimeout = d } }
+
+// Client dials peer nodes over the mesh. It holds per-peer pools of
 // HTTP/2 clients (round-robin), each backed by its own transport/connection.
 type Client struct {
 	tlsConf     func() *tls.Config // hot-swappable mesh-role client cert
@@ -62,6 +54,8 @@ type Client struct {
 	readIdle    time.Duration // PING health cadence (see meshReadIdleTimeout)
 	pingTimeout time.Duration
 	dialTimeout time.Duration
+
+	controlTimeout time.Duration
 
 	mu    sync.Mutex
 	pools map[string]*peerPool // peer advertise addr → pool
@@ -80,6 +74,7 @@ func NewClient(tlsConf func() *tls.Config, poolSize int, opts ...Option) *Client
 	c := &Client{
 		tlsConf: tlsConf, poolSize: poolSize, pools: map[string]*peerPool{},
 		readIdle: meshReadIdleTimeout, pingTimeout: meshPingTimeout, dialTimeout: meshDialTimeout,
+		controlTimeout: meshControlTimeout,
 	}
 	for _, o := range opts {
 		o(c)
@@ -91,7 +86,7 @@ type peerPool struct {
 	addr    string
 	clients []*http.Client
 	next    atomic.Uint64
-	lastUse atomic.Int64 // unix nanos of the last OpenStream through this pool (reap bookkeeping)
+	lastUse atomic.Int64 // unix nanos of the last use of this pool (reap bookkeeping)
 	active  atomic.Int64 // in-flight streams held through this pool (a pool with active>0 is never reaped)
 }
 
@@ -117,8 +112,7 @@ func (c *Client) pool(peer string) *peerPool {
 }
 
 // Run reaps per-peer pools that have been idle for reapAfter (closing their pooled connections and
-// zeroing the pool-size gauge), until ctx is done. A reaped peer's pool is lazily re-created on the
-// next OpenStream. Wired onto the server errgroup so idle pools never accumulate across peer churn.
+// zeroing the pool-size gauge), until ctx is done. A reaped peer's pool is lazily re-created. Wired onto the server errgroup so idle pools never accumulate across peer churn.
 func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
 	if reapAfter <= 0 {
 		reapAfter = 10 * time.Minute
@@ -182,65 +176,12 @@ func requirePeerH2(conn net.Conn) (net.Conn, error) {
 	return conn, nil
 }
 
-// OpenStream dials peer and opens a connID-checked mesh stream for (tunnel, connID, streamID). The
-// far side verifies connID against its live phone connection before bridging.
-func (c *Client) OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (io.ReadWriteCloser, error) {
-	p := c.pool(peer) // active++ (released by clientStream.Close on success, or here on any failure)
-	success := false
-	defer func() {
-		if !success {
-			p.active.Add(-1) // decrement on EVERY failure return so the reaper is not blocked forever
-		}
-	}()
-	hc := p.clients[int(p.next.Add(1))%len(p.clients)]
-
-	pr, pw := io.Pipe() // request body: entry→owner (client→phone bytes)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+peer+"/api/v1/mesh/data", pr)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("X-Tunnel", tunnel)
-	req.Header.Set("X-Conn-Id", connID)
-	req.Header.Set("X-Stream-Id", streamID)
-
-	resp, err := hc.Do(req)
-	if err != nil {
-		pw.CloseWithError(err)
-		return nil, fmt.Errorf("mesh: dial %s: %w", peer, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		closeErr := errors.Join(resp.Body.Close(), pw.Close())
-		if resp.StatusCode == http.StatusUnprocessableEntity {
-			return nil, errors.Join(ErrDuplicateStream, closeErr)
-		}
-		return nil, errors.Join(ErrNoOwner, closeErr)
-	}
-	success = true
-	return &clientStream{pw: pw, resp: resp, p: p}, nil
-}
-
-type clientStream struct {
-	pw   *io.PipeWriter
-	resp *http.Response
-	p    *peerPool
-	once sync.Once
-}
-
-func (s *clientStream) Read(p []byte) (int, error)  { return s.resp.Body.Read(p) }
-func (s *clientStream) Write(p []byte) (int, error) { return s.pw.Write(p) }
-func (s *clientStream) Close() error {
-	var err error
-	s.once.Do(func() {
-		err = errors.Join(s.pw.Close(), s.resp.Body.Close())
-		s.p.active.Add(-1)
-	})
-	return err
-}
-
 // Control posts a mesh control RPC to peer over the per-peer mTLS H2 pool and returns the decoded
 // response. Short request/response (not a splice); the pool's active-count guards it against reaping
 // for the request's duration.
 func (c *Client) Control(ctx context.Context, peer string, req ControlRequest) (_ ControlResponse, err error) {
+	ctx, cancel := context.WithTimeout(ctx, c.controlTimeout)
+	defer cancel()
 	p := c.pool(peer) // active++
 	defer p.active.Add(-1)
 	hc := p.clients[int(p.next.Add(1))%len(p.clients)]

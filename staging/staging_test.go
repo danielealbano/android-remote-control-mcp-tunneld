@@ -432,6 +432,7 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 		InternalListen: net.JoinHostPort("127.0.0.1", strconv.Itoa(freeLocalPort(t))),
 		MeshAdvertise:  meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
 		TunnelDomain: env.domain, EnrollHost: enrollHost, ControlHost: controlHost, NameLength: 10,
+		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
 		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
 		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: stagingBucket,
 		S3AccessKey: access, S3SecretKey: secret, S3ForcePathStyle: true,

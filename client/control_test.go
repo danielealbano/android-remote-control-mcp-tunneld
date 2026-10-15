@@ -190,8 +190,8 @@ func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
 	}
 }
 
-// TestControlConnectBindAndDuplex covers: control connect + bind, dial-back opens a data stream, and a
-// full-duplex splice (the echo backend proves interleaved read/write works across the data stream).
+// TestControlConnectBindAndDuplex covers: control connect + bind, a dial-back connection, and a
+// full-duplex splice (the echo backend proves interleaved read/write works across the dial-back).
 func TestControlConnectBindAndDuplex(t *testing.T) {
 	ts := startTestServer(t)
 	echo := func(s io.ReadWriteCloser) {
@@ -214,12 +214,9 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 		t.Fatal("control connect must bind the route")
 	}
 
-	// Dial-back: OpenStream sends OPEN, the client opens the /api/v1/data stream, deliverStream returns it.
-	openCtx, openCancel := context.WithTimeout(ctx, 3*time.Second)
-	defer openCancel()
-	ds, err := ts.mgr.OpenStream(openCtx, testName, "stream-1")
+	ds, err := ts.dialBack(t, "TOKEN-DUPLEX", true, true)
 	if err != nil {
-		t.Fatalf("dial-back OpenStream failed: %v", err)
+		t.Fatalf("dial-back failed: %v", err)
 	}
 	defer tunneltest.CloseOrLog(t, ds)
 

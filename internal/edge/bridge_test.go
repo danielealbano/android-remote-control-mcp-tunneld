@@ -2,7 +2,10 @@ package edge
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -27,9 +31,6 @@ func TestBridge_BanDuringDialbackEvictsStream(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	te.local.has = true
-	te.local.owns = true
-	te.local.ds = &pipeStream{r: io.NopCloser(nil), w: io.Discard, closed: make(chan struct{})}
 
 	client := newScriptConn("198.51.100.30", nil)
 	te.e.handleTunnel(context.Background(), client, ClientHelloInfo{SNI: name})
@@ -42,45 +43,6 @@ func TestBridge_BanDuringDialbackEvictsStream(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) < 2 {
 		t.Fatal("the post-trackStream ban re-check must run")
-	}
-}
-
-func TestEdge_OpenFar_LocalWhenOwner(t *testing.T) {
-	te := newTestEdge(t, baseConfig(), nil, nil)
-	te.local.has = true
-	te.local.owns = true
-	te.local.ds = &pipeStream{r: io.NopCloser(nil), w: io.Discard, closed: make(chan struct{})}
-
-	far, closeFar, err := te.e.openFar(context.Background(), "t1", "node-a", "conn", "stream")
-	if err != nil {
-		t.Fatalf("openFar: %v", err)
-	}
-	defer closeFar()
-	if far == nil {
-		t.Fatal("far stream must be non-nil")
-	}
-	if te.local.opened != 1 || te.mesh.opened != 0 {
-		t.Fatalf("owner==self must use the LOCAL dialer (local=%d mesh=%d)", te.local.opened, te.mesh.opened)
-	}
-}
-
-func TestEdge_OpenFar_MeshWhenRemote(t *testing.T) {
-	te := newTestEdge(t, baseConfig(), nil, nil)
-	te.local.has = false // phone not local
-	te.rtr.nodeAdv = "10.0.0.2:9443"
-	te.rtr.nodeOK = true
-	te.mesh.rwc = &pipeStream{r: io.NopCloser(nil), w: io.Discard, closed: make(chan struct{})}
-
-	far, closeFar, err := te.e.openFar(context.Background(), "t1", "node-b", "conn", "stream")
-	if err != nil {
-		t.Fatalf("openFar: %v", err)
-	}
-	defer closeFar()
-	if far == nil {
-		t.Fatal("far stream must be non-nil")
-	}
-	if te.mesh.opened != 1 || te.local.opened != 0 {
-		t.Fatalf("remote owner must use the MESH dialer (local=%d mesh=%d)", te.local.opened, te.mesh.opened)
 	}
 }
 
@@ -115,26 +77,260 @@ func TestEdge_HandleTunnel_ReleasesStreamSlotOnce(t *testing.T) {
 	te.rtr.nodeID = "node-a"
 	te.rtr.fp = "fp"
 	te.rtr.connID = "conn"
-	// openFar fails (no local, no mesh route) so handleTunnel takes the acquire→release path once.
-	te.local.has = false
-	te.rtr.nodeOK = false
+	te.opener.errByNode["node-a"] = errors.New("owner unreachable")
 
 	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.20", nil), ClientHelloInfo{SNI: name})
 
-	// After a failed openFar, the acquired stream slot must be released (net zero), so a fresh acquire
-	// up to the cap still succeeds --limit-concurrent times.
-	acquired := 0
-	for i := 0; i < cfg.Concurrent; i++ {
-		ok, err := te.e.lim.AcquireStream(context.Background(), name, "conn1", cfg.Concurrent)
+	if got := freeSlots(t, te, "abcdef012345", cfg.Concurrent); got != cfg.Concurrent {
+		t.Fatalf("stream slot leaked: only %d/%d slots free after a failed bridge", got, cfg.Concurrent)
+	}
+}
+
+func freeSlots(t *testing.T, te *testEdge, name string, n int) int {
+	t.Helper()
+	free := 0
+	for i := range n {
+		ok, err := te.e.lim.AcquireStream(context.Background(), name, fmt.Sprintf("probe-%d", i), n)
 		if err != nil {
 			t.Fatalf("AcquireStream: %v", err)
 		}
 		if ok {
-			acquired++
+			free++
 		}
 	}
-	if acquired != cfg.Concurrent {
-		t.Fatalf("stream slot leaked: only %d/%d slots free after a failed bridge", acquired, cfg.Concurrent)
+	return free
+}
+
+func runTunnel(te *testEdge, client net.Conn, sni string) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(context.Background(), client, ClientHelloInfo{SNI: sni})
+		close(done)
+	}()
+	return done
+}
+
+func waitPhone(t *testing.T, te *testEdge, i int) net.Conn {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		te.dial.mu.Lock()
+		n := len(te.dial.phones)
+		te.dial.mu.Unlock()
+		if n > i {
+			return te.dial.phone(i)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dial-back %d never arrived", i)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func readFull(t *testing.T, r io.Reader, want string) {
+	t.Helper()
+	buf := make([]byte, len(want))
+	if _, err := io.ReadFull(r, buf); err != nil {
+		t.Fatalf("read %q: %v", want, err)
+	}
+	if string(buf) != want {
+		t.Fatalf("read %q, want %q", buf, want)
+	}
+}
+
+func clientWrites(c *scriptConn) string {
+	c.writesMu.Lock()
+	defer c.writesMu.Unlock()
+	return string(c.writes)
+}
+
+func TestEdge_OpenFar_OpensThenAwaitsWithOneToken(t *testing.T) {
+	te := newTestEdge(t, baseConfig(), nil, nil)
+	te.rtr.set("node-b", "fp", "conn-7", true, nil)
+	client := newScriptConn("198.51.100.70", []byte("HELLO"))
+	done := runTunnel(te, client, "abcdef012345.example.test")
+
+	phone := waitPhone(t, te, 0)
+	readFull(t, phone, "HELLO")
+	if _, err := phone.Write([]byte("WORLD")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for clientWrites(client) != "WORLD" {
+		if time.Now().After(deadline) {
+			t.Fatalf("the phone's bytes never reached the client, got %q", clientWrites(client))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	tunneltest.CloseOrLog(t, phone)
+	waitDone(t, done, 5*time.Second)
+
+	te.opener.mu.Lock()
+	calls := append([]openCall(nil), te.opener.calls...)
+	te.opener.mu.Unlock()
+	te.dial.mu.Lock()
+	tokens := append([]string(nil), te.dial.tokens...)
+	tunnels := append([]string(nil), te.dial.tunnels...)
+	te.dial.mu.Unlock()
+	if len(calls) != 1 || len(tokens) != 1 {
+		t.Fatalf("want one open and one wait, got opens=%+v waits=%v", calls, tokens)
+	}
+	want := openCall{nodeID: "node-b", name: "abcdef012345", connID: "conn-7", token: tokens[0]}
+	if calls[0] != want || tunnels[0] != "abcdef012345" || len(tokens[0]) != 26 {
+		t.Fatalf("open = %+v (waited for %q on %q), want %+v with a 26-char token", calls[0], tokens[0], tunnels[0], want)
+	}
+}
+
+func TestEdge_HandleTunnel_RefusedWhileDialBacksUnavailable(t *testing.T) {
+	cfg := baseConfig()
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.set("node-a", "fp", "conn-1", true, nil)
+	te.ready.notReady.Store(true)
+	client := newScriptConn("198.51.100.73", nil)
+	waitDone(t, runTunnel(te, client, "abcdef012345.example.test"), 5*time.Second)
+	if !client.isClosed() || !containsStr(te.rec.rejectReasons(), "no-route") {
+		t.Fatalf("closed=%v rejects=%v, want the client refused with no-route", client.isClosed(), te.rec.rejectReasons())
+	}
+	if len(te.opener.calls) != 0 || len(te.dial.tokens) != 0 {
+		t.Fatal("no OPEN may be requested while this node cannot accept dial-backs")
+	}
+	if got := freeSlots(t, te, "abcdef012345", cfg.Concurrent); got != cfg.Concurrent {
+		t.Fatalf("no stream slot may be taken while this node cannot accept dial-backs: %d/%d free", got, cfg.Concurrent)
+	}
+}
+
+func TestEdge_OpenFar_BoundedByDialBackTimeout(t *testing.T) {
+	cfg := baseConfig()
+	cfg.DialBackTimeout = 100 * time.Millisecond
+	te := newTestEdge(t, cfg, nil, nil)
+	te.rtr.set("node-a", "fp", "conn-1", true, nil)
+	te.dial.never = true
+	client := newScriptConn("198.51.100.71", nil)
+	start := time.Now()
+	waitDone(t, runTunnel(te, client, "abcdef012345.example.test"), 5*time.Second)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("the dial-back wait was not bounded by DialBackTimeout (took %s)", elapsed)
+	}
+	if !client.isClosed() {
+		t.Fatal("the client must be closed when the phone never dials back")
+	}
+	if !containsStr(te.rec.rejectReasons(), "no-route") {
+		t.Fatalf("want a no-route reject, got %v", te.rec.rejectReasons())
+	}
+	if got := freeSlots(t, te, "abcdef012345", cfg.Concurrent); got != cfg.Concurrent {
+		t.Fatalf("the stream slot leaked: %d/%d free", got, cfg.Concurrent)
+	}
+}
+
+func TestEdge_Splice_RouteCheckEndsOrphanedSplice(t *testing.T) {
+	prev := routeCheckInterval
+	routeCheckInterval = 50 * time.Millisecond
+	t.Cleanup(func() { routeCheckInterval = prev })
+	tests := []struct {
+		name    string
+		mutate  func(r *fakeRouter)
+		wantEnd bool
+	}{
+		{name: "route gone", mutate: func(r *fakeRouter) { r.set("", "", "", false, nil) }, wantEnd: true},
+		{name: "route re-bound to another connection", mutate: func(r *fakeRouter) { r.set("node-a", "fp", "conn-2", true, nil) }, wantEnd: true},
+		{name: "lookup error keeps the splice", mutate: func(r *fakeRouter) { r.set("", "", "", false, errors.New("valkey down")) }},
+		{name: "unchanged route keeps the splice", mutate: func(*fakeRouter) {}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			te := newTestEdge(t, cfg, nil, nil)
+			te.rtr.set("node-a", "fp", "conn-1", true, nil)
+			client := newScriptConn("198.51.100.72", nil)
+			done := runTunnel(te, client, "abcdef012345.example.test")
+			phone := waitPhone(t, te, 0)
+			tc.mutate(te.rtr)
+			select {
+			case <-done:
+				if !tc.wantEnd {
+					t.Fatal("the splice must keep running")
+				}
+			case <-time.After(2500 * time.Millisecond):
+				if tc.wantEnd {
+					t.Fatal("the orphaned splice was not ended by the route check")
+				}
+				tunneltest.CloseOrLog(t, phone)
+				waitDone(t, done, 5*time.Second)
+				return
+			}
+			var end *PublicEvent
+			for _, ev := range te.sink.kinds() {
+				if ev.Event == "end" {
+					end = &ev
+				}
+			}
+			if end == nil || end.CloseReason != store.ClosePhoneClose {
+				t.Fatalf("end event = %+v, want close_reason %q", end, store.ClosePhoneClose)
+			}
+			if !client.isClosed() {
+				t.Fatal("the client socket must be closed")
+			}
+			if _, err := phone.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+				t.Fatalf("the dial-back socket must be closed, read = %v", err)
+			}
+			if got := freeSlots(t, te, "abcdef012345", cfg.Concurrent); got != cfg.Concurrent {
+				t.Fatalf("the stream slot leaked: %d/%d free", got, cfg.Concurrent)
+			}
+		})
+	}
+}
+
+func TestEdge_EvictConnStreams_OnlyThatConnection(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{reason: store.CloseBanEvict, want: store.CloseBanEvict},
+		{reason: store.CloseAdminTerminate, want: store.CloseAdminTerminate},
+		{reason: store.ClosePhoneClose, want: store.ClosePhoneClose},
+		{reason: "liveness-timeout", want: store.ClosePhoneClose},
+	}
+	for _, tc := range tests {
+		t.Run(tc.reason, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.IdleTimeout = 0
+			cfg.MinRate = 0
+			te := newTestEdge(t, cfg, nil, nil)
+			client := newScriptConn("203.0.113.50", nil)
+			far := newScriptConn("203.0.113.50", nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			victim := &activeStream{tunnel: "t1", connID: "conn-1", parent: context.Background(), started: time.Now(), cancel: cancel}
+			victim.lastAct.Store(time.Now().UnixNano())
+			var otherCancels atomic.Int32
+			otherConn := &activeStream{tunnel: "t1", connID: "conn-2", cancel: func() { otherCancels.Add(1) }}
+			otherTunnel := &activeStream{tunnel: "t2", connID: "conn-1", cancel: func() { otherCancels.Add(1) }}
+			for _, s := range []*activeStream{victim, otherConn, otherTunnel} {
+				te.e.trackStream(s)
+				defer te.e.untrackStream(s)
+			}
+			reasonCh := make(chan string, 1)
+			go func() { reasonCh <- te.e.splice(ctx, "t1", client, far, victim) }()
+			time.Sleep(20 * time.Millisecond)
+
+			if !te.e.EvictConnStreams("t1", "conn-1", tc.reason) {
+				t.Fatal("EvictConnStreams must report the ended splice")
+			}
+			select {
+			case got := <-reasonCh:
+				if got != tc.want {
+					t.Fatalf("close_reason = %q, want %q", got, tc.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the splice of that connection was not ended")
+			}
+			if otherCancels.Load() != 0 {
+				t.Fatal("splices of another connection or tunnel must keep running")
+			}
+			if te.e.EvictConnStreams("t3", "conn-9", tc.reason) {
+				t.Fatal("no splice matches: EvictConnStreams must report false")
+			}
+		})
 	}
 }
 

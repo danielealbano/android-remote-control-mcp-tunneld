@@ -65,8 +65,8 @@ const tsNanosLayout = "20060102T150405.000000000Z"
 var connIDRand = rand.Read
 
 // NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
-// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision;
-// pending-stream duplicate refusal) — a collision is detected and retried, never silent.
+// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision) — a
+// collision is detected and retried, never silent.
 func NewConnID() (string, error) {
 	var buf [4]byte
 	if _, err := connIDRand(buf[:]); err != nil {
@@ -76,8 +76,7 @@ func NewConnID() (string, error) {
 }
 
 // MustConnID mints a conn/stream id, falling back to a deterministic non-empty id ("00000000") on the
-// practically impossible crypto/rand failure — an EMPTY id would be refused by the dial-back match
-// (serveData / the mesh header check both reject "") and turn every connection into a no-route.
+// practically impossible crypto/rand failure.
 func MustConnID() string {
 	id, err := NewConnID()
 	if err != nil {

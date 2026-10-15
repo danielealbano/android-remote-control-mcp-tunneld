@@ -145,3 +145,71 @@ func TestNewRegistry_RejectsNilLogger(t *testing.T) {
 		t.Fatal("a nil logger must be rejected")
 	}
 }
+
+func TestRegistry_LiveNodes_ListsRegistered(t *testing.T) {
+	reg, mr := newReg(t)
+	ctx := context.Background()
+	a := NodeInfo{Advertise: "10.0.0.1:9443", Hostname: "host-a"}
+	b := NodeInfo{Advertise: "10.0.0.2:9443", Hostname: "host-b"}
+	if err := reg.RegisterNode(ctx, "a", a, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterNode(ctx, "b", b, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := reg.LiveNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 || nodes["a"] != a || nodes["b"] != b {
+		t.Fatalf("LiveNodes = %+v, want a and b", nodes)
+	}
+	if ttl := mr.TTL(nodeSetKey); ttl != 90*time.Second {
+		t.Fatalf("node set TTL = %s, want 3 × the node TTL", ttl)
+	}
+}
+
+func TestRegistry_LiveNodes_PrunesExpired(t *testing.T) {
+	reg, mr := newReg(t)
+	ctx := context.Background()
+	if err := reg.RegisterNode(ctx, "old", NodeInfo{Advertise: "10.0.0.1:9443"}, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	mr.FastForward(31 * time.Second)
+	if err := reg.RegisterNode(ctx, "fresh", NodeInfo{Advertise: "10.0.0.2:9443"}, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := reg.LiveNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := nodes["old"]; ok || len(nodes) != 1 {
+		t.Fatalf("LiveNodes = %+v, want only the fresh node", nodes)
+	}
+	if member, err := mr.SIsMember(nodeSetKey, "old"); err != nil || member {
+		t.Fatalf("the expired id must be pruned from the set (member=%v err=%v)", member, err)
+	}
+}
+
+func TestRegistry_DeregisterNode_RemovesFromSet(t *testing.T) {
+	reg, mr := newReg(t)
+	ctx := context.Background()
+	if err := reg.RegisterNode(ctx, "a", NodeInfo{Advertise: "10.0.0.1:9443"}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.DeregisterNode(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := reg.LiveNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 0 {
+		t.Fatalf("LiveNodes = %+v, want none", nodes)
+	}
+	if mr.Exists(nodeSetKey) {
+		if member, err := mr.SIsMember(nodeSetKey, "a"); err != nil || member {
+			t.Fatalf("a deregistered id must leave the set (member=%v err=%v)", member, err)
+		}
+	}
+}

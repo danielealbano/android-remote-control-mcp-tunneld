@@ -13,34 +13,31 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 )
 
 // Router resolves a tunnel name to its owner + fingerprint + connID.
 type Router interface {
 	LookupRoute(ctx context.Context, name string) (nodeID, fingerprint, connID string, ok bool, err error)
-	LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error)
 }
 
-// LocalDialer opens a dial-back stream to a locally-held phone (phoneconn.Manager) and reports whether
-// a phone is local.
-type LocalDialer interface {
-	OpenStream(ctx context.Context, name, streamID string) (phoneconn.DataStream, error)
-	HasConn(name string) bool
-	OwnsConn(name, connID string) bool
+type DialBackWaiter interface {
+	Await(ctx context.Context, token, tunnel string, open func(context.Context) error) (net.Conn, error)
 }
 
-// MeshDialer opens a connID-checked mesh stream to the owning node.
-type MeshDialer interface {
-	OpenStream(ctx context.Context, peer, tunnel, connID, streamID string) (io.ReadWriteCloser, error)
+type Opener interface {
+	Open(ctx context.Context, nodeID, name, connID, token string) error
+}
+
+type DialBackReadiness interface {
+	DialBackReady() bool
 }
 
 // StreamLimiter is the data-plane limiting surface the edge depends on. It is defined at the consumer
 // (Go convention) so tests can substitute a fake; *limit.Limiter is the production implementation.
 type StreamLimiter interface {
-	AcquireStream(ctx context.Context, name, connID string, maxN int) (bool, error)
-	ReleaseStream(ctx context.Context, name, connID string) error
-	Charge(ctx context.Context, name, dir string, nr int64) (action limit.ChargeAction, wait time.Duration, window string, err error)
+	AcquireStream(ctx context.Context, name, member string, maxN int) (bool, error)
+	ReleaseStream(ctx context.Context, name, member string) error
+	Charge(ctx context.Context, name, member, dir string, nr int64) (action limit.ChargeAction, wait time.Duration, window string, err error)
 	TrafficExhausted(ctx context.Context, name string) (dayOver, weekOver bool, err error)
 	Allow(ctx context.Context, scope string, ip netip.Addr, limit int, window time.Duration) (bool, time.Duration, error)
 }
@@ -84,16 +81,17 @@ type Config struct {
 
 // Edge is the raw :443 public edge.
 type Edge struct {
-	cfg    Config
-	ban    func(netip.Addr) bool
-	banTun func(name, fingerprint string) bool
-	rec    Recorder
-	router Router
-	local  LocalDialer
-	mesh   MeshDialer
-	lim    StreamLimiter
-	logs   PhoneEventSink
-	chal   ACMEChallenges
+	cfg       Config
+	ban       func(netip.Addr) bool
+	banTun    func(name, fingerprint string) bool
+	rec       Recorder
+	router    Router
+	dialBacks DialBackWaiter
+	opener    Opener
+	ready     DialBackReadiness
+	lim       StreamLimiter
+	logs      PhoneEventSink
+	chal      ACMEChallenges
 
 	enrollLn  *chanListener
 	controlLn *chanListener
@@ -119,8 +117,6 @@ func (e *Edge) Wait(ctx context.Context) {
 	}
 }
 
-var errNoOwner = errors.New("edge: no owner for tunnel")
-
 func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		logger.Debug("close failed", "what", what, "err", err)
@@ -145,10 +141,10 @@ type PublicEvent struct {
 
 // New builds the Edge. enrollLn/controlLn are the reserved-SNI listeners the http servers accept from.
 func New(cfg Config, ban func(netip.Addr) bool, banTun func(string, string) bool,
-	rec Recorder, r Router, local LocalDialer, mesh MeshDialer, lim StreamLimiter, logs PhoneEventSink,
-	chal ACMEChallenges, addr net.Addr) *Edge {
+	rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, ready DialBackReadiness, lim StreamLimiter,
+	logs PhoneEventSink, chal ACMEChallenges, addr net.Addr) *Edge {
 	return &Edge{
-		cfg: cfg, ban: ban, banTun: banTun, rec: rec, router: r, local: local, mesh: mesh,
+		cfg: cfg, ban: ban, banTun: banTun, rec: rec, router: r, dialBacks: dialBacks, opener: opener, ready: ready,
 		lim: lim, logs: logs, chal: chal,
 		enrollLn: newChanListener(addr, cfg.Logger), controlLn: newChanListener(addr, cfg.Logger), now: time.Now,
 	}
