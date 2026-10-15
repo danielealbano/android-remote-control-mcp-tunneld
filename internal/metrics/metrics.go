@@ -35,6 +35,7 @@ type Metrics struct {
 	acmeIssue      *prometheus.CounterVec // {ca, result}
 	acmeRenew      *prometheus.CounterVec // {ca, result}
 	acmeCooldown   *prometheus.CounterVec // {ca}
+	acmeRateLimited *prometheus.CounterVec
 	meshPoolSize   *prometheus.GaugeVec   // {peer}
 	perConnMem     prometheus.Gauge
 	connLogDropped prometheus.Counter
@@ -76,7 +77,10 @@ func NewMetrics() *Metrics {
 			Name: "tunneld_acme_renew_total", Help: "ACME renewals by CA and result.",
 		}, []string{"ca", "result"}),
 		acmeCooldown: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "tunneld_acme_cooldown_total", Help: "Per-CA cooldown activations.",
+			Name: "tunneld_acme_cooldown_total", Help: "ACME account wait-until activations by CA.",
+		}, []string{"ca"}),
+		acmeRateLimited: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tunneld_acme_rate_limited_total", Help: "ACME 429 (rate-limited) answers by CA.",
 		}, []string{"ca"}),
 		meshPoolSize: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "tunneld_mesh_pool_size", Help: "Mesh connection pool size by peer.",
@@ -91,7 +95,7 @@ func NewMetrics() *Metrics {
 	reg.MustRegister(
 		m.enrollments, m.rejections, m.bytesTotal,
 		m.publicConnsUp, m.phoneConnsUp, m.streamsActive, m.quotaExhausted,
-		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.meshPoolSize, m.perConnMem,
+		m.attestVerify, m.acmeIssue, m.acmeRenew, m.acmeCooldown, m.acmeRateLimited, m.meshPoolSize, m.perConnMem,
 		m.connLogDropped,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -106,6 +110,7 @@ func NewMetrics() *Metrics {
 		m.acmeIssue.WithLabelValues(ca, "fail")
 		m.acmeRenew.WithLabelValues(ca, "ok")
 		m.acmeCooldown.WithLabelValues(ca)
+		m.acmeRateLimited.WithLabelValues(ca)
 	}
 	m.acmeRenew.WithLabelValues(observ.ACMERenewAllCAs, "fail")
 	for _, r := range observ.EnrollResults {

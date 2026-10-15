@@ -1458,22 +1458,22 @@ DoD:
 
 ---
 
-## [ ] US6 — ACME chain: accounts, budgets, HTTP layer, selection, server wiring
+## [x] US6 — ACME chain: accounts, budgets, HTTP layer, selection, server wiring
 
 The chain becomes account-aware (several GTS accounts, looked up by key; optional CAs), reserves budget before every order, and wraps lego's HTTP client so wait-until, request budgets and the poll schedule hold for every request. It is wired into `server.Run` in this same story, so the story's commit builds and runs a working server.
 
-- [ ] AC1: An account without budget or under a wait-until gets ZERO requests, tracked or not.
-- [ ] AC2: The first 429 ends the attempt; only the named bucket is resynced; the wait-until is never shortened.
-- [ ] AC3: Settlement follows the decision record; an abandoned attempt removes its pending TLS-ALPN challenge.
-- [ ] AC4: GTS accounts are tried by remaining order budget, random among equals (`crypto/rand`).
-- [ ] AC5: Every account unavailable → `rateLimited(earliest + 1–10 s)`; a run never exceeds its budget (290 s).
-- [ ] AC6: A GTS account is only looked up (`ResolveAccountByKey`), never registered.
-- [ ] AC7: `server.Run` builds the chain from config. Only enabled CAs are in it, and a listed GTS id without its key file fails startup. `--acme-eab-gts-*` and `TUNNELD_ACME_EAB_GTS_*` no longer exist.
-- [ ] AC8: `tunneld_acme_rate_limited_total{ca}` counts every 429 a CA answers, and is pre-created at zero for every CA.
+- [x] AC1: An account without budget or under a wait-until gets ZERO requests, tracked or not.
+- [x] AC2: The first 429 ends the attempt; only the named bucket is resynced; the wait-until is never shortened.
+- [x] AC3: Settlement follows the decision record; an abandoned attempt removes its pending TLS-ALPN challenge.
+- [x] AC4: GTS accounts are tried by remaining order budget, random among equals (`crypto/rand`).
+- [x] AC5: Every account unavailable → `rateLimited(earliest + 1–10 s)`; a run never exceeds its budget (290 s).
+- [x] AC6: A GTS account is only looked up (`ResolveAccountByKey`), never registered.
+- [x] AC7: `server.Run` builds the chain from config. Only enabled CAs are in it, and a listed GTS id without its key file fails startup. `--acme-eab-gts-*` and `TUNNELD_ACME_EAB_GTS_*` no longer exist.
+- [x] AC8: `tunneld_acme_rate_limited_total{ca}` counts every 429 a CA answers, and is pre-created at zero for every CA.
 
-### [ ] T6.1 — per-attempt order tracker
+### [x] T6.1 — per-attempt order tracker
 
-- [ ] A6.1.1 `internal/acme/track.go` (create):
+- [x] A6.1.1 `internal/acme/track.go` (create):
 
 ```go
 package acme
@@ -1613,7 +1613,7 @@ func (t *orderTrack) outcome() orderOutcome {
 }
 ```
 
-- [ ] A6.1.2 `internal/acme/challenge_providers.go` (modify) `tlsALPNProvider.Present`:
+- [x] A6.1.2 `internal/acme/challenge_providers.go` (modify) `tlsALPNProvider.Present`:
 
 ```go
 func (p *tlsALPNProvider) Present(ctx context.Context, domain, _, keyAuth string) error {
@@ -1632,11 +1632,11 @@ Context:
 - `DeleteTLSALPN` is GET-compare-DEL, so a later run of lego's own `CleanUp` (or a newer challenge) is unaffected.
 
 DoD:
-- [ ] Tracker is concurrency-safe; a presented TLS-ALPN challenge is removable on abandon.
+- [x] Tracker is concurrency-safe; a presented TLS-ALPN challenge is removable on abandon.
 
-### [ ] T6.2 — budget policy
+### [x] T6.2 — budget policy
 
-- [ ] A6.2.1 `internal/acme/budget.go` (create):
+- [x] A6.2.1 `internal/acme/budget.go` (create):
 
 ```go
 package acme
@@ -1797,14 +1797,14 @@ Context:
 - `registeredDomain` falls back to the name itself when it has no eTLD+1. That happens only for a public suffix, which LE cannot issue for.
 - `Budgets.Domain` (the tunnel domain) only labels the LE domain budget in the metrics.
 
-- [ ] A6.2.2 `go.mod` / `go.sum` (modify): `make tidy` moves `golang.org/x/net v0.61.0` (the latest version) from the `// indirect` block to the direct requirements, now that `budget.go` imports `publicsuffix`. The tidied files are committed with this story, so CI's tidy-drift check passes on its commit.
+- [x] A6.2.2 `go.mod` / `go.sum` (modify): `make tidy` moves `golang.org/x/net v0.61.0` (the latest version) from the `// indirect` block to the direct requirements, now that `budget.go` imports `publicsuffix`. The tidied files are committed with this story, so CI's tidy-drift check passes on its commit.
 
 DoD:
-- [ ] Policy matches the decision record bucket for bucket; `go.mod` lists x/net as a direct requirement.
+- [x] Policy matches the decision record bucket for bucket; `go.mod` lists x/net as a direct requirement.
 
-### [ ] T6.3 — budgeted HTTP transport
+### [x] T6.3 — budgeted HTTP transport
 
-- [ ] A6.3.1 (modify) the 429 counter, together with every `Recorder` implementation, so this story compiles (the server passes `metrics.PromRecorder` as the `acme.Recorder`). No comment is added; the new struct field gets no trailing `// {ca}`.
+- [x] A6.3.1 (modify) the 429 counter, together with every `Recorder` implementation, so this story compiles (the server passes `metrics.PromRecorder` as the `acme.Recorder`). No comment is added; the new struct field gets no trailing `// {ca}`.
   - **`internal/acme/chain.go`:** the `Recorder` interface gains `ACMERateLimited(ca string)`; `nopRecorder` gains `func (nopRecorder) ACMERateLimited(string) {}`.
   - **`internal/observ/recorder.go`:**
     - the `Recorder` interface gains `ACMERateLimited(ca string)`;
@@ -1823,7 +1823,7 @@ DoD:
     - the help text of `tunneld_acme_cooldown_total`, `"Per-CA cooldown activations."`, becomes `"ACME account wait-until activations by CA."`.
   - **`internal/metrics/recorder.go`:** `func (p *PromRecorder) ACMERateLimited(ca string) { p.m.acmeRateLimited.WithLabelValues(ca).Inc() }`.
   - **`internal/tunneltest/recorder.go`:** `func (r *Recorder) ACMERateLimited(ca string) { r.add(RecCall{Kind: "acmeratelimited", CA: ca}) }`.
-- [ ] A6.3.2 `internal/acme/transport.go` (create):
+- [x] A6.3.2 `internal/acme/transport.go` (create):
 
 ```go
 package acme
@@ -2083,11 +2083,11 @@ Context:
 - Every Valkey call in the transport has its own `budgetOpTimeout` (3 s ≈ 2× the budget lock's worst wait of 100 × 10 ms plus round-trips). lego's obtain context has no deadline (`context.WithoutCancel`), and a hold (`sleep`) still ends on abandon or ctx cancel.
 
 DoD:
-- [ ] No request bypasses the wait-until or the request budget; tracked requests also follow the poll schedule.
+- [x] No request bypasses the wait-until or the request budget; tracked requests also follow the poll schedule.
 
-### [ ] T6.4 — lego client
+### [x] T6.4 — lego client
 
-- [ ] A6.4.1 `internal/acme/lego_client.go` (modify):
+- [x] A6.4.1 `internal/acme/lego_client.go` (modify):
   - **Imports:** `net/http`.
   - **`LegoConfig` gains:**
 
@@ -2106,7 +2106,7 @@ DoD:
     - `AccountKey` field comment: "per-CA " → `// persisted account key`;
     - `NewLegoClient` doc: " and registers (or EAB-registers)" and "per-CA " → "NewLegoClient constructs the account. Network-touching; exercised by the Pebble-backed integration tier." A `ResolveOnly` account is never registered;
     - `classifyLego` doc: only the clause "so the chain and the phone are told exactly when the CA will accept a retry;". The phone's answer now adds a 1–10 s jitter.
-- [ ] A6.4.2 same file, `NewLegoClient`:
+- [x] A6.4.2 same file, `NewLegoClient`:
   - right after `lc.CADirURL = cfg.DirectoryURL`:
 
 ```go
@@ -2142,7 +2142,7 @@ DoD:
 	}
 ```
 
-- [ ] A6.4.3 same file:
+- [x] A6.4.3 same file:
   - **Added:** `var errCARateLimited = errors.New("acme: the CA answered 429 (rate limited)")`.
   - **`obtain`:** keep the goroutine, `logAbandoned` and the comment above it, and replace the `select` with:
 
@@ -2185,11 +2185,11 @@ DoD:
 ```
 
 DoD:
-- [ ] A transport-signalled 429 ends `obtain` immediately; GTS accounts are only resolved.
+- [x] A transport-signalled 429 ends `obtain` immediately; GTS accounts are only resolved.
 
-### [ ] T6.5 — chain
+### [x] T6.5 — chain
 
-- [ ] A6.5.1 `internal/acme/chain.go` (modify):
+- [x] A6.5.1 `internal/acme/chain.go` (modify):
   - **Imports:** `cmp`, `slices`, `encoding/binary`, `encoding/hex`.
   - **`ChainConfig` gains:**
     - `NodeID string`, `Nodes NodeLister`, `Budgets Budgets`;
@@ -2486,11 +2486,11 @@ func mintMember() string {
 Context: `cryptoIntN` and `mintMember` discard `crypto/rand.Read`'s error because Go documents that it "never returns an error, and always fills b entirely" (`go doc crypto/rand.Read`). `math/rand` is avoided because gosec G404 flags it.
 
 DoD:
-- [ ] The chain runs on accounts; its log message texts and final error text are unchanged; no comment states something false.
+- [x] The chain runs on accounts; its log message texts and final error text are unchanged; no comment states something false.
 
-### [ ] T6.6 — `NewChain` + package doc
+### [x] T6.6 — `NewChain` + package doc
 
-- [ ] A6.6.1 `internal/acme/lazy.go` (modify):
+- [x] A6.6.1 `internal/acme/lazy.go` (modify):
   - **Imports:** `net/http`.
   - **`NewChain`** becomes the function below. Only the wrong parts of its doc comment are removed: "per-CA ", " (order preserved: MUST be LE, GTS, ZeroSSL)" (the accounts are now grouped by CA) and " (ACME account registration)" (GTS accounts are only looked up).
 
@@ -2522,28 +2522,28 @@ func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
 }
 ```
 
-- [ ] A6.6.2 same file, comments made wrong by per-account clients that may only look their account up. Only the wrong parts are removed:
+- [x] A6.6.2 same file, comments made wrong by per-account clients that may only look their account up. Only the wrong parts are removed:
   - `lazyCA` doc: "per-CA " and " (ACME account registration)" are removed, so it starts "lazyCA defers the network-touching client construction to first use, …";
   - the `group` field's trailing comment `// dedups concurrent first-use registration` is removed;
   - `newLazyCA` doc: " for one CA's client" is removed ("newLazyCA wraps a builder behind lazy, self-healing construction.");
   - `resolve` doc: ", performing first-use registration once (deduped via singleflight)" is removed ("resolve returns the built client."). The "It is ctx-aware: …" sentences stay.
-- [ ] A6.6.3 same file, `resolve`: the shared build must not inherit the triggering attempt's tracker. That attempt ends (and abandons its tracker) on its own deadline, and every concurrent waiter of the same singleflight build would then get `errOrderAbandoned`. The build context becomes:
+- [x] A6.6.3 same file, `resolve`: the shared build must not inherit the triggering attempt's tracker. That attempt ends (and abandons its tracker) on its own deadline, and every concurrent waiter of the same singleflight build would then get `errOrderAbandoned`. The build context becomes:
 
 ```go
 		bctx, cancel := context.WithTimeout(withoutTrack(context.WithoutCancel(ctx)), lazyBuildTimeout)
 ```
 
   The build's requests are then untracked, so the transport refuses them while the account waits or lacks request budget, and the build is retried on the next use.
-- [ ] A6.6.4 `internal/acme/issuer.go` (modify): two parts of the package doc comment are removed (made wrong):
+- [x] A6.6.4 `internal/acme/issuer.go` (modify): two parts of the package doc comment are removed (made wrong):
   - "per-CA " in "lego-backed per-CA clients";
   - the clause "and reactive per-CA cooldown+backoff (a rate-limited CA gets a Valkey retry-after; the spillover skips a cooling CA)".
 
 DoD:
-- [ ] Each lego client of each account gets its own budget transport; no comment states something false.
+- [x] Each lego client of each account gets its own budget transport; no comment states something false.
 
-### [ ] T6.7 — server wiring
+### [x] T6.7 — server wiring
 
-- [ ] A6.7.1 `internal/server/acmewire.go` (modify):
+- [x] A6.7.1 `internal/server/acmewire.go` (modify):
   - **Imports:** `strings`, `internal/ca`.
   - **`buildACMEChain`** is replaced by the code below. Only "per-CA " is removed from its doc comment, because accounts are now per account. `loadAccountKey` and its doc comment stay unchanged.
 
@@ -2693,17 +2693,17 @@ func budgetsFrom(cfg config.ServeCmd) (acme.Budgets, error) {
 }
 ```
 
-- [ ] A6.7.2 same file, the `acmeChain` interface: `ObtainSelf` becomes `ObtainSelf(ctx context.Context, host string, cur store.CertInfo) (certPEM, keyPEM []byte, info store.CertInfo, err error)`, and the interface gains `ACMEBudgetLevels(ctx context.Context) ([]acme.BudgetLevel, error)`.
-- [ ] A6.7.3 `internal/server/reserved.go` (modify):
+- [x] A6.7.2 same file, the `acmeChain` interface: `ObtainSelf` becomes `ObtainSelf(ctx context.Context, host string, cur store.CertInfo) (certPEM, keyPEM []byte, info store.CertInfo, err error)`, and the interface gains `ACMEBudgetLevels(ctx context.Context) ([]acme.BudgetLevel, error)`.
+- [x] A6.7.3 `internal/server/reserved.go` (modify):
   - `type selfIssuer func(ctx context.Context, host string, cur store.CertInfo) (certPEM, keyPEM []byte, info store.CertInfo, err error)`;
   - in `issue`, `rc.obtain(issueCtx, rh.host)` → `rc.obtain(issueCtx, rh.host, rh.currentInfo())`. That is the zero `CertInfo` until a cert is held.
   - The `selfIssuer` doc comment stays (still true).
-- [ ] A6.7.4 `internal/config/config.go` (modify): the `ACMEEABGTSKID` and `ACMEEABGTSHMAC` fields are removed. Their only reader was the old `buildACMEChain`.
-- [ ] A6.7.5 `deploy/tunneld.env.example` (modify):
+- [x] A6.7.4 `internal/config/config.go` (modify): the `ACMEEABGTSKID` and `ACMEEABGTSHMAC` fields are removed. Their only reader was the old `buildACMEChain`.
+- [x] A6.7.5 `deploy/tunneld.env.example` (modify):
   - the `TUNNELD_ACME_EAB_GTS_KID=` and `TUNNELD_ACME_EAB_GTS_HMAC=` lines are removed;
   - in the comment "# GTS / ZeroSSL External Account Binding (optional; leave empty to use LE only until configured).", only the parts made wrong are removed: "GTS / " and "; leave empty to use LE only until configured". It reads "# ZeroSSL External Account Binding (optional)." No new comment text is added.
-- [ ] A6.7.6 `deploy/docker-compose.yml` (modify): in the `./acme:/acme` mount's comment, only "per-CA " is removed (made wrong: the keys are per account). It reads `# bind mount (operator-owned): ACME account keys + reserved-host self-certs`.
-- [ ] A6.7.7 `internal/server/server.go` (modify): add
+- [x] A6.7.6 `deploy/docker-compose.yml` (modify): in the `./acme:/acme` mount's comment, only "per-CA " is removed (made wrong: the keys are per account). It reads `# bind mount (operator-owned): ACME account keys + reserved-host self-certs`.
+- [x] A6.7.7 `internal/server/server.go` (modify): add
 
 ```go
 type liveNodeIDs struct{ reg *router.Registry }
@@ -2724,9 +2724,9 @@ func (n liveNodeIDs) LiveNodeIDs(ctx context.Context) ([]string, error) {
   - **Chain construction:** `chain, err := buildACMEChain(cfg, lim, chal, rec, logger, nodeID, liveNodeIDs{reg})`.
 
 DoD:
-- [ ] `server.Run` builds the new chain before any listener binds: only enabled CAs, listed GTS keys must exist, no GTS EAB setting is left, no comment states something false.
+- [x] `server.Run` builds the new chain before any listener binds: only enabled CAs, listed GTS keys must exist, no GTS EAB setting is left, no comment states something false.
 
-### [ ] T6.8 — tests (`internal/acme`: miniredis limiter, fake issuers, `httptest` CA; `internal/server`; `internal/metrics`)
+### [x] T6.8 — tests (`internal/acme`: miniredis limiter, fake issuers, `httptest` CA; `internal/server`; `internal/metrics`)
 
 | Test | Verifies |
 |---|---|
@@ -2800,7 +2800,7 @@ Log substrings (`ca=… name=… class=…`, `msg="acme CA cooldown check failed
 **Existing tests to adapt** (`internal/server/acmewire_test.go`). Each of the three `buildACMEChain` calls takes the new signature (`…, testLogger(), "node-test", fakeNodes{})` with a `fakeNodes` `NodeLister` returning `["node-test"]`). Each literal becomes a `cfg` variable followed by `tunneltest.LooseACMEBudgets(&cfg)` and `tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")`. The `ACMEDirLE` the two LE-dependent tests need is already set by A5.3.6.
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 
@@ -3881,3 +3881,5 @@ DoD:
 ## Deviations
 
 - **A2.1.1** (`internal/tunneltest/blackhole.go`). The cleanup's `conns := p.conns` became `conns := slices.Clone(p.conns)`. `reap` removes finished pairs with `slices.DeleteFunc`, which since Go 1.22 zeroes the freed tail of the same backing array. The cleanup's view of the old slice header could therefore hold nil entries and dereference them. The action's code block is updated to match.
+- **T6.8** (`internal/acme/chain_test.go`). In the `TestObtainSelfSelfCert` comment, "subject to the per-CA cooldowns" became "subject to the cooldowns". The change made "per-CA" wrong: cooldowns are now per account. The plan's existing-test table did not list this comment.
+- **T6.8** (`internal/server/reserved_test.go`). `blockingIssuer.obtain` also gains the `store.CertInfo` parameter. It is a second `selfIssuer` fake that the plan's adaptation table did not list.

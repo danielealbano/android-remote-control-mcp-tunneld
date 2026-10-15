@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -109,16 +110,24 @@ type countingIssuer struct {
 	keyPEM  []byte
 	info    store.CertInfo
 	err     error
+	curs    []store.CertInfo
 }
 
-func (c *countingIssuer) obtain(context.Context, string) ([]byte, []byte, store.CertInfo, error) {
+func (c *countingIssuer) obtain(_ context.Context, _ string, cur store.CertInfo) ([]byte, []byte, store.CertInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
+	c.curs = append(c.curs, cur)
 	return c.certPEM, c.keyPEM, c.info, c.err
 }
 
 func (c *countingIssuer) callCount() int { c.mu.Lock(); defer c.mu.Unlock(); return c.calls }
+
+func (c *countingIssuer) passedCurs() []store.CertInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.curs)
+}
 
 func neverRenew(context.Context, store.CertInfo) (bool, time.Time, error) {
 	return false, time.Time{}, nil
@@ -181,7 +190,7 @@ type blockingIssuer struct {
 	hasDeadln bool
 }
 
-func (b *blockingIssuer) obtain(ctx context.Context, _ string) ([]byte, []byte, store.CertInfo, error) {
+func (b *blockingIssuer) obtain(ctx context.Context, _ string, _ store.CertInfo) ([]byte, []byte, store.CertInfo, error) {
 	b.mu.Lock()
 	b.calls++
 	b.calledAt = time.Now()
@@ -287,6 +296,9 @@ func TestReservedCerts_ObtainsWhenNoCache(t *testing.T) {
 	if iss.callCount() != 1 {
 		t.Fatalf("no cache must trigger exactly one ObtainSelf, got %d", iss.callCount())
 	}
+	if curs := iss.passedCurs(); len(curs) != 1 || curs[0] != (store.CertInfo{}) {
+		t.Fatalf("a first issuance must pass the zero CertInfo, got %+v", curs)
+	}
 	if _, err := rc.getCertificateFor(host)(nil); err != nil {
 		t.Fatalf("obtained cert must be served, got %v", err)
 	}
@@ -335,6 +347,9 @@ func TestReservedCerts_RenewsExpiringCache(t *testing.T) {
 
 			if iss.callCount() != 1 {
 				t.Fatalf("a due cached pair must be renewed once in the first pass, got %d", iss.callCount())
+			}
+			if curs := iss.passedCurs(); len(curs) != 1 || curs[0].CA != oldInfo.CA || curs[0].Serial != oldInfo.Serial || !curs[0].NotAfter.Equal(oldInfo.NotAfter) {
+				t.Fatalf("a renewal must pass the held cert's info %+v, got %+v", oldInfo, curs)
 			}
 			if _, err := rc.getCertificateFor(host)(nil); err != nil {
 				t.Fatalf("a cert must still be served, got %v", err)

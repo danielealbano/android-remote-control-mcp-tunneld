@@ -283,7 +283,7 @@ func TestReservedCerts_PublishSurvivesShutdownAfterOrder(t *testing.T) {
 	certPEM, keyPEM, info := mintSelfCert(t, sharedHost, time.Now().Add(100*time.Hour))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	obtain := func(context.Context, string) ([]byte, []byte, store.CertInfo, error) {
+	obtain := func(context.Context, string, store.CertInfo) ([]byte, []byte, store.CertInfo, error) {
 		cancel()
 		return certPEM, keyPEM, info, nil
 	}

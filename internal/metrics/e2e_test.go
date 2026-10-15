@@ -19,12 +19,13 @@ func TestE2EFamiliesExportedNoTunnelLabels(t *testing.T) {
 	rec.ACMERenew("gts", "ok")
 	rec.QuotaExhausted("secret-tunnel-name", "day")
 	rec.ACMECooldown("zerossl")
+	rec.ACMERateLimited("zerossl")
 	rec.MeshPool("10.0.0.1:9443", 4)
 
 	got, err := testutil.GatherAndCount(m.Registry(),
 		"tunneld_public_connections", "tunneld_phone_connections", "tunneld_streams_active",
 		"tunneld_attest_verify_total", "tunneld_acme_issue_total", "tunneld_acme_renew_total",
-		"tunneld_quota_exhausted_total", "tunneld_acme_cooldown_total", "tunneld_mesh_pool_size")
+		"tunneld_quota_exhausted_total", "tunneld_acme_cooldown_total", "tunneld_acme_rate_limited_total", "tunneld_mesh_pool_size")
 	if err != nil {
 		t.Fatal(err)
 	}

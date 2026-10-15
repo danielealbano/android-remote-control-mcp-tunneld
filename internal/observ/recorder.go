@@ -55,7 +55,8 @@ type Recorder interface {
 	ACMEIssue(ca, result string)
 	ACMERenew(ca, result string)
 	QuotaExhausted(tunnelName, window string) // "day" | "week"
-	ACMECooldown(ca string)                   // a per-CA cooldown/backoff was set
+	ACMECooldown(ca string)                   // a cooldown/backoff was set
+	ACMERateLimited(ca string)
 	MeshPool(peer string, size int)
 }
 
@@ -79,4 +80,5 @@ func (Nop) ACMEIssue(ca, result string)              {}
 func (Nop) ACMERenew(ca, result string)              {}
 func (Nop) QuotaExhausted(tunnelName, window string) {}
 func (Nop) ACMECooldown(ca string)                   {}
+func (Nop) ACMERateLimited(ca string)                {}
 func (Nop) MeshPool(peer string, size int)           {}

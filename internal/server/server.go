@@ -159,7 +159,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// ACME chain (lazy self-healing lego clients). An
 	// existing-but-unreadable account key aborts startup (never overwrites it).
-	chain, err := buildACMEChain(cfg, lim, chal, rec, logger)
+	chain, err := buildACMEChain(cfg, lim, chal, rec, logger, nodeID, liveNodeIDs{reg})
 	if err != nil {
 		return err
 	}
@@ -548,4 +548,18 @@ func registerValkeyPool(m *metrics.Metrics, rdb *redis.Client) error {
 		return fmt.Errorf("register the valkey pool metrics: %w", err)
 	}
 	return nil
+}
+
+type liveNodeIDs struct{ reg *router.Registry }
+
+func (n liveNodeIDs) LiveNodeIDs(ctx context.Context) ([]string, error) {
+	nodes, err := n.reg.LiveNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	return ids, nil
 }

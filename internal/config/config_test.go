@@ -587,6 +587,22 @@ func TestRemovedLegacyFlagsRejected(t *testing.T) {
 	}
 }
 
+func TestServeCmd_NoGTSEABFlags(t *testing.T) {
+	for _, flag := range []string{"--acme-eab-gts-kid=k", "--acme-eab-gts-hmac=h"} {
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), kong.DefaultEnvars("TUNNELD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, perr := parser.Parse([]string{"serve", flag})
+		if perr == nil || !strings.Contains(perr.Error(), "unknown flag") {
+			t.Errorf("%s must yield an unknown-flag error, got: %v", flag, perr)
+		}
+	}
+}
+
 func TestValidate_ACMEChallenge(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -924,31 +940,6 @@ func TestDialBackEnvTwins(t *testing.T) {
 	})
 }
 
-func setRequiredServeEnv(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	cert := filepath.Join(dir, "ca.pem")
-	key := filepath.Join(dir, "ca-key.pem")
-	digest := filepath.Join(dir, "signers.txt")
-	for _, f := range []string{cert, key, digest} {
-		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("TUNNELD_CA_CERT", cert)
-	t.Setenv("TUNNELD_CA_KEY", key)
-	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
-	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
-	t.Setenv("TUNNELD_S_3_ENDPOINT", "http://localhost:9000")
-	t.Setenv("TUNNELD_S_3_ACCESS_KEY", "access")
-	t.Setenv("TUNNELD_S_3_SECRET_KEY", "secret")
-	t.Setenv("TUNNELD_S_3_BUCKET", "tunneld")
-	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
-	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
-	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
-	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
-}
-
 func TestValidate_ACMEBudgetFlags(t *testing.T) {
 	tests := []struct {
 		flag string
@@ -1095,6 +1086,7 @@ func TestUsesChallenge_OnlyEnabledCAs(t *testing.T) {
 
 func TestServeCmd_ACMEDefaults(t *testing.T) {
 	setRequiredServeEnv(t)
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
 	var cli struct {
 		Serve ServeCmd `cmd:""`
 	}

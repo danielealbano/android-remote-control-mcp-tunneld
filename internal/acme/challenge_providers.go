@@ -15,7 +15,13 @@ type HTTPChallenges interface {
 type tlsALPNProvider struct{ s TLSALPNChallenges }
 
 func (p *tlsALPNProvider) Present(ctx context.Context, domain, _, keyAuth string) error {
-	return p.s.PutTLSALPN(ctx, domain, keyAuth)
+	if err := p.s.PutTLSALPN(ctx, domain, keyAuth); err != nil {
+		return err
+	}
+	if tr := trackFrom(ctx); tr != nil {
+		tr.onAbandon(func(cctx context.Context) error { return p.s.DeleteTLSALPN(cctx, domain, keyAuth) })
+	}
+	return nil
 }
 
 func (p *tlsALPNProvider) CleanUp(ctx context.Context, domain, _, keyAuth string) error {

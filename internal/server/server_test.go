@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,8 +26,10 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -418,4 +421,29 @@ func waitUntil(t *testing.T, d time.Duration, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("waitUntil: condition not met within timeout")
+}
+
+func TestLiveNodeIDs(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for id, ttl := range map[string]time.Duration{"node-a": time.Minute, "node-b": time.Minute, "node-gone": time.Second} {
+		if err := reg.RegisterNode(ctx, id, router.NodeInfo{Advertise: id + ":9443"}, ttl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mr.FastForward(2 * time.Second)
+	ids, err := liveNodeIDs{reg}.LiveNodeIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(ids)
+	if !slices.Equal(ids, []string{"node-a", "node-b"}) {
+		t.Fatalf("live node ids = %v, want the registry's live nodes [node-a node-b]", ids)
+	}
 }

@@ -1,7 +1,6 @@
 // Package acme implements the public-cert issuance chain behind enroll.PublicIssuer: lego-backed
-// per-CA clients with automatic LE→GTS→ZeroSSL spillover, the split renewal timing (LE NotAfter−margin floor /
-// fixed cadence for GTS+ZeroSSL), and reactive per-CA cooldown+backoff (a rate-limited CA gets a Valkey
-// retry-after; the spillover skips a cooling CA). Issue and renew share the same LE-first order, so every
+// clients with automatic LE→GTS→ZeroSSL spillover, and the split renewal timing (LE NotAfter−margin floor /
+// fixed cadence for GTS+ZeroSSL). Issue and renew share the same LE-first order, so every
 // renewal opportunistically migrates the name to LE. See docs/PROTOCOL.md and docs/ARCHITECTURE.md §3.
 package acme
 

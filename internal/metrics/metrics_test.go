@@ -539,6 +539,7 @@ func TestLabelledCountersPreCreatedAtZero(t *testing.T) {
 		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail")
 		want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+ca+",result=ok")
 		want["tunneld_acme_cooldown_total"] = append(want["tunneld_acme_cooldown_total"], "ca="+ca)
+		want["tunneld_acme_rate_limited_total"] = append(want["tunneld_acme_rate_limited_total"], "ca="+ca)
 	}
 	want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+observ.ACMERenewAllCAs+",result=fail")
 	for _, r := range observ.EnrollResults {

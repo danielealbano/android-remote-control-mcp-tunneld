@@ -20,7 +20,7 @@ import (
 
 // selfIssuer obtains a publicly-trusted cert for one of tunneld's OWN reserved hostnames (server-side
 // key + CSR) via the ACME chain. Wired to acme.chainIssuer.ObtainSelf.
-type selfIssuer func(ctx context.Context, host string) (certPEM, keyPEM []byte, info store.CertInfo, err error)
+type selfIssuer func(ctx context.Context, host string, cur store.CertInfo) (certPEM, keyPEM []byte, info store.CertInfo, err error)
 
 // shouldRenewFunc reports whether cur should renew now (chain.ShouldRenew, CA-dispatched).
 type shouldRenewFunc func(ctx context.Context, cur store.CertInfo) (bool, time.Time, error)
@@ -161,7 +161,7 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 	}
 	issueCtx, cancel := context.WithTimeout(ctx, rc.issueTimeout)
 	defer cancel()
-	certPEM, keyPEM, info, err := rc.obtain(issueCtx, rh.host)
+	certPEM, keyPEM, info, err := rc.obtain(issueCtx, rh.host, rh.currentInfo())
 	if err != nil {
 		abandoned := ctx.Err() == nil && issueCtx.Err() != nil
 		if locked {

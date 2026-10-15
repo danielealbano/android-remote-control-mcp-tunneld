@@ -60,6 +60,9 @@ func (r *Recorder) QuotaExhausted(tunnel, window string) {
 	r.add(RecCall{Kind: "quotaexhausted", Tunnel: tunnel, Window: window})
 }
 func (r *Recorder) ACMECooldown(ca string) { r.add(RecCall{Kind: "acmecooldown", CA: ca}) }
+func (r *Recorder) ACMERateLimited(ca string) {
+	r.add(RecCall{Kind: "acmeratelimited", CA: ca})
+}
 func (r *Recorder) MeshPool(peer string, size int) {
 	r.add(RecCall{Kind: "meshpool", Peer: peer, Size: size})
 }

@@ -94,8 +94,6 @@ type ServeCmd struct {
 	ACMELEProfile   string        `name:"acme-le-profile" default:"shortlived" help:"LE certificate profile."`
 	ACMEGTSValidity time.Duration `name:"acme-gts-validity" default:"168h" help:"Requested GTS validity (7d)."`
 
-	ACMEEABGTSKID      string `name:"acme-eab-gts-kid" default:"" help:"GTS EAB key id (secret)."`
-	ACMEEABGTSHMAC     string `name:"acme-eab-gts-hmac" default:"" help:"GTS EAB HMAC key (secret)."`
 	ACMEEABZeroSSLKID  string `name:"acme-eab-zerossl-kid" default:"" help:"ZeroSSL EAB key id (secret)."`
 	ACMEEABZeroSSLHMAC string `name:"acme-eab-zerossl-hmac" default:"" help:"ZeroSSL EAB HMAC key (secret)."`
 	ACMEAccountDir     string `name:"acme-account-dir" help:"Directory holding the ACME account keys (<dir>/accounts/<id>.key: Let's Encrypt and ZeroSSL keys are created per node, GTS keys must already exist) + reserved-host self-certs. Required for serve."`

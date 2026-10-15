@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-// acmeUser implements lego's registration.User for one operator ACME account per CA.
+// acmeUser implements lego's registration.User for one operator ACME account.
 type acmeUser struct {
 	email string
 	reg   *legoacme.ExtendedAccount
@@ -38,12 +39,12 @@ func (u *acmeUser) GetEmail() string                           { return u.email 
 func (u *acmeUser) GetRegistration() *legoacme.ExtendedAccount { return u.reg }
 func (u *acmeUser) GetPrivateKey() crypto.Signer               { return u.key }
 
-// LegoConfig configures one per-CA lego client.
+// LegoConfig configures one lego client.
 type LegoConfig struct {
 	CAID         string
 	DirectoryURL string
 	Email        string
-	AccountKey   crypto.Signer // persisted per-CA account key
+	AccountKey   crypto.Signer // persisted account key
 	Profile      string        // LE "shortlived" ("" for GTS/ZeroSSL)
 	Validity     time.Duration // requested validity (GTS); 0 = CA default
 	RenewMargin  time.Duration
@@ -62,6 +63,13 @@ type LegoConfig struct {
 	TLSALPN   TLSALPNChallenges
 	HTTP      HTTPChallenges
 	Logger    *slog.Logger
+
+	AccountID      string
+	Label          string
+	ResolveOnly    bool
+	AttemptTimeout time.Duration
+	PollFirst      time.Duration
+	Wrap           func(http.RoundTripper) http.RoundTripper
 }
 
 // dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
@@ -93,7 +101,7 @@ type legoClient struct {
 
 var _ caIssuer = (*legoClient)(nil)
 
-// NewLegoClient constructs and registers (or EAB-registers) the per-CA account. Network-touching;
+// NewLegoClient constructs the account. Network-touching;
 // exercised by the Pebble-backed integration tier.
 func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	if cfg.Logger == nil {
@@ -110,6 +118,9 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	user := &acmeUser{email: cfg.Email, key: key}
 	lc := lego.NewConfig(user)
 	lc.CADirURL = cfg.DirectoryURL
+	if cfg.Wrap != nil {
+		lc.HTTPClient.Transport = cfg.Wrap(lc.HTTPClient.Transport)
+	}
 	client, err := lego.NewClient(lc)
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
@@ -145,7 +156,14 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	default:
 		return nil, fmt.Errorf("acme: %s: unsupported challenge %q", cfg.CAID, cfg.Challenge)
 	}
-	if cfg.EABKID != "" {
+	switch {
+	case cfg.ResolveOnly:
+		reg, err := client.Registration.ResolveAccountByKey(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("acme: resolve the existing account by key (%s %s; tunneld never creates this account): %w", cfg.CAID, cfg.Label, err)
+		}
+		user.reg = reg
+	case cfg.EABKID != "":
 		reg, err := client.Registration.RegisterWithExternalAccountBinding(ctx, registration.RegisterEABOptions{
 			TermsOfServiceAgreed: true, Kid: cfg.EABKID, HmacEncoded: cfg.EABHMAC,
 		})
@@ -153,7 +171,7 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 			return nil, fmt.Errorf("acme: EAB register (%s): %w", cfg.CAID, err)
 		}
 		user.reg = reg
-	} else {
+	default:
 		reg, err := client.Registration.Register(ctx, registration.RegisterOptions{TermsOfServiceAgreed: true})
 		if err != nil {
 			return nil, fmt.Errorf("acme: register (%s): %w", cfg.CAID, err)
@@ -198,8 +216,12 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 		}
 		ch <- result{res, err}
 	}()
-	select {
-	case <-ctx.Done():
+	var limited <-chan time.Duration
+	tr := trackFrom(ctx)
+	if tr != nil {
+		limited = tr.limited
+	}
+	abandon := func() {
 		mu.Lock()
 		abandoned = true
 		select {
@@ -208,7 +230,17 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 		default:
 		}
 		mu.Unlock()
+		if tr != nil {
+			tr.abandon()
+		}
+	}
+	select {
+	case <-ctx.Done():
+		abandon()
 		return nil, store.CertInfo{}, transient(ctx.Err())
+	case d := <-limited:
+		abandon()
+		return nil, store.CertInfo{}, rateLimited(d, errCARateLimited)
 	case r := <-ch:
 		if r.err != nil {
 			return nil, store.CertInfo{}, classifyLego(r.err)
@@ -272,10 +304,11 @@ func certInfoFromPEM(caID string, pemChain []byte) (store.CertInfo, error) {
 
 const localChallengeRetry = 30 * time.Second
 
+var errCARateLimited = errors.New("acme: the CA answered 429 (rate limited)")
+
 // classifyLego maps a lego/ACME error to an IssuerError class. An official rate-limit answer arrives
 // as *acme.RateLimitedError carrying the CA's Retry-After header — that value is HONORED
-// (parsed per RFC 7231), so the chain and the phone are told exactly when the CA will accept a retry;
-// the --acme-cooldown-default applies only when no header was sent.
+// (parsed per RFC 7231); the --acme-cooldown-default applies only when no header was sent.
 func classifyLego(err error) *IssuerError {
 	if errors.Is(err, ErrChallengeStore) {
 		return local(localChallengeRetry, err)

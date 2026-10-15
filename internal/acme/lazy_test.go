@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-acme/lego/v5/certificate"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -255,5 +256,36 @@ func TestLegoClient_AbandonedOrderOutcomeLogged(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestLazyCA_BuildIgnoresAttemptTracker(t *testing.T) {
+	sawTracker := make(chan bool, 1)
+	release := make(chan struct{})
+	l := newLazyCA("x", 0, 0, func(ctx context.Context) (caIssuer, error) {
+		sawTracker <- trackFrom(ctx) != nil
+		<-release
+		return &fakeCA{caID: "x"}, nil
+	}, testLogger())
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	first := make(chan error, 1)
+	go func() {
+		_, err := l.resolve(withTrack(context.Background(), tr))
+		first <- err
+	}()
+	if <-sawTracker {
+		t.Fatal("the shared build must not see the triggering attempt's tracker")
+	}
+	tr.abandon()
+	second := make(chan error, 1)
+	go func() {
+		_, err := l.resolve(context.Background())
+		second <- err
+	}()
+	close(release)
+	for _, ch := range []chan error{first, second} {
+		if err := <-ch; err != nil {
+			t.Fatalf("resolve = %v, want the built client", err)
+		}
 	}
 }

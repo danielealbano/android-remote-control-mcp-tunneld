@@ -24,6 +24,7 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 	rec.ACMEIssue("letsencrypt", "ok")
 	rec.ACMERenew("letsencrypt", "ok")
 	rec.ACMECooldown("letsencrypt")
+	rec.ACMERateLimited("letsencrypt")
 	rec.QuotaExhausted("x", "day")
 	rec.MeshPool("10.0.0.2:9443", 4)
 	rec.PublicConnOpen()
