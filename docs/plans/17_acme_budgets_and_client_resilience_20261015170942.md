@@ -3500,18 +3500,18 @@ DoD:
 
 ---
 
-## [ ] US10 — Device-gate coverage of the app rules (`e2e/`)
+## [x] US10 — Device-gate coverage of the app rules (`e2e/`)
 
 The Kotlin liveness, retry and give-up rules get automated coverage on the attached device.
 
-- [ ] AC1: Both apps reconnect over a new connection after a black-holed control connection.
-- [ ] AC2: The reference app completes a renewal through exactly one server-paced retry, and gives up after 3 retries when issuance stays impossible.
-- [ ] AC3: A soak phone whose issuance stays impossible fails after 3 retries without enrolling a second name, also across a second `start`.
-- [ ] AC4: Every "give up" scenario finishes in minutes. The retry waits come from a replica whose CAs are unreachable (backoff 1 s / 5 s + 1–10 s jitter), never from an hour-long budget.
+- [x] AC1: Both apps reconnect over a new connection after a black-holed control connection.
+- [x] AC2: The reference app completes a renewal through exactly one server-paced retry, and gives up after 3 retries when issuance stays impossible.
+- [x] AC3: A soak phone whose issuance stays impossible fails after 3 retries without enrolling a second name, also across a second `start`.
+- [x] AC4: Every "give up" scenario finishes in minutes. The retry waits come from a replica whose CAs are unreachable (backoff 1 s / 5 s + 1–10 s jitter), never from an hour-long budget.
 
-### [ ] T10.1 — harness (shared test infrastructure, in full)
+### [x] T10.1 — harness (shared test infrastructure, in full)
 
-- [ ] A10.1.1 `e2e/e2e_test.go` (modify):
+- [x] A10.1.1 `e2e/e2e_test.go` (modify):
   - **`replicaOpts` gains** (no comments):
 
 ```go
@@ -3542,7 +3542,7 @@ The Kotlin liveness, retry and give-up rules get automated coverage on the attac
 	}
 ```
 
-- [ ] A10.1.2 `e2e/app_rules_test.go` (create): the device-side wiring shared by the T10.2 scenarios. The existing device gates keep their own inline setup. The "failing issuer" uses two replicas: replica A issues the reserved-host certificates and publishes them in Valkey, and replica B adopts them at startup (`reservedCerts.loadCache` → `adoptShared`) while its LE and GTS directories are unreachable. ZeroSSL is out of the e2e chain (no EAB, A5.3.5). So every issuance on B fails at once, and the answer's `retry_after_seconds` is B's backoff (1 s, at most 5 s) plus 1–10 s.
+- [x] A10.1.2 `e2e/app_rules_test.go` (create): the device-side wiring shared by the T10.2 scenarios. The existing device gates keep their own inline setup. The "failing issuer" uses two replicas: replica A issues the reserved-host certificates and publishes them in Valkey, and replica B adopts them at startup (`reservedCerts.loadCache` → `adoptShared`) while its LE and GTS directories are unreachable. ZeroSSL is out of the e2e chain (no EAB, A5.3.5). So every issuance on B fails at once, and the answer's `retry_after_seconds` is B's backoff (1 s, at most 5 s) plus 1–10 s.
 
 ```go
 //go:build e2e
@@ -3708,9 +3708,9 @@ func metricSeriesValue(t *testing.T, internalAddr, series string) float64 {
 ```
 
 DoD:
-- [ ] Harness options and device helpers in place. The device port 18446 is used by no other gate.
+- [x] Harness options and device helpers in place. The device port 18446 is used by no other gate.
 
-### [ ] T10.2 — scenarios (`e2e/app_rules_test.go`; each skips without a single adb device, like the existing gates)
+### [x] T10.2 — scenarios (`e2e/app_rules_test.go`; each skips without a single adb device, like the existing gates)
 
 | Test | Setup | Verifies |
 |---|---|---|
@@ -3721,7 +3721,7 @@ DoD:
 | `TestE2E_SoakAppIssueGivesUpWithoutReEnrolling` | `edgeB := startFailingIssuer(t, inf, attestedOpts("soak-app"))`; `reverseVia(t, serial, edgeB)`; `prepareApp`; `forgetSoakPhones` | `startSoakPhones(…, 1)` = `"0"`, `files/failures.txt` lists phone 0, and on B `acme-failed` = 4 and `enrollments_total{result="ok"}` = 1. A second `startSoakPhones(…, 1)` = `"0"` again: `acme-failed` = 8 and enrollments still 1, because the saved phone resumed with issuance only |
 
 DoD:
-- [ ] Scenarios added.
+- [x] Scenarios added.
 
 ---
 
