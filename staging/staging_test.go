@@ -400,12 +400,12 @@ func bundleTrustPool(t *testing.T, env *stagingEnv, accountDir string, hosts ...
 }
 
 type stagingCase struct {
-	name                    string
-	leDir, gtsDir           string
-	le, gts, zerossl        string
-	wantCA                  string
-	served, unused          string
-	writeLEKey              bool
+	name             string
+	leDir, gtsDir    string
+	le, gts, zerossl string
+	wantCA           string
+	served, unused   string
+	writeLEKey       bool
 }
 
 func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase, redisURL, s3URL, access, secret string, edgePort, httpPort int) {
@@ -442,8 +442,8 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 		ACMEEmail: "ops@free.example.com", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
 		ACMEAccountDir: accountDir, ACMEDNSProvider: "", ConnLogDir: t.TempDir(),
 		ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl,
-		ACMEHTTPListen:      net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)),
-		ACMEEABZeroSSLKID:   "changeme", ACMEEABZeroSSLHMAC: "changeme",
+		ACMEHTTPListen:    net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)),
+		ACMEEABZeroSSLKID: "changeme", ACMEEABZeroSSLHMAC: "changeme",
 		ACMEGTSAccounts:           []string{"gts"},
 		ACMEBudgetLEDomain:        "50/168h",
 		ACMEBudgetLEOrders:        "300/3h",
@@ -460,7 +460,7 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 		ACMEPollFirstGTS:          5600 * time.Millisecond,
 		ACMEPollFirstZeroSSL:      15200 * time.Millisecond,
 		ACMEPollInterval:          2 * time.Second,
-		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
+		ACMECooldownDefault:       time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
 		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
 		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
 		LimitStreamPending: 64, LimitEnrollHour: 50, LimitEnrollMinute: 10, LimitEnrollBody: "64kb",

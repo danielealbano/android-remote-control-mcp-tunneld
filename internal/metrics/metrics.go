@@ -27,18 +27,18 @@ type Metrics struct {
 	bytesTotal  *prometheus.CounterVec // {direction}
 
 	// --- E2E families ---
-	publicConnsUp  prometheus.Gauge
-	phoneConnsUp   prometheus.Gauge
-	streamsActive  prometheus.Gauge
-	quotaExhausted *prometheus.CounterVec // {window}
-	attestVerify   *prometheus.CounterVec // {result}
-	acmeIssue      *prometheus.CounterVec // {ca, result}
-	acmeRenew      *prometheus.CounterVec // {ca, result}
-	acmeCooldown   *prometheus.CounterVec // {ca}
+	publicConnsUp   prometheus.Gauge
+	phoneConnsUp    prometheus.Gauge
+	streamsActive   prometheus.Gauge
+	quotaExhausted  *prometheus.CounterVec // {window}
+	attestVerify    *prometheus.CounterVec // {result}
+	acmeIssue       *prometheus.CounterVec // {ca, result}
+	acmeRenew       *prometheus.CounterVec // {ca, result}
+	acmeCooldown    *prometheus.CounterVec // {ca}
 	acmeRateLimited *prometheus.CounterVec
-	meshPoolSize   *prometheus.GaugeVec   // {peer}
-	perConnMem     prometheus.Gauge
-	connLogDropped prometheus.Counter
+	meshPoolSize    *prometheus.GaugeVec // {peer}
+	perConnMem      prometheus.Gauge
+	connLogDropped  prometheus.Counter
 }
 
 // NewMetrics registers every family into a fresh registry.

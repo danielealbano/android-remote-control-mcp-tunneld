@@ -593,7 +593,9 @@ func Enroll(ctx context.Context, dialAddr, enrollHost, controlHost, tunnelDomain
 
 ```go
 	id, err := issueWithRetries(ctx, sleep, er.IssueNonce,
-		func(n string) (*Identity, error) { return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", n) },
+		func(n string) (*Identity, error) {
+			return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", n)
+		},
 		func() (string, error) { return fetchNonce(ctx, hc, enrollHost) })
 ```
 
@@ -1203,9 +1205,11 @@ DoD:
   - **Enabled-CA methods** replace `UsesChallenge`:
 
 ```go
-func (c ServeCmd) LEEnabled() bool      { return c.ACMEDirLE != "" }
-func (c ServeCmd) GTSEnabled() bool     { return len(c.ACMEGTSAccounts) > 0 }
-func (c ServeCmd) ZeroSSLEnabled() bool { return c.ACMEEABZeroSSLKID != "" && c.ACMEEABZeroSSLHMAC != "" }
+func (c ServeCmd) LEEnabled() bool  { return c.ACMEDirLE != "" }
+func (c ServeCmd) GTSEnabled() bool { return len(c.ACMEGTSAccounts) > 0 }
+func (c ServeCmd) ZeroSSLEnabled() bool {
+	return c.ACMEEABZeroSSLKID != "" && c.ACMEEABZeroSSLHMAC != ""
+}
 
 func (c ServeCmd) UsesChallenge(method string) bool {
 	return (c.LEEnabled() && c.ACMEChallengeLE == method) ||
@@ -1703,12 +1707,14 @@ func (b Budgets) leDomain(fqdn string) limit.Bucket {
 func (b Budgets) leOrders(a *account) limit.Bucket {
 	return b.LEOrders.Bucket("letsencrypt:orders:" + a.id)
 }
-func (b Budgets) leName(fqdn string) limit.Bucket { return b.LEName.Bucket("letsencrypt:name:" + fqdn) }
+func (b Budgets) leName(fqdn string) limit.Bucket   { return b.LEName.Bucket("letsencrypt:name:" + fqdn) }
 func (b Budgets) gtsOrders(a *account) limit.Bucket { return b.GTSOrders.Bucket("gts:orders:" + a.id) }
 func (b Budgets) gtsRequests(a *account) limit.Bucket {
 	return b.GTSRequests.Bucket("gts:requests:" + a.id)
 }
-func (b Budgets) gtsCertPolls(a *account) limit.Bucket { return b.GTSCertPolls.Bucket("gts:cert:" + a.id) }
+func (b Budgets) gtsCertPolls(a *account) limit.Bucket {
+	return b.GTSCertPolls.Bucket("gts:cert:" + a.id)
+}
 func (b Budgets) zerosslOrders(a *account) limit.Bucket {
 	return b.ZeroSSLOrders.Bucket("zerossl:orders:" + a.id)
 }
@@ -3884,3 +3890,4 @@ DoD:
 - **T6.8** (`internal/acme/chain_test.go`). In the `TestObtainSelfSelfCert` comment, "subject to the per-CA cooldowns" became "subject to the cooldowns". The change made "per-CA" wrong: cooldowns are now per account. The plan's existing-test table did not list this comment.
 - **T6.8** (`internal/server/reserved_test.go`). `blockingIssuer.obtain` also gains the `store.CertInfo` parameter. It is a second `selfIssuer` fake that the plan's adaptation table did not list.
 - **A9.2.1** (`support/soak-app/.../Responder.kt`). `readHead` loops `repeat(MAX_HEADERS + 1)` instead of `repeat(MAX_HEADERS)`. The loop also reads the blank line that ends the head, so the planned bound accepted only 63 header lines. `ResponderTest.sixtyFourHeadersAccepted` covers the boundary.
+- **A3.3.3, A5.2.1, A6.2.1** (`client/enroll.go`, `internal/config/config.go`, `internal/acme/budget.go`). The quality gates' `gofmt` (Go 1.27.2, the formatter `make lint` enforces) rewrote three one-line function bodies as multi-line ones (the `issueWithRetries` issue closure, `ZeroSSLEnabled` and `gtsCertPolls`) and realigned the neighbouring one-liners. `gofmt` also realigned `internal/metrics/metrics.go`'s fields around `acmeRateLimited`, the `config_test.go` `validCfg` literal and the `staging_test.go` `ServeCmd` literal. The affected code blocks above are updated to match.

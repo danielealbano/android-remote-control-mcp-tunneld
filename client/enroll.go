@@ -147,7 +147,9 @@ func enroll(ctx context.Context, sleep func(context.Context, time.Duration) erro
 	defer mtlsTr.CloseIdleConnections()
 	mtls := &http.Client{Transport: mtlsTr}
 	id, err := issueWithRetries(ctx, sleep, er.IssueNonce,
-		func(n string) (*Identity, error) { return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", n) },
+		func(n string) (*Identity, error) {
+			return issueCerts(ctx, mtls, controlHost, er.Name, tunnelDomain, "", n)
+		},
 		func() (string, error) { return fetchNonce(ctx, hc, enrollHost) })
 	if err != nil {
 		// Preserve the Phase-1 bootstrap identity (name + identity cert + key, no public cert yet) —

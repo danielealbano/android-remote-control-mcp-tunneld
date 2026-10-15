@@ -166,9 +166,11 @@ type ServeCmd struct {
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
 }
 
-func (c ServeCmd) LEEnabled() bool      { return c.ACMEDirLE != "" }
-func (c ServeCmd) GTSEnabled() bool     { return len(c.ACMEGTSAccounts) > 0 }
-func (c ServeCmd) ZeroSSLEnabled() bool { return c.ACMEEABZeroSSLKID != "" && c.ACMEEABZeroSSLHMAC != "" }
+func (c ServeCmd) LEEnabled() bool  { return c.ACMEDirLE != "" }
+func (c ServeCmd) GTSEnabled() bool { return len(c.ACMEGTSAccounts) > 0 }
+func (c ServeCmd) ZeroSSLEnabled() bool {
+	return c.ACMEEABZeroSSLKID != "" && c.ACMEEABZeroSSLHMAC != ""
+}
 
 func (c ServeCmd) UsesChallenge(method string) bool {
 	return (c.LEEnabled() && c.ACMEChallengeLE == method) ||
