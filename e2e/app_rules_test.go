@@ -230,6 +230,9 @@ func TestE2E_ReferenceTunnelAppRenewRetrySucceeds(t *testing.T) {
 	if !ok {
 		t.Skip("no single adb device connected")
 	}
+	prevLevel := strings.TrimSpace(string(adb(t, serial, "shell", "getprop", "log.tag.TunnelApp")))
+	adb(t, serial, "shell", "setprop", "log.tag.TunnelApp", "W")
+	t.Cleanup(func() { adbCleanup(t, serial, "shell", "setprop", "log.tag.TunnelApp", "'"+prevLevel+"'") })
 	inf := startE2EInfra(t)
 	opts := attestedOpts("tunnel-app")
 	opts.leNameBudget = "1/60s"
