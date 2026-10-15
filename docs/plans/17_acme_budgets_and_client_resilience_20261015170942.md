@@ -3185,34 +3185,34 @@ DoD:
 
 ---
 
-## [ ] US9 — Soak app (`support/soak-app`)
+## [x] US9 — Soak app (`support/soak-app`)
 
 Same phone rules; the phone answers on the dial-back connection itself (about 3 threads per phone) and there's no phone cap.
 
-- [ ] AC1: Watchdog, retry rule, 300 s and single-flight renewals, as in US8. A failed issuance never re-enrolls: the phone is saved right after Phase 1, and a later `start` resumes it with issuance only.
-- [ ] AC2: No Ktor/Netty, no local socket/port, no `maxPhones`.
-- [ ] AC3: The soak client works against the HTTP/1.1-only responder without code changes.
-- [ ] AC4: The responder's request parsing and its refusals are covered by JVM unit tests.
+- [x] AC1: Watchdog, retry rule, 300 s and single-flight renewals, as in US8. A failed issuance never re-enrolls: the phone is saved right after Phase 1, and a later `start` resumes it with issuance only.
+- [x] AC2: No Ktor/Netty, no local socket/port, no `maxPhones`.
+- [x] AC3: The soak client works against the HTTP/1.1-only responder without code changes.
+- [x] AC4: The responder's request parsing and its refusals are covered by JVM unit tests.
 
-### [ ] T9.1 — watchdog + pure retry logic
+### [x] T9.1 — watchdog + pure retry logic
 
-- [ ] A9.1.1 `.../soakapp/ControlWatchdog.kt` (create): identical to A8.1.1 with `package com.example.soakapp`.
-- [ ] A9.1.2 `.../soakapp/IssueRetry.kt` (create): identical to A8.2.1 with `package com.example.soakapp`.
-- [ ] A9.1.3 `.../soakapp/SingleFlight.kt` (create): identical to A8.1.2 with `package com.example.soakapp`.
-- [ ] A9.1.4 `.../soakapp/Tunnel.kt` (modify) `serveControlOnce`: the same structure as A8.1.3, including the `renewals` `SingleFlight` field and its `RENEW_NUDGE` branch, with:
+- [x] A9.1.1 `.../soakapp/ControlWatchdog.kt` (create): identical to A8.1.1 with `package com.example.soakapp`.
+- [x] A9.1.2 `.../soakapp/IssueRetry.kt` (create): identical to A8.2.1 with `package com.example.soakapp`.
+- [x] A9.1.3 `.../soakapp/SingleFlight.kt` (create): identical to A8.1.2 with `package com.example.soakapp`.
+- [x] A9.1.4 `.../soakapp/Tunnel.kt` (modify) `serveControlOnce`: the same structure as A8.1.3, including the `renewals` `SingleFlight` field and its `RENEW_NUDGE` branch, with:
   - this app's URL `net.url(controlHost, "/api/v1/control")`;
   - label `"phone $phone"`;
   - log prefixes `"phone $phone: "`;
   - the `AtomicLong` import.
 
 DoD:
-- [ ] As T8.1/T8.2.
+- [x] As T8.1/T8.2.
 
-### [ ] T9.2 — responder replaces the local server
+### [x] T9.2 — responder replaces the local server
 
 Each action only uses what earlier actions created.
 
-- [ ] A9.2.1 `.../soakapp/Responder.kt` (create):
+- [x] A9.2.1 `.../soakapp/Responder.kt` (create):
 
 ```kotlin
 package com.example.soakapp
@@ -3278,7 +3278,7 @@ class Responder(private val phone: Int) {
         if (parts.size != 3 || !parts[2].startsWith("HTTP/1.")) throw IOException("phone $phone: malformed request line")
         var length = 0L
         var close = parts[2] == "HTTP/1.0"
-        repeat(MAX_HEADERS) {
+        repeat(MAX_HEADERS + 1) {
             val line = readLine(input) ?: throw IOException("phone $phone: connection closed inside the request head")
             if (line.isEmpty()) return Head(parts[0], parts[1], length, close)
             val sep = line.indexOf(':')
@@ -3343,7 +3343,7 @@ class Responder(private val phone: Int) {
 
 Context: Conscrypt always builds an engine socket when wrapping an existing socket (`USE_ENGINE_SOCKET_BY_DEFAULT = true`), so server-mode TLS over the dial-back socket works; that's why the dial-back reader must not buffer past the `101` (A9.2.2).
 
-- [ ] A9.2.2 `.../soakapp/DialBack.kt` (modify):
+- [x] A9.2.2 `.../soakapp/DialBack.kt` (modify):
   - **Removed:** `class Conn` and the `BufferedInputStream` (and its import).
   - **`open`** returns the `Socket`; signature `fun open(token: String, addr: String, useHttps: Boolean, useMtls: Boolean): Socket`. Its end becomes:
 
@@ -3354,7 +3354,7 @@ Context: Conscrypt always builds an engine socket when wrapping an existing sock
             return s
 ```
 
-- [ ] A9.2.3 `.../soakapp/Tunnel.kt` (modify):
+- [x] A9.2.3 `.../soakapp/Tunnel.kt` (modify):
   - **Constructor:** `responder: Responder` replaces `localServerPort: () -> Int`.
   - **`handleOpen`,** after the `OPEN` validation:
 
@@ -3375,11 +3375,11 @@ Context: Conscrypt always builds an engine socket when wrapping an existing sock
   - **Removed:** `splice`, `copy`, and the `InputStream` / `OutputStream` / `Socket` imports.
 
 DoD:
-- [ ] The responder and the unbuffered dial-back are in place; `Tunnel` serves each dial-back through the responder.
+- [x] The responder and the unbuffered dial-back are in place; `Tunnel` serves each dial-back through the responder.
 
-### [ ] T9.3 — enrollment, issuance and saving
+### [x] T9.3 — enrollment, issuance and saving
 
-- [ ] A9.3.1 `.../soakapp/Enroll.kt` (modify):
+- [x] A9.3.1 `.../soakapp/Enroll.kt` (modify):
   - **Constants:** `MAX_ISSUE_RETRIES` is removed; `postJson` uses `readTimeout(300, TimeUnit.SECONDS)`.
   - **Phase 1:** `enrollOnce` becomes `phase1Once(...): Pair<Identity, String>`, returning `id to r.getString("issue_nonce")` without calling `issue`.
   - **`enroll`** is Phase 1 only. It keeps the existing retry loop body unchanged and returns the bootstrap identity plus the issue nonce, so the caller can save the phone before issuing. **`issue`** takes `nonce: String?`, where `null` means fetch a fresh one first:
@@ -3418,15 +3418,15 @@ DoD:
         getJson(id.net.serverClient(), id.net.url(id.enrollHost, "/api/v1/enroll/nonce")).getString("nonce")
 ```
 
-- [ ] A9.3.2 `.../soakapp/PhoneStore.kt` (modify) `parse`: a phone saved before its first issuance has an empty `public_chain`, so that field is parsed as `j.getString("public_chain").let { if (it.isEmpty()) emptyArray() else Enroll.parseChain(it) }`. `save` already writes an empty chain and an empty `tls_alias` for such a phone, and `forgetAll` already skips empty aliases.
-- [ ] A9.3.3 `Makefile` (modify) `soak-app`: `./gradlew assembleDebug` → `./gradlew testDebugUnitTest assembleDebug`.
+- [x] A9.3.2 `.../soakapp/PhoneStore.kt` (modify) `parse`: a phone saved before its first issuance has an empty `public_chain`, so that field is parsed as `j.getString("public_chain").let { if (it.isEmpty()) emptyArray() else Enroll.parseChain(it) }`. `save` already writes an empty chain and an empty `tls_alias` for such a phone, and `forgetAll` already skips empty aliases.
+- [x] A9.3.3 `Makefile` (modify) `soak-app`: `./gradlew assembleDebug` → `./gradlew testDebugUnitTest assembleDebug`.
 
 DoD:
-- [ ] Phase 1 and issuance are separate; a phone without a public cert can be saved and loaded.
+- [x] Phase 1 and issuance are separate; a phone without a public cert can be saved and loaded.
 
-### [ ] T9.4 — `SoakService` wiring
+### [x] T9.4 — `SoakService` wiring
 
-- [ ] A9.4.1 `.../soakapp/SoakService.kt` (modify):
+- [x] A9.4.1 `.../soakapp/SoakService.kt` (modify):
   - **Phone:** `Phone(val name: String, val tunnel: Tunnel)`.
   - **Removed:** `basePort` and `maxPhones`; `require(count >= 1) { "count must be >= 1, got $count" }`.
   - **`bringUp`** saves a new phone right after Phase 1, and resumes a saved phone that has no public cert with issuance only:
@@ -3472,15 +3472,15 @@ DoD:
 
   - **`restore`:** the TLS key check runs only for a phone that has one: `if (s.tlsAlias.isNotEmpty()) Keys.privateKey(s.tlsAlias)`.
   - **`doStop`:** `phones.values.forEach { it.tunnel.stop() }`.
-- [ ] A9.4.2 delete `.../soakapp/Server.kt` (no longer referenced).
-- [ ] A9.4.3 `support/soak-app/app/build.gradle.kts` (modify):
+- [x] A9.4.2 delete `.../soakapp/Server.kt` (no longer referenced).
+- [x] A9.4.3 `support/soak-app/app/build.gradle.kts` (modify):
   - **Removed:** the `ktor-server-core`, `ktor-server-netty` (with its exclude) and `slf4j-jdk14` dependencies, and the `"META-INF/io.netty.versions.properties"` packaging exclude.
   - **Added:** `testImplementation("junit:junit:4.13.2")`.
 
 DoD:
-- [ ] No reference to Ktor/Netty/`Server`/`basePort`/`maxPhones` remains. A phone whose issuance gave up stays saved, and the next `start` resumes it without enrolling again.
+- [x] No reference to Ktor/Netty/`Server`/`basePort`/`maxPhones` remains. A phone whose issuance gave up stays saved, and the next `start` resumes it without enrolling again.
 
-### [ ] T9.5 — tests (JUnit 4, `support/soak-app/app/src/test/java/com/example/soakapp/`)
+### [x] T9.5 — tests (JUnit 4, `support/soak-app/app/src/test/java/com/example/soakapp/`)
 
 | Test | Verifies |
 |---|---|
@@ -3496,7 +3496,7 @@ DoD:
 | `TestRun_TrustsTheCAFileAndDialsTheConnectAddress` (existing, `support/soak-client/soak`, unchanged) | the real `transportFactory` against an `httptest` TLS server, whose ALPN is only `http/1.1` (`httptest.Server.StartTLS` without `EnableHTTP2`), ends with `errors=0`; this covers AC3 at unit level. `TestE2E_SoakApp` (existing) covers it against the device |
 
 DoD:
-- [ ] Tests added; `make soak-app` runs them.
+- [x] Tests added; `make soak-app` runs them.
 
 ---
 
@@ -3883,3 +3883,4 @@ DoD:
 - **A2.1.1** (`internal/tunneltest/blackhole.go`). The cleanup's `conns := p.conns` became `conns := slices.Clone(p.conns)`. `reap` removes finished pairs with `slices.DeleteFunc`, which since Go 1.22 zeroes the freed tail of the same backing array. The cleanup's view of the old slice header could therefore hold nil entries and dereference them. The action's code block is updated to match.
 - **T6.8** (`internal/acme/chain_test.go`). In the `TestObtainSelfSelfCert` comment, "subject to the per-CA cooldowns" became "subject to the cooldowns". The change made "per-CA" wrong: cooldowns are now per account. The plan's existing-test table did not list this comment.
 - **T6.8** (`internal/server/reserved_test.go`). `blockingIssuer.obtain` also gains the `store.CertInfo` parameter. It is a second `selfIssuer` fake that the plan's adaptation table did not list.
+- **A9.2.1** (`support/soak-app/.../Responder.kt`). `readHead` loops `repeat(MAX_HEADERS + 1)` instead of `repeat(MAX_HEADERS)`. The loop also reads the blank line that ends the head, so the planned bound accepted only 63 header lines. `ResponderTest.sixtyFourHeadersAccepted` covers the boundary.

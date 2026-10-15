@@ -1,6 +1,5 @@
 package com.example.soakapp
 
-import java.io.BufferedInputStream
 import java.io.InputStream
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -14,9 +13,7 @@ class DialBack(
     private val mtls: SSLContext,
     private val serverTls: SSLContext,
 ) {
-    class Conn(val socket: Socket, val input: InputStream)
-
-    fun open(token: String, addr: String, useHttps: Boolean, useMtls: Boolean): Conn {
+    fun open(token: String, addr: String, useHttps: Boolean, useMtls: Boolean): Socket {
         val sep = addr.lastIndexOf(':')
         require(sep > 0) { "bad dial-back address $addr" }
         val host = addr.substring(0, sep).removePrefix("[").removeSuffix("]")
@@ -34,11 +31,10 @@ class DialBack(
                 )
                 flush()
             }
-            val input = BufferedInputStream(s.getInputStream())
-            val status = readStatus(input)
+            val status = readStatus(s.getInputStream())
             check(status == 101) { "dial-back refused: $status" }
             s.soTimeout = 0
-            return Conn(s, input)
+            return s
         } catch (t: Throwable) {
             try { raw.close() } catch (c: Throwable) { t.addSuppressed(c) }
             throw t

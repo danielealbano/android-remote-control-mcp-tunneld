@@ -7,12 +7,10 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
 import org.json.JSONObject
-import java.io.InputStream
-import java.io.OutputStream
-import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 internal const val TAG = "SoakApp"
 
@@ -22,11 +20,12 @@ class Tunnel(
     private val client: OkHttpClient,
     private val controlHost: String,
     private val dialBack: DialBack,
-    private val localServerPort: () -> Int,
+    private val responder: Responder,
     private val onRenewNudge: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(true)
     private val bound = CountDownLatch(1)
+    private val renewals = SingleFlight()
 
     fun awaitBound(seconds: Long): Boolean = bound.await(seconds, TimeUnit.SECONDS)
     fun stop() = running.set(false)
@@ -43,8 +42,12 @@ class Tunnel(
     private fun serveControlOnce() {
         var sink: BufferedSink? = null
         val body = duplexBody { sink = it }
-        client.newCall(Request.Builder().url(net.url(controlHost, "/api/v1/control")).post(body).build())
-            .execute().use { resp ->
+        val call = client.newCall(Request.Builder().url(net.url(controlHost, "/api/v1/control")).post(body).build())
+        val lastFrameAt = AtomicLong(System.nanoTime())
+        val silent = AtomicBoolean(false)
+        val watch = ControlWatchdog.watch("phone $phone", call, lastFrameAt, silent)
+        try {
+            call.execute().use { resp ->
                 if (resp.code != 200) {
                     Log.w(TAG, "phone $phone: control connect rejected: ${resp.code}")
                     return
@@ -58,6 +61,7 @@ class Tunnel(
                 try {
                     while (running.get()) {
                         val frame = Frames.read(source) ?: break
+                        lastFrameAt.set(System.nanoTime())
                         when (frame.first) {
                             Frames.PING -> { s.write(Frames.PONG_FRAME); s.flush() }
                             Frames.OPEN -> JSONObject(String(frame.second)).let { o ->
@@ -68,9 +72,10 @@ class Tunnel(
                             Frames.RENEW_NUDGE -> JSONObject(String(frame.second)).optString("nonce")
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
-                                    Thread {
+                                    val started = renewals.launch("renewal") {
                                         try { onRenewNudge(n) } catch (t: Throwable) { Log.w(TAG, "phone $phone: renewal failed; keeping the current certs", t) }
-                                    }.apply { isDaemon = true }.start()
+                                    }
+                                    if (!started) Log.i(TAG, "phone $phone: renewal already in progress; RENEW_NUDGE ignored")
                                 }
                                 ?: Log.w(TAG, "phone $phone: RENEW_NUDGE without a nonce ignored")
                         }
@@ -79,6 +84,10 @@ class Tunnel(
                     try { s.close() } catch (t: Throwable) { Log.d(TAG, "phone $phone: control request body close failed", t) }
                 }
             }
+        } finally {
+            watch.cancel(false)
+            if (silent.get()) client.connectionPool.evictAll()
+        }
     }
 
     private fun handleOpen(open: JSONObject) {
@@ -90,50 +99,16 @@ class Tunnel(
             Log.w(TAG, "phone $phone: invalid OPEN ignored: addr=$addr use_https=$useHttps use_mtls=$useMtls")
             return
         }
-        val local = try {
-            Socket("127.0.0.1", localServerPort()).apply { tcpNoDelay = true }
-        } catch (t: Throwable) {
-            Log.w(TAG, "phone $phone: local server unreachable for a dial-back to $addr", t)
-            return
-        }
         val remote = try {
             dialBack.open(token, addr, useHttps, useMtls)
         } catch (t: Throwable) {
             Log.w(TAG, "phone $phone: dial-back to $addr failed", t)
-            try { local.close() } catch (c: Throwable) { Log.d(TAG, "phone $phone: local socket close failed", c) }
             return
         }
-        splice(local, remote)
-    }
-
-    private fun splice(local: Socket, remote: DialBack.Conn) {
-        val closed = AtomicBoolean(false)
-        val closeBoth = {
-            if (closed.compareAndSet(false, true)) {
-                try { local.close() } catch (t: Throwable) { Log.d(TAG, "phone $phone: local socket close failed", t) }
-                try { remote.socket.close() } catch (t: Throwable) { Log.d(TAG, "phone $phone: dial-back socket close failed", t) }
-            }
-        }
-        val up = Thread { copy({ local.getInputStream() }, { remote.socket.getOutputStream() }, "upstream"); closeBoth() }
-            .apply { isDaemon = true; start() }
-        copy({ remote.input }, { local.getOutputStream() }, "downstream")
-        closeBoth()
-        up.join()
-    }
-
-    private fun copy(source: () -> InputStream, sink: () -> OutputStream, dir: String) {
         try {
-            val src = source()
-            val dst = sink()
-            val buf = ByteArray(16384)
-            while (true) {
-                val n = src.read(buf)
-                if (n < 0) break
-                dst.write(buf, 0, n)
-                dst.flush()
-            }
+            responder.serve(remote, controlHost)
         } catch (t: Throwable) {
-            Log.d(TAG, "phone $phone: $dir copy ended", t)
+            Log.d(TAG, "phone $phone: dial-back session from $addr ended", t)
         }
     }
 

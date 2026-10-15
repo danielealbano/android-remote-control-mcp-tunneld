@@ -103,7 +103,7 @@ tunnel-app:
 
 soak-app:
 	@test -n "$(APKSIGNER)" || { echo "apksigner not found under $(ANDROID_SDK)/build-tools; set ANDROID_HOME"; exit 1; }
-	cd support/soak-app && ./gradlew assembleDebug
+	cd support/soak-app && ./gradlew testDebugUnitTest assembleDebug
 	mkdir -p fixtures/soak-app
 	cp support/soak-app/app/build/outputs/apk/debug/app-debug.apk \
 	    fixtures/soak-app/soak-app.apk
