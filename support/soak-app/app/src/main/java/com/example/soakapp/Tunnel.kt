@@ -60,7 +60,11 @@ class Tunnel(
                         val frame = Frames.read(source) ?: break
                         when (frame.first) {
                             Frames.PING -> { s.write(Frames.PONG_FRAME); s.flush() }
-                            Frames.OPEN -> JSONObject(String(frame.second)).let { o -> Thread { handleOpen(o) }.apply { isDaemon = true }.start() }
+                            Frames.OPEN -> JSONObject(String(frame.second)).let { o ->
+                                Thread {
+                                    try { handleOpen(o) } catch (t: Throwable) { Log.w(TAG, "phone $phone: dial-back handling failed", t) }
+                                }.apply { isDaemon = true }.start()
+                            }
                             Frames.RENEW_NUDGE -> JSONObject(String(frame.second)).optString("nonce")
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
@@ -110,15 +114,17 @@ class Tunnel(
                 try { remote.socket.close() } catch (t: Throwable) { Log.d(TAG, "phone $phone: dial-back socket close failed", t) }
             }
         }
-        val up = Thread { copy(local.getInputStream(), remote.socket.getOutputStream(), "upstream"); closeBoth() }
+        val up = Thread { copy({ local.getInputStream() }, { remote.socket.getOutputStream() }, "upstream"); closeBoth() }
             .apply { isDaemon = true; start() }
-        copy(remote.input, local.getOutputStream(), "downstream")
+        copy({ remote.input }, { local.getOutputStream() }, "downstream")
         closeBoth()
         up.join()
     }
 
-    private fun copy(src: InputStream, dst: OutputStream, dir: String) {
+    private fun copy(source: () -> InputStream, sink: () -> OutputStream, dir: String) {
         try {
+            val src = source()
+            val dst = sink()
             val buf = ByteArray(16384)
             while (true) {
                 val n = src.read(buf)
