@@ -2804,17 +2804,17 @@ DoD:
 
 ---
 
-## [ ] US7 — Budget metrics, dashboard, integration tests
+## [x] US7 — Budget metrics, dashboard, integration tests
 
 The server exports the remaining budget, the dashboard shows it, and the integration tier exercises the budgets through the real server.
 
-- [ ] AC1: `/metrics` exposes `tunneld_acme_budget_ratio{ca,account,budget}`. A Valkey or node-list error drops only the budget family for that scrape. Its Warn is at most 1/min and carries the count of suppressed errors.
-- [ ] AC2: The tunneld overview dashboard shows the remaining budget as a percentage.
-- [ ] AC3: Integration tests through the real server cover the budget-exhausted answer and a GTS-only chain.
+- [x] AC1: `/metrics` exposes `tunneld_acme_budget_ratio{ca,account,budget}`. A Valkey or node-list error drops only the budget family for that scrape. Its Warn is at most 1/min and carries the count of suppressed errors.
+- [x] AC2: The tunneld overview dashboard shows the remaining budget as a percentage.
+- [x] AC3: Integration tests through the real server cover the budget-exhausted answer and a GTS-only chain.
 
-### [ ] T7.1 — `internal/metrics/acme_budget.go`
+### [x] T7.1 — `internal/metrics/acme_budget.go`
 
-- [ ] A7.1.1 `internal/metrics/acme_budget.go` (create):
+- [x] A7.1.1 `internal/metrics/acme_budget.go` (create):
 
 ```go
 package metrics
@@ -2906,11 +2906,11 @@ func (m *Metrics) RegisterACMEBudgets(levels func(context.Context) ([]ACMEBudget
 ```
 
 DoD:
-- [ ] Family registered; no per-tunnel labels.
+- [x] Family registered; no per-tunnel labels.
 
-### [ ] T7.2 — `internal/server/server.go`: budget metrics
+### [x] T7.2 — `internal/server/server.go`: budget metrics
 
-- [ ] A7.2.1 right after the chain construction (A6.7.7):
+- [x] A7.2.1 right after the chain construction (A6.7.7):
 
 ```go
 	if err := m.RegisterACMEBudgets(func(ctx context.Context) ([]metrics.ACMEBudgetLevel, error) {
@@ -2929,11 +2929,11 @@ DoD:
 ```
 
 DoD:
-- [ ] The budget family is registered before any listener binds.
+- [x] The budget family is registered before any listener binds.
 
-### [ ] T7.3 — dashboard
+### [x] T7.3 — dashboard
 
-- [ ] A7.3.1 `deploy/grafana/provisioning/dashboards/tunneld.json` (modify):
+- [x] A7.3.1 `deploy/grafana/provisioning/dashboards/tunneld.json` (modify):
   - **New panel:** id 28, `timeseries`, title `ACME issuance budget left`, unit `percent`, gridPos `{"h": 8, "w": 24, "x": 0, "y": 46}`.
   - **Every panel/row with `y ≥ 46`** moves down by 8.
   - **Target** (same datasource and fieldConfig style as its neighbours):
@@ -2945,9 +2945,9 @@ DoD:
 ```
 
 DoD:
-- [ ] The file keeps its formatting (indent 1, no trailing newline).
+- [x] The file keeps its formatting (indent 1, no trailing newline).
 
-### [ ] T7.4 — tests
+### [x] T7.4 — tests
 
 | Test | Verifies |
 |---|---|
@@ -2959,7 +2959,7 @@ DoD:
 | `TestIntegration_GTSOnlyIssues` (same file) | `ACMEDirLE ""` (GTS only, the harness's registered `gts` key): the server becomes ready (reserved hosts issued on GTS) and `client.Enroll` issues on GTS (`ident.CA == "gts"`) |
 
 DoD:
-- [ ] Tests added and adapted.
+- [x] Tests added and adapted.
 
 ---
 

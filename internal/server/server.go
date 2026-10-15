@@ -163,6 +163,19 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err != nil {
 		return err
 	}
+	if err := m.RegisterACMEBudgets(func(ctx context.Context) ([]metrics.ACMEBudgetLevel, error) {
+		levels, err := chain.ACMEBudgetLevels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]metrics.ACMEBudgetLevel, len(levels))
+		for i, l := range levels {
+			out[i] = metrics.ACMEBudgetLevel{CA: l.CA, Account: l.Account, Budget: l.Budget, Ratio: l.Ratio}
+		}
+		return out, nil
+	}, logger); err != nil {
+		return fmt.Errorf("acme budget metrics: %w", err)
+	}
 
 	// Enrollment service + handler.
 	enrollSvc := enroll.NewService(enroll.Config{
