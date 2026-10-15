@@ -8,7 +8,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	legoacme "github.com/go-acme/lego/v5/acme"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
@@ -60,7 +63,11 @@ func newAccountChain(t *testing.T, cfg ChainConfig, accounts ...*account) *accou
 	if cfg.Rand == nil {
 		cfg.Rand = func(int) int { return 0 }
 	}
-	ac.ch = NewChainIssuer(cfg, accounts...)
+	ch, err := NewChainIssuer(cfg, accounts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac.ch = ch
 	ac.ch.SetClock(func() time.Time { return frozenNow })
 	return ac
 }
@@ -537,5 +544,44 @@ func TestChain_OrderedLevelsError(t *testing.T) {
 	}
 	if !strings.Contains(ac.log.String(), `msg="acme budget levels unavailable (accounts in random order)"`) {
 		t.Fatalf("log = %q", ac.log.String())
+	}
+}
+
+func TestChain_RetryAfterReportsTheWaitUntilInEffect(t *testing.T) {
+	var ac *accountChain
+	le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("down")), onObtain: func(ctx context.Context) {
+		if err := ac.lim.SetCACooldown(ctx, "le-1", 10*time.Minute); err != nil {
+			t.Errorf("set the other node's wait-until: %v", err)
+		}
+	}}
+	ac = newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	_, _, err := ac.ch.Obtain(context.Background(), nil, "p")
+	ie, ok := errors.AsType[*IssuerError](err)
+	if !ok || ie.Class != ClassRateLimited || ie.Retry != 10*time.Minute+time.Second {
+		t.Fatalf("Obtain = %v, want rate-limited with the 10 m wait-until in effect + 1 s, not the 1 m backoff", err)
+	}
+}
+
+func TestChain_BuildRateLimitedSkipsTheBackoff(t *testing.T) {
+	limited := newLazyCA(CALetsEncrypt, 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
+		return nil, fmt.Errorf("acme: resolve the existing account by key: %w",
+			&legoacme.ProblemDetails{HTTPStatus: http.StatusTooManyRequests, Type: "urn:ietf:params:acme:error:rateLimited"})
+	}, testLogger())
+	ac := newAccountChain(t, ChainConfig{}, &account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: time.Minute, issuer: limited})
+	_, _, err := ac.ch.Obtain(context.Background(), nil, "p")
+	if ie, ok := errors.AsType[*IssuerError](err); !ok || ie.Class != ClassRateLimited {
+		t.Fatalf("Obtain = %v, want rate-limited", err)
+	}
+	if ac.mr.Exists("acme-fail:le-1") {
+		t.Fatal("a 429 while building the client must not start the failure streak")
+	}
+	if cool, err := ac.lim.CACooldown(context.Background(), "le-1"); err != nil || cool != time.Hour {
+		t.Fatalf("LE account wait-until = %s (%v), want --acme-cooldown-default (1 h), not the 1 m backoff", cool, err)
+	}
+}
+
+func TestNewChainIssuer_RequiresNodes(t *testing.T) {
+	if _, err := NewChainIssuer(ChainConfig{}, acct(&trackingFake{caID: CALetsEncrypt}, "le-1", time.Minute)); !errors.Is(err, errNoNodeLister) {
+		t.Fatalf("NewChainIssuer without a node lister = %v, want errNoNodeLister", err)
 	}
 }

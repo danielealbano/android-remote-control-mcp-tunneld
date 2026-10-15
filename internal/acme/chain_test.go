@@ -88,7 +88,10 @@ func newChainOn(t *testing.T, mr *miniredis.Miniredis, cfg ChainConfig, cas ...c
 	for _, ca := range cas {
 		accounts = append(accounts, testAccount(ca))
 	}
-	ch := NewChainIssuer(cfg, accounts...)
+	ch, err := NewChainIssuer(cfg, accounts...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ch.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	return ch, lim
 }

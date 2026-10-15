@@ -41,7 +41,7 @@ func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ct
 // NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing clients constructed from
 // the given lego configs. Each client's network-touching construction is deferred to first use, so
 // startup never blocks on CA reachability and an unreachable CA self-heals once it recovers.
-func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
+func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) (*chainIssuer, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -109,6 +109,9 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
 	c, err := l.resolve(ctx)
 	if err != nil {
+		if ie := classifyLego(err); ie.Class == ClassRateLimited {
+			return nil, store.CertInfo{}, ie
+		}
 		return nil, store.CertInfo{}, transient(err)
 	}
 	return c.obtain(ctx, csr, name)

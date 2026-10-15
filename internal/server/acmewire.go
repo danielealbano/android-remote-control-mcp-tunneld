@@ -57,7 +57,11 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		BackoffMax: cfg.ACMEBackoffMax, RenewMargin: cfg.ACMERenewMargin, ShortlivedLifetime: shortlivedLifetime,
 		NodeID: nodeID, Nodes: nodes, Budgets: budgets, PollEvery: cfg.ACMEPollInterval,
 	}
-	return acme.NewChain(chainCfg, legoCfgs...), nil
+	chain, err := acme.NewChain(chainCfg, legoCfgs...)
+	if err != nil {
+		return nil, err
+	}
+	return chain, nil
 }
 
 func acmeLegoConfigs(cfg config.ServeCmd, chal *acme.ChallengeStore, logger *slog.Logger, nodeID string) ([]acme.LegoConfig, error) {

@@ -2,6 +2,7 @@ package acme
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ type Budgets struct {
 type NodeLister interface {
 	LiveNodeIDs(ctx context.Context) ([]string, error)
 }
+
+var errNoNodeLister = errors.New("acme: the chain needs a live-node lister")
 
 type BudgetLevel struct {
 	CA      string

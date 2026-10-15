@@ -76,7 +76,10 @@ type chainIssuer struct {
 }
 
 // NewChainIssuer builds the chain.
-func NewChainIssuer(cfg ChainConfig, accounts ...*account) *chainIssuer {
+func NewChainIssuer(cfg ChainConfig, accounts ...*account) (*chainIssuer, error) {
+	if cfg.Nodes == nil {
+		return nil, errNoNodeLister
+	}
 	if cfg.Recorder == nil {
 		cfg.Recorder = nopRecorder{}
 	}
@@ -101,7 +104,7 @@ func NewChainIssuer(cfg ChainConfig, accounts ...*account) *chainIssuer {
 			c.groups = append(c.groups, g)
 		}
 	}
-	return c
+	return c, nil
 }
 
 // SetClock overrides the clock (tests).
@@ -327,7 +330,7 @@ func mintMember() string {
 	return hex.EncodeToString(b[:])
 }
 
-// handleFailure applies the reactive cooldown/backoff, returning the cooldown it set (0 for a
+// handleFailure applies the reactive cooldown/backoff, returning the cooldown (0 for a
 // permanent error) and whether the error is permanent.
 func (c *chainIssuer) handleFailure(ctx context.Context, a *account, err error) (cooldown time.Duration, permanent bool) {
 	var ie *IssuerError
@@ -348,24 +351,29 @@ func (c *chainIssuer) handleFailure(ctx context.Context, a *account, err error) 
 		if d <= 0 {
 			d = c.cfg.CooldownDefault
 		}
-		c.setCooldown(ctx, a, d)
-		return d, false
+		return c.setCooldown(ctx, a, d), false
 	default: // transient / unknown → exponential backoff
 		n, berr := c.cfg.Limiter.BumpCAFailures(ctx, a.id, c.cfg.BackoffMax) // best-effort streak counter (see above)
 		if berr != nil {
 			c.cfg.Logger.Warn("acme CA failure-streak bump failed", "ca", a.ca, "err", berr, "account", a.label)
 		}
 		d := backoff(c.cfg.BackoffInitial, c.cfg.BackoffMax, n)
-		c.setCooldown(ctx, a, d)
-		return d, false
+		return c.setCooldown(ctx, a, d), false
 	}
 }
 
-func (c *chainIssuer) setCooldown(ctx context.Context, a *account, d time.Duration) {
+func (c *chainIssuer) setCooldown(ctx context.Context, a *account, d time.Duration) time.Duration {
+	c.cfg.Recorder.ACMECooldown(a.ca)
 	if err := c.cfg.Limiter.SetCACooldown(ctx, a.id, d); err != nil {
 		c.cfg.Logger.Warn("acme CA cooldown write failed", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
+		return d
 	}
-	c.cfg.Recorder.ACMECooldown(a.ca)
+	cur, err := c.cfg.Limiter.CACooldown(ctx, a.id)
+	if err != nil {
+		c.cfg.Logger.Warn("acme CA cooldown read failed (reporting the requested cooldown)", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
+		return d
+	}
+	return max(d, cur)
 }
 
 // ShouldRenew dispatches to the CA that issued cur (LE: NotAfter−margin floor; GTS/ZeroSSL: fixed cadence).
