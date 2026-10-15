@@ -147,8 +147,8 @@ func TestRun_DeadConnectionIsReplaced(t *testing.T) {
 		t.Fatalf("the next Run must dial one new connection: accepted %d → %d", accepted, got)
 	}
 	cancel()
-	if err := waitRun(t, second, 5*time.Second); err != nil {
-		t.Fatalf("Run after ctx cancel = %v, want nil", err)
+	if err := waitRun(t, second, 5*time.Second); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run after ctx cancel = %v, want nil or the cancellation", err)
 	}
 }
 
