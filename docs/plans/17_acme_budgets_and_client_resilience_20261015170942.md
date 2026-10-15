@@ -3725,15 +3725,15 @@ DoD:
 
 ---
 
-## [ ] US11 — CI uses the new GTS staging account
+## [x] US11 — CI uses the new GTS staging account
 
 The staging tier must run on the dedicated `arc-tunnel-acme-gts-staging` project's account.
 
-- [ ] AC1: GitHub secret `TUNNELD_STAGING_GTS_ACCOUNT_KEY` holds `~/.secrets/arc-tunnel-acme-gts-staging-account.key`.
+- [x] AC1: GitHub secret `TUNNELD_STAGING_GTS_ACCOUNT_KEY` holds `~/.secrets/arc-tunnel-acme-gts-staging-account.key`.
 
-### [ ] T11.1 — switch the secret
+### [x] T11.1 — switch the secret
 
-- [ ] A11.1.1 (the value is read from stdin, never on a command line):
+- [x] A11.1.1 (the value is read from stdin, never on a command line):
 
 ```bash
 gh secret set TUNNELD_STAGING_GTS_ACCOUNT_KEY < ~/.secrets/arc-tunnel-acme-gts-staging-account.key
@@ -3741,19 +3741,19 @@ gh secret list | grep -E '^TUNNELD_STAGING_GTS_ACCOUNT_KEY'
 ```
 
 DoD:
-- [ ] Secret updated (new timestamp).
+- [x] Secret updated (new timestamp).
 
 ---
 
-## [ ] US12 — Documentation
+## [x] US12 — Documentation
 
 Canonical docs and the project rules describe what was built.
 
-- [ ] AC1: PROJECT, ARCHITECTURE, README, `deploy/tunneld.env.example` and `.claude/rules/project.md` are accurate; no duplication beyond references.
+- [x] AC1: PROJECT, ARCHITECTURE, README, `deploy/tunneld.env.example` and `.claude/rules/project.md` are accurate; no duplication beyond references.
 
-### [ ] T12.1 — docs
+### [x] T12.1 — docs
 
-- [ ] A12.1.1 `docs/PROJECT.md` (modify):
+- [x] A12.1.1 `docs/PROJECT.md` (modify):
   - **§2:** the "Server-run ACME chain" bullet gains, after its first sentence:
 
 > Each CA is optional: Let's Encrypt is used unless `--acme-dir-le` is empty, GTS only for the EXISTING accounts
@@ -3793,7 +3793,7 @@ Canonical docs and the project rules describe what was built.
     - "local HTTPS server answering `POST /op?resp=<bytes>`" → "answers on the dial-back connection itself (TLS with the phone's public cert, HTTP/1.1) `POST /op?resp=<bytes>`";
     - delete "(max 200)";
     - after "…a saved phone whose keys are unusable fails its start instead of being replaced." insert: "A phone is saved right after its enrollment. If its issuance gives up after the retries (docs/PROTOCOL.md §3), it stays saved without a public cert and the next `start` retries only the issuance, so a phone never enrolls a second name."
-- [ ] A12.1.2 `docs/ARCHITECTURE.md` (modify):
+- [x] A12.1.2 `docs/ARCHITECTURE.md` (modify):
   - **§1 package map:**
     - `internal/acme`: "per-CA cooldown/backoff retry-after" → "per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, optional CAs, several GTS accounts looked up by key";
     - `internal/limit`: "ACME cooldown" → "ACME issuance budgets + wait-until".
@@ -3826,7 +3826,7 @@ Canonical docs and the project rules describe what was built.
   - **§8:**
     - after the Valkey pool sentence add: "`tunneld_acme_budget_ratio{ca,account,budget}` reads the budget buckets at scrape time (2 s timeout; an error drops only that family, Warn ≤ 1/min)."
     - after the `tunneld_acme_renew_total{ca,result}` sentence (ending "every CA in the chain declined).") add: "`tunneld_acme_cooldown_total{ca}` counts account wait-until activations and `tunneld_acme_rate_limited_total{ca}` the CAs' 429 answers."
-- [ ] A12.1.3 `README.md` (modify):
+- [x] A12.1.3 `README.md` (modify):
   - **Line 49:** "per-CA account keys" → "per-account ACME keys".
   - **ACME quickstart:** after the challenge-method step, add:
 
@@ -3835,7 +3835,7 @@ Canonical docs and the project rules describe what was built.
 > ids in `TUNNELD_ACME_GTS_ACCOUNT`; tunneld only looks the accounts up and never creates them. ZeroSSL is used
 > only when both `TUNNELD_ACME_EAB_ZEROSSL_*` values are set; Let's Encrypt unless `TUNNELD_ACME_DIR_LE` is empty.
 
-- [ ] A12.1.4 `.claude/rules/project.md` (modify):
+- [x] A12.1.4 `.claude/rules/project.md` (modify):
   - **ACME tech-stack row:** "per-CA cooldown/backoff retry-after" → "optional CAs, per-account Valkey issuance budgets + wait-until/backoff, several GTS accounts looked up by key".
   - **Valkey invariant:**
     - the key list adds "the ACME issuance budgets (`acme-budget:` via `HSET` + pipelined `PEXPIRE`, TTL = time to refill + 1 h; `acme:inflight:` via `ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT`, TTL = deadline + 1 min, never shortened; `lock:acme-budget:` a `SETNX` lock, 2 s TTL)";
@@ -3847,7 +3847,7 @@ Canonical docs and the project rules describe what was built.
   - **Status line:** mentions Plan 17.
 
 DoD:
-- [ ] Docs match the code.
+- [x] Docs match the code.
 
 ---
 

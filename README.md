@@ -46,7 +46,7 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 2. **Create the operator-owned dirs** (bind-mounted):
    ```sh
-   mkdir -p deploy/logs deploy/acme deploy/conn-logs   # acme persists per-CA account keys + reserved-host certs across restarts
+   mkdir -p deploy/logs deploy/acme deploy/conn-logs   # acme persists per-account ACME keys + reserved-host certs across restarts
    mkdir -p deploy/banfiles && : > deploy/banfiles/bans.txt   # host-edited manual bans (hot-reloaded within --ban-poll)
    mkdir -p deploy/attest && : > deploy/attest/signers.txt   # add accepted app signer SHA-256 digests, one per line
    ```
@@ -62,6 +62,11 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    `TUNNELD_ACME_DNS_PROVIDER` + its credential only for a CA set to `dns-01`. Publish the CAA `issue` records
    for Let's Encrypt / GTS / ZeroSSL as an operator DNS step; if they carry `validationmethods`, allow
    `tls-alpn-01` (LE, GTS) and `http-01` (ZeroSSL).
+
+   GTS (optional): create one Google Cloud Public CA project per GTS account, register each account once with that
+   project's single-use EAB (outside tunneld), put its key at `<acme-account-dir>/accounts/<id>.key` and list the
+   ids in `TUNNELD_ACME_GTS_ACCOUNT`; tunneld only looks the accounts up and never creates them. ZeroSSL is used
+   only when both `TUNNELD_ACME_EAB_ZEROSSL_*` values are set; Let's Encrypt unless `TUNNELD_ACME_DIR_LE` is empty.
 5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
    images are no longer published) the compose creates the bucket automatically. For a real
    provider, set the `S3_*` / `TUNNELD_S_3_*` values and **run a pre-go-live read-after-write probe**
