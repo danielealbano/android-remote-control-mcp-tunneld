@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -481,41 +482,65 @@ func TestBudgetTransport_RequestBudgetWaits(t *testing.T) {
 	}
 }
 
-type blockingBudget struct{}
-
-func (blockingBudget) TakeACME(ctx context.Context, _ string, _ []limit.Bucket) (time.Duration, error) {
-	<-ctx.Done()
-	return 0, ctx.Err()
+type blockingBudget struct {
+	mu     sync.Mutex
+	bounds []time.Duration
 }
 
-func (blockingBudget) ResyncACME(ctx context.Context, _ string, _ []limit.Bucket, _ time.Duration) error {
+func (b *blockingBudget) wait(ctx context.Context) error {
+	start := time.Now()
+	bound := time.Duration(-1)
+	if dl, ok := ctx.Deadline(); ok {
+		bound = dl.Sub(start)
+	}
+	b.mu.Lock()
+	b.bounds = append(b.bounds, bound)
+	b.mu.Unlock()
 	<-ctx.Done()
 	return ctx.Err()
 }
 
-func (blockingBudget) CACooldown(ctx context.Context, _ string) (time.Duration, error) {
-	<-ctx.Done()
-	return 0, ctx.Err()
+func (b *blockingBudget) recorded() []time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.bounds)
 }
 
-func (blockingBudget) SetCACooldown(ctx context.Context, _ string, _ time.Duration) error {
-	<-ctx.Done()
-	return ctx.Err()
+func (b *blockingBudget) TakeACME(ctx context.Context, _ string, _ []limit.Bucket) (time.Duration, error) {
+	return 0, b.wait(ctx)
+}
+
+func (b *blockingBudget) ResyncACME(ctx context.Context, _ string, _ []limit.Bucket, _ time.Duration) error {
+	return b.wait(ctx)
+}
+
+func (b *blockingBudget) CACooldown(ctx context.Context, _ string) (time.Duration, error) {
+	return 0, b.wait(ctx)
+}
+
+func (b *blockingBudget) SetCACooldown(ctx context.Context, _ string, _ time.Duration) error {
+	return b.wait(ctx)
 }
 
 func TestBudgetTransport_ValkeyCallsBounded(t *testing.T) {
 	t.Parallel()
 	acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
 	h := newTransportHarness(t, acct, testBudgets())
-	h.bt.requests, h.bt.cooldowns = blockingBudget{}, blockingBudget{}
+	stuck := &blockingBudget{}
+	h.bt.requests, h.bt.cooldowns = stuck, stuck
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	start := time.Now()
 	ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
 	if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 		t.Fatalf("a stuck Valkey must fail open, got %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*budgetOpTimeout+time.Second {
-		t.Fatalf("each Valkey call must be bounded by budgetOpTimeout, the request took %s", elapsed)
+	bounds := stuck.recorded()
+	if len(bounds) != 2 {
+		t.Fatalf("want the wait-until check and the budget take, got %d Valkey calls", len(bounds))
+	}
+	for i, b := range bounds {
+		if b <= 0 || b > budgetOpTimeout {
+			t.Fatalf("Valkey call %d ran with a deadline %s away, want at most budgetOpTimeout (%s)", i+1, b, budgetOpTimeout)
+		}
 	}
 	if ca.count() != 1 {
 		t.Fatal("the request must be sent")
