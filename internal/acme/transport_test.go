@@ -96,7 +96,7 @@ func (cs *caServer) hitTimes() []time.Time {
 	return append([]time.Time(nil), cs.hits...)
 }
 
-func (h *transportHarness) do(t *testing.T, ctx context.Context, method, url string, body io.Reader) (*http.Response, error) {
+func (h *transportHarness) do(ctx context.Context, t *testing.T, method, url string, body io.Reader) (*http.Response, error) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -133,7 +133,7 @@ func TestBudgetTransport_429(t *testing.T) {
 	b := testBudgets()
 	tr := newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com"))
 	ctx := context.Background()
-	resp, err := h.do(t, withTrack(ctx, tr), http.MethodPost, ca.srv.URL+"/new-order", nil)
+	resp, err := h.do(withTrack(ctx, tr), t, http.MethodPost, ca.srv.URL+"/new-order", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestBudgetTransport_HoldsUnderWaitUntil(t *testing.T) {
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	start := time.Now()
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
-	if _, err := h.do(t, withTrack(context.Background(), tr), http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+	if _, err := h.do(withTrack(context.Background(), tr), t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := ca.hitTimes(); len(got) != 1 || got[0].Sub(start) < 300*time.Millisecond {
@@ -230,7 +230,7 @@ func TestBudgetTransport_RechecksWaitUntilAfterHolds(t *testing.T) {
 		h.bt.cooldowns = cd
 		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 		start := time.Now()
-		if _, err := h.do(t, withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{})), http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+		if _, err := h.do(withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{})), t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := ca.hitTimes(); len(got) != 1 || got[0].Sub(start) < 500*time.Millisecond || cd.readCount() != 3 {
@@ -246,11 +246,11 @@ func TestBudgetTransport_RechecksWaitUntilAfterHolds(t *testing.T) {
 		h.bt.cooldowns = cd
 		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 		ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
-		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := ca.hitTimes(); len(got) != 2 || got[1].Sub(start) < 300*time.Millisecond || cd.readCount() != 4 {
@@ -266,11 +266,11 @@ func TestBudgetTransport_RechecksWaitUntilAfterHolds(t *testing.T) {
 		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 		tr.setOrder(ca.srv.URL+"/order/1", ca.srv.URL+"/finalize/1")
 		ctx := withTrack(context.Background(), tr)
-		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
 			t.Fatal(err)
 		}
 		start := time.Now()
-		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := ca.hitTimes(); len(got) != 2 || got[1].Sub(start) < 300*time.Millisecond || cd.readCount() != 4 {
@@ -287,7 +287,7 @@ func TestBudgetTransport_UntrackedRefused(t *testing.T) {
 		if err := h.lim.SetCACooldown(context.Background(), acct.id, time.Minute); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.do(t, context.Background(), http.MethodGet, ca.srv.URL+"/directory", nil); !errors.Is(err, errAccountCooling) {
+		if _, err := h.do(context.Background(), t, http.MethodGet, ca.srv.URL+"/directory", nil); !errors.Is(err, errAccountCooling) {
 			t.Fatalf("err = %v, want errAccountCooling", err)
 		}
 		if ca.count() != 0 {
@@ -300,10 +300,10 @@ func TestBudgetTransport_UntrackedRefused(t *testing.T) {
 		budgets.GTSRequests = limit.Rate{Count: 1, Period: time.Hour, Burst: 1}
 		h := newTransportHarness(t, acct, budgets)
 		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-		if _, err := h.do(t, context.Background(), http.MethodGet, ca.srv.URL+"/directory", nil); err != nil {
+		if _, err := h.do(context.Background(), t, http.MethodGet, ca.srv.URL+"/directory", nil); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.do(t, context.Background(), http.MethodGet, ca.srv.URL+"/directory", nil); !errors.Is(err, errAccountBudget) {
+		if _, err := h.do(context.Background(), t, http.MethodGet, ca.srv.URL+"/directory", nil); !errors.Is(err, errAccountBudget) {
 			t.Fatalf("err = %v, want errAccountBudget", err)
 		}
 		if ca.count() != 1 {
@@ -348,7 +348,7 @@ func TestBudgetTransport_AbandonedFailsFast(t *testing.T) {
 		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 		time.AfterFunc(100*time.Millisecond, tr.abandon)
 		start := time.Now()
-		if _, err := h.do(t, withTrack(context.Background(), tr), http.MethodGet, ca.srv.URL+"/x", nil); !errors.Is(err, errOrderAbandoned) {
+		if _, err := h.do(withTrack(context.Background(), tr), t, http.MethodGet, ca.srv.URL+"/x", nil); !errors.Is(err, errOrderAbandoned) {
 			t.Fatalf("err = %v, want errOrderAbandoned", err)
 		}
 		if time.Since(start) > 5*time.Second {
@@ -359,7 +359,7 @@ func TestBudgetTransport_AbandonedFailsFast(t *testing.T) {
 		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 		ctx, cancel := context.WithTimeout(withTrack(context.Background(), tr), 100*time.Millisecond)
 		defer cancel()
-		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); !errors.Is(err, context.DeadlineExceeded) {
+		if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("err = %v, want the ctx error", err)
 		}
 	})
@@ -397,20 +397,20 @@ func TestBudgetTransport_RecordsOrderAndFinalize(t *testing.T) {
 		finalizeStatus.Store(int32(status))
 		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 		ctx := withTrack(context.Background(), tr)
-		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/new-acct", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/new-acct", nil); err != nil {
 			t.Fatal(err)
 		}
 		if tr.hasOrder() {
 			t.Fatal("a newAccount 201 (no finalize) is not an order")
 		}
-		resp, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/new-order", nil)
+		resp, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/new-order", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if readAll(t, resp.Body) != orderBody || !tr.hasOrder() {
 			t.Fatal("the order must be recorded and its body passed on intact")
 		}
-		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := tr.outcome().finalized; got != (status == http.StatusOK) {
@@ -432,21 +432,21 @@ func TestBudgetTransport_PollSchedule(t *testing.T) {
 		defer tr.mu.Unlock()
 		return *field
 	}
-	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
+	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
 		t.Fatal(err)
 	}
 	finalizedAt := stamp(&tr.finalizedAt)
 	if finalizedAt.IsZero() {
 		t.Fatal("a 200 on the finalize URL must mark the order finalized")
 	}
-	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/other", nil); err != nil {
+	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/other", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
 		t.Fatal(err)
 	}
 	lastPoll := stamp(&tr.lastPoll)
-	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
 		t.Fatal(err)
 	}
 	hits := ca.hitTimes()
@@ -472,7 +472,7 @@ func TestBudgetTransport_RequestBudgetWaits(t *testing.T) {
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
 	for range 3 {
-		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+		if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -530,7 +530,7 @@ func TestBudgetTransport_ValkeyCallsBounded(t *testing.T) {
 	h.bt.requests, h.bt.cooldowns = stuck, stuck
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
-	if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+	if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 		t.Fatalf("a stuck Valkey must fail open, got %v", err)
 	}
 	bounds := stuck.recorded()
@@ -662,7 +662,7 @@ func TestBudgetTransport_UnansweredOrderAndFinalizeCount(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(withTrack(context.Background(), tr), 200*time.Millisecond)
 			defer cancel()
-			resp, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+tc.path, nil)
+			resp, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+tc.path, nil)
 			if (err == nil) != strings.HasSuffix(tc.path, "/refused") {
 				t.Fatalf("POST %s: resp %v, err %v", tc.path, resp, err)
 			}
