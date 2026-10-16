@@ -180,22 +180,102 @@ func TestBudgetTransport_429NeverShortens(t *testing.T) {
 	}
 }
 
+type scriptedCooldowns struct {
+	mu    sync.Mutex
+	waits []time.Duration
+	reads int
+}
+
+func (s *scriptedCooldowns) CACooldown(context.Context, string) (time.Duration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	if len(s.waits) == 0 {
+		return 0, nil
+	}
+	d := s.waits[0]
+	s.waits = s.waits[1:]
+	return d, nil
+}
+
+func (s *scriptedCooldowns) SetCACooldown(context.Context, string, time.Duration) error { return nil }
+
+func (s *scriptedCooldowns) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
 func TestBudgetTransport_HoldsUnderWaitUntil(t *testing.T) {
 	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
 	h := newTransportHarness(t, acct, testBudgets())
+	h.bt.cooldowns = &scriptedCooldowns{waits: []time.Duration{300 * time.Millisecond}}
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	ctx := context.Background()
-	if err := h.lim.SetCACooldown(ctx, acct.id, time.Second); err != nil {
-		t.Fatal(err)
-	}
 	start := time.Now()
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
-	if _, err := h.do(t, withTrack(ctx, tr), http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+	if _, err := h.do(t, withTrack(context.Background(), tr), http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := ca.hitTimes(); len(got) != 1 || got[0].Sub(start) < time.Second {
-		t.Fatalf("a tracked request under a 1 s wait-until must reach the CA ≥ 1 s later, hits %v", got)
+	if got := ca.hitTimes(); len(got) != 1 || got[0].Sub(start) < 300*time.Millisecond {
+		t.Fatalf("a tracked request under a 300 ms wait-until must reach the CA ≥ 300 ms later, hits %v", got)
 	}
+}
+
+func TestBudgetTransport_RechecksWaitUntilAfterHolds(t *testing.T) {
+	t.Run("wait-until extended during the hold", func(t *testing.T) {
+		acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
+		h := newTransportHarness(t, acct, testBudgets())
+		cd := &scriptedCooldowns{waits: []time.Duration{200 * time.Millisecond, 300 * time.Millisecond}}
+		h.bt.cooldowns = cd
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		start := time.Now()
+		if _, err := h.do(t, withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{})), http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := ca.hitTimes(); len(got) != 1 || got[0].Sub(start) < 500*time.Millisecond || cd.readCount() != 3 {
+			t.Fatalf("the request must wait both wait-untils (≥ 500 ms) and re-read until none is left: hits %v, reads %d", got, cd.readCount())
+		}
+	})
+	t.Run("wait-until set during a request-budget hold", func(t *testing.T) {
+		acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+		budgets := testBudgets()
+		budgets.GTSRequests = limit.Rate{Count: 1, Period: time.Second, Burst: 1}
+		h := newTransportHarness(t, acct, budgets)
+		cd := &scriptedCooldowns{waits: []time.Duration{0, 0, 300 * time.Millisecond}}
+		h.bt.cooldowns = cd
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
+		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		if _, err := h.do(t, ctx, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := ca.hitTimes(); len(got) != 2 || got[1].Sub(start) < 300*time.Millisecond || cd.readCount() != 4 {
+			t.Fatalf("after the budget hold the request must wait the new wait-until: hits %v, reads %d", got, cd.readCount())
+		}
+	})
+	t.Run("wait-until set during the poll hold", func(t *testing.T) {
+		acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
+		h := newTransportHarness(t, acct, testBudgets())
+		cd := &scriptedCooldowns{waits: []time.Duration{0, 0, 300 * time.Millisecond}}
+		h.bt.cooldowns = cd
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setOrder(ca.srv.URL+"/order/1", ca.srv.URL+"/finalize/1")
+		ctx := withTrack(context.Background(), tr)
+		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := ca.hitTimes(); len(got) != 2 || got[1].Sub(start) < 300*time.Millisecond || cd.readCount() != 4 {
+			t.Fatalf("after the poll hold the request must wait the new wait-until: hits %v, reads %d", got, cd.readCount())
+		}
+	})
 }
 
 func TestBudgetTransport_UntrackedRefused(t *testing.T) {
@@ -341,34 +421,45 @@ func TestBudgetTransport_RecordsOrderAndFinalize(t *testing.T) {
 func TestBudgetTransport_PollSchedule(t *testing.T) {
 	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
 	h := newTransportHarness(t, acct, testBudgets())
+	h.bt.firstPoll = time.Second
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 	tr.setOrder(ca.srv.URL+"/order/1", ca.srv.URL+"/finalize/1")
 	ctx := withTrack(context.Background(), tr)
+	stamp := func(field *time.Time) time.Time {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		return *field
+	}
 	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/finalize/1", nil); err != nil {
 		t.Fatal(err)
 	}
-	finalized := time.Now()
+	finalizedAt := stamp(&tr.finalizedAt)
+	if finalizedAt.IsZero() {
+		t.Fatal("a 200 on the finalize URL must mark the order finalized")
+	}
 	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/other", nil); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+		t.Fatal(err)
+	}
+	lastPoll := stamp(&tr.lastPoll)
+	if _, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+"/order/1", nil); err != nil {
+		t.Fatal(err)
 	}
 	hits := ca.hitTimes()
 	if len(hits) != 4 {
 		t.Fatalf("the CA saw %d requests, want 4", len(hits))
 	}
-	if hits[1].Sub(finalized) > 100*time.Millisecond {
-		t.Fatalf("a non-poll request must not be delayed, took %s", hits[1].Sub(finalized))
+	if !hits[1].Before(finalizedAt.Add(h.bt.firstPoll)) {
+		t.Fatalf("a non-poll request must not wait for the poll schedule, came %s after finalize", hits[1].Sub(finalizedAt))
 	}
-	if hits[2].Sub(finalized) < 300*time.Millisecond {
-		t.Fatalf("the first poll must wait the first delay, came after %s", hits[2].Sub(finalized))
+	if hits[2].Before(finalizedAt.Add(h.bt.firstPoll)) {
+		t.Fatalf("the first poll must wait the first delay after finalize, came after %s", hits[2].Sub(finalizedAt))
 	}
-	if hits[3].Sub(hits[2]) < 200*time.Millisecond {
-		t.Fatalf("the next poll must wait the interval, came after %s", hits[3].Sub(hits[2]))
+	if hits[3].Before(lastPoll.Add(h.bt.pollEvery)) {
+		t.Fatalf("the next poll must wait the interval after the previous one, came after %s", hits[3].Sub(lastPoll))
 	}
 }
 

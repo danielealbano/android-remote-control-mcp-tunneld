@@ -95,27 +95,37 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
 		}
 		return nil
 	}
-	if err := t.sleep(ctx, tr, cool); err != nil {
-		return err
-	}
-	if tr.isPoll(req.URL.String()) {
-		if err := t.sleep(ctx, tr, tr.pollDue(t.firstPoll, t.pollEvery).Sub(t.now())); err != nil {
-			return err
-		}
-		tr.markPoll(t.now())
-	}
+	poll := tr.isPoll(req.URL.String())
 	for {
+		for ; cool > 0; cool = t.cooling(ctx) {
+			if err := t.sleep(ctx, tr, cool); err != nil {
+				return err
+			}
+		}
+		if poll {
+			if d := tr.pollDue(t.firstPoll, t.pollEvery).Sub(t.now()); d > 0 {
+				if err := t.sleep(ctx, tr, d); err != nil {
+					return err
+				}
+				cool = t.cooling(ctx)
+				continue
+			}
+		}
 		wait, err := t.take(ctx, bs)
 		if err != nil {
 			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
-			return nil
+			wait = 0
 		}
 		if wait <= 0 {
+			if poll {
+				tr.markPoll(t.now())
+			}
 			return nil
 		}
 		if err := t.sleep(ctx, tr, wait); err != nil {
 			return err
 		}
+		cool = t.cooling(ctx)
 	}
 }
 
