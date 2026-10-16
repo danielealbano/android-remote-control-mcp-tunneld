@@ -138,7 +138,10 @@ DoD:
 >   rate-limited) and repeats `POST /api/v1/issue` with a fresh attestation over it (fresh keys/CSRs, as always);
 >   a failed nonce fetch is a failed retry like any other. After the third failed retry the phone gives up. When
 >   every CA is out of issuance budget the server answers `503` `acme_rate_limited` with `retry_after_seconds` =
->   the earliest free budget slot plus a random 1–10 s. A phone that is already BOUND on the control stream is
+>   the earliest free budget slot plus a random 1–10 s. While another issuance for the same name is still in
+>   progress (for example a request on a connection the phone has given up on), the answer is `503` `issuance_cap`
+>   with `retry_after_seconds` = 300; the same reason with 604800 (7 days) means the weekly issuance cap
+>   (`--issue-per-week`) is reached. A phone that is already BOUND on the control stream is
 >   also re-nudged: the renewal watcher sees a cert-less or renewal-due tunnel and sends a fresh
 >   `RENEW_NUDGE{nonce}` on its next scan.
 
@@ -1647,6 +1650,7 @@ package acme
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -1671,6 +1675,8 @@ type Budgets struct {
 type NodeLister interface {
 	LiveNodeIDs(ctx context.Context) ([]string, error)
 }
+
+var errNoNodeLister = errors.New("acme: the chain needs a live-node lister")
 
 type BudgetLevel struct {
 	CA      string
@@ -1929,27 +1935,37 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
 		}
 		return nil
 	}
-	if err := t.sleep(ctx, tr, cool); err != nil {
-		return err
-	}
-	if tr.isPoll(req.URL.String()) {
-		if err := t.sleep(ctx, tr, tr.pollDue(t.firstPoll, t.pollEvery).Sub(t.now())); err != nil {
-			return err
-		}
-		tr.markPoll(t.now())
-	}
+	poll := tr.isPoll(req.URL.String())
 	for {
+		for ; cool > 0; cool = t.cooling(ctx) {
+			if err := t.sleep(ctx, tr, cool); err != nil {
+				return err
+			}
+		}
+		if poll {
+			if d := tr.pollDue(t.firstPoll, t.pollEvery).Sub(t.now()); d > 0 {
+				if err := t.sleep(ctx, tr, d); err != nil {
+					return err
+				}
+				cool = t.cooling(ctx)
+				continue
+			}
+		}
 		wait, err := t.take(ctx, bs)
 		if err != nil {
 			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
-			return nil
+			wait = 0
 		}
 		if wait <= 0 {
+			if poll {
+				tr.markPoll(t.now())
+			}
 			return nil
 		}
 		if err := t.sleep(ctx, tr, wait); err != nil {
 			return err
 		}
+		cool = t.cooling(ctx)
 	}
 }
 
@@ -3905,3 +3921,5 @@ DoD:
 - **A6.5.1, A6.6.1, A6.7.1** (`internal/acme/chain.go`, `lazy.go`, `budget.go`, `internal/server/acmewire.go`, code review). `NewChainIssuer` and `NewChain` return an error (`errNoNodeLister`) when `ChainConfig.Nodes` is nil, instead of panicking at the first issuance, and `buildACMEChain` returns it. The code blocks above are updated. Covered by `TestNewChainIssuer_RequiresNodes`.
 - **A12.1.2** (`docs/ARCHITECTURE.md`, code review). The backoff sentence also excludes a permanent CA error and a local error, which stop the run without a backoff ("other than a 429, a permanent CA error or a local error (a transient CA error, …)"). The quoted paragraph above is updated.
 - **Code review** (`internal/limit/issuance.go`, `internal/enroll/enroll.go`, `docs/PROTOCOL.md` §3; user decision). `IssuanceBegin` returns `ErrIssuanceInFlight` when another issuance for the name holds the lock, and the service answers that case with `issuance_cap`, retryable, `retry_after_seconds` = 300 instead of 7 days. A reached weekly cap keeps 7 days. Under the retry rule the phone waits the server's `retry_after`, so an order left in flight by a dead connection would otherwise have made it wait 7 days. The `IssuanceBegin` doc loses "another order in flight OR". `TestLimiter_IssuanceLock_CancelledCallerIsSilent` pre-sets the lock only for its refresh case, so its over-cap case reaches the over-cap release again. `TestIssueRecordsIssuanceAndCap` and `TestIssue_ConcurrentCallsRespectCap` assert the two `retry_after` values.
+- **A6.3.2** (`internal/acme/transport.go`, code review). `before` re-reads the account's wait-until after every hold of a tracked request: the wait-until hold itself, the poll-spacing hold and each request-budget hold. A wait-until set or extended during a hold (another request's 429, another attempt's backoff) therefore holds the request too, as AC1 requires. `markPoll` records the poll when the request is released, after every hold. The code block above is updated. `TestBudgetTransport_HoldsUnderWaitUntil` uses a scripted wait-until (300 ms, as T6.8 states, now that the re-read would loop on miniredis' non-ticking TTL). `TestBudgetTransport_RechecksWaitUntilAfterHolds` covers the three holds. `TestBudgetTransport_PollSchedule` measures from the transport's own `finalizedAt` / `lastPoll`, with a 1 s first delay.
+- **A1.3.3** (`docs/PROTOCOL.md` §3, code review). The quoted bullet above gains the in-flight `issuance_cap` sentence recorded in the issuance-in-flight deviation.
