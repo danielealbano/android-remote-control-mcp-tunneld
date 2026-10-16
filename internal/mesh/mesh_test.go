@@ -739,6 +739,16 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 	release := make(chan struct{})
 	p := startMeshPeer(t, 2, release)
 	c := NewClient(insecureMeshTLS, 1)
+	warm := make(chan error, 1)
+	go func() {
+		_, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+		warm <- err
+	}()
+	waitEntered(t, p, 1)
+	release <- struct{}{}
+	if err := <-warm; err != nil {
+		t.Fatal(err)
+	}
 	errs := make(chan error, 3)
 	for range 3 {
 		go func() {
@@ -746,7 +756,7 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 			errs <- err
 		}()
 	}
-	waitEntered(t, p, 3)
+	waitEntered(t, p, 4)
 	close(release)
 	for range 3 {
 		if err := <-errs; err != nil {
