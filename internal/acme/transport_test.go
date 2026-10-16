@@ -647,3 +647,56 @@ func TestBudgetTransport_UnansweredOrderAndFinalizeCount(t *testing.T) {
 		})
 	}
 }
+
+type gatedCooldowns struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedCooldowns) CACooldown(ctx context.Context, _ string) (time.Duration, error) {
+	select {
+	case g.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+		return 0, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func (g *gatedCooldowns) SetCACooldown(context.Context, string, time.Duration) error { return nil }
+
+func TestBudgetTransport_AbandonedDuringItsChecksNotSent(t *testing.T) {
+	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
+	h := newTransportHarness(t, acct, testBudgets())
+	gate := &gatedCooldowns{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.bt.cooldowns = gate
+	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	req, err := http.NewRequestWithContext(withTrack(context.Background(), tr), http.MethodPost, ca.srv.URL+"/new-order", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		resp, err := h.hc.Do(req)
+		if resp != nil {
+			err = errors.Join(err, resp.Body.Close())
+		}
+		done <- err
+	}()
+	<-gate.entered
+	tr.abandon()
+	close(gate.release)
+	if err := <-done; !errors.Is(err, errOrderAbandoned) {
+		t.Fatalf("Do = %v, want errOrderAbandoned", err)
+	}
+	if ca.count() != 0 {
+		t.Fatal("a request whose attempt was abandoned during its checks must not be sent")
+	}
+	if tr.outcome().created {
+		t.Fatal("a request that was never sent must not count as a created order")
+	}
+}

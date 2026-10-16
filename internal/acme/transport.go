@@ -54,12 +54,7 @@ type budgetTransport struct {
 func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tr := trackFrom(req.Context())
 	if err := t.before(req, tr); err != nil {
-		if req.Body != nil {
-			if cerr := req.Body.Close(); cerr != nil {
-				err = errors.Join(err, cerr)
-			}
-		}
-		return nil, err
+		return nil, closeRequestBody(req, err)
 	}
 	if tr == nil {
 		resp, err := t.base.RoundTrip(req)
@@ -72,6 +67,10 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 	sent := tr.markSent(req.Method, req.URL.String())
+	if tr.abandoned() {
+		tr.markAnswered(sent)
+		return nil, closeRequestBody(req, errOrderAbandoned)
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
@@ -85,6 +84,15 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tr.markAnswered(sent)
 	}
 	return resp, err
+}
+
+func closeRequestBody(req *http.Request, err error) error {
+	if req.Body != nil {
+		if cerr := req.Body.Close(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}
+	return err
 }
 
 func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {

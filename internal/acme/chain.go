@@ -193,7 +193,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			if permanent {
 				return nil, store.CertInfo{}, err // permanent (e.g. bad CSR) — stop
 			}
-			// Fold the cooldown this failure JUST set into the shortest-remaining computation, so the
+			// Fold the cooldown into the shortest-remaining computation, so the
 			// Retry-After reflects when the chain would actually accept a retry (a run where every CA
 			// fails transitively must not report the 1h default when a 1m backoff applies).
 			note(cool)
