@@ -4,6 +4,7 @@ package limit
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"time"
 )
@@ -17,8 +18,10 @@ func (l *Limiter) SetCACooldown(ctx context.Context, ca string, d time.Duration)
 	pipe := l.rdb.Pipeline()
 	pipe.ExpireGT(ctx, cooldownKey(ca), d)
 	pipe.SetNX(ctx, cooldownKey(ca), "1", d)
-	_, err := pipe.Exec(ctx)
-	return err
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set acme wait-until %s: %w", ca, err)
+	}
+	return nil
 }
 
 // CACooldown returns the remaining cooldown for ca (0 = not cooling).

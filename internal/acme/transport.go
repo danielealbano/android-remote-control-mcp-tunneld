@@ -202,7 +202,7 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 		err = errors.Join(err, cerr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acme budget transport: read the 429 body: %w", err)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	var problem struct {
@@ -248,7 +248,7 @@ func (t *budgetTransport) observe(req *http.Request, resp *http.Response, tr *or
 		err = errors.Join(err, cerr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acme budget transport: read the 201 body: %w", err)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	var order struct {
