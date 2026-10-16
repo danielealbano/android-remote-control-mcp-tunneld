@@ -110,6 +110,7 @@ func expectEOF(t *testing.T, c net.Conn) {
 }
 
 func TestBlackholeProxy_ForwardsThenFreezes(t *testing.T) {
+	t.Parallel()
 	target := startTarget(t, echo)
 	p := StartBlackholeProxy(t, target.ln.Addr().String())
 
@@ -129,6 +130,7 @@ func TestBlackholeProxy_ForwardsThenFreezes(t *testing.T) {
 }
 
 func TestBlackholeProxy_PropagatesClose(t *testing.T) {
+	t.Parallel()
 	t.Run("target closes", func(t *testing.T) {
 		target := startTarget(t, func(c net.Conn) { CloseLogged(c) })
 		p := StartBlackholeProxy(t, target.ln.Addr().String())
@@ -182,6 +184,7 @@ func TestBlackholeProxy_PropagatesClose(t *testing.T) {
 }
 
 func TestBlackholeProxy_CleanupNeverHangs(t *testing.T) {
+	t.Parallel()
 	target := startTarget(t, echo)
 	var dials sync.WaitGroup
 	t.Run("proxy", func(t *testing.T) {

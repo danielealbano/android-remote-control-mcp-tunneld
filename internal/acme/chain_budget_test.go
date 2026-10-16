@@ -191,6 +191,7 @@ func tlsCSR(t *testing.T, cn string, sans ...string) *x509.CertificateRequest {
 }
 
 func TestChain_SkipsWithoutBudget(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	gts := &trackingFake{caID: CAGTS}
 	leAcct := acct(le, "le-1", time.Minute)
@@ -206,6 +207,7 @@ func TestChain_SkipsWithoutBudget(t *testing.T) {
 }
 
 func TestChain_SkipsUnderWaitUntil(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	gts := &trackingFake{caID: CAGTS}
 	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute), acct(gts, "gts-1", time.Minute))
@@ -221,6 +223,7 @@ func TestChain_SkipsUnderWaitUntil(t *testing.T) {
 }
 
 func TestChain_AllUnavailable_RetryAfter(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	gts := &trackingFake{caID: CAGTS}
 	leAcct, gtsAcct := acct(le, "le-1", time.Minute), acct(gts, "gts-1", time.Minute)
@@ -241,6 +244,7 @@ func TestChain_AllUnavailable_RetryAfter(t *testing.T) {
 }
 
 func TestChain_GTSOrderedByBudget(t *testing.T) {
+	t.Parallel()
 	t.Run("most remaining budget first", func(t *testing.T) {
 		calls := &callLog{}
 		g1 := &trackingFake{caID: CAGTS, label: "gts-1", order: calls}
@@ -291,6 +295,7 @@ func settleLevels(t *testing.T, f *trackingFake, timeout time.Duration) ([3]floa
 }
 
 func TestChain_SettleSuccess(t *testing.T) {
+	t.Parallel()
 	levels, cleaned, err := settleLevels(t, &trackingFake{caID: CALetsEncrypt, created: true, finalized: true}, time.Minute)
 	if err != nil || levels != [3]float64{0.9, 0.9, 0.9} || cleaned {
 		t.Fatalf("orders/name/domain levels = %v (cleanup %v, err %v), want every bucket spent and no reservation left", levels, cleaned, err)
@@ -298,6 +303,7 @@ func TestChain_SettleSuccess(t *testing.T) {
 }
 
 func TestChain_SettleCreatedThenFailed(t *testing.T) {
+	t.Parallel()
 	levels, cleaned, err := settleLevels(t, &trackingFake{caID: CALetsEncrypt, created: true, err: permanent(errors.New("bad csr"))}, time.Minute)
 	if err == nil || levels != [3]float64{0.9, 1, 1} || cleaned {
 		t.Fatalf("orders/name/domain levels = %v (cleanup %v, err %v), want the order bucket spent and the success buckets released", levels, cleaned, err)
@@ -305,6 +311,7 @@ func TestChain_SettleCreatedThenFailed(t *testing.T) {
 }
 
 func TestChain_SettleFailedBeforeCreate(t *testing.T) {
+	t.Parallel()
 	levels, cleaned, err := settleLevels(t, &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("down"))}, time.Minute)
 	if err == nil || levels != [3]float64{1, 1, 1} || cleaned {
 		t.Fatalf("orders/name/domain levels = %v (cleanup %v, err %v), want everything released", levels, cleaned, err)
@@ -312,6 +319,7 @@ func TestChain_SettleFailedBeforeCreate(t *testing.T) {
 }
 
 func TestChain_SettleFinalizedAbandoned(t *testing.T) {
+	t.Parallel()
 	levels, cleaned, err := settleLevels(t, &trackingFake{caID: CALetsEncrypt, created: true, finalized: true, block: true}, 50*time.Millisecond)
 	if err == nil || levels != [3]float64{0.9, 0.9, 0.9} || !cleaned {
 		t.Fatalf("orders/name/domain levels = %v (cleanup %v, err %v), want every bucket spent and the challenge cleanups run", levels, cleaned, err)
@@ -319,6 +327,7 @@ func TestChain_SettleFinalizedAbandoned(t *testing.T) {
 }
 
 func TestChain_SettleFinalizedThenError(t *testing.T) {
+	t.Parallel()
 	levels, cleaned, err := settleLevels(t, &trackingFake{caID: CALetsEncrypt, created: true, finalized: true, err: transient(errors.New("certificate wait"))}, time.Minute)
 	if err == nil || levels != [3]float64{0.9, 0.9, 0.9} || cleaned {
 		t.Fatalf("orders/name/domain levels = %v (cleanup %v, err %v), want every bucket spent and no cleanup run", levels, cleaned, err)
@@ -326,6 +335,7 @@ func TestChain_SettleFinalizedThenError(t *testing.T) {
 }
 
 func TestChain_SettleWithoutReservation(t *testing.T) {
+	t.Parallel()
 	const ordersKey = "acme-budget:letsencrypt:orders:le-1"
 	var ac *accountChain
 	le := &trackingFake{caID: CALetsEncrypt, onObtain: func(ctx context.Context) {
@@ -351,6 +361,7 @@ func TestChain_SettleWithoutReservation(t *testing.T) {
 }
 
 func TestChain_LERenewalExempt(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	a := acct(le, "le-1", time.Minute)
 	ac := newAccountChain(t, ChainConfig{}, a)
@@ -364,6 +375,7 @@ func TestChain_LERenewalExempt(t *testing.T) {
 }
 
 func TestObtainSelf_LERenewalExempt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		cur  store.CertInfo
@@ -388,6 +400,7 @@ func TestObtainSelf_LERenewalExempt(t *testing.T) {
 }
 
 func TestChain_BucketNameFromCSR(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		csr  func(t *testing.T) *x509.CertificateRequest
@@ -439,6 +452,7 @@ func TestChain_AttemptDeadline(t *testing.T) {
 }
 
 func TestChain_LocalRefusalBacksOff(t *testing.T) {
+	t.Parallel()
 	le := newLazyCA(CALetsEncrypt, 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) { return nil, errAccountBudget }, testLogger())
 	gts := &trackingFake{caID: CAGTS}
 	leAcct := &account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: time.Minute, issuer: le}
@@ -472,6 +486,7 @@ func TestChain_RunBudget(t *testing.T) {
 }
 
 func TestChain_MissingCAsSkipped(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
 	if _, info, err := ac.ch.Obtain(context.Background(), nil, "p"); err != nil || info.CA != CALetsEncrypt {
@@ -488,6 +503,7 @@ func TestChain_MissingCAsSkipped(t *testing.T) {
 }
 
 func TestChain_BudgetLevels(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	g1 := &trackingFake{caID: CAGTS, label: "gts-1"}
 	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute), acct(g1, "g1", time.Minute))
@@ -513,6 +529,7 @@ func TestChain_BudgetLevels(t *testing.T) {
 }
 
 func TestChain_LiveNodesError(t *testing.T) {
+	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
 	a := acct(le, "le-1", time.Minute)
 	budgets := smallBudgets()
@@ -531,6 +548,7 @@ func TestChain_LiveNodesError(t *testing.T) {
 }
 
 func TestChain_OrderedLevelsError(t *testing.T) {
+	t.Parallel()
 	calls := &callLog{}
 	g1 := &trackingFake{caID: CAGTS, label: "gts-1", order: calls}
 	g2 := &trackingFake{caID: CAGTS, label: "gts-2", order: calls}
@@ -548,6 +566,7 @@ func TestChain_OrderedLevelsError(t *testing.T) {
 }
 
 func TestChain_RetryAfterReportsTheWaitUntilInEffect(t *testing.T) {
+	t.Parallel()
 	var ac *accountChain
 	le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("down")), onObtain: func(ctx context.Context) {
 		if err := ac.lim.SetCACooldown(ctx, "le-1", 10*time.Minute); err != nil {
@@ -563,6 +582,7 @@ func TestChain_RetryAfterReportsTheWaitUntilInEffect(t *testing.T) {
 }
 
 func TestChain_BuildRateLimitedSkipsTheBackoff(t *testing.T) {
+	t.Parallel()
 	limited := newLazyCA(CALetsEncrypt, 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {
 		return nil, fmt.Errorf("acme: resolve the existing account by key: %w",
 			&legoacme.ProblemDetails{HTTPStatus: http.StatusTooManyRequests, Type: "urn:ietf:params:acme:error:rateLimited"})
@@ -581,12 +601,14 @@ func TestChain_BuildRateLimitedSkipsTheBackoff(t *testing.T) {
 }
 
 func TestNewChainIssuer_RequiresNodes(t *testing.T) {
+	t.Parallel()
 	if _, err := NewChainIssuer(ChainConfig{}, acct(&trackingFake{caID: CALetsEncrypt}, "le-1", time.Minute)); !errors.Is(err, errNoNodeLister) {
 		t.Fatalf("NewChainIssuer without a node lister = %v, want errNoNodeLister", err)
 	}
 }
 
 func TestChain_FailureWhileWaitingDoesNotBumpTheStreak(t *testing.T) {
+	t.Parallel()
 	var ac *accountChain
 	le := &trackingFake{caID: CALetsEncrypt, err: transient(context.DeadlineExceeded), onObtain: func(ctx context.Context) {
 		if err := ac.lim.SetCACooldown(ctx, "le-1", 3*time.Minute); err != nil {

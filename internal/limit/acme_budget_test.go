@@ -60,6 +60,7 @@ func within(got, want, tol time.Duration) bool {
 }
 
 func TestSetCACooldown_NeverShortens(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		existing time.Duration
@@ -92,6 +93,7 @@ func TestSetCACooldown_NeverShortens(t *testing.T) {
 }
 
 func TestRate_Bucket(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		rate Rate
@@ -114,6 +116,7 @@ func TestRate_Bucket(t *testing.T) {
 }
 
 func TestReserveACME_Reserves(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 5, Period: time.Hour, Burst: 5}.Bucket("le:orders")
 	deadline := h.now.Add(20 * time.Second)
@@ -134,6 +137,7 @@ func TestReserveACME_Reserves(t *testing.T) {
 }
 
 func TestReserveACME_InflightCounts(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 2, Period: time.Hour, Burst: 2}.Bucket("le:orders")
 	deadline := h.now.Add(time.Minute)
@@ -148,6 +152,7 @@ func TestReserveACME_InflightCounts(t *testing.T) {
 }
 
 func TestReserveACME_DeadNodeNotCounted(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 1, Period: time.Hour, Burst: 1}.Bucket("le:orders")
 	deadline := h.now.Add(time.Minute)
@@ -160,6 +165,7 @@ func TestReserveACME_DeadNodeNotCounted(t *testing.T) {
 }
 
 func TestReserveACME_ExpiredNotCounted(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 1, Period: time.Hour, Burst: 1}.Bucket("le:orders")
 	if ok, _ := h.reserve(t, b, "n1", "old", h.now.Add(-time.Second), "n1"); !ok {
@@ -174,6 +180,7 @@ func TestReserveACME_ExpiredNotCounted(t *testing.T) {
 }
 
 func TestReserveACME_WaitUntilNextToken(t *testing.T) {
+	t.Parallel()
 	t.Run("empty bucket", func(t *testing.T) {
 		h := newBudgetHarness(t)
 		b := Rate{Count: 1, Period: 10 * time.Second, Burst: 1}.Bucket("le:orders")
@@ -198,6 +205,7 @@ func TestReserveACME_WaitUntilNextToken(t *testing.T) {
 }
 
 func TestCommitACME_SpendsAndDrops(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 3, Period: time.Hour, Burst: 3}.Bucket("le:orders")
 	if ok, _ := h.reserve(t, b, "n1", "m1", h.now.Add(time.Minute), "n1"); !ok {
@@ -224,6 +232,7 @@ func TestCommitACME_SpendsAndDrops(t *testing.T) {
 }
 
 func TestReleaseACME_NoSpend(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 1, Period: time.Hour, Burst: 1}.Bucket("le:orders")
 	if ok, _ := h.reserve(t, b, "n1", "m1", h.now.Add(time.Minute), "n1"); !ok {
@@ -241,6 +250,7 @@ func TestReleaseACME_NoSpend(t *testing.T) {
 }
 
 func TestTakeACME_TakeOrWait(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 2, Period: time.Second, Burst: 2}.Bucket("gts:requests")
 	for i := range 2 {
@@ -258,6 +268,7 @@ func TestTakeACME_TakeOrWait(t *testing.T) {
 }
 
 func TestResyncACME_NextTokenAtRetryAfter(t *testing.T) {
+	t.Parallel()
 	for _, retryAfter := range []time.Duration{3 * time.Second, 30 * time.Second} {
 		t.Run(retryAfter.String(), func(t *testing.T) {
 			h := newBudgetHarness(t)
@@ -278,6 +289,7 @@ func TestResyncACME_NextTokenAtRetryAfter(t *testing.T) {
 }
 
 func TestACMEBudgetLevel_Ratio(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 4, Period: time.Hour, Burst: 4}.Bucket("gts:orders")
 	if ok, _ := h.reserve(t, b, "n1", "m1", h.now.Add(time.Minute), "n1"); !ok {
@@ -304,6 +316,7 @@ func TestACMEBudgetLevel_Ratio(t *testing.T) {
 }
 
 func TestACMEBudget_UnparseableTreatedFull(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 1, Period: time.Hour, Burst: 1}.Bucket("le:orders")
 	if err := h.rdb.HSet(ctxT(t), budgetKey(b), "t", "garbage", "at", "x").Err(); err != nil {
@@ -318,6 +331,7 @@ func TestACMEBudget_UnparseableTreatedFull(t *testing.T) {
 }
 
 func TestBudgetLock_Contended(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	if err := h.rdb.Set(ctxT(t), budgetLockKey("letsencrypt"), "someone-else", time.Minute).Err(); err != nil {
 		t.Fatal(err)
@@ -337,6 +351,7 @@ func TestBudgetLock_Contended(t *testing.T) {
 }
 
 func TestBudgetKeys_AllHaveTTL(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	ctx := ctxT(t)
 	b := Rate{Count: 3, Period: time.Hour, Burst: 3}.Bucket("le:orders")
@@ -370,6 +385,7 @@ func TestBudgetKeys_AllHaveTTL(t *testing.T) {
 }
 
 func TestReserveACME_InflightTTLNeverShortened(t *testing.T) {
+	t.Parallel()
 	h := newBudgetHarness(t)
 	b := Rate{Count: 3, Period: time.Hour, Burst: 3}.Bucket("le:orders")
 	if ok, _ := h.reserve(t, b, "n1", "long", h.now.Add(10*time.Minute), "n1"); !ok {

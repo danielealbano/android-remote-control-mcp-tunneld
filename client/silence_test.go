@@ -153,6 +153,7 @@ func TestRun_DeadConnectionIsReplaced(t *testing.T) {
 }
 
 func TestWithControlSilenceTimeout_NonPositive(t *testing.T) {
+	t.Parallel()
 	for _, d := range []time.Duration{0, -time.Second} {
 		if _, err := New("", "", "", "", nil, nil, nil, WithControlSilenceTimeout(d)); err == nil {
 			t.Fatalf("WithControlSilenceTimeout(%s) must be rejected", d)
@@ -161,6 +162,7 @@ func TestWithControlSilenceTimeout_NonPositive(t *testing.T) {
 }
 
 func TestRenew_NudgeSingleFlight(t *testing.T) {
+	t.Parallel()
 	ca := newTestCA(t)
 	holding := make(chan struct{})
 	release := make(chan struct{})

@@ -54,6 +54,7 @@ func (s *issueScript) sleep(_ context.Context, d time.Duration) error {
 }
 
 func TestIssueWithRetries_Rule(t *testing.T) {
+	t.Parallel()
 	retryable := &EnrollError{Status: http.StatusServiceUnavailable, Reason: "acme_transient", Retryable: true}
 	paced := &EnrollError{Status: http.StatusServiceUnavailable, Reason: "acme_rate_limited", Retryable: true, RetryAfter: 7 * time.Second}
 	final := &EnrollError{Status: http.StatusBadRequest, Reason: "acme_failed"}
@@ -108,6 +109,7 @@ func TestIssueWithRetries_Rule(t *testing.T) {
 }
 
 func TestEnroll_Phase2RetriesWithFreshNonce(t *testing.T) {
+	t.Parallel()
 	ca := newTestCA(t)
 	var calls atomic.Int32
 	opts := &enrollServerOpts{issueFail: func() *errorResponse {
@@ -144,6 +146,7 @@ func newCAIdentity(t *testing.T, ca *testCA) *Identity {
 }
 
 func TestRenew_RetriesWithFreshNonce(t *testing.T) {
+	t.Parallel()
 	ca := newTestCA(t)
 	var calls atomic.Int32
 	opts := &enrollServerOpts{issueFail: func() *errorResponse {
@@ -177,6 +180,7 @@ func TestRenew_RetriesWithFreshNonce(t *testing.T) {
 }
 
 func TestIssueCerts_TransportErrorIsRetryable(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		rt   http.RoundTripper

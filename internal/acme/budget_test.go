@@ -20,6 +20,7 @@ func keys(bs []limit.Bucket) []string {
 }
 
 func TestRegisteredDomain(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ in, want string }{
 		{in: "a.b.example.com", want: "example.com"},
 		{in: "x.example.co.uk", want: "example.co.uk"},
@@ -36,6 +37,7 @@ func TestRegisteredDomain(t *testing.T) {
 }
 
 func TestOrderBuckets_PerCAAndPath(t *testing.T) {
+	t.Parallel()
 	b := testBudgets()
 	le := &account{ca: CALetsEncrypt, id: "le-1"}
 	gts := &account{ca: CAGTS, id: "gts-1"}
@@ -63,6 +65,7 @@ func TestOrderBuckets_PerCAAndPath(t *testing.T) {
 }
 
 func TestRequestBuckets_GTSCertURL(t *testing.T) {
+	t.Parallel()
 	b := testBudgets()
 	req := func(path string) *http.Request { return &http.Request{URL: &url.URL{Path: path}} }
 	tests := []struct {
@@ -86,6 +89,7 @@ func TestRequestBuckets_GTSCertURL(t *testing.T) {
 }
 
 func TestResyncBuckets_NamedLimit(t *testing.T) {
+	t.Parallel()
 	b := testBudgets()
 	le := &account{ca: CALetsEncrypt, id: "l"}
 	tr := newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com"))
@@ -118,6 +122,7 @@ func TestResyncBuckets_NamedLimit(t *testing.T) {
 }
 
 func TestOrderTrack_PollDueAndCleanups(t *testing.T) {
+	t.Parallel()
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 	t0 := time.Unix(1_700_000_000, 0)
 	tr.setOrder("https://ca/order/1", "https://ca/finalize/1")
@@ -163,6 +168,7 @@ func (f *fakeTLSALPN) DeleteTLSALPN(_ context.Context, domain, keyAuth string) e
 }
 
 func TestTLSALPNPresent_RegistersCleanup(t *testing.T) {
+	t.Parallel()
 	store := &fakeTLSALPN{}
 	p := &tlsALPNProvider{s: store}
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
@@ -188,6 +194,7 @@ func TestTLSALPNPresent_RegistersCleanup(t *testing.T) {
 }
 
 func TestOrderTrack_UnansweredRequestsCount(t *testing.T) {
+	t.Parallel()
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 	if s := tr.markSent(http.MethodHead, "https://ca/nonce"); s != sentOther || tr.outcome().created {
 		t.Fatal("a non-POST request is neither an order nor a finalize")

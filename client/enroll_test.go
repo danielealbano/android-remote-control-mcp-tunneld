@@ -63,9 +63,6 @@ func (c *countingConn) Close() error {
 	return c.Conn.Close()
 }
 
-// startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /api/v1/enroll/nonce, POST /api/v1/enroll
-// server-TLS, POST /api/v1/issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
-// (Phase-2 mTLS) via ALPN and returns the dial address plus the connection-counting listener.
 type enrollServerOpts struct {
 	issueFail func() *errorResponse
 
@@ -79,6 +76,9 @@ func (o *enrollServerOpts) nonces() []string {
 	return slices.Clone(o.issueNonces)
 }
 
+// startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /api/v1/enroll/nonce, POST /api/v1/enroll
+// server-TLS, POST /api/v1/issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
+// (Phase-2 mTLS) via ALPN and returns the dial address plus the connection-counting listener.
 func startEnrollServer(t *testing.T, ca *testCA, opts ...*enrollServerOpts) (string, *countingListener) {
 	t.Helper()
 	o := &enrollServerOpts{}

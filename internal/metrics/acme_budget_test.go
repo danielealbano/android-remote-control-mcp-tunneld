@@ -50,6 +50,7 @@ func gatherFamilies(t *testing.T, reg *prometheus.Registry) map[string][]string 
 }
 
 func TestACMEBudgetCollector_Emits(t *testing.T) {
+	t.Parallel()
 	m := NewMetrics()
 	levels := []ACMEBudgetLevel{
 		{CA: "letsencrypt", Account: "local", Budget: "orders", Ratio: 0.5},
@@ -90,6 +91,7 @@ func TestACMEBudgetCollector_Emits(t *testing.T) {
 }
 
 func TestACMEBudgetCollector_ErrorKeepsScrape(t *testing.T) {
+	t.Parallel()
 	var fail atomic.Bool
 	logs := &syncBuffer{}
 	c := &acmeBudgetCollector{
@@ -146,6 +148,7 @@ func TestACMEBudgetCollector_ErrorKeepsScrape(t *testing.T) {
 }
 
 func TestRegisterACMEBudgets_RejectsNil(t *testing.T) {
+	t.Parallel()
 	levels := func(context.Context) ([]ACMEBudgetLevel, error) { return nil, nil }
 	if err := NewMetrics().RegisterACMEBudgets(nil, slog.New(slog.DiscardHandler)); err == nil {
 		t.Fatal("a nil levels func must be refused")
