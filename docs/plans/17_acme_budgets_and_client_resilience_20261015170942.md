@@ -3942,30 +3942,30 @@ DoD:
 
 ---
 
-## [ ] US13 — Ground-up verification
+## [x] US13 — Ground-up verification
 
 Everything built in this plan is checked from the ground up before the PR.
 
-- [ ] AC1: Every user story is verified against the code and every deviation is recorded.
-- [ ] AC2: All quality gates and CI are green.
+- [x] AC1: Every user story is verified against the code and every deviation is recorded.
+- [x] AC2: All quality gates and CI are green.
 
-### [ ] T13.1 — double-check EVERYTHING from the ground up
+### [x] T13.1 — double-check EVERYTHING from the ground up
 
-- [ ] A13.1.1 Re-read this plan and verify every US/AC/action against the code; record every deviation in `## Deviations`.
-- [ ] A13.1.2 Rebuild the app fixtures (this runs their JVM unit tests): `make tunnel-app` and `make soak-app`. APK + sha256; the signer digests are unchanged.
-- [ ] A13.1.3 Quality gates via the Makefile, each tee'd to `/tmp/plan17-*.log`:
+- [x] A13.1.1 Re-read this plan and verify every US/AC/action against the code; record every deviation in `## Deviations`.
+- [x] A13.1.2 Rebuild the app fixtures (this runs their JVM unit tests): `make tunnel-app` and `make soak-app`. APK + sha256; the signer digests are unchanged.
+- [x] A13.1.3 Quality gates via the Makefile, each tee'd to `/tmp/plan17-*.log`:
   - `make lint`, `make vet`, `make build`, `make govulncheck`, `make tidy` (no diff);
   - `make test-unit`, `make test-integration`, `make test-e2e`. The Realme is attached, so every device gate runs, including US10.
   - `make test-scripts`, `make compose-config`.
-- [ ] A13.1.4 CI on the pushed branch is green, including `test-staging` on the new GTS staging account (US11). Branch pushes do not trigger `ci.yml`, so the run is dispatched: `gh workflow run ci.yml --ref feat/plan-17-acme-budgets-client-resilience`, then `gh run watch` on that run.
-- [ ] A13.1.5 Grep checks:
+- [x] A13.1.4 CI on the pushed branch is green, including `test-staging` on the new GTS staging account (US11). Branch pushes do not trigger `ci.yml`, so the run is dispatched: `gh workflow run ci.yml --ref feat/plan-17-acme-budgets-client-resilience`, then `gh run watch` on that run.
+- [x] A13.1.5 Grep checks:
   - no new comment in changed Go/Kotlin files. Manually review every added `//` / `/*` line in the diff: it must be a `//go:build` directive of a new tagged test file, or a shortened form of a comment removed in the same hunk (a part made wrong was cut). Anything else is a violation;
   - no `maxPhones`, `basePort`, `io.ktor` or `Server(` in `support/soak-app`;
   - `git grep -nE 'ACMEEABGTS|acme-eab-gts|ACME_EAB_GTS' -- ':!docs/plans'` → only `TestServeCmd_NoGTSEABFlags`'s rejected-flag strings (plan files are permanent records and keep the old names);
   - no `TODO`.
 
 DoD:
-- [ ] All gates green; plan checkmarks complete; deviations recorded.
+- [x] All gates green; plan checkmarks complete; deviations recorded.
 
 ---
 
