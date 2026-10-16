@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/support/soak-client/soak"
 )
@@ -245,6 +247,19 @@ func TestE2E_ReferenceTunnelAppRenewRetrySucceeds(t *testing.T) {
 	name := readyName(t, serial, tunnelAppPkg)
 	before := readAppInfo(t, serial)
 
+	ropts, err := redis.ParseURL(inf.redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(ropts)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	nameBudget := "acme-budget:letsencrypt:name:" + name + "." + e2eTunnelDomain
+	pipe := rdb.Pipeline()
+	pipe.HSet(context.Background(), nameBudget, "t", "0", "at", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	pipe.PExpire(context.Background(), nameBudget, time.Hour)
+	if _, err := pipe.Exec(context.Background()); err != nil {
+		t.Fatalf("empty the name budget: %v", err)
+	}
 	adb(t, serial, "logcat", "-c")
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/info.json")
 	amBroadcast(t, serial, tunnelAppPkg, "refresh")
