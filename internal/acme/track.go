@@ -2,6 +2,7 @@ package acme
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
 
@@ -19,6 +20,8 @@ type orderTrack struct {
 	finalizedAt time.Time
 	lastPoll    time.Time
 	created     bool
+	orderSent   bool
+	finalSent   bool
 	cleanups    []func(context.Context) error
 	limited     chan time.Duration
 	done        chan struct{}
@@ -30,6 +33,14 @@ type orderOutcome struct {
 	finalized bool
 	abandoned bool
 }
+
+type sentRequest int
+
+const (
+	sentOther sentRequest = iota
+	sentOrder
+	sentFinalize
+)
 
 func newOrderTrack(name, domain limit.Bucket) *orderTrack {
 	return &orderTrack{name: name, domain: domain, limited: make(chan time.Duration, 1), done: make(chan struct{})}
@@ -128,8 +139,33 @@ func (t *orderTrack) markPoll(at time.Time) {
 	t.lastPoll = at
 }
 
+func (t *orderTrack) markSent(method, u string) sentRequest {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case t.finalizeURL != "" && u == t.finalizeURL:
+		t.finalSent = true
+		return sentFinalize
+	case !t.created && method == http.MethodPost:
+		t.orderSent = true
+		return sentOrder
+	}
+	return sentOther
+}
+
+func (t *orderTrack) markAnswered(s sentRequest) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch s {
+	case sentOrder:
+		t.orderSent = false
+	case sentFinalize:
+		t.finalSent = false
+	}
+}
+
 func (t *orderTrack) outcome() orderOutcome {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return orderOutcome{created: t.created, finalized: !t.finalizedAt.IsZero(), abandoned: t.abandoned()}
+	return orderOutcome{created: t.created || t.orderSent, finalized: !t.finalizedAt.IsZero() || t.finalSent, abandoned: t.abandoned()}
 }

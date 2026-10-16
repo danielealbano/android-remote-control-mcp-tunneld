@@ -61,17 +61,30 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	if tr == nil {
+		resp, err := t.base.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return t.rateLimited(req.Context(), resp, nil)
+		}
+		return resp, nil
+	}
+	sent := tr.markSent(req.Method, req.URL.String())
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return t.rateLimited(req.Context(), resp, tr)
+		resp, err = t.rateLimited(req.Context(), resp, tr)
+	} else {
+		resp, err = t.observe(req, resp, tr)
 	}
-	if tr == nil {
-		return resp, nil
+	if err == nil {
+		tr.markAnswered(sent)
 	}
-	return t.observe(req, resp, tr)
+	return resp, err
 }
 
 func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {

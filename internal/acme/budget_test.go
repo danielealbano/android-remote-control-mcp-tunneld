@@ -186,3 +186,30 @@ func TestTLSALPNPresent_RegistersCleanup(t *testing.T) {
 		t.Fatalf("a Present without a tracker stores the challenge and registers no cleanup: put %v deleted %v", store.put, store.deleted)
 	}
 }
+
+func TestOrderTrack_UnansweredRequestsCount(t *testing.T) {
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	if s := tr.markSent(http.MethodHead, "https://ca/nonce"); s != sentOther || tr.outcome().created {
+		t.Fatal("a non-POST request is neither an order nor a finalize")
+	}
+	sent := tr.markSent(http.MethodPost, "https://ca/new-order")
+	if sent != sentOrder || !tr.outcome().created {
+		t.Fatal("an unanswered POST before any order may have created one")
+	}
+	tr.markAnswered(sent)
+	if tr.outcome().created {
+		t.Fatal("an answered POST that created no order must not count")
+	}
+	tr.setOrder("https://ca/order/1", "https://ca/finalize/1")
+	if s := tr.markSent(http.MethodPost, "https://ca/authz/1"); s != sentOther {
+		t.Fatal("a POST after the order exists is not a new order")
+	}
+	sent = tr.markSent(http.MethodPost, "https://ca/finalize/1")
+	if sent != sentFinalize || !tr.outcome().finalized {
+		t.Fatal("an unanswered finalize may have issued the certificate")
+	}
+	tr.markAnswered(sent)
+	if tr.outcome().finalized {
+		t.Fatal("an answered finalize without a 2xx must not count as finalized")
+	}
+}

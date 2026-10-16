@@ -607,3 +607,43 @@ func TestBudgetTransport_429EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+func TestBudgetTransport_UnansweredOrderAndFinalizeCount(t *testing.T) {
+	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
+	ca := startCAServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/refused") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		<-r.Context().Done()
+	})
+	tests := []struct {
+		name          string
+		order         bool
+		path          string
+		wantCreated   bool
+		wantFinalized bool
+	}{
+		{name: "new order still in flight", path: "/new-order", wantCreated: true},
+		{name: "new order refused", path: "/new-order/refused"},
+		{name: "finalize still in flight", order: true, path: "/finalize/1", wantCreated: true, wantFinalized: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTransportHarness(t, acct, testBudgets())
+			tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+			if tc.order {
+				tr.setOrder(ca.srv.URL+"/order/1", ca.srv.URL+"/finalize/1")
+			}
+			ctx, cancel := context.WithTimeout(withTrack(context.Background(), tr), 200*time.Millisecond)
+			defer cancel()
+			resp, err := h.do(t, ctx, http.MethodPost, ca.srv.URL+tc.path, nil)
+			if (err == nil) != strings.HasSuffix(tc.path, "/refused") {
+				t.Fatalf("POST %s: resp %v, err %v", tc.path, resp, err)
+			}
+			if out := tr.outcome(); out.created != tc.wantCreated || out.finalized != tc.wantFinalized {
+				t.Fatalf("outcome %+v, want created %v finalized %v", out, tc.wantCreated, tc.wantFinalized)
+			}
+		})
+	}
+}
