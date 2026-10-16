@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -214,6 +215,11 @@ func TestRecorder_FlushWritesOneRowPerPhoneAndLogsEachKindOnce(t *testing.T) {
 	}
 }
 
+func clientGone(r *http.Request, err error) bool {
+	return r.Context().Err() != nil || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET)
+}
+
 func fakePhone(t *testing.T, short bool) (*httptest.Server, func() *http.Transport) {
 	t.Helper()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,13 +233,15 @@ func fakePhone(t *testing.T, short bool) (*httptest.Server, func() *http.Transpo
 			return
 		}
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
-			t.Errorf("read request body: %v", err)
+			if !clientGone(r, err) {
+				t.Errorf("read request body: %v", err)
+			}
 			return
 		}
 		if short {
 			n--
 		}
-		if _, err := w.Write(pattern(n)); err != nil {
+		if _, err := w.Write(pattern(n)); err != nil && !clientGone(r, err) {
 			t.Errorf("write response: %v", err)
 		}
 	}))
