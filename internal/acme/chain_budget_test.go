@@ -585,3 +585,23 @@ func TestNewChainIssuer_RequiresNodes(t *testing.T) {
 		t.Fatalf("NewChainIssuer without a node lister = %v, want errNoNodeLister", err)
 	}
 }
+
+func TestChain_FailureWhileWaitingDoesNotBumpTheStreak(t *testing.T) {
+	var ac *accountChain
+	le := &trackingFake{caID: CALetsEncrypt, err: transient(context.DeadlineExceeded), onObtain: func(ctx context.Context) {
+		if err := ac.lim.SetCACooldown(ctx, "le-1", 3*time.Minute); err != nil {
+			t.Errorf("set the wait-until the attempt was held under: %v", err)
+		}
+	}}
+	ac = newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	_, _, err := ac.ch.Obtain(context.Background(), nil, "p")
+	if ie, ok := errors.AsType[*IssuerError](err); !ok || ie.Class != ClassRateLimited || ie.Retry != 3*time.Minute+time.Second {
+		t.Fatalf("Obtain = %v, want rate-limited with the 3 m wait in effect + 1 s", err)
+	}
+	if ac.mr.Exists("acme-fail:le-1") {
+		t.Fatal("a failure while the account already waits must not add a step to the backoff")
+	}
+	if len(ac.rec.cooldowns) != 0 {
+		t.Fatalf("a failure while the account already waits must set no cooldown, got %v", ac.rec.cooldowns)
+	}
+}

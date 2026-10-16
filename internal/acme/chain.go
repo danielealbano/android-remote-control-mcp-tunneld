@@ -353,6 +353,13 @@ func (c *chainIssuer) handleFailure(ctx context.Context, a *account, err error) 
 		}
 		return c.setCooldown(ctx, a, d), false
 	default: // transient / unknown → exponential backoff
+		cool, cerr := c.cfg.Limiter.CACooldown(ctx, a.id)
+		if cerr != nil {
+			c.cfg.Logger.Warn("acme CA cooldown check failed (backing off as for a new failure)", "ca", a.ca, "err", cerr, "account", a.label)
+		}
+		if cool > 0 {
+			return cool, false
+		}
 		n, berr := c.cfg.Limiter.BumpCAFailures(ctx, a.id, c.cfg.BackoffMax) // best-effort streak counter (see above)
 		if berr != nil {
 			c.cfg.Logger.Warn("acme CA failure-streak bump failed", "ca", a.ca, "err", berr, "account", a.label)
