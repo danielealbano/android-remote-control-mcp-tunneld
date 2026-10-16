@@ -224,8 +224,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "tunneld_phone_connections{node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "sum(tunneld_phone_connections{node=~\"$node\"})",
+     "legendFormat": "phones"
     }
    ],
    "fieldConfig": {
@@ -278,8 +278,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "tunneld_public_connections{node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "sum(tunneld_public_connections{node=~\"$node\"})",
+     "legendFormat": "public"
     }
    ],
    "fieldConfig": {
@@ -332,8 +332,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "tunneld_streams_active{node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "sum(tunneld_streams_active{node=~\"$node\"})",
+     "legendFormat": "streams"
     }
    ],
    "fieldConfig": {
@@ -367,7 +367,7 @@
   {
    "id": 8,
    "type": "timeseries",
-   "title": "Bandwidth",
+   "title": "Bandwidth per node (in + out)",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -386,8 +386,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, direction) (rate(tunneld_bytes_total{node=~\"$node\"}[5m]))",
-     "legendFormat": "{{node}} {{direction}}"
+     "expr": "sum by (node) (rate(tunneld_bytes_total{node=~\"$node\"}[5m]))",
+     "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
@@ -453,8 +453,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, result) (increase(tunneld_enrollments_total{node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}} {{result}}"
+     "expr": "sum by (result) (increase(tunneld_enrollments_total{node=~\"$node\"}[1h]))",
+     "legendFormat": "{{result}}"
     }
    ],
    "fieldConfig": {
@@ -507,8 +507,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, result) (increase(tunneld_attest_verify_total{node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}} {{result}}"
+     "expr": "sum by (result) (increase(tunneld_attest_verify_total{node=~\"$node\"}[1h]))",
+     "legendFormat": "{{result}}"
     }
    ],
    "fieldConfig": {
@@ -561,8 +561,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, ca) (increase(tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}} {{ca}}"
+     "expr": "sum by (ca) (increase(tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"}[1h]))",
+     "legendFormat": "{{ca}}"
     }
    ],
    "fieldConfig": {
@@ -615,8 +615,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, ca) (increase(tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}} {{ca}}"
+     "expr": "sum by (ca) (increase(tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"}[1h]))",
+     "legendFormat": "{{ca}}"
     }
    ],
    "fieldConfig": {
@@ -669,8 +669,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (increase(tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}}"
+     "expr": "sum(increase(tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"}[1h]))",
+     "legendFormat": "failures"
     }
    ],
    "fieldConfig": {
@@ -723,8 +723,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node, ca) (increase(tunneld_acme_cooldown_total{node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}} {{ca}}"
+     "expr": "sum by (ca) (increase(tunneld_acme_cooldown_total{node=~\"$node\"}[1h]))",
+     "legendFormat": "{{ca}}"
     }
    ],
    "fieldConfig": {
@@ -779,7 +779,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 24,
     "x": 0,
     "y": 47
    },
@@ -792,60 +792,6 @@
      },
      "expr": "sum by (reason) (rate(tunneld_rejections_total{node=~\"$node\"}[5m]))",
      "legendFormat": "{{reason}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "short",
-     "custom": {
-      "drawStyle": "line",
-      "lineWidth": 1,
-      "fillOpacity": 10,
-      "stacking": {
-       "mode": "none"
-      },
-      "showPoints": "never"
-     },
-     "min": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   }
-  },
-  {
-   "id": 18,
-   "type": "timeseries",
-   "title": "Rejections per node",
-   "description": "Per second.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 47
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "sum by (node) (rate(tunneld_rejections_total{node=~\"$node\"}[5m]))",
-     "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
@@ -952,8 +898,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (tunneld_mesh_pool_size{node=~\"$node\"})",
-     "legendFormat": "{{node}}"
+     "expr": "sum(tunneld_mesh_pool_size{node=~\"$node\"})",
+     "legendFormat": "connections"
     }
    ],
    "fieldConfig": {
@@ -1019,8 +965,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "go_memstats_heap_inuse_bytes{job=\"tunneld\",node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "sum(go_memstats_heap_inuse_bytes{job=\"tunneld\",node=~\"$node\"})",
+     "legendFormat": "heap in use"
     }
    ],
    "fieldConfig": {
@@ -1073,8 +1019,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "go_goroutines{job=\"tunneld\",node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "sum(go_goroutines{job=\"tunneld\",node=~\"$node\"})",
+     "legendFormat": "goroutines"
     }
    ],
    "fieldConfig": {
@@ -1108,7 +1054,7 @@
   {
    "id": 24,
    "type": "timeseries",
-   "title": "Open file descriptors vs limit",
+   "title": "Open file descriptors used",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -1127,8 +1073,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * process_open_fds{job=\"tunneld\",node=~\"$node\"} / process_max_fds{job=\"tunneld\",node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "100 * sum(process_open_fds{job=\"tunneld\",node=~\"$node\"}) / sum(process_max_fds{job=\"tunneld\",node=~\"$node\"})",
+     "legendFormat": "open"
     }
    ],
    "fieldConfig": {
@@ -1181,8 +1127,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "100 * (tunneld_valkey_pool_connections{node=~\"$node\"} - tunneld_valkey_pool_idle_connections{node=~\"$node\"}) / tunneld_valkey_pool_max_connections{node=~\"$node\"}",
-     "legendFormat": "{{node}}"
+     "expr": "100 * (sum(tunneld_valkey_pool_connections{node=~\"$node\"}) - sum(tunneld_valkey_pool_idle_connections{node=~\"$node\"})) / sum(tunneld_valkey_pool_max_connections{node=~\"$node\"})",
+     "legendFormat": "in use"
     }
    ],
    "fieldConfig": {
@@ -1235,8 +1181,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (rate(tunneld_valkey_pool_waits_total{node=~\"$node\"}[5m]))",
-     "legendFormat": "{{node}} waits"
+     "expr": "sum(rate(tunneld_valkey_pool_waits_total{node=~\"$node\"}[5m]))",
+     "legendFormat": "waits"
     },
     {
      "refId": "B",
@@ -1244,8 +1190,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (rate(tunneld_valkey_pool_timeouts_total{node=~\"$node\"}[5m]))",
-     "legendFormat": "{{node}} timeouts"
+     "expr": "sum(rate(tunneld_valkey_pool_timeouts_total{node=~\"$node\"}[5m]))",
+     "legendFormat": "timeouts"
     }
    ],
    "fieldConfig": {
@@ -1298,8 +1244,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (increase(tunneld_connlog_dropped_total{node=~\"$node\"}[1h]))",
-     "legendFormat": "{{node}}"
+     "expr": "sum(increase(tunneld_connlog_dropped_total{node=~\"$node\"}[1h]))",
+     "legendFormat": "dropped"
     }
    ],
    "fieldConfig": {

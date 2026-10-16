@@ -271,7 +271,7 @@
   {
    "id": 5,
    "type": "timeseries",
-   "title": "RAM",
+   "title": "RAM used",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -290,8 +290,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "node_memory_MemTotal_bytes{node=\"$node\"}",
-     "legendFormat": "total"
+     "expr": "100 * (1 - node_memory_MemAvailable_bytes{node=\"$node\"} / node_memory_MemTotal_bytes{node=\"$node\"})",
+     "legendFormat": "used"
     },
     {
      "refId": "B",
@@ -299,22 +299,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "node_memory_MemTotal_bytes{node=\"$node\"} - node_memory_MemAvailable_bytes{node=\"$node\"}",
-     "legendFormat": "used"
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "node_memory_Committed_AS_bytes{node=\"$node\"}",
+     "expr": "100 * node_memory_Committed_AS_bytes{node=\"$node\"} / node_memory_MemTotal_bytes{node=\"$node\"}",
      "legendFormat": "committed"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "bytes",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -362,13 +353,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "node_memory_SwapTotal_bytes{node=\"$node\"} - node_memory_SwapFree_bytes{node=\"$node\"}",
+     "expr": "100 * (1 - node_memory_SwapFree_bytes{node=\"$node\"} / node_memory_SwapTotal_bytes{node=\"$node\"})",
      "legendFormat": "used"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "bytes",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -893,7 +884,7 @@
   {
    "id": 17,
    "type": "timeseries",
-   "title": "Conntrack entries vs limit",
+   "title": "Conntrack table used",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -912,22 +903,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "node_nf_conntrack_entries{node=\"$node\"}",
-     "legendFormat": "entries"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "node_nf_conntrack_entries_limit{node=\"$node\"}",
-     "legendFormat": "limit"
+     "expr": "100 * node_nf_conntrack_entries{node=\"$node\"} / node_nf_conntrack_entries_limit{node=\"$node\"}",
+     "legendFormat": "used"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,

@@ -773,7 +773,7 @@
   {
    "id": 14,
    "type": "timeseries",
-   "title": "Open file descriptors",
+   "title": "Open file descriptors used",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -792,13 +792,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "process_open_fds{job=\"tunneld\",node=\"$node\"}",
+     "expr": "100 * process_open_fds{job=\"tunneld\",node=\"$node\"} / process_max_fds{job=\"tunneld\",node=\"$node\"}",
      "legendFormat": "open"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -935,7 +935,7 @@
   {
    "id": 17,
    "type": "timeseries",
-   "title": "Valkey pool connections",
+   "title": "Valkey pool used",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -954,7 +954,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "tunneld_valkey_pool_connections{node=\"$node\"}",
+     "expr": "100 * tunneld_valkey_pool_connections{node=\"$node\"} / tunneld_valkey_pool_max_connections{node=\"$node\"}",
      "legendFormat": "open"
     },
     {
@@ -963,22 +963,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "tunneld_valkey_pool_idle_connections{node=\"$node\"}",
-     "legendFormat": "idle"
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "tunneld_valkey_pool_max_connections{node=\"$node\"}",
-     "legendFormat": "max"
+     "expr": "100 * (tunneld_valkey_pool_connections{node=\"$node\"} - tunneld_valkey_pool_idle_connections{node=\"$node\"}) / tunneld_valkey_pool_max_connections{node=\"$node\"}",
+     "legendFormat": "in use"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
