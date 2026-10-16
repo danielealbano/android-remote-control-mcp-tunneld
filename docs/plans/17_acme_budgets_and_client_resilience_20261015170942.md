@@ -738,7 +738,7 @@ Token buckets, per-node in-flight reservations and the per-CA lock, with the sam
 ### [x] T4.1 — wait-until never shortened
 
 - [x] A4.1.1 `internal/limit/acme_cooldown.go` (modify):
-  - **Imports:** `math`.
+  - **Imports:** `fmt`, `math`.
   - **`SetCACooldown`:** `d` is rounded UP to whole seconds. go-redis v9.23.0 has no `PExpireGT`: `ExpireGT` sends whole seconds, while `SetNX` switches to `PX` for a fractional duration. Rounding first makes both commands carry the same value.
 
 ```go
@@ -747,8 +747,10 @@ func (l *Limiter) SetCACooldown(ctx context.Context, ca string, d time.Duration)
 	pipe := l.rdb.Pipeline()
 	pipe.ExpireGT(ctx, cooldownKey(ca), d)
 	pipe.SetNX(ctx, cooldownKey(ca), "1", d)
-	_, err := pipe.Exec(ctx)
-	return err
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set acme wait-until %s: %w", ca, err)
+	}
+	return nil
 }
 ```
 
@@ -2078,7 +2080,7 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 		err = errors.Join(err, cerr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acme budget transport: read the 429 body: %w", err)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	var problem struct {
@@ -2124,7 +2126,7 @@ func (t *budgetTransport) observe(req *http.Request, resp *http.Response, tr *or
 		err = errors.Join(err, cerr)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acme budget transport: read the 201 body: %w", err)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
 	var order struct {
@@ -2420,7 +2422,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			if permanent {
 				return nil, store.CertInfo{}, err // permanent (e.g. bad CSR) — stop
 			}
-			// Fold the cooldown this failure JUST set into the shortest-remaining computation, so the
+			// Fold the cooldown into the shortest-remaining computation, so the
 			// Retry-After reflects when the chain would actually accept a retry (a run where every CA
 			// fails transitively must not report the 1h default when a 1m backoff applies).
 			note(cool)
@@ -3991,3 +3993,5 @@ DoD:
 - **A6.5.1** (`internal/acme/chain.go`, code review). In `run`'s comment before `note(cool)`, "this failure JUST set" goes: the cooldown is now the wait in effect, which this failure may not have set ("Fold the cooldown into the shortest-remaining computation, …").
 - **T10.2** (`e2e/app_rules_test.go`, code review). `TestE2E_ReferenceTunnelAppRenewRetrySucceeds` empties the name's LE budget right before `refresh`, so the server's paced wait (≈ 60 s + 1–10 s) no longer depends on how long the enrollment, the adb calls and the key generation took. The row above is updated.
 - **Out of plan** (`internal/mesh/mesh_test.go`, code review). `TestClient_OpensSecondConnWhenStreamsSaturated` (not changed by this plan) raced its burst of three calls against the client's processing of the peer's `MAX_CONCURRENT_STREAMS=2` SETTINGS: a burst sent before them put all three streams on one connection, and the peer refused the third. The test now completes one call first, released with a single send on its gate, so the settings are applied before the burst. Fixed here because a broken test must be fixed even if unrelated.
+- **A4.1.1, A6.3.2** (`internal/limit/acme_cooldown.go`, `internal/acme/transport.go`, code review). `SetCACooldown` wraps its pipeline error ("set acme wait-until <account>: …", import `fmt`), and the transport wraps a failed read of a 429 or 201 body ("acme budget transport: read the 429 / 201 body: …"), as go.md requires. The code blocks above are updated.
+- **Out of plan** (`support/soak-client/soak/soak_test.go`, code review). The fake phone of the soak-client tests failed its test on a body read or response write error caused by the client going away: the soak run cancels its in-flight operation when it ends, which resets the connection (`broken pipe`). It now ignores errors when the request's context ended, the peer reset or closed the connection, or the body ended early (`clientGone`), and still fails on any other error.
