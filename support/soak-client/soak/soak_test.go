@@ -34,6 +34,7 @@ func TestParseConfig_Variants(t *testing.T) {
 		{name: "zero interval", args: []string{"--names-file", "n.txt", "--domain", "d", "--interval", "0s"}, wantErr: true},
 		{name: "negative request size", args: []string{"--names-file", "n.txt", "--domain", "d", "--req-bytes", "-1"}, wantErr: true},
 		{name: "response above the phone limit", args: []string{"--names-file", "n.txt", "--domain", "d", "--resp-bytes", "40000"}, wantErr: true},
+		{name: "request above the phone limit", args: []string{"--names-file", "n.txt", "--domain", "d", "--req-bytes", "582543"}, wantErr: true},
 		{name: "unknown flag", args: []string{"--names-file", "n.txt", "--domain", "d", "--bogus"}, wantErr: true},
 		{name: "connect without a port", args: []string{"--names-file", "n.txt", "--domain", "d", "--connect", "127.0.0.1"}, wantErr: true},
 		{name: "connect host and port", args: []string{"--names-file", "n.txt", "--domain", "d", "--connect", "127.0.0.1:8443"}},
