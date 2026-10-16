@@ -1930,12 +1930,7 @@ type budgetTransport struct {
 func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tr := trackFrom(req.Context())
 	if err := t.before(req, tr); err != nil {
-		if req.Body != nil {
-			if cerr := req.Body.Close(); cerr != nil {
-				err = errors.Join(err, cerr)
-			}
-		}
-		return nil, err
+		return nil, closeRequestBody(req, err)
 	}
 	if tr == nil {
 		resp, err := t.base.RoundTrip(req)
@@ -1948,6 +1943,10 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 	sent := tr.markSent(req.Method, req.URL.String())
+	if tr.abandoned() {
+		tr.markAnswered(sent)
+		return nil, closeRequestBody(req, errOrderAbandoned)
+	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
@@ -1961,6 +1960,15 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tr.markAnswered(sent)
 	}
 	return resp, err
+}
+
+func closeRequestBody(req *http.Request, err error) error {
+	if req.Body != nil {
+		if cerr := req.Body.Close(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}
+	return err
 }
 
 func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
@@ -3793,7 +3801,7 @@ DoD:
 | Test | Setup | Verifies |
 |---|---|---|
 | `TestE2E_ReferenceTunnelAppReconnectsAfterSilence` | `edge := inf.startReplica(t, attestedOpts("tunnel-app"))`; `p := reverseVia(t, serial, edge)`; `prepareApp(…, tunnelAppPkg, "tunnel-app")`; `enrollTunnelApp`; poll `ready` (150 s) | `p.Freeze()`. Within 150 s, `p.Accepted()` grows (the app dialed a new control connection after 90 s of silence), and `fetchInfo(edge, fqdn, roots)` succeeds again with the same app nonce |
-| `TestE2E_ReferenceTunnelAppRenewRetrySucceeds` | first `adb shell setprop log.tag.TunnelApp W` (the previous value is restored at cleanup); one replica: `attestedOpts("tunnel-app")` + `leNameBudget "1/60s"`, `acmeDirGTS: unreachableACMEDir`, backoff 2 min / 2 min (so GTS's cooldown is longer than the LE name wait); enroll as above | `adb logcat -c`, `rm files/ready files/info.json`, broadcast `refresh`, poll `ready` (150 s). The app's wait is read from `adb logcat -d -v raw -s TunnelApp:W`. There is exactly one `issuance failed; retry 1 in <ms>ms` line and no `retry 2` line, and `<ms>` is in (5000, 70000]: the server's pace (the LE name wait + 1–10 s), not the 5 s default. `info.json` keeps the name and has a changed `tls_cert_sha256`; `tunneld_rejections_total{reason="acme-failed"}` = 1 |
+| `TestE2E_ReferenceTunnelAppRenewRetrySucceeds` | first `adb shell setprop log.tag.TunnelApp W` (the previous value is restored at cleanup); right before `refresh` the test writes the LE name bucket of `<name>.example.test` as empty (`acme-budget:letsencrypt:name:<fqdn>` = `{t: 0, at: now}`) through the e2e Valkey; one replica: `attestedOpts("tunnel-app")` + `leNameBudget "1/60s"`, `acmeDirGTS: unreachableACMEDir`, backoff 2 min / 2 min (so GTS's cooldown is longer than the LE name wait); enroll as above | `adb logcat -c`, `rm files/ready files/info.json`, broadcast `refresh`, poll `ready` (150 s). The app's wait is read from `adb logcat -d -v raw -s TunnelApp:W`. There is exactly one `issuance failed; retry 1 in <ms>ms` line and no `retry 2` line, and `<ms>` is in (5000, 70000]: the server's pace (the LE name wait + 1–10 s), not the 5 s default. `info.json` keeps the name and has a changed `tls_cert_sha256`; `tunneld_rejections_total{reason="acme-failed"}` = 1 |
 | `TestE2E_ReferenceTunnelAppIssueGivesUp` | `edgeB := startFailingIssuer(t, inf, attestedOpts("tunnel-app"))`; `reverseVia(t, serial, edgeB)`; `prepareApp`; `enrollTunnelApp` | `pollAppError(t, serial, tunnelAppPkg, 150*time.Second)` returns (the existing `pollAppFile` fails on `files/error`, so it cannot be used here). On B (`inf.internal[edgeB]`): `tunneld_rejections_total{reason="acme-failed"}` = 4 (the first attempt + 3 retries) and `tunneld_enrollments_total{result="ok"}` = 1 |
 | `TestE2E_SoakAppReconnectsAfterSilence` | `edge := inf.startReplica(t, attestedOpts("soak-app"))`; `p := reverseVia`; `prepareApp(…, soakAppPkg, "soak-app")`; `forgetSoakPhones`; `startSoakPhones(…, 2)` = `"2"` | `p.Freeze()`. Within 150 s `p.Accepted()` grows by at least 2 more control connections. Then a 20 s `soak.Run` (names from `files/names.txt`, `--connect` the edge, as in `TestE2E_SoakApp`) ends with zero errors |
 | `TestE2E_SoakAppIssueGivesUpWithoutReEnrolling` | `edgeB := startFailingIssuer(t, inf, attestedOpts("soak-app"))`; `reverseVia(t, serial, edgeB)`; `prepareApp`; `forgetSoakPhones` | `startSoakPhones(…, 1)` = `"0"`, `files/failures.txt` lists phone 0, and on B `acme-failed` = 4 and `enrollments_total{result="ok"}` = 1. A second `startSoakPhones(…, 1)` = `"0"` again: `acme-failed` = 8 and enrollments still 1, because the saved phone resumed with issuance only |
@@ -3979,3 +3987,7 @@ DoD:
 - **A5.2.1, A12.1.1, A12.1.3** (`internal/config/config.go`, `docs/PROJECT.md`, `README.md`, code review). The `--acme-gts-account` help, PROJECT §2 and the README GTS step name the key type tunneld reads, an EC private key in PEM (SEC1 or PKCS#8). An account registered elsewhere with an RSA key would stop startup as unparseable. The quotes above are updated.
 - **T9.5** (`support/soak-client/soak/soak.go`, code review). The soak client refuses a `--req-bytes` whose largest request (1.8× the average) exceeds the responder's 1 MiB body limit, as it already did for `--resp-bytes` against 64 KiB. PROJECT §7 states both limits. Covered by a new `TestParseConfig_Variants` case; the soak client is otherwise unchanged (AC3).
 - **A6.5.1** (`internal/acme/chain.go`, code review; user decision). `handleFailure` counts one backoff step per episode: an attempt that fails (transient, deadline or a held/refused request) while its account already has a wait-until or backoff in effect neither bumps the failure streak nor sets a cooldown, and reports the wait in effect. Before, every attempt held under one 429 or backoff bumped the streak when its deadline expired, so k concurrent attempts turned a 60 s rate limit into a 2^(k−1)-minute backoff (up to `--acme-backoff-max`). A failure on an account that is not waiting bumps as before. `docs/ARCHITECTURE.md` §3 (and the quote above) says so. Covered by `TestChain_FailureWhileWaitingDoesNotBumpTheStreak`.
+- **A6.3.2** (`internal/acme/transport.go`, code review). `RoundTrip` checks the tracker again right after `markSent`. If the attempt was abandoned meanwhile (its deadline fired during `before`'s Valkey calls), the request is not sent; its mark is cleared, and the body closed by the new `closeRequestBody`, which the `before` error path also uses. The abandon precedes the settlement's `outcome()` read, so a request marked before that read counts and a request found abandoned is never sent. The code block above is updated. Covered by `TestBudgetTransport_AbandonedDuringItsChecksNotSent`.
+- **A6.5.1** (`internal/acme/chain.go`, code review). In `run`'s comment before `note(cool)`, "this failure JUST set" goes: the cooldown is now the wait in effect, which this failure may not have set ("Fold the cooldown into the shortest-remaining computation, …").
+- **T10.2** (`e2e/app_rules_test.go`, code review). `TestE2E_ReferenceTunnelAppRenewRetrySucceeds` empties the name's LE budget right before `refresh`, so the server's paced wait (≈ 60 s + 1–10 s) no longer depends on how long the enrollment, the adb calls and the key generation took. The row above is updated.
+- **Out of plan** (`internal/mesh/mesh_test.go`, code review). `TestClient_OpensSecondConnWhenStreamsSaturated` (not changed by this plan) raced its burst of three calls against the client's processing of the peer's `MAX_CONCURRENT_STREAMS=2` SETTINGS: a burst sent before them put all three streams on one connection, and the peer refused the third. The test now completes one call first, released with a single send on its gate, so the settings are applied before the burst. Fixed here because a broken test must be fixed even if unrelated.
