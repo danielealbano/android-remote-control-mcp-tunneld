@@ -156,9 +156,10 @@ every Valkey token bucket the order draws on (`acme:inflight:{bucket}:{node}`, s
 deadline); only live nodes' reservations count. The LE per-domain bucket is keyed on the name's registered domain
 (eTLD+1), and an LE renewal of an LE certificate (phone or reserved host) draws only the per-name bucket.
 Success spends the reservation; a created order always spends
-its order bucket; an order finalized and then abandoned counts as issued; other failures release. Every ACME
+its order bucket; an order finalized and then abandoned counts as issued; a newOrder or finalize request whose
+answer never arrived counts as accepted; other failures release. Every ACME
 request goes through a per-account HTTP transport around lego that refuses or holds requests while the account
-waits out a 429 (a cluster-wide wait-until, never shortened) or lacks request budget, delays the first
+waits out a 429 (a cluster-wide wait-until, never shortened) or its backoff, or lacks request budget, delays the first
 certificate poll after finalize to the CA's median wait + 2 s and spaces the rest 2 s apart, and on a 429
 resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
 abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt

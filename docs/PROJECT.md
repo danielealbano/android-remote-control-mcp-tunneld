@@ -63,8 +63,8 @@ of the raw TCP connection.
 - **Server-run ACME chain**: Let's Encrypt → Google Trust Services → ZeroSSL, with automatic spillover,
   a per-CA validation method (DNS-01 / HTTP-01 / TLS-ALPN-01; defaults LE + GTS TLS-ALPN-01, ZeroSSL HTTP-01 — answered by tunneld's own listeners from Valkey, so any replica answers), and short-lived certs renewed on a uniform ~4.7-day cadence.
   Each CA is optional: Let's Encrypt is used unless `--acme-dir-le` is empty, GTS only for the EXISTING accounts
-  listed in `--acme-gts-account` (one per Public CA project; tunneld looks them up by key and never creates
-  them), ZeroSSL only when its EAB pair is set. Issuance is planned against per-CA budgets kept in Valkey (token
+  listed in `--acme-gts-account` (one per Public CA project, each with its EC private key in PEM at
+  `<acme-account-dir>/accounts/<id>.key`; tunneld looks them up by key and never creates them), ZeroSSL only when its EAB pair is set. Issuance is planned against per-CA budgets kept in Valkey (token
   buckets per registered domain, account, name and request rate), so a CA is asked only when it has budget; a
   429 makes that account wait out its Retry-After cluster-wide. The phone holds the TLS private key;
   only CSRs leave it. Every successful issuance — phone cert, renewal or reserved-host cert — logs
@@ -254,7 +254,9 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   environment's phones and keys; uninstalling the app discards every environment. Then run
   `bin/soak-client --names-file names.txt --domain <tunnel-domain>`: per phone, one operation every
   `--interval` (1 s) with a request averaging `--req-bytes` (1 KiB) and a response averaging `--resp-bytes`
-  (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte, on a reused connection dropped every
+  (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte (the phone accepts request bodies up to
+  1 MiB and answers up to 64 KiB, so the client refuses averages whose 1.8× exceeds them), on a reused connection
+  dropped every
   `--reconnect` (5 min), for `--duration` (24 h), the phones' starts (and so their reconnects) spread evenly over
   `--ramp` so a single client IP stays under `--limit-conn-rate`; it writes one CSV row per phone per minute (`--out`) and a
   summary at the end. `adb shell am broadcast -a com.example.soakapp.stop …` stops the app. Each enrollment

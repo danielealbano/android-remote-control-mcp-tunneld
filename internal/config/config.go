@@ -99,7 +99,7 @@ type ServeCmd struct {
 	ACMEAccountDir     string `name:"acme-account-dir" help:"Directory holding the ACME account keys (<dir>/accounts/<id>.key: Let's Encrypt and ZeroSSL keys are created per node, GTS keys must already exist) + reserved-host self-certs. Required for serve."`
 	ACMEDNSProvider    string `name:"acme-dns-provider" help:"lego DNS-01 provider id (e.g. cloudflare, route53). Required when a CA uses dns-01."`
 
-	ACMEGTSAccounts []string `name:"acme-gts-account" help:"GTS ACME account ids, one per Public CA project (empty = no GTS); each EXISTING account's key lives at <acme-account-dir>/accounts/<id>.key (tunneld never creates GTS accounts). Repeatable."`
+	ACMEGTSAccounts []string `name:"acme-gts-account" help:"GTS ACME account ids, one per Public CA project (empty = no GTS); each EXISTING account's EC private key (PEM, SEC1 or PKCS#8) lives at <acme-account-dir>/accounts/<id>.key (tunneld never creates GTS accounts). Repeatable."`
 
 	ACMEBudgetLEDomain        string `name:"acme-budget-le-domain" default:"50/168h" help:"Let's Encrypt new certificates per registered domain, <count>/<period>[:<burst>]."`
 	ACMEBudgetLEOrders        string `name:"acme-budget-le-orders" default:"300/3h" help:"Let's Encrypt new orders per account, <count>/<period>[:<burst>]."`

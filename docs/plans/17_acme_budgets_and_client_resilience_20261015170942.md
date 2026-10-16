@@ -1185,7 +1185,7 @@ DoD:
   - **Added** after `ACMEDNSProvider`:
 
 ```go
-	ACMEGTSAccounts []string `name:"acme-gts-account" help:"GTS ACME account ids, one per Public CA project (empty = no GTS); each EXISTING account's key lives at <acme-account-dir>/accounts/<id>.key (tunneld never creates GTS accounts). Repeatable."`
+	ACMEGTSAccounts []string `name:"acme-gts-account" help:"GTS ACME account ids, one per Public CA project (empty = no GTS); each EXISTING account's EC private key (PEM, SEC1 or PKCS#8) lives at <acme-account-dir>/accounts/<id>.key (tunneld never creates GTS accounts). Repeatable."`
 
 	ACMEBudgetLEDomain        string `name:"acme-budget-le-domain" default:"50/168h" help:"Let's Encrypt new certificates per registered domain, <count>/<period>[:<burst>]."`
 	ACMEBudgetLEOrders        string `name:"acme-budget-le-orders" default:"300/3h" help:"Let's Encrypt new orders per account, <count>/<period>[:<burst>]."`
@@ -1487,6 +1487,7 @@ package acme
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
 
@@ -1504,6 +1505,8 @@ type orderTrack struct {
 	finalizedAt time.Time
 	lastPoll    time.Time
 	created     bool
+	orderSent   bool
+	finalSent   bool
 	cleanups    []func(context.Context) error
 	limited     chan time.Duration
 	done        chan struct{}
@@ -1515,6 +1518,14 @@ type orderOutcome struct {
 	finalized bool
 	abandoned bool
 }
+
+type sentRequest int
+
+const (
+	sentOther sentRequest = iota
+	sentOrder
+	sentFinalize
+)
 
 func newOrderTrack(name, domain limit.Bucket) *orderTrack {
 	return &orderTrack{name: name, domain: domain, limited: make(chan time.Duration, 1), done: make(chan struct{})}
@@ -1613,10 +1624,35 @@ func (t *orderTrack) markPoll(at time.Time) {
 	t.lastPoll = at
 }
 
+func (t *orderTrack) markSent(method, u string) sentRequest {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case t.finalizeURL != "" && u == t.finalizeURL:
+		t.finalSent = true
+		return sentFinalize
+	case !t.created && method == http.MethodPost:
+		t.orderSent = true
+		return sentOrder
+	}
+	return sentOther
+}
+
+func (t *orderTrack) markAnswered(s sentRequest) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch s {
+	case sentOrder:
+		t.orderSent = false
+	case sentFinalize:
+		t.finalSent = false
+	}
+}
+
 func (t *orderTrack) outcome() orderOutcome {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return orderOutcome{created: t.created, finalized: !t.finalizedAt.IsZero(), abandoned: t.abandoned()}
+	return orderOutcome{created: t.created || t.orderSent, finalized: !t.finalizedAt.IsZero() || t.finalSent, abandoned: t.abandoned()}
 }
 ```
 
@@ -1901,17 +1937,30 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 		return nil, err
 	}
+	if tr == nil {
+		resp, err := t.base.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return t.rateLimited(req.Context(), resp, nil)
+		}
+		return resp, nil
+	}
+	sent := tr.markSent(req.Method, req.URL.String())
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return t.rateLimited(req.Context(), resp, tr)
+		resp, err = t.rateLimited(req.Context(), resp, tr)
+	} else {
+		resp, err = t.observe(req, resp, tr)
 	}
-	if tr == nil {
-		return resp, nil
+	if err == nil {
+		tr.markAnswered(sent)
 	}
-	return t.observe(req, resp, tr)
+	return resp, err
 }
 
 func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
@@ -3786,8 +3835,8 @@ Canonical docs and the project rules describe what was built.
   - **§2:** the "Server-run ACME chain" bullet gains, after its first sentence:
 
 > Each CA is optional: Let's Encrypt is used unless `--acme-dir-le` is empty, GTS only for the EXISTING accounts
-> listed in `--acme-gts-account` (one per Public CA project; tunneld looks them up by key and never creates
-> them), ZeroSSL only when its EAB pair is set. Issuance is planned against per-CA budgets kept in Valkey (token
+> listed in `--acme-gts-account` (one per Public CA project, each with its EC private key in PEM at
+> `<acme-account-dir>/accounts/<id>.key`; tunneld looks them up by key and never creates them), ZeroSSL only when its EAB pair is set. Issuance is planned against per-CA budgets kept in Valkey (token
 > buckets per registered domain, account, name and request rate), so a CA is asked only when it has budget; a
 > 429 makes that account wait out its Retry-After cluster-wide.
 
@@ -3836,9 +3885,10 @@ Canonical docs and the project rules describe what was built.
 > deadline); only live nodes' reservations count. The LE per-domain bucket is keyed on the name's registered domain
 > (eTLD+1), and an LE renewal of an LE certificate (phone or reserved host) draws only the per-name bucket.
 > Success spends the reservation; a created order always spends
-> its order bucket; an order finalized and then abandoned counts as issued; other failures release. Every ACME
+> its order bucket; an order finalized and then abandoned counts as issued; a newOrder or finalize request whose
+> answer never arrived counts as accepted; other failures release. Every ACME
 > request goes through a per-account HTTP transport around lego that refuses or holds requests while the account
-> waits out a 429 (a cluster-wide wait-until, never shortened) or lacks request budget, delays the first
+> waits out a 429 (a cluster-wide wait-until, never shortened) or its backoff, or lacks request budget, delays the first
 > certificate poll after finalize to the CA's median wait + 2 s and spaces the rest 2 s apart, and on a 429
 > resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
 > abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
@@ -3860,7 +3910,8 @@ Canonical docs and the project rules describe what was built.
   - **ACME quickstart:** after the challenge-method step, add:
 
 > GTS (optional): create one Google Cloud Public CA project per GTS account, register each account once with that
-> project's single-use EAB (outside tunneld), put its key at `<acme-account-dir>/accounts/<id>.key` and list the
+> project's single-use EAB (outside tunneld), put its EC private key (PEM, SEC1 or PKCS#8) at
+> `<acme-account-dir>/accounts/<id>.key` and list the
 > ids in `TUNNELD_ACME_GTS_ACCOUNT`; tunneld only looks the accounts up and never creates them. ZeroSSL is used
 > only when both `TUNNELD_ACME_EAB_ZEROSSL_*` values are set; Let's Encrypt unless `TUNNELD_ACME_DIR_LE` is empty.
 
@@ -3923,3 +3974,6 @@ DoD:
 - **Code review** (`internal/limit/issuance.go`, `internal/enroll/enroll.go`, `docs/PROTOCOL.md` §3; user decision). `IssuanceBegin` returns `ErrIssuanceInFlight` when another issuance for the name holds the lock, and the service answers that case with `issuance_cap`, retryable, `retry_after_seconds` = 300 instead of 7 days. A reached weekly cap keeps 7 days. Under the retry rule the phone waits the server's `retry_after`, so an order left in flight by a dead connection would otherwise have made it wait 7 days. The `IssuanceBegin` doc loses "another order in flight OR". `TestLimiter_IssuanceLock_CancelledCallerIsSilent` pre-sets the lock only for its refresh case, so its over-cap case reaches the over-cap release again. `TestIssueRecordsIssuanceAndCap` and `TestIssue_ConcurrentCallsRespectCap` assert the two `retry_after` values.
 - **A6.3.2** (`internal/acme/transport.go`, code review). `before` re-reads the account's wait-until after every hold of a tracked request: the wait-until hold itself, the poll-spacing hold and each request-budget hold. A wait-until set or extended during a hold (another request's 429, another attempt's backoff) therefore holds the request too, as AC1 requires. `markPoll` records the poll when the request is released, after every hold. The code block above is updated. `TestBudgetTransport_HoldsUnderWaitUntil` uses a scripted wait-until (300 ms, as T6.8 states, now that the re-read would loop on miniredis' non-ticking TTL). `TestBudgetTransport_RechecksWaitUntilAfterHolds` covers the three holds. `TestBudgetTransport_PollSchedule` measures from the transport's own `finalizedAt` / `lastPoll`, with a 1 s first delay.
 - **A1.3.3** (`docs/PROTOCOL.md` §3, code review). The quoted bullet above gains the in-flight `issuance_cap` sentence recorded in the issuance-in-flight deviation.
+- **A6.1.1, A6.3.2** (`internal/acme/track.go`, `transport.go`, code review). The tracker marks a newOrder request (a tracked POST before any order exists, the first request of lego's `ObtainForCSR`) and a finalize request as sent, and `RoundTrip` clears the mark once their response is handled without error. `outcome` counts a request still marked, either unanswered when the attempt was abandoned (lego's request runs on, but nobody reads the tracker afterwards) or lost in transit, as a created order or a finalized one. Settlement then spends instead of releasing a reservation the CA may already have counted; an over-count denies and never breaches. The code blocks above are updated. Covered by `TestOrderTrack_UnansweredRequestsCount` and `TestBudgetTransport_UnansweredOrderAndFinalizeCount`. `docs/ARCHITECTURE.md` §3 (and the quote above) says so, and it also lists the backoff among the states in which the transport refuses or holds requests.
+- **A5.2.1, A12.1.1, A12.1.3** (`internal/config/config.go`, `docs/PROJECT.md`, `README.md`, code review). The `--acme-gts-account` help, PROJECT §2 and the README GTS step name the key type tunneld reads, an EC private key in PEM (SEC1 or PKCS#8). An account registered elsewhere with an RSA key would stop startup as unparseable. The quotes above are updated.
+- **T9.5** (`support/soak-client/soak/soak.go`, code review). The soak client refuses a `--req-bytes` whose largest request (1.8× the average) exceeds the responder's 1 MiB body limit, as it already did for `--resp-bytes` against 64 KiB. PROJECT §7 states both limits. Covered by a new `TestParseConfig_Variants` case; the soak client is otherwise unchanged (AC3).

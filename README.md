@@ -64,7 +64,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    `tls-alpn-01` (LE, GTS) and `http-01` (ZeroSSL).
 
    GTS (optional): create one Google Cloud Public CA project per GTS account, register each account once with that
-   project's single-use EAB (outside tunneld), put its key at `<acme-account-dir>/accounts/<id>.key` and list the
+   project's single-use EAB (outside tunneld), put its EC private key (PEM, SEC1 or PKCS#8) at
+   `<acme-account-dir>/accounts/<id>.key` and list the
    ids in `TUNNELD_ACME_GTS_ACCOUNT`; tunneld only looks the accounts up and never creates them. ZeroSSL is used
    only when both `TUNNELD_ACME_EAB_ZEROSSL_*` values are set; Let's Encrypt unless `TUNNELD_ACME_DIR_LE` is empty.
 5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
