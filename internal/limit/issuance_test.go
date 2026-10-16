@@ -23,10 +23,8 @@ func TestLimiter_Issuance_SerializesOnePerTunnel(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("first begin: ok=%v err=%v", ok, err)
 	}
-	if ok, _, err := l.IssuanceBegin(ctx, name, 3); err != nil {
-		t.Fatal(err)
-	} else if ok {
-		t.Fatal("a second begin while one order holds the lock must be refused")
+	if ok, _, err := l.IssuanceBegin(ctx, name, 3); !errors.Is(err, ErrIssuanceInFlight) || ok {
+		t.Fatalf("a second begin while one order holds the lock must be refused as in flight: ok=%v err=%v", ok, err)
 	}
 	if err := l.IssuanceEnd(ctx, name, orderID); err != nil {
 		t.Fatal(err)
@@ -51,7 +49,9 @@ func TestLimiter_Issuance_ConcurrentGate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ok, _, err := l.IssuanceBegin(ctx, name, 3)
-			errs <- err
+			if !errors.Is(err, ErrIssuanceInFlight) {
+				errs <- err
+			}
 			if err == nil && ok {
 				wins.Add(1)
 			}
@@ -203,6 +203,7 @@ func TestLimiter_IssuanceLock_CancelledCallerIsSilent(t *testing.T) {
 	tests := []struct {
 		name string
 		fail string
+		lock bool
 		run  func(ctx context.Context, l *Limiter)
 	}{
 		{name: "over-cap release", fail: "del", run: func(ctx context.Context, l *Limiter) {
@@ -210,7 +211,7 @@ func TestLimiter_IssuanceLock_CancelledCallerIsSilent(t *testing.T) {
 				t.Errorf("IssuanceBegin over the cap = (%v, %v), want a plain refusal", ok, err)
 			}
 		}},
-		{name: "ttl refresh", fail: "pexpire", run: func(ctx context.Context, l *Limiter) {
+		{name: "ttl refresh", fail: "pexpire", lock: true, run: func(ctx context.Context, l *Limiter) {
 			l.refreshIssLock(ctx, "t", "order")
 		}},
 	}
@@ -220,8 +221,10 @@ func TestLimiter_IssuanceLock_CancelledCallerIsSilent(t *testing.T) {
 			if err := mr.Set(issuanceKey("t"), "3"); err != nil {
 				t.Fatal(err)
 			}
-			if err := mr.Set(issLockKey("t"), "order"); err != nil {
-				t.Fatal(err)
+			if tc.lock {
+				if err := mr.Set(issLockKey("t"), "order"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

@@ -166,7 +166,10 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   rate-limited) and repeats `POST /api/v1/issue` with a fresh attestation over it (fresh keys/CSRs, as always);
   a failed nonce fetch is a failed retry like any other. After the third failed retry the phone gives up. When
   every CA is out of issuance budget the server answers `503` `acme_rate_limited` with `retry_after_seconds` =
-  the earliest free budget slot plus a random 1–10 s. A phone that is already BOUND on the control stream is
+  the earliest free budget slot plus a random 1–10 s. While another issuance for the same name is still in
+  progress (for example a request on a connection the phone has given up on), the answer is `503` `issuance_cap`
+  with `retry_after_seconds` = 300; the same reason with 604800 (7 days) means the weekly issuance cap
+  (`--issue-per-week`) is reached. A phone that is already BOUND on the control stream is
   also re-nudged: the renewal watcher sees a cert-less or renewal-due tunnel and sends a fresh
   `RENEW_NUDGE{nonce}` on its next scan.
 

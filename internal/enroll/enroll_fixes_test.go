@@ -346,8 +346,8 @@ func TestIssueRecordsIssuanceAndCap(t *testing.T) {
 	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
 		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
 	})
-	if ee == nil || ee.Reason != "issuance_cap" || !ee.Retryable {
-		t.Fatalf("an at-cap name must get a retryable issuance_cap, got %v", ee)
+	if ee == nil || ee.Reason != "issuance_cap" || !ee.Retryable || ee.RetryAfter != 7*24*time.Hour {
+		t.Fatalf("an at-cap name must get a retryable issuance_cap with a 7-day retry_after, got %+v", ee)
 	}
 	if iss.obtains+iss.renews != callsAfterFirst {
 		t.Fatal("the cap must refuse BEFORE any issuer call")
@@ -579,8 +579,8 @@ func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
 	_, e2 := svc.Issue(context.Background(), name, "1.2.3.4", Request{
 		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR,
 	})
-	if e2 == nil || e2.Reason != "issuance_cap" {
-		t.Fatalf("a concurrent second issue must hit issuance_cap, got %v", e2)
+	if e2 == nil || e2.Reason != "issuance_cap" || !e2.Retryable || e2.RetryAfter != 300*time.Second {
+		t.Fatalf("a concurrent second issue must hit issuance_cap with a 300 s retry_after, got %+v", e2)
 	}
 
 	close(iss.proceed) // let the first Issue finish
