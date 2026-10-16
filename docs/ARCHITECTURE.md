@@ -164,7 +164,8 @@ certificate poll after finalize to the CA's median wait + 2 s and spaces the res
 resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
 abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
 other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
-tunneld refused or held) puts the account on the exponential backoff. GTS accounts are tried
+tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
+waits (a wait-until or a backoff in effect) adds no step to it, so concurrent attempts count once. GTS accounts are tried
 by remaining order budget. When no account can take the order, the issue answer is `acme_rate_limited` with
 `retry_after_seconds` = the earliest free slot + a random 1–10 s. Decision record:
 [Plan 17](plans/17_acme_budgets_and_client_resilience_20261015170942.md).
