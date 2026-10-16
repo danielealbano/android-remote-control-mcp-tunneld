@@ -72,9 +72,45 @@ func newChainOn(t *testing.T, mr *miniredis.Miniredis, cfg ChainConfig, cas ...c
 	}
 	cfg.RenewMargin = 48 * time.Hour
 	cfg.ShortlivedLifetime = 160 * time.Hour
-	ch := NewChainIssuer(cfg, cas...)
+	if cfg.NodeID == "" {
+		cfg.NodeID = "node-test"
+	}
+	if cfg.Nodes == nil {
+		cfg.Nodes = fakeNodes{ids: []string{"node-test"}}
+	}
+	if cfg.Budgets == (Budgets{}) {
+		cfg.Budgets = testBudgets()
+	}
+	if cfg.Rand == nil {
+		cfg.Rand = func(int) int { return 0 }
+	}
+	accounts := make([]*account, 0, len(cas))
+	for _, ca := range cas {
+		accounts = append(accounts, testAccount(ca))
+	}
+	ch, err := NewChainIssuer(cfg, accounts...)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ch.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	return ch, lim
+}
+
+type fakeNodes struct {
+	ids []string
+	err error
+}
+
+func (f fakeNodes) LiveNodeIDs(context.Context) ([]string, error) { return f.ids, f.err }
+
+func testBudgets() Budgets {
+	big := limit.Rate{Count: 1_000_000, Period: time.Minute, Burst: 1_000_000}
+	return Budgets{Domain: "example.test", LEDomain: big, LEOrders: big, LEName: big,
+		GTSOrders: big, GTSRequests: big, GTSCertPolls: big, ZeroSSLOrders: big, ZeroSSLRequests: big}
+}
+
+func testAccount(ca caIssuer) *account {
+	return &account{ca: ca.id(), id: ca.id(), label: "local", timeout: time.Minute, issuer: ca}
 }
 
 func TestSpilloverToZeroSSL(t *testing.T) {
@@ -145,8 +181,8 @@ func TestAllCoolingReturnsRetryable(t *testing.T) {
 	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
 		t.Fatalf("all cooling should be retryable rate-limited, got %v", err)
 	}
-	if ie.Retry != 30*time.Minute {
-		t.Errorf("retry-after should be the shortest cooldown (30m), got %s", ie.Retry)
+	if ie.Retry != 30*time.Minute+time.Second {
+		t.Errorf("retry-after should be the shortest cooldown (30m) plus the 1 s jitter, got %s", ie.Retry)
 	}
 }
 
@@ -154,7 +190,7 @@ func TestRenewTriesLEFirst(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
 	ch, _ := newChain(t, ChainConfig{}, le, gts)
-	// A name currently on GTS renews: LE is tried FIRST (opportunistic migration), no budget involved.
+	// A name currently on GTS renews: LE is tried FIRST (opportunistic migration).
 	_, info, err := ch.Renew(context.Background(), nil, "t", store.CertInfo{CA: CAGTS})
 	if err != nil || info.CA != CALetsEncrypt {
 		t.Fatalf("renewal should try LE first and migrate, got %+v %v", info, err)
@@ -243,7 +279,7 @@ func TestBackoffDoubles(t *testing.T) {
 }
 
 // TestObtainSelfSelfCert covers the plan's "ObtainSelf self-cert" row: a server-side key + cert for a
-// reserved host, subject to the per-CA cooldowns, and never touching per-tunnel issuance state.
+// reserved host, subject to the cooldowns, and never touching per-tunnel issuance state.
 func TestObtainSelfSelfCert(t *testing.T) {
 	le := &fakeCA{caID: CALetsEncrypt}
 	gts := &fakeCA{caID: CAGTS}
@@ -252,7 +288,7 @@ func TestObtainSelfSelfCert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	certPEM, keyPEM, info, err := ch.ObtainSelf(context.Background(), "enroll.example.test")
+	certPEM, keyPEM, info, err := ch.ObtainSelf(context.Background(), "enroll.example.test", store.CertInfo{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,8 +319,8 @@ func TestAllFailInRunRetryAfterUsesBackoff(t *testing.T) {
 	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
 		t.Fatalf("all-fail should be retryable rate-limited, got %v", err)
 	}
-	if ie.Retry != time.Minute {
-		t.Fatalf("Retry-After must be the in-run backoff (1m), got %s", ie.Retry)
+	if ie.Retry != time.Minute+time.Second {
+		t.Fatalf("Retry-After must be the in-run backoff (1m) plus the 1 s jitter, got %s", ie.Retry)
 	}
 }
 
@@ -299,8 +335,8 @@ func TestMixedPreCoolingAndInRunFailurePicksShortest(t *testing.T) {
 	}
 	_, _, err := ch.Obtain(context.Background(), nil, "t")
 	var ie *IssuerError
-	if !asIssuerError(err, &ie) || ie.Retry != time.Minute {
-		t.Fatalf("Retry-After must be the SHORTEST cooldown (in-run 1m beats pre-cooling 30m), got %v", err)
+	if !asIssuerError(err, &ie) || ie.Retry != time.Minute+time.Second {
+		t.Fatalf("Retry-After must be the SHORTEST cooldown (in-run 1m beats pre-cooling 30m) plus the 1 s jitter, got %v", err)
 	}
 }
 
@@ -316,8 +352,8 @@ func TestShortRetryAfterHonoredAsIs(t *testing.T) {
 		t.Fatalf("all rate-limited should be retryable, got %v", err)
 	}
 	// The phone is told the SHORTEST honored Retry-After (~30s), not the 1h default.
-	if ie.Retry != 30*time.Second {
-		t.Fatalf("Retry-After must be the shortest honored CA hint (30s), got %s", ie.Retry)
+	if ie.Retry != 30*time.Second+time.Second {
+		t.Fatalf("Retry-After must be the shortest honored CA hint (30s) plus the 1 s jitter, got %s", ie.Retry)
 	}
 	if d, err := lim.CACooldown(context.Background(), CALetsEncrypt); err != nil {
 		t.Fatal(err)
@@ -327,9 +363,10 @@ func TestShortRetryAfterHonoredAsIs(t *testing.T) {
 }
 
 type recordingChainRecorder struct {
-	mu        sync.Mutex
-	issues    []string
-	cooldowns []string
+	mu          sync.Mutex
+	issues      []string
+	cooldowns   []string
+	rateLimited []string
 }
 
 func (r *recordingChainRecorder) ACMECooldown(ca string) {
@@ -345,6 +382,12 @@ func (r *recordingChainRecorder) ACMEIssue(ca, result string) {
 }
 
 func (r *recordingChainRecorder) ACMERenew(string, string) {}
+
+func (r *recordingChainRecorder) ACMERateLimited(ca string) {
+	r.mu.Lock()
+	r.rateLimited = append(r.rateLimited, ca)
+	r.mu.Unlock()
+}
 
 func assertNoCAFailureState(t *testing.T, lim *limit.Limiter, ca string) {
 	t.Helper()
@@ -481,11 +524,14 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 	}{
 		{name: "failed order", err: transient(errors.New("down")), want: []string{
 			"acme CA cooldown check failed", "acme CA failure-streak bump failed", "acme CA cooldown write failed",
+			"acme budget reservation failed (trying the account)", "acme budget release failed (the reservation expires at its deadline)",
 		}},
 		{name: "rate-limited order", err: rateLimited(time.Minute, errors.New("slow down")), want: []string{
 			"acme CA cooldown check failed", "acme CA cooldown write failed",
+			"acme budget reservation failed (trying the account)", "acme budget release failed (the reservation expires at its deadline)",
 		}},
-		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed"}},
+		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed",
+			"acme budget reservation failed (trying the account)", "acme budget spend failed (the reservation expires at its deadline)"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -537,7 +583,7 @@ func TestChain_LogsTheIssuingCA(t *testing.T) {
 			return err
 		}, wantCA: CALetsEncrypt, wantNm: "phone"},
 		{name: "reserved host", leErr: transient(errors.New("le down")), gtsErr: transient(errors.New("gts down")), issue: func(ctx context.Context, ch *chainIssuer) error {
-			_, _, _, err := ch.ObtainSelf(ctx, "enroll.example.test")
+			_, _, _, err := ch.ObtainSelf(ctx, "enroll.example.test", store.CertInfo{})
 			return err
 		}, wantCA: CAZeroSSL, wantNm: "enroll.example.test"},
 	}

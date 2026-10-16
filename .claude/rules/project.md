@@ -12,10 +12,12 @@ durable state (name registry, connection logs, rejected-enroll evidence). Identi
 **two-phase attested enrollment** (Android hardware key attestation → identity mTLS cert → server-run
 ACME public cert). Abuse is contained by layered caps and a hot-reloadable ban/geo engine.
 
-> **STATUS: Plan 3 (E2E) implemented; Plan 16 (entry-node dial-back, wire v2) implemented.** Plan 3
+> **STATUS: Plan 3 (E2E) implemented; Plan 16 (entry-node dial-back, wire v2) implemented; Plan 17 (ACME
+> issuance budgets, phone liveness and issuance retries) implemented.** Plan 3
 > (`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`) replaces the Plan-1 HTTP/WebSocket-proxy
 > architecture end to end; Plan 16 (`docs/plans/16_entry_node_dial_back_20261014192454.md`) replaces its
-> dial-back/data path. Releases are cut from `v*` tags via goreleaser; multi-arch images are published to
+> dial-back/data path; Plan 17 (`docs/plans/17_acme_budgets_and_client_resilience_20261015170942.md`) adds the
+> ACME issuance budgets and the phone liveness and issuance-retry rules. Releases are cut from `v*` tags via goreleaser; multi-arch images are published to
 > `ghcr.io/danielealbano/tunneld`.
 
 ## MANDATORY: Read These First
@@ -55,7 +57,7 @@ does NOT duplicate them.
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/issue`) + replica↔replica mesh control RPCs; binary control frames per `docs/PROTOCOL.md`; the data path is an HTTP/1.1-upgraded dial-back connection (`/api/v1/data`) carrying an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
 | Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
-| ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, per-CA cooldown/backoff retry-after, self-heal. |
+| ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, optional CAs, per-account Valkey issuance budgets + wait-until/backoff, several GTS accounts looked up by key, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
 | Metrics | `github.com/prometheus/client_golang` | Custom registry on the INTERNAL listener only; NO per-tunnel labels. |
@@ -125,8 +127,8 @@ MUST NOT be relaxed without explicit user direction.
 - **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry + the `nodes` id
   set, rate-limit windows, the `conc:{name}` stream-cap sorted set, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
   `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
-  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, a
-  pipelined `EXPIRE NX` right after the `INCR`, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets). `EXPIRE NX` self-heals a skipped TTL on the next
+  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private, the ACME issuance budgets (`acme-budget:` via `HSET` + pipelined `PEXPIRE`, TTL = time to refill + 1 h; `acme:inflight:` via `ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT`, TTL = deadline + 1 min, never shortened; `lock:acme-budget:` a `SETNX` lock, 2 s TTL)) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, a
+  pipelined `EXPIRE NX` right after the `INCR`, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); the per-account ACME wait-until uses a pipelined `EXPIRE GT` + `SET NX EX` so it is never shortened. `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
   counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
   self-healing pipeline, or a `SETNX` lock covers every case.
@@ -236,12 +238,12 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `config` | `internal/config`: kong flag surface, `Validate()`, size/bitrate parsing |
 | `logging` | `internal/logging`: slog fan-out, composite `--log` sinks |
 | `ban` | `internal/ban`: parser, LPM engine, DB-IP expansion, watcher |
-| `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME cooldown |
+| `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME issuance budgets + wait-until |
 | `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
 | `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
-| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-CA cooldown/backoff retry-after) |
+| `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, several GTS accounts looked up by key) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
 | `wire` | `internal/wire`: control-frame codec + dial-back constants |
 | `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back upgrade, renewal, eviction) |
@@ -288,7 +290,7 @@ The `Makefile` is the authoritative command surface:
   `deploy/.env.example`)
 - `make mermaid-check` — validate all Mermaid blocks in `README.md` + `docs/` via `mmdc`
 - `make tidy` — `go mod tidy`
-- `make soak-app` / `make soak-client` — build the soak-test app (into `fixtures/soak-app/`) and its load client (`docs/PROJECT.md` §7)
+- `make tunnel-app` / `make soak-app` — run the app's JVM unit tests (`testDebugUnitTest`) and build its APK fixture (into `fixtures/tunnel-app/` / `fixtures/soak-app/`); `make soak-client` — the soak load client (`docs/PROJECT.md` §7)
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
 httptest, temp CA files); the integration + e2e tiers provision everything via testcontainers and need a

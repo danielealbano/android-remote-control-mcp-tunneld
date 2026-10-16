@@ -3,6 +3,11 @@ package acme
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -14,13 +19,16 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	legoacme "github.com/go-acme/lego/v5/acme"
+	"github.com/go-acme/lego/v5/certificate"
 	"github.com/go-acme/lego/v5/challenge/dns01"
 	legolog "github.com/go-acme/lego/v5/log"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -220,5 +228,102 @@ func TestClassifyLego_ChallengeStoreIsLocal(t *testing.T) {
 				t.Fatalf("class=%s retry=%s, want %s / %s", ie.Class, ie.Retry, ClassLocal, localChallengeRetry)
 			}
 		})
+	}
+}
+
+func TestLegoObtain_LimitedSignalEndsAttempt(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	l := &legoClient{
+		cfg: LegoConfig{CAID: CAGTS, Logger: testLogger()},
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			<-release
+			return nil, errors.New("released")
+		},
+	}
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := l.obtain(withTrack(context.Background(), tr), &x509.CertificateRequest{}, "n")
+		done <- err
+	}()
+	tr.signalLimited(3 * time.Second)
+	select {
+	case err := <-done:
+		var ie *IssuerError
+		if !errors.As(err, &ie) || ie.Class != ClassRateLimited || ie.Retry != 3*time.Second || !errors.Is(err, errCARateLimited) {
+			t.Fatalf("obtain = %v, want rate-limited 3 s from the 429 signal", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a 429 signal must end the attempt at once")
+	}
+	if !tr.abandoned() {
+		t.Fatal("the tracker must be abandoned")
+	}
+}
+
+func TestNewLegoClient_ResolveOnly(t *testing.T) {
+	var accountCalls atomic.Int32
+	var onlyExisting atomic.Bool
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Replay-Nonce", fmt.Sprintf("nonce-%d", time.Now().UnixNano()))
+		switch r.URL.Path {
+		case "/directory":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]string{
+				"newNonce": srv.URL + "/nonce", "newAccount": srv.URL + "/account", "newOrder": srv.URL + "/order",
+			}); err != nil {
+				t.Errorf("directory stub encode: %v", err)
+			}
+		case "/nonce":
+			w.WriteHeader(http.StatusOK)
+		case "/account":
+			accountCalls.Add(1)
+			var jws struct {
+				Payload string `json:"payload"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&jws); err != nil {
+				t.Errorf("decode JWS: %v", err)
+			}
+			raw, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+			if err != nil {
+				t.Errorf("decode JWS payload: %v", err)
+			}
+			var payload struct {
+				OnlyReturnExisting bool `json:"onlyReturnExisting"`
+			}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Errorf("decode account payload %q: %v", raw, err)
+			}
+			onlyExisting.Store(payload.OnlyReturnExisting)
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusBadRequest)
+			if _, err := fmt.Fprint(w, `{"type":"urn:ietf:params:acme:error:accountDoesNotExist","detail":"no account for this key"}`); err != nil {
+				t.Errorf("write problem: %v", err)
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGO_CA_CERTIFICATES", caFile)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewLegoClient(context.Background(), LegoConfig{
+		CAID: CAGTS, Label: "gts-1", DirectoryURL: srv.URL + "/directory", AccountKey: key, ResolveOnly: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "tunneld never creates this account") {
+		t.Fatalf("NewLegoClient = %v, want the look-up failure", err)
+	}
+	if !onlyExisting.Load() {
+		t.Fatal("the account request must set onlyReturnExisting")
+	}
+	if n := accountCalls.Load(); n != 1 {
+		t.Fatalf("new-account requests = %d, want exactly the one look-up", n)
 	}
 }

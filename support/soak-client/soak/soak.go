@@ -29,7 +29,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-const maxResponse = 65536
+const (
+	maxResponse = 65536
+	maxRequest  = 1 << 20
+)
 
 var nameRE = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
 
@@ -79,6 +82,8 @@ func parseConfig(args []string) (config, error) {
 		return config{}, errors.New("--req-bytes and --resp-bytes must be positive")
 	case maxSize(c.respBytes) > maxResponse:
 		return config{}, fmt.Errorf("--resp-bytes %d: responses up to %d bytes exceed the phone's %d-byte limit", c.respBytes, maxSize(c.respBytes), maxResponse)
+	case maxSize(c.reqBytes) > maxRequest:
+		return config{}, fmt.Errorf("--req-bytes %d: requests up to %d bytes exceed the phone's %d-byte limit", c.reqBytes, maxSize(c.reqBytes), maxRequest)
 	}
 	if c.connect != "" {
 		if _, _, err := net.SplitHostPort(c.connect); err != nil {

@@ -82,6 +82,11 @@ type replicaOpts struct {
 	bandwidth  string // override --limit-bandwidth; empty = 10mbit
 	dialBack   time.Duration
 
+	acmeDirGTS     string
+	leNameBudget   string
+	backoffInitial time.Duration
+	backoffMax     time.Duration
+
 	dialBackAdvertise string
 	dialBackPlain     bool
 	dialBackNoMTLS    bool
@@ -215,6 +220,22 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",
 		BanPoll: time.Second, ShutdownGrace: 3 * time.Second, Log: []string{"output=std;level=error"},
 	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	if opts.leNameBudget != "" {
+		cfg.ACMEBudgetLEName = opts.leNameBudget
+	}
+	if opts.backoffInitial != 0 {
+		cfg.ACMEBackoffInitial = opts.backoffInitial
+	}
+	if opts.backoffMax != 0 {
+		cfg.ACMEBackoffMax = opts.backoffMax
+	}
+	if opts.acmeDirGTS != "" {
+		cfg.ACMEDirGTS = opts.acmeDirGTS
+		tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")
+	} else {
+		tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", inf.pebble.DirectoryURL)
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
@@ -282,7 +303,7 @@ func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*cl
 			tunneltest.Logger().Debug("echo phone stream ended with an error", "err", err)
 		}
 	}
-	c, err := client.New(controlAddr, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
+	c, err := client.New(controlAddr, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}

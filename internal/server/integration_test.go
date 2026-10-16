@@ -77,7 +77,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 	acmeDirLE, acmeDirGTS, acmeDirZeroSSL string, dnsResolvers []string) config.ServeCmd {
 	t.Helper()
 	caCert, caKey := writeCA(t)
-	return config.ServeCmd{
+	cfg := config.ServeCmd{
 		RedisURL:       redisURL,
 		Listen:         edgeAddr,
 		MeshListen:     meshAddr,
@@ -114,6 +114,9 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		BanPoll: time.Second, ShutdownGrace: 3 * time.Second,
 		Log: []string{"output=std;level=error"},
 	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")
+	return cfg
 }
 
 // startIntegrationServer stands up Valkey + MinIO + Pebble/challtestsrv + the DNS shim, runs the real
@@ -134,6 +137,7 @@ func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itE
 	edgeAddr := freeAddr(t)
 	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
 		pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, []string{pebble.DNSResolver})
+	tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
 	for _, m := range mutate {
 		m(&cfg)
 	}
@@ -160,6 +164,7 @@ func startChallengeServer(t *testing.T, method string, mutate ...func(*config.Se
 		cfg := itServeConfig(t, redisURL, s3URL, access, secret,
 			net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.TLSPort)), freeAddr(t),
 			pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, nil)
+		tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
 		cfg.ACMEDNSProvider = ""
 		cfg.ACMEChallengeLE, cfg.ACMEChallengeGTS, cfg.ACMEChallengeZeroSSL = method, method, config.ChallengeHTTP01
 		cfg.ACMEHTTPListen = net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.HTTPPort))
@@ -295,7 +300,7 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 			testLogger().Debug("echo phone stream ended with an error", "err", err)
 		}
 	}
-	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,4 +43,5 @@ dependencies {
         exclude(group = "io.netty", module = "netty-codec-native-quic")
     }
     implementation("org.slf4j:slf4j-jdk14:2.0.20")
+    testImplementation("junit:junit:4.13.2")
 }

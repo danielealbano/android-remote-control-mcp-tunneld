@@ -50,7 +50,7 @@ func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {
 			testLogger().Warn("echo phone stream ended with an error", "fqdn", fqdn, "err", err)
 		}
 	}
-	c, err := client.New(env.edgeAddr, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
 	if err != nil {
 		t.Fatal(err)
 	}

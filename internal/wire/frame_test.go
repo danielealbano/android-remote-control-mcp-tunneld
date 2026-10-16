@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestControlFrameRoundTrip(t *testing.T) {
@@ -109,5 +110,30 @@ func TestControlRejectsOversizeAndMalformed(t *testing.T) {
 	bad := []byte{byte(CtrlPing), 0, 0, 0, 9, 1, 2, 3}
 	if _, _, err := DecodeControl(bad); err == nil {
 		t.Error("length/payload mismatch should error")
+	}
+}
+
+func TestIssueRetryWait_Schedule(t *testing.T) {
+	tests := []struct {
+		name  string
+		retry int
+		want  time.Duration
+	}{
+		{name: "first retry", retry: 0, want: 5 * time.Second},
+		{name: "second retry", retry: 1, want: 10 * time.Second},
+		{name: "third retry", retry: 2, want: 15 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IssueRetryWait(tc.retry); got != tc.want {
+				t.Errorf("IssueRetryWait(%d) = %s, want %s", tc.retry, got, tc.want)
+			}
+		})
+	}
+	if IssueRetries != 3 {
+		t.Errorf("IssueRetries = %d, want 3", IssueRetries)
+	}
+	if ControlSilenceTimeout != 90*time.Second {
+		t.Errorf("ControlSilenceTimeout = %s, want 90s", ControlSilenceTimeout)
 	}
 }

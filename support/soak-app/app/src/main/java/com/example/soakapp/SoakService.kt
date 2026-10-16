@@ -15,10 +15,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.random.Random
 
 class SoakService : Service() {
-    private class Phone(val name: String, val server: Server, val tunnel: Tunnel)
+    private class Phone(val name: String, val tunnel: Tunnel)
 
-    private val basePort = 18100
-    private val maxPhones = 200
     private val phones = ConcurrentHashMap<Int, Phone>()
     private val lifecycle = Any()
     private val startLock = Any()
@@ -46,7 +44,7 @@ class SoakService : Service() {
 
     private fun doStart(intent: Intent) {
         val count = intent.getStringExtra("count")!!.toInt()
-        require(count in 1..maxPhones) { "count must be 1..$maxPhones, got $count" }
+        require(count >= 1) { "count must be >= 1, got $count" }
         val spacingSeconds = intent.getStringExtra("spacingSeconds")?.toLong() ?: 65L
         require(spacingSeconds >= 0) { "spacingSeconds must be >= 0" }
         val parallel = intent.getStringExtra("parallel") == "true"
@@ -101,24 +99,33 @@ class SoakService : Service() {
         } else {
             if (jitter) Thread.sleep(Random.nextLong(0, 5001))
             Keys.deleteAll(Enroll.aliasPrefix(env, i))
-            Enroll.enroll(net, i, env.enrollHost, env.controlHost, env.tunnelDomain).also { store.save(i, it) }
+            val (fresh, issueNonce) = Enroll.enroll(net, i, env.enrollHost, env.controlHost, env.tunnelDomain)
+            store.save(i, fresh)
+            Enroll.issue(fresh, issueNonce)
+            store.save(i, fresh)
+            fresh
+        }
+        if (id.state().tlsAlias.isEmpty()) {
+            Log.i(TAG, "phone $i (${id.name}): saved without a public cert; issuing only, never re-enrolling")
+            Enroll.issue(id, null)
+            store.save(i, id)
         }
         val (key, chain) = id.tlsCredential()
-        val server = Server(basePort + i).also { it.start(key, chain) }
+        val responder = Responder(i).also { it.install(key, chain) }
         val renewLock = Any()
-        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), server::localPort) { nonce ->
+        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), responder) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce)
                 store.save(i, id)
-                id.tlsCredential().let { (k, c) -> server.swapIdentity(k, c) }
+                id.tlsCredential().let { (k, c) -> responder.install(k, c) }
             }
         }
         Thread { tunnel.run() }.apply { isDaemon = true }.start()
         if (!tunnel.awaitBound(60)) {
-            tunnel.stop(); server.stop()
+            tunnel.stop()
             error("phone $i (${id.name}): control stream not bound within 60s")
         }
-        phones[i] = Phone(id.name, server, tunnel)
+        phones[i] = Phone(id.name, tunnel)
         Log.i(TAG, "phone $i bound as ${id.name}${if (saved != null) " (resumed)" else ""}")
     }
 
@@ -126,7 +133,7 @@ class SoakService : Service() {
         val s = saved.state
         try {
             Keys.privateKey(s.identityAlias)
-            Keys.privateKey(s.tlsAlias)
+            if (s.tlsAlias.isNotEmpty()) Keys.privateKey(s.tlsAlias)
         } catch (t: Throwable) {
             throw IllegalStateException("phone $i: saved identity ${saved.name} has no usable keys; it is kept, not replaced", t)
         }
@@ -162,7 +169,7 @@ class SoakService : Service() {
     private fun doStop() {
         synchronized(lifecycle) {
             running = false
-            phones.values.forEach { it.tunnel.stop(); it.server.stop() }
+            phones.values.forEach { it.tunnel.stop() }
             phones.clear()
             runningEnv = null
             wakeLock?.let { if (it.isHeld) it.release() }

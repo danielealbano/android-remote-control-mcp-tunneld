@@ -247,7 +247,7 @@ func (ts *testServer) newClient(t *testing.T, backend Backend, opts ...Option) *
 	}
 	idCertPEM := ts.ca.signLeaf(t, testName, &idKey.PublicKey, false, nil)
 	ident := &Identity{Name: testName, IdentityCertPEM: idCertPEM, IdentityKey: idKey, CA: "test"}
-	c, err := New(ts.dialAdr, testControlHost, testTunnelDomain, ts.ca.pool, ident, backend, opts...)
+	c, err := New(ts.dialAdr, testEnrollHost, testControlHost, testTunnelDomain, ts.ca.pool, ident, backend, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

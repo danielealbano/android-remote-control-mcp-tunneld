@@ -1,22 +1,27 @@
 // Package limit implements tunneld's abuse-control primitives: rate windows, the enroll quota, the
-// global stream counter, the per-second bandwidth + packet windows, and the per-CA ACME cooldown/backoff.
+// global stream counter, the per-second bandwidth + packet windows, and the ACME cooldown/backoff.
 package limit
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"time"
 )
-
-// The ACME rate-limit protection is REACTIVE (no proactive order counter, no budget): a CA answering
-// rate-limited gets a per-CA cooldown ("retry-after") in Valkey honoring its Retry-After; other repeated
-// failures apply exponential per-CA backoff; the spillover skips a cooling CA.
 
 func cooldownKey(ca string) string { return "acme-cooldown:" + ca }
 func failuresKey(ca string) string { return "acme-fail:" + ca }
 
-// SetCACooldown marks ca as cooling for d (SET EX — the TTL IS the cooldown).
+// SetCACooldown marks ca as cooling for d (the TTL IS the cooldown).
 func (l *Limiter) SetCACooldown(ctx context.Context, ca string, d time.Duration) error {
-	return l.rdb.Set(ctx, cooldownKey(ca), "1", d).Err()
+	d = max(time.Duration(math.Ceil(d.Seconds()))*time.Second, time.Second)
+	pipe := l.rdb.Pipeline()
+	pipe.ExpireGT(ctx, cooldownKey(ca), d)
+	pipe.SetNX(ctx, cooldownKey(ca), "1", d)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("set acme wait-until %s: %w", ca, err)
+	}
+	return nil
 }
 
 // CACooldown returns the remaining cooldown for ca (0 = not cooling).

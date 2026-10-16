@@ -20,12 +20,14 @@ const (
 	issWindowTTL = 7 * 24 * time.Hour
 )
 
+var ErrIssuanceInFlight = errors.New("limit: another issuance for this name is in flight")
+
 func issuanceKey(name string) string { return "iss:" + name }
 func issLockKey(name string) string  { return "iss_lock:" + name }
 
 // IssuanceBegin serializes issuance per tunnel via a SETNX lock (only one in-flight order per tunnel) and
 // gates against the weekly success cap under that lock. Returns the lock token as orderID for
-// HeartbeatLoop/End. ok=false = another order in flight OR cap reached.
+// HeartbeatLoop/End. ok=false = cap reached.
 func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok bool, orderID string, err error) {
 	token := mintToken()
 	got, err := l.rdb.SetNX(ctx, issLockKey(name), token, issLockTTL).Result()
@@ -33,7 +35,7 @@ func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok 
 		return false, "", err
 	}
 	if !got {
-		return false, "", nil // another issuance in flight
+		return false, "", ErrIssuanceInFlight // another issuance in flight
 	}
 	n, err := l.rdb.Get(ctx, issuanceKey(name)).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {

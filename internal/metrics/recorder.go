@@ -117,6 +117,9 @@ func (p *PromRecorder) QuotaExhausted(tunnelName, window string) {
 	p.caplog.Hit(tunnelName, "quota-"+window, "")
 }
 func (p *PromRecorder) ACMECooldown(ca string) { p.m.acmeCooldown.WithLabelValues(ca).Inc() }
+func (p *PromRecorder) ACMERateLimited(ca string) {
+	p.m.acmeRateLimited.WithLabelValues(ca).Inc()
+}
 func (p *PromRecorder) MeshPool(peer string, size int) {
 	p.m.meshPoolSize.WithLabelValues(peer).Set(float64(size))
 }

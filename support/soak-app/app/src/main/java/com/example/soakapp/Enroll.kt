@@ -88,18 +88,17 @@ class EnrollError(val reason: String, val retryable: Boolean, val retryAfterSec:
     RuntimeException("enroll: $reason (status $status)")
 
 object Enroll {
-    private const val MAX_ISSUE_RETRIES = 3
     private const val MAX_ENROLL_RETRIES = 10
 
     fun envAliasPrefix(env: Env) = "soak-${env.key}-"
 
     fun aliasPrefix(env: Env, phone: Int) = "${envAliasPrefix(env)}$phone-"
 
-    fun enroll(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Identity {
+    fun enroll(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Pair<Identity, String> {
         var attempt = 0
         while (true) {
             try {
-                return enrollOnce(net, phone, enrollHost, controlHost, tunnelDomain)
+                return phase1Once(net, phone, enrollHost, controlHost, tunnelDomain)
             } catch (e: EnrollError) {
                 if (!e.retryable || attempt++ >= MAX_ENROLL_RETRIES) throw e
                 Log.w(TAG, "phone $phone: enrollment refused (${e.reason}), retrying in ${e.retryAfterSec}s")
@@ -116,7 +115,7 @@ object Enroll {
         }
     }
 
-    private fun enrollOnce(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Identity {
+    private fun phase1Once(net: Net, phone: Int, enrollHost: String, controlHost: String, tunnelDomain: String): Pair<Identity, String> {
         val server = net.serverClient()
         val nonce = getJson(server, net.url(enrollHost, "/api/v1/enroll/nonce")).getString("nonce")
         val idAlias = "${aliasPrefix(Env(enrollHost, controlHost, tunnelDomain), phone)}identity-0"
@@ -132,23 +131,19 @@ object Enroll {
             net, phone, r.getString("name"), enrollHost, controlHost, tunnelDomain,
             idAlias, "", parseChain(r.getString("identity_cert")), emptyArray(), "", 0,
         )
-        issue(id, r.getString("issue_nonce"))
-        return id
+        return id to r.getString("issue_nonce")
     }
 
-    fun issue(id: Identity, nonce: String) {
+    fun issue(id: Identity, nonce: String?) {
         synchronized(id.issueLock) {
-            var attempt = 0
-            var n = nonce
-            while (true) {
-                try { issueOnce(id, n); return } catch (e: EnrollError) {
-                    if (!e.retryable || attempt++ >= MAX_ISSUE_RETRIES) throw e
-                    Thread.sleep(e.retryAfterSec.coerceAtLeast(1) * 1000)
-                    n = getJson(id.net.serverClient(), id.net.url(id.enrollHost, "/api/v1/enroll/nonce")).getString("nonce")
-                }
+            IssueRetry.run(nonce, { n -> issueOnce(id, n) }, { freshNonce(id) }, { Thread.sleep(it) }) { n, wait, t ->
+                Log.w(TAG, "phone ${id.phone}: issuance failed; retry $n in ${wait}ms", t)
             }
         }
     }
+
+    private fun freshNonce(id: Identity): String =
+        getJson(id.net.serverClient(), id.net.url(id.enrollHost, "/api/v1/enroll/nonce")).getString("nonce")
 
     private fun issueOnce(id: Identity, nonce: String) {
         val base = id.issueBase()
@@ -200,7 +195,7 @@ object Enroll {
 
     private fun postJson(client: OkHttpClient, url: String, json: String): Pair<Int, String> {
         val req = Request.Builder().url(url).post(json.toRequestBody("application/json".toMediaType())).build()
-        client.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+        client.newBuilder().readTimeout(300, TimeUnit.SECONDS).build()
             .newCall(req).execute().use { resp -> return resp.code to resp.body.string() }
     }
 

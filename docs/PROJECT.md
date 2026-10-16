@@ -61,7 +61,12 @@ of the raw TCP connection.
   tunneld re-verifies attestation, and issues the **public WebPKI cert** via server-run ACME. See
   [`PROTOCOL.md`](PROTOCOL.md) §2.
 - **Server-run ACME chain**: Let's Encrypt → Google Trust Services → ZeroSSL, with automatic spillover,
-  a per-CA validation method (DNS-01 / HTTP-01 / TLS-ALPN-01; defaults LE + GTS TLS-ALPN-01, ZeroSSL HTTP-01 — answered by tunneld's own listeners from Valkey, so any replica answers), and short-lived certs renewed on a uniform ~4.7-day cadence. The phone holds the TLS private key;
+  a per-CA validation method (DNS-01 / HTTP-01 / TLS-ALPN-01; defaults LE + GTS TLS-ALPN-01, ZeroSSL HTTP-01 — answered by tunneld's own listeners from Valkey, so any replica answers), and short-lived certs renewed on a uniform ~4.7-day cadence.
+  Each CA is optional: Let's Encrypt is used unless `--acme-dir-le` is empty, GTS only for the EXISTING accounts
+  listed in `--acme-gts-account` (one per Public CA project, each with its EC private key in PEM at
+  `<acme-account-dir>/accounts/<id>.key`; tunneld looks them up by key and never creates them), ZeroSSL only when its EAB pair is set. Issuance is planned against per-CA budgets kept in Valkey (token
+  buckets per registered domain, account, name and request rate), so a CA is asked only when it has budget; a
+  429 makes that account wait out its Retry-After cluster-wide. The phone holds the TLS private key;
   only CSRs leave it. Every successful issuance — phone cert, renewal or reserved-host cert — logs
   `acme certificate issued` at Info with the issuing `ca`, the `name`, the `serial` and `not_after`.
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
@@ -112,6 +117,26 @@ own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
 Caps are uniform by design — no per-path exceptions, no bulk-transfer carve-outs. Operators raise the
 `--limit-*` values; they never patch the code.
 
+### ACME issuance budgets
+
+| Budget | Flag | Default |
+|---|---|---|
+| LE new certificates / registered domain | `--acme-budget-le-domain` | `50/168h` |
+| LE new orders / account | `--acme-budget-le-orders` | `300/3h` |
+| LE certificates / exact name | `--acme-budget-le-name` | `5/168h` |
+| GTS new orders / account | `--acme-budget-gts-orders` | `100/1h` |
+| GTS requests / account | `--acme-budget-gts-requests` | `120/1m` |
+| GTS `/cert/` requests / account | `--acme-budget-gts-cert-polls` | `50/1m` |
+| ZeroSSL new orders / account | `--acme-budget-zerossl-orders` | `200/1h:40` |
+| ZeroSSL requests / account | `--acme-budget-zerossl-requests` | `240/1m` |
+| Order attempt deadline LE / GTS / ZeroSSL | `--acme-attempt-timeout-{le,gts,zerossl}` | `20s` / `40s` / `90s` |
+| First certificate poll LE / GTS / ZeroSSL | `--acme-poll-first-{le,gts,zerossl}` | `2s` / `5.6s` / `15.2s` |
+| Following polls | `--acme-poll-interval` | `2s` |
+
+Rates are `<count>/<period>[:<burst>]` token buckets. The registered domain is the certificate name's eTLD+1
+(Public Suffix List), as Let's Encrypt counts it. A renewal of an LE certificate on LE draws only the per-name
+budget, for phone names and tunneld's own reserved hosts alike.
+
 ### Ban / geo engine
 
 One or more `--ban-file` (hot-reloaded on mtime, entries UNIONed): `ip`, `cidr`, `country XX`,
@@ -129,10 +154,12 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   admission, `Charge` refreshes the stream's own member, release removes it, TTL 3 × `--limit-conn-idle`; the
   day/week traffic quotas persist across reconnects), the merged per-tunnel byte counters (in the routing `tunnel:{name}` key), the per-second
   bandwidth (`bw:`) + packet (`pkt:`) windows and the per-direction day/week traffic
-  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, ACME cooldown/backoff, ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) the reserved-host issuance lock (`lock:acme-self:`, 10 min) and the shared reserved-host cert (`acme:self-cert:`, until the cert's NotAfter — it holds the private key, so Valkey must stay private). Every
+  (`traf:{name}:{dir}:day/week:{n}`) windows, single-use enrollment nonces, per-account ACME wait-until/backoff, the ACME issuance budgets (`acme-budget:{bucket}` token buckets, the per-node in-flight orders `acme:inflight:{bucket}:{node}`, the per-CA lock `lock:acme-budget:{ca}`), ACME challenge material (`acme:alpn:` / `acme:http:`, 10 min) the reserved-host issuance lock (`lock:acme-self:`, 10 min) and the shared reserved-host cert (`acme:self-cert:`, until the cert's NotAfter — it holds the private key, so Valkey must stay private). Every
   key gets a TTL in the same round-trip as its write — via `SET EX`, a `SETNX` lock, a pipelined
   `EXPIRE NX` right after the `INCR` for the self-healing transient `bw:`/`pkt:` per-second AND `traf:`
-  day/week windows, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
+  day/week windows, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); the per-account ACME
+  wait-until is a pipelined `EXPIRE GT` + `SET NX EX` and the in-flight order sets a pipelined `EXPIRE NX` +
+  `EXPIRE GT`, so neither TTL is ever shortened; NO Lua/WATCH/MULTI-EXEC. No permanent Valkey state.
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (per-node JSONL objects
   `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
@@ -166,7 +193,9 @@ then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-con
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
 spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
 a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being queued when
-`--shutdown-grace` expires, or arriving after shutdown. Grafana provisioning (`deploy/grafana/`) ships six
+`--shutdown-grace` expires, or arriving after shutdown. `tunneld_acme_budget_ratio{ca,account,budget}` is the
+remaining issuance budget (0–1) per CA account; `tunneld_acme_rate_limited_total{ca}` counts the CAs' 429 answers.
+Grafana provisioning (`deploy/grafana/`) ships six
 dashboards: Health (one red/green tile per check, grouped, with the failing-check count on top and the
 `eth0` traffic chart), Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard
 handshake and ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail.
@@ -203,8 +232,9 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   e2e and staging tiers require Docker (testcontainers: Valkey, MinIO via the PGSTY Silo build, Pebble); the staging tier also reaches Let's Encrypt staging + GTS staging through a reverse SSH tunnel and skips without `TUNNELD_STAGING_SSH_KEY`.
 - **Soak test** (manual, against a live deployment): `make soak-app soak-client` (the APK lands in
   `fixtures/soak-app/` with its sha256 and signer digest, like the reference app). The soak app emulates N
-  phones on one device — each with its own hardware-attested enrollment, public cert, control connection and
-  local HTTPS server answering `POST /op?resp=<bytes>` with `<bytes>` of the pattern `byte(i % 251)`. Allow its
+  phones on one device — each with its own hardware-attested enrollment, public cert and control connection;
+  each answers on the dial-back connection itself (TLS with the phone's public cert, HTTP/1.1)
+  `POST /op?resp=<bytes>` with `<bytes>` of the pattern `byte(i % 251)`. Allow its
   signing-cert digest, install it, then `adb shell am broadcast -a com.example.soakapp.start -n
   com.example.soakapp/.CommandReceiver -f 0x00000020 --es count 10 --es enrollHost <enroll-host> --es
   controlHost <control-host> --es tunnelDomain <tunnel-domain>` (phones enroll one at a time, `spacingSeconds`
@@ -215,13 +245,18 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   saved per environment (its enroll host, control host and tunnel domain) in `files/phones/<env>/<n>.json` (name,
   keystore aliases, cert chains — rewritten on every renewal), so `start` is additive and resumable: it skips
   running phones, resumes saved ones (also after `stop`, a crash or an `adb install -r`), and enrolls only the
-  missing ones up to `count` (max 200). Phones of other environments are never touched, and only one environment
-  runs at a time; a saved phone whose keys are unusable fails its start instead of being replaced. The only way to
+  missing ones up to `count`. Phones of other environments are never touched, and only one environment
+  runs at a time; a saved phone whose keys are unusable fails its start instead of being replaced. A phone is
+  saved right after its enrollment. If its issuance gives up after the retries (docs/PROTOCOL.md §3), it stays
+  saved without a public cert and the next `start` retries only the issuance, so a phone never enrolls a second
+  name. The only way to
   discard saved phones is `forget` (the `forget` action with the same three host extras), which deletes that one
   environment's phones and keys; uninstalling the app discards every environment. Then run
   `bin/soak-client --names-file names.txt --domain <tunnel-domain>`: per phone, one operation every
   `--interval` (1 s) with a request averaging `--req-bytes` (1 KiB) and a response averaging `--resp-bytes`
-  (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte, on a reused connection dropped every
+  (5 KiB), each uniformly 0.2–1.8× the average and verified byte by byte (the phone accepts request bodies up to
+  1 MiB and answers up to 64 KiB, so the client refuses averages whose 1.8× exceeds them), on a reused connection
+  dropped every
   `--reconnect` (5 min), for `--duration` (24 h), the phones' starts (and so their reconnects) spread evenly over
   `--ramp` so a single client IP stays under `--limit-conn-rate`; it writes one CSV row per phone per minute (`--out`) and a
   summary at the end. `adb shell am broadcast -a com.example.soakapp.stop …` stops the app. Each enrollment

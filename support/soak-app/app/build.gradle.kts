@@ -21,7 +21,7 @@ android {
         resources.excludes += setOf(
             "META-INF/versions/9/OSGI-INF/MANIFEST.MF", "META-INF/DEPENDENCIES",
             "META-INF/LICENSE.md", "META-INF/LICENSE-notice.md", "META-INF/NOTICE.md",
-            "META-INF/INDEX.LIST", "META-INF/io.netty.versions.properties", "META-INF/{AL2.0,LGPL2.1}",
+            "META-INF/INDEX.LIST", "META-INF/{AL2.0,LGPL2.1}",
         )
         jniLibs { useLegacyPackaging = true }
     }
@@ -37,9 +37,5 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.5.0")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.86")
     implementation("org.bouncycastle:bcprov-jdk18on:1.86")
-    implementation("io.ktor:ktor-server-core:3.6.0")
-    implementation("io.ktor:ktor-server-netty:3.6.0") {
-        exclude(group = "io.netty", module = "netty-codec-native-quic")
-    }
-    implementation("org.slf4j:slf4j-jdk14:2.0.20")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
@@ -42,16 +43,25 @@ type Client struct {
 	sendW  io.Writer // control request-body writer (phone→server frames)
 
 	dialBackTimeout time.Duration
+
+	enrollHost     string
+	silenceTimeout time.Duration
+	sleep          func(context.Context, time.Duration) error
+	renewing       atomic.Bool
+
+	connMu sync.Mutex
+	conn   net.Conn
 }
 
 // New builds a control client that dials dialAddr, negotiates TLS with SNI/Host controlHost (trusting
 // caPool), presents ident as the mTLS client cert, serves dial-back streams to backend, and renews via
 // the mTLS POST /api/v1/issue endpoint (needing tunnelDomain to request <name>.<tunnelDomain>).
-func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend, opts ...Option) (*Client, error) {
+func New(dialAddr, enrollHost, controlHost, tunnelDomain string, caPool *x509.CertPool, ident *Identity, backend Backend, opts ...Option) (*Client, error) {
 	c := &Client{
 		dialAddr: dialAddr, controlHost: controlHost, tunnelDomain: tunnelDomain,
 		caPool: caPool, backend: backend, ident: ident, logger: slog.Default(),
 		dialBackTimeout: defaultDialBackTimeout,
+		enrollHost:      enrollHost, silenceTimeout: wire.ControlSilenceTimeout, sleep: sleepCtx,
 	}
 	for _, o := range opts {
 		if err := o(c); err != nil {
@@ -63,7 +73,7 @@ func New(dialAddr, controlHost, tunnelDomain string, caPool *x509.CertPool, iden
 		return nil, err
 	}
 	c.cert = &cert
-	c.tr = newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert)
+	c.tr = newMTLSTransport(dialAddr, controlHost, caPool, c.currentCert, c.trackConn)
 	c.hc = &http.Client{Transport: c.tr}
 	return c, nil
 }
@@ -80,6 +90,34 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
+var errControlSilence = errors.New("client: no control frame within the silence timeout; connection treated as dead")
+
+func WithControlSilenceTimeout(d time.Duration) Option {
+	return func(c *Client) error {
+		if d <= 0 {
+			return errors.New("client: control silence timeout must be positive")
+		}
+		c.silenceTimeout = d
+		return nil
+	}
+}
+
+func (c *Client) trackConn(conn net.Conn) {
+	c.connMu.Lock()
+	c.conn = conn
+	c.connMu.Unlock()
+}
+
+func (c *Client) dropConn() {
+	c.connMu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.connMu.Unlock()
+	if conn != nil {
+		c.closeLogged("control connection", conn)
+	}
+}
+
 // Close releases the control client's pooled TLS connections. Call it once Run has returned.
 func (c *Client) Close() {
 	c.tr.CloseIdleConnections()
@@ -90,7 +128,7 @@ var errNotHTTP2 = errors.New("client: server did not negotiate HTTP/2 (ALPN h2)"
 // newMTLSTransport builds an HTTP/2 transport that dials dialAddr, negotiates TLS with SNI/Host
 // controlHost (trusting caPool), and presents the identity cert returned by getCert as the mTLS client
 // cert (getCert is re-invoked per handshake, so a rotated identity is picked up on reconnect).
-func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCert func() *tls.Certificate) *http.Transport {
+func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCert func() *tls.Certificate, onConn func(net.Conn)) *http.Transport {
 	var protocols http.Protocols
 	protocols.SetHTTP2(true)
 	return &http.Transport{
@@ -106,7 +144,12 @@ func newMTLSTransport(dialAddr, controlHost string, caPool *x509.CertPool, getCe
 			if err != nil {
 				return nil, err
 			}
-			return requireH2(conn)
+			h2, err := requireH2(conn)
+			if err != nil {
+				return nil, err
+			}
+			onConn(h2)
+			return h2, nil
 		},
 	}
 }
@@ -134,14 +177,45 @@ func (c *Client) Identity() *Identity {
 
 // Run opens the control connection and serves it until ctx is cancelled or the connection drops.
 func (c *Client) Run(ctx context.Context) error {
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+c.controlHost+"/api/v1/control", pr)
+	var (
+		wdMu         sync.Mutex
+		ended, quiet bool
+	)
+	silent := func() bool {
+		wdMu.Lock()
+		defer wdMu.Unlock()
+		return quiet
+	}
+	watchdog := time.AfterFunc(c.silenceTimeout, func() {
+		wdMu.Lock()
+		defer wdMu.Unlock()
+		if ended || quiet {
+			return
+		}
+		quiet = true
+		c.dropConn()
+		cancel()
+		pw.CloseWithError(errControlSilence)
+	})
+	defer func() {
+		watchdog.Stop()
+		wdMu.Lock()
+		ended = true
+		wdMu.Unlock()
+	}()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, "https://"+c.controlHost+"/api/v1/control", pr)
 	if err != nil {
 		return err
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		pw.CloseWithError(err)
+		if silent() {
+			return errControlSilence
+		}
 		return err
 	}
 	defer c.closeLogged("control response body", resp.Body)
@@ -155,22 +229,27 @@ func (c *Client) Run(ctx context.Context) error {
 	defer close(watchDone)
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-rctx.Done():
 			c.closeLogged("control response body", resp.Body)
-			pw.CloseWithError(ctx.Err())
+			pw.CloseWithError(rctx.Err())
 		case <-watchDone:
 		}
 	}()
 	c.setSend(pw)
+	watchdog.Reset(c.silenceTimeout)
 
 	for {
 		ct, payload, err := readControlFrame(resp.Body)
 		if err != nil {
+			if silent() {
+				return errControlSilence
+			}
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
+		watchdog.Reset(c.silenceTimeout)
 		switch ct {
 		case wire.CtrlOpen:
 			go c.handleOpen(ctx, payload)

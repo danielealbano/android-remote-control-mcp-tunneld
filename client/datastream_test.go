@@ -326,7 +326,7 @@ func TestClient_DialBack_UpgradeAbortedWhenRunStops(t *testing.T) {
 }
 
 func TestNew_RejectsNonPositiveDialBackTimeout(t *testing.T) {
-	if _, err := New("127.0.0.1:1", testControlHost, testTunnelDomain, nil, nil, nil, WithDialBackTimeout(0)); err == nil {
+	if _, err := New("127.0.0.1:1", testEnrollHost, testControlHost, testTunnelDomain, nil, nil, nil, WithDialBackTimeout(0)); err == nil {
 		t.Fatal("a zero dial-back timeout must be rejected")
 	}
 }
@@ -380,11 +380,18 @@ func TestClient_Renew_LogsFailures(t *testing.T) {
 			original := &Identity{Name: testName, CA: "test"}
 			c.ident = original
 			c.controlHost = testControlHost
+			c.enrollHost = testEnrollHost
+			c.dialAddr = "127.0.0.1:1"
 			c.tunnelDomain = testTunnelDomain
+			var sleeps int
+			c.sleep = func(context.Context, time.Duration) error { sleeps++; return nil }
 			c.hc = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, errInjected
 			})}
 			c.renew(context.Background(), []byte(tc.payload))
+			if tc.name == "issuance fails" && sleeps != 3 {
+				t.Fatalf("a failing issuance must be retried 3 times before it is logged, slept %d times", sleeps)
+			}
 			if !strings.Contains(buf.String(), tc.want) {
 				t.Fatalf("the failed renewal must be logged; log = %q", buf.String())
 			}

@@ -97,7 +97,7 @@ func getOnce(hc *http.Client) (*http.Response, error) {
 func TestNewMTLSTransport_RejectsNonH2Server(t *testing.T) {
 	t.Parallel()
 	s := startH2TestServer(t, nil, 0, okHandler())
-	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
+	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert, func(net.Conn) {})
 	defer tr.CloseIdleConnections()
 	_, err := getOnce(&http.Client{Transport: tr, Timeout: 5 * time.Second})
 	if !errors.Is(err, errNotHTTP2) {
@@ -108,7 +108,7 @@ func TestNewMTLSTransport_RejectsNonH2Server(t *testing.T) {
 func TestNewMTLSTransport_OneConnForConcurrentColdRequests(t *testing.T) {
 	t.Parallel()
 	s := startH2TestServer(t, []string{"h2", "http/1.1"}, 0, okHandler())
-	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
+	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert, func(net.Conn) {})
 	defer tr.CloseIdleConnections()
 	hc := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	var wg sync.WaitGroup
@@ -146,7 +146,7 @@ func TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 		}
 	})
 	s := startH2TestServer(t, []string{"h2", "http/1.1"}, 2, held)
-	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
+	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert, func(net.Conn) {})
 	defer tr.CloseIdleConnections()
 	hc := &http.Client{Transport: tr, Timeout: 10 * time.Second}
 	resps := make([]*http.Response, 0, 3)
@@ -174,7 +174,7 @@ func TestNewMTLSTransport_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
 	t.Parallel()
 	s := startH2TestServer(t, []string{"h2", "http/1.1"}, 0, okHandler())
-	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert)
+	tr := newMTLSTransport(s.addr, testControlHost, s.pool, noClientCert, func(net.Conn) {})
 	defer tr.CloseIdleConnections()
 	hc := &http.Client{Transport: tr, Timeout: 5 * time.Second}
 	if _, err := getOnce(hc); err != nil {
@@ -266,7 +266,7 @@ func TestRenewViaNudgeAndIssue(t *testing.T) {
 }
 
 func TestNew_RejectsNilLogger(t *testing.T) {
-	if _, err := New("", "", "", nil, nil, nil, WithLogger(nil)); err == nil {
+	if _, err := New("", "", "", "", nil, nil, nil, WithLogger(nil)); err == nil {
 		t.Fatal("a nil logger must be rejected")
 	}
 }

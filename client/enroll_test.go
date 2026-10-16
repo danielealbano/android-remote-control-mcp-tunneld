@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,11 +63,29 @@ func (c *countingConn) Close() error {
 	return c.Conn.Close()
 }
 
+type enrollServerOpts struct {
+	issueFail func() *errorResponse
+
+	mu          sync.Mutex
+	issueNonces []string
+}
+
+func (o *enrollServerOpts) nonces() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.issueNonces)
+}
+
 // startEnrollServer stands up a minimal two-phase enrollment endpoint (GET /api/v1/enroll/nonce, POST /api/v1/enroll
 // server-TLS, POST /api/v1/issue mTLS) signing everything with ca. It serves both HTTP/1.1 (Phase-1) and HTTP/2
 // (Phase-2 mTLS) via ALPN and returns the dial address plus the connection-counting listener.
-func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (string, *countingListener) {
+func startEnrollServer(t *testing.T, ca *testCA, opts ...*enrollServerOpts) (string, *countingListener) {
 	t.Helper()
+	o := &enrollServerOpts{}
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	var nonceSeq atomic.Int64
 
 	signFromCSR := func(w http.ResponseWriter, kind, csrPEM, cn string, server bool, dns []string) (string, bool) {
 		csr, err := parseCSR(csrPEM)
@@ -85,7 +105,7 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/enroll/nonce", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, nonceResponse{Nonce: "aa"})
+		writeJSON(w, nonceResponse{Nonce: fmt.Sprintf("%02x", nonceSeq.Add(1))})
 	})
 	mux.HandleFunc("/api/v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var body enrollRequestBody
@@ -101,11 +121,6 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 		writeJSON(w, enrollResponse{Name: testName, IdentityCert: idCert, IssueNonce: "bb"})
 	})
 	mux.HandleFunc("/api/v1/issue", func(w http.ResponseWriter, r *http.Request) {
-		if len(issueFail) > 0 && issueFail[0]() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			writeJSON(w, errorResponse{Reason: "acme_rate_limited", Retryable: true, RetryAfter: 1})
-			return
-		}
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			http.Error(w, "mtls required", http.StatusUnauthorized)
 			return
@@ -115,6 +130,20 @@ func startEnrollServer(t *testing.T, ca *testCA, issueFail ...func() bool) (stri
 			tunneltest.Logger().Warn("test enroll server: undecodable body", "err", err)
 			http.Error(w, "bad body", http.StatusBadRequest)
 			return
+		}
+		o.mu.Lock()
+		o.issueNonces = append(o.issueNonces, body.Nonce)
+		o.mu.Unlock()
+		if o.issueFail != nil {
+			if e := o.issueFail(); e != nil {
+				status := http.StatusBadRequest
+				if e.Retryable {
+					status = http.StatusServiceUnavailable
+				}
+				w.WriteHeader(status)
+				writeJSON(w, *e)
+				return
+			}
 		}
 		idCert, ok := signFromCSR(w, "identity", body.IdentityCSR, testName, false, nil)
 		if !ok {
@@ -190,15 +219,17 @@ func TestFetchNonce_BadHostReturnsError(t *testing.T) {
 	}
 }
 
-// TestEnroll_Phase2FailureReturnsBootstrapIdentity verifies a retryable /api/v1/issue failure returns the
-// Phase-1 bootstrap identity (name + identity cert, no public cert) alongside the error, so the caller
-// can retry without re-enrolling (which would orphan the name).
+// TestEnroll_Phase2FailureReturnsBootstrapIdentity verifies a /api/v1/issue failure returns the
+// Phase-1 bootstrap identity (name + identity cert, no public cert) alongside the error.
 func TestEnroll_Phase2FailureReturnsBootstrapIdentity(t *testing.T) {
 	ca := newTestCA(t)
-	dialAddr, _ := startEnrollServer(t, ca, func() bool { return true }) // /api/v1/issue always 503
+	opts := &enrollServerOpts{issueFail: func() *errorResponse { return &errorResponse{Reason: "acme_failed"} }}
+	dialAddr, _ := startEnrollServer(t, ca, opts)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	id, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
+	var slept []time.Duration
+	sleep := func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }
+	id, err := enroll(ctx, sleep, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
 	if err == nil {
 		t.Fatal("a Phase-2 /api/v1/issue failure must return an error")
 	}
@@ -209,39 +240,73 @@ func TestEnroll_Phase2FailureReturnsBootstrapIdentity(t *testing.T) {
 		t.Error("the bootstrap identity must NOT carry a public cert yet")
 	}
 	var ee *EnrollError
-	if !errors.As(err, &ee) || ee.Status != http.StatusServiceUnavailable {
-		t.Fatalf("expected a 503 EnrollError, got %v", err)
+	if !errors.As(err, &ee) || ee.Status != http.StatusBadRequest || ee.Retryable {
+		t.Fatalf("expected a non-retryable 400 EnrollError, got %v", err)
+	}
+	if len(slept) != 0 || len(opts.nonces()) != 1 {
+		t.Fatalf("a non-retryable failure must stop at once: slept %v, issue requests %v", slept, opts.nonces())
 	}
 }
 
-// TestFetchIssueNonce_RetryPathCompletes drives the documented retry path: a failed Phase-2 issue →
-// bootstrap identity → fresh nonce → Renew over the SAME mTLS identity completes the issuance.
 func TestFetchIssueNonce_RetryPathCompletes(t *testing.T) {
 	ca := newTestCA(t)
 	var issueCalls atomic.Int32
-	dialAddr, _ := startEnrollServer(t, ca, func() bool { return issueCalls.Add(1) == 1 }) // fail the first /api/v1/issue only
+	opts := &enrollServerOpts{issueFail: func() *errorResponse {
+		if issueCalls.Add(1) == 1 {
+			return &errorResponse{Reason: "acme_rate_limited", Retryable: true, RetryAfter: 1}
+		}
+		return nil
+	}}
+	dialAddr, _ := startEnrollServer(t, ca, opts)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	sleep := func(context.Context, time.Duration) error { return nil }
 
-	boot, err := Enroll(ctx, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
-	if err == nil {
-		t.Fatal("the first /api/v1/issue must fail")
+	id, err := enroll(ctx, sleep, dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool)
+	if err != nil {
+		t.Fatalf("the retry must complete the issuance: %v", err)
 	}
-	if boot == nil || boot.Name == "" || len(boot.PublicCertPEM) != 0 {
-		t.Fatalf("Enroll must return the bootstrap identity (no public cert), got %+v", boot)
+	if len(id.PublicCertPEM) == 0 {
+		t.Fatal("the retried issuance must return the public cert")
 	}
+	nonces := opts.nonces()
+	if len(nonces) != 2 || nonces[0] == nonces[1] {
+		t.Fatalf("issue nonces = %v, want the Phase-1 issue nonce then a freshly fetched one", nonces)
+	}
+}
 
-	nonce, err := FetchIssueNonce(ctx, dialAddr, testEnrollHost, ca.pool)
-	if err != nil {
-		t.Fatalf("FetchIssueNonce: %v", err)
+func TestFetchNonce_ErrorClasses(t *testing.T) {
+	answer := func(status int, body string) *http.Client {
+		return &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})}
 	}
-	c, err := New(dialAddr, testControlHost, testTunnelDomain, ca.pool, boot, func(io.ReadWriteCloser) {})
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name          string
+		hc            *http.Client
+		wantEnroll    bool
+		wantTransport bool
+		wantWait      time.Duration
+		wantRetry     bool
+	}{
+		{name: "retryable refusal", hc: answer(http.StatusServiceUnavailable, `{"reason":"internal","retryable":true,"retry_after_seconds":3}`),
+			wantEnroll: true, wantWait: 3 * time.Second, wantRetry: true},
+		{name: "final refusal", hc: answer(http.StatusBadRequest, `{"reason":"bad_request"}`), wantEnroll: true},
+		{name: "network failure", hc: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errInjected })},
+			wantTransport: true, wantWait: 5 * time.Second, wantRetry: true},
 	}
-	t.Cleanup(c.Close) // Run was never started, so Close only releases the pooled transport
-	if err := c.Renew(ctx, nonce); err != nil {
-		t.Fatalf("Renew (retry) must complete after a fresh nonce: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchNonce(context.Background(), tc.hc, testEnrollHost)
+			_, isEnroll := errors.AsType[*EnrollError](err)
+			_, isTransport := errors.AsType[*transportError](err)
+			if isEnroll != tc.wantEnroll || isTransport != tc.wantTransport {
+				t.Fatalf("fetchNonce = %v (EnrollError %v, transportError %v), want %v / %v", err, isEnroll, isTransport, tc.wantEnroll, tc.wantTransport)
+			}
+			if wait, retry := issueRetryWait(err, 0); retry != tc.wantRetry || wait != tc.wantWait {
+				t.Fatalf("issueRetryWait = %s, %v; want %s, %v", wait, retry, tc.wantWait, tc.wantRetry)
+			}
+		})
 	}
 }
 

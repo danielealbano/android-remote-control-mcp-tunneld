@@ -245,6 +245,10 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	// The lock is released on BOTH success and failure (failed orders never burn the window), refreshed by a
 	// heartbeat so a long ACME order keeps it, and self-expires (via its TTL) if this node crashes mid-order.
 	ok, orderID, err := s.cfg.Limiter.IssuanceBegin(ctx, name, s.cfg.IssuePerWeek)
+	if errors.Is(err, limit.ErrIssuanceInFlight) {
+		s.rec.Reject("issuance-cap", name, ip)
+		return Result{}, &Error{Reason: "issuance_cap", Retryable: true, RetryAfter: 300 * time.Second}
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Warn("issuance lock acquire failed", "tunnel", name, "ip", ip, "err", err)

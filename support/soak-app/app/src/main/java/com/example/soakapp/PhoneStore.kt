@@ -84,7 +84,8 @@ class PhoneStore(root: File, env: Env) {
                 j.getString("name"), j.getString("enroll_host"), j.getString("control_host"), j.getString("tunnel_domain"),
                 Identity.State(
                     j.getString("identity_alias"), j.getString("tls_alias"),
-                    Enroll.parseChain(j.getString("identity_chain")), Enroll.parseChain(j.getString("public_chain")),
+                    Enroll.parseChain(j.getString("identity_chain")),
+                    j.getString("public_chain").let { if (it.isEmpty()) emptyArray() else Enroll.parseChain(it) },
                     j.getString("ca"), j.getInt("generation"),
                 ),
             )

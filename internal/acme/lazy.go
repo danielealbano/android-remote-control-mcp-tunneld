@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"log/slog"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -12,8 +13,8 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-// lazyCA defers the network-touching per-CA client construction (ACME account registration) to first
-// use, caching it on success and retrying on the next call after a failure. This makes server startup
+// lazyCA defers the network-touching client construction to first use, caching it on success and
+// retrying on the next call after a failure. This makes server startup
 // non-blocking on ACME reachability: an unreachable CA at boot simply issues a transient error (the
 // chain applies its cooldown and falls through to the next CA), and the client self-heals when the CA
 // becomes reachable again.
@@ -24,7 +25,7 @@ type lazyCA struct {
 	build       func(ctx context.Context) (caIssuer, error)
 	logger      *slog.Logger
 
-	group singleflight.Group       // dedups concurrent first-use registration
+	group singleflight.Group
 	inner atomic.Pointer[caIssuer] // fast-path read; nil until first successful build
 }
 
@@ -32,26 +33,35 @@ var _ caIssuer = (*lazyCA)(nil)
 
 const lazyBuildTimeout = 2 * time.Minute
 
-// newLazyCA wraps a builder for one CA's client behind lazy, self-healing construction.
+// newLazyCA wraps a builder behind lazy, self-healing construction.
 func newLazyCA(caID string, shortlived, renewMargin time.Duration, build func(ctx context.Context) (caIssuer, error), logger *slog.Logger) *lazyCA {
 	return &lazyCA{caID: caID, shortlived: shortlived, renewMargin: renewMargin, build: build, logger: logger}
 }
 
-// NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing per-CA clients constructed from
-// the given lego configs (order preserved: MUST be LE, GTS, ZeroSSL). Each client's network-touching
-// construction (ACME account registration) is deferred to first use, so startup never blocks on CA
-// reachability and an unreachable CA self-heals once it recovers.
-func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) *chainIssuer {
+// NewChain builds the [LE, GTS, ZeroSSL] chain with lazy, self-healing clients constructed from
+// the given lego configs. Each client's network-touching construction is deferred to first use, so
+// startup never blocks on CA reachability and an unreachable CA self-heals once it recovers.
+func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) (*chainIssuer, error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
-	cas := make([]caIssuer, 0, len(legoCfgs))
-	for _, lc := range legoCfgs {
-		cas = append(cas, newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
-			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }, logger))
+	var rec Recorder = nopRecorder{}
+	if cfg.Recorder != nil {
+		rec = cfg.Recorder
 	}
-	return NewChainIssuer(cfg, cas...)
+	accounts := make([]*account, 0, len(legoCfgs))
+	for _, lc := range legoCfgs {
+		a := &account{ca: lc.CAID, id: lc.AccountID, label: lc.Label, timeout: lc.AttemptTimeout}
+		lc.Wrap = func(base http.RoundTripper) http.RoundTripper {
+			return &budgetTransport{base: base, acct: a, budgets: cfg.Budgets, requests: cfg.Limiter, cooldowns: cfg.Limiter,
+				recorder: rec, cooldown: cfg.CooldownDefault, firstPoll: lc.PollFirst, pollEvery: cfg.PollEvery, logger: logger, now: time.Now}
+		}
+		a.issuer = newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
+			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }, logger)
+		accounts = append(accounts, a)
+	}
+	return NewChainIssuer(cfg, accounts...)
 }
 
 func (l *lazyCA) id() string { return l.caID }
@@ -64,7 +74,7 @@ func (l *lazyCA) cached() (caIssuer, bool) {
 	return nil, false
 }
 
-// resolve returns the built client, performing first-use registration once (deduped via singleflight).
+// resolve returns the built client.
 // It is ctx-aware: a cancelled/shutdown caller returns promptly while the build completes+caches in the
 // background; a build error is surfaced to the caller and retried on the next call.
 func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
@@ -75,7 +85,7 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 		if c, ok := l.cached(); ok {
 			return c, nil
 		}
-		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lazyBuildTimeout)
+		bctx, cancel := context.WithTimeout(withoutTrack(context.WithoutCancel(ctx)), lazyBuildTimeout)
 		defer cancel()
 		c, err := l.build(bctx)
 		if err != nil {
@@ -99,6 +109,9 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
 	c, err := l.resolve(ctx)
 	if err != nil {
+		if ie := classifyLego(err); ie.Class == ClassRateLimited {
+			return nil, store.CertInfo{}, ie
+		}
 		return nil, store.CertInfo{}, transient(err)
 	}
 	return c.obtain(ctx, csr, name)

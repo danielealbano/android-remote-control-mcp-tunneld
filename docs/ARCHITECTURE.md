@@ -63,11 +63,11 @@ flowchart TD
 | `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`), `/api/v1/issue` cert generation |
 | `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
-| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-CA cooldown/backoff retry-after, self-heal) |
+| `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, optional CAs, several GTS accounts looked up by key, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
-| `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME cooldown |
+| `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME issuance budgets + wait-until |
 | `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
@@ -147,8 +147,28 @@ challenge material lives in Valkey, so any replica answers a validation. The TLS
 tunneld's own: lego's built-in one carries key usage `keyEncipherment` only, which BoringSSL validators
 (Google Trust Services) reject in TLS 1.3 (RFC 8446 §4.4.2.2). Only ONE TLS-ALPN-01 challenge can be pending
 per domain cluster-wide (a validator sends only the SNI); a conflicting or failed challenge-store write is a
-LOCAL error: the chain stops with Retry-After 30 s and sets no per-CA cooldown. When CAA records carry
+LOCAL error: the chain stops with Retry-After 30 s and sets no per-account wait-until. When CAA records carry
 `validationmethods`, they must allow each CA's configured method.
+
+**Issuance budgets.** Each enabled CA contributes accounts: Let's Encrypt and ZeroSSL one per node (its key
+under `--acme-account-dir`), GTS one per listed existing account. Before an order the chain reserves one slot in
+every Valkey token bucket the order draws on (`acme:inflight:{bucket}:{node}`, scored by the attempt's
+deadline); only live nodes' reservations count. The LE per-domain bucket is keyed on the name's registered domain
+(eTLD+1), and an LE renewal of an LE certificate (phone or reserved host) draws only the per-name bucket.
+Success spends the reservation; a created order always spends
+its order bucket; an order finalized and then abandoned counts as issued; a newOrder or finalize request whose
+answer never arrived counts as accepted; other failures release. Every ACME
+request goes through a per-account HTTP transport around lego that refuses or holds requests while the account
+waits out a 429 (a cluster-wide wait-until, never shortened) or its backoff, or lacks request budget, delays the first
+certificate poll after finalize to the CA's median wait + 2 s and spaces the rest 2 s apart, and on a 429
+resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
+abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
+other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
+tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
+waits (a wait-until or a backoff in effect) adds no step to it, so concurrent attempts count once. GTS accounts are tried
+by remaining order budget. When no account can take the order, the issue answer is `acme_rate_limited` with
+`retry_after_seconds` = the earliest free slot + a random 1–10 s. Decision record:
+[Plan 17](plans/17_acme_budgets_and_client_resilience_20261015170942.md).
 
 ## 4. Unified per-window limit model
 
@@ -170,7 +190,7 @@ never hard-depends on the control plane). Each key's TTL is its window plus a sm
 admission (`TrafficExhausted`, read-only). `wire.ChunkSize` = 16384 is the paced-copy read slice, so the
 per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap + N_concurrent`.
 
-## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX / a pipelined PEXPIRE; NO Lua/WATCH/MULTI-EXEC)
+## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX / a pipelined PEXPIRE / a pipelined EXPIRE GT; NO Lua/WATCH/MULTI-EXEC)
 
 Routing (`tunnel:{name}` → owner/fp/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
 (`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`; plus the
@@ -180,8 +200,8 @@ every live node), rate-limit windows, the per-direction day/week traffic windows
 the global per-tunnel stream cap (`conc:{name}`, a sorted set: one member per live public connection = its
 dial-back token, score = its expiry in unix ms; expired members are pruned at admission, `Charge` refreshes
 the stream's own member with `ZADD XX` (never resurrecting a released one), release removes it; TTL = 3 ×
-`--limit-conn-idle`), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-CA ACME
-cooldown/backoff, the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private). No permanent Valkey state; a stale connection never clobbers a re-bound route.
+`--limit-conn-idle`), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-account ACME
+wait-until/backoff (the wait-until a pipelined `EXPIRE GT` + `SET NX EX`, never shortened), the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private), the ACME issuance budgets — `acme-budget:{bucket}` (hash `{t, at}`, `HSET` + pipelined `PEXPIRE` = time to refill to full + 1 h), `acme:inflight:{bucket}:{node}` (`ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT` = deadline + 1 min, never shortened) and the per-CA lock `lock:acme-budget:{ca}` (`SETNX`, 2 s TTL). No permanent Valkey state; a stale connection never clobbers a re-bound route.
 Connection ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
 and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic. Dial-back
@@ -235,7 +255,8 @@ Every labelled counter is exposed at 0 from startup for each known label value (
 also `ca="all", result="fail"`). A series that first appeared at 1 would hide its first event from
 `rate()`/`increase()`. The Valkey client's main pool is exported as `tunneld_valkey_pool_connections`,
 `_idle_connections`, `_max_connections`, `_waits_total` and `_timeouts_total` (a timeout is a command that
-gave up waiting for a free connection).
+gave up waiting for a free connection). `tunneld_acme_budget_ratio{ca,account,budget}` reads the budget buckets
+at scrape time (2 s timeout; an error drops only that family, Warn ≤ 1/min).
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
@@ -260,7 +281,8 @@ hits the window (its LOG is caplog-deduped), and forced closures of existing con
 `tunneld_enrollments_total{result}` carries the enrollment outcome;
 `tunneld_attest_verify_total{result}` the attestation verdicts; and
 `tunneld_acme_renew_total{ca,result}` the tunnel-cert renewal outcomes (`ca="all"` on a failure, since
-every CA in the chain declined).
+every CA in the chain declined). `tunneld_acme_cooldown_total{ca}` counts account wait-until activations and
+`tunneld_acme_rate_limited_total{ca}` the CAs' 429 answers.
 
 Cap-hit logs are deduped via `internal/caplog` (first hit per `(tunnel, reason)` immediately, then ≤1
 summary/min) for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel value is
