@@ -3,7 +3,8 @@
 This document maps the E2E-encrypted tunnel internals. The operational overview is
 [`PROJECT.md`](PROJECT.md); the wire contract is [`PROTOCOL.md`](PROTOCOL.md); the decision record is
 [Plan 3](plans/3_e2e_encrypted_tunneling_20260817175922.md), and for the dial-back/data path
-[Plan 16](plans/16_entry_node_dial_back_20261014192454.md).
+[Plan 16](plans/16_entry_node_dial_back_20261014192454.md); the name claim (the Valkey claim lock that replaced Plan 3's
+write-verify claim) is described in §6.
 
 ## 1. Process anatomy
 
@@ -61,14 +62,14 @@ flowchart TD
 | `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
 | `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, `acme-tls/1` TLS-ALPN-01 answering, dial-back wait + splice on the entry node, connection policy (idle/min-rate/eviction) |
 | `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (OPEN dial-back, PING, RENEW_NUDGE), `/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`), `/api/v1/issue` cert generation |
-| `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, write-verify name claim, issuance cap |
+| `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, Valkey-locked name claim, issuance cap |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, optional CAs, several GTS accounts looked up by key, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
 | `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME issuance budgets + wait-until |
-| `internal/store` | durable S3 name registry (write-verify claim), connection logs, rejected-enroll evidence |
+| `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | control-frame codec + dial-back constants + the ChunkSize pacing constant |
@@ -121,7 +122,7 @@ every other request to the ACME handler unchanged.
 ## 3. Enrollment, issuance, renewal
 
 Enrollment is two-phase (see [`PROTOCOL.md`](PROTOCOL.md) §2): Phase 1 (`/api/v1/enroll`, server-TLS) verifies
-attestation + key binding, write-verify-claims a name in S3, and signs a bootstrap identity cert; Phase
+attestation + key binding, claims a name (Valkey lock, then S3), and signs a bootstrap identity cert; Phase
 2 (`/api/v1/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
 `<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
@@ -153,15 +154,33 @@ LOCAL error: the chain stops with Retry-After 30 s and sets no per-account wait-
 **Issuance budgets.** Each enabled CA contributes accounts: Let's Encrypt and ZeroSSL one per node (its key
 under `--acme-account-dir`), GTS one per listed existing account. Before an order the chain reserves one slot in
 every Valkey token bucket the order draws on (`acme:inflight:{bucket}:{node}`, scored by the attempt's
-deadline); only live nodes' reservations count. The LE per-domain bucket is keyed on the name's registered domain
+deadline plus the 30 s finalize grace); only live nodes' reservations count. For GTS and ZeroSSL it also prepays 9 requests — the measured cost
+of one order, capped at the bucket's burst — from the account's request bucket; without them the account is skipped like an out-of-budget one. The
+account's client is built (its directory, nonce and account requests) before the reservation and the prepay, so a
+node's own orders never starve the build. The
+order's requests draw from that prepaid balance first (only a request beyond it is charged to the shared bucket), and
+when the attempt ends the unused balance is refunded (not while a 429 resync holds the bucket), so the shared request
+bucket always reflects the requests sent plus what the running orders may still send. A 429 resets that bucket, so
+every 429 leaves a fresh random mark on the account both before and after the reset (`acme-429:{account}`, read with
+the wait-until in one round-trip); an order that finds a mark different from the one it read before its prepay drops its remaining balance at
+its next request or at its end — its later requests are charged to, and paced by, the shared bucket, and nothing is
+refunded. The mark outlives any order, so a mark that merely expired is not a new 429. An unreadable mark counts as a
+new 429; before the prepay it means no prepay. The LE per-domain bucket is keyed on the name's registered domain
 (eTLD+1), and an LE renewal of an LE certificate (phone or reserved host) draws only the per-name bucket.
 Success spends the reservation; a created order always spends
 its order bucket; an order finalized and then abandoned counts as issued; a newOrder or finalize request whose
 answer never arrived counts as accepted; other failures release. Every ACME
 request goes through a per-account HTTP transport around lego that refuses or holds requests while the account
 waits out a 429 (a cluster-wide wait-until, never shortened) or its backoff, or lacks request budget, delays the first
-certificate poll after finalize to the CA's median wait + 2 s and spaces the rest 2 s apart, and on a 429
-resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 40 s, ZeroSSL 90 s); an
+certificate poll after finalize (LE 2 s, GTS 3 s, ZeroSSL 15.2 s by default) and spaces the rest 2 s apart, gives every
+successful answer within an order that carries no `Retry-After` a 1 s one (2 s for GTS, which costs fewer of its
+budgeted requests) — lego reads it only on a challenge answer, so it re-checks a pending validation after ~1 s (~2 s
+for GTS) — randomized ±50 %, growing ×1.5 up to 10× — instead of its 5 s default, and stops re-checking after 100× that
+value (100 s, or 200 s for GTS); every attempt deadline is capped at 100 s; drops the
+`rel="alternate"` links from certificate downloads (lego otherwise downloads every alternate chain the CA offers
+and keeps only the default one, which is the chain tunneld serves), and on a 429 resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 60 s, ZeroSSL 90 s); an order already
+finalized when its deadline passes gets 30 s more to fetch its certificate (lego's own certificate wait is set to the
+attempt deadline plus those 30 s), so a certificate the CA issued is not thrown away; an
 abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
 other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
 tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
@@ -201,7 +220,7 @@ the global per-tunnel stream cap (`conc:{name}`, a sorted set: one member per li
 dial-back token, score = its expiry in unix ms; expired members are pruned at admission, `Charge` refreshes
 the stream's own member with `ZADD XX` (never resurrecting a released one), release removes it; TTL = 3 ×
 `--limit-conn-idle`), the merged per-tunnel byte counters (in `tunnel:{name}`, existence-guarded flush), single-use enrollment nonces, per-account ACME
-wait-until/backoff (the wait-until a pipelined `EXPIRE GT` + `SET NX EX`, never shortened), the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private), the ACME issuance budgets — `acme-budget:{bucket}` (hash `{t, at}`, `HSET` + pipelined `PEXPIRE` = time to refill to full + 1 h), `acme:inflight:{bucket}:{node}` (`ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT` = deadline + 1 min, never shortened) and the per-CA lock `lock:acme-budget:{ca}` (`SETNX`, 2 s TTL). No permanent Valkey state; a stale connection never clobbers a re-bound route.
+wait-until/backoff (the wait-until a pipelined `EXPIRE GT` + `SET NX EX`, never shortened), the per-account 429 mark (`acme-429:{account}`, `SET EX` = the 100 s attempt-timeout cap + the 30 s finalize grace + the 5 s settle + 1 min, longer than any order lives), the ACME challenge material (`acme:alpn:{domain}` via `SET NX EX` and `acme:http:{domain}:{token}` via `SET EX`, both 10 min; removed only while they still hold this order's value — GET-compare, then DEL), the reserved-host issuance lock (`lock:acme-self:{host}`, `SET NX EX` 10 min, released the same GET-compare-then-DEL way), the name-claim lock (`lock:claim:{name}`, `SET NX EX` = `--registry-claim-settle`, never released), and the shared reserved-host cert (`acme:self-cert:{host}`, `SET EX` until the cert's NotAfter; it carries the private key, so Valkey must stay private), the ACME issuance budgets — `acme-budget:{bucket}` (hash `{t, at}`, `HSET` + pipelined `PEXPIRE` = time to refill to full + 1 h), `acme:inflight:{bucket}:{node}` (`ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT` = deadline + 1 min, never shortened) and the per-CA lock `lock:acme-budget:{ca}` (`SETNX`, 2 s TTL). No permanent Valkey state; a stale connection never clobbers a re-bound route.
 Connection ids are 8 lowercase
 hex chars (4 `crypto/rand` bytes); a bind whose id collides with the current route owner re-rolls the id
 and retries (bounded), so the owner-conditional guarantee is deterministic, not probabilistic. Dial-back
@@ -213,9 +232,12 @@ tokens are `crypto/rand.Text` (26 base32 chars, 128 bits).
 registry (`names/<name>`), connection logs (per-node JSONL objects
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed; a connection's start and
 end may land in different objects), and rejected-enroll evidence
-(`rejected-enroll/…`). Name uniqueness is the **write-verify claim**: GET (absent) → PUT a claim nonce
-under a hard timeout (SDK retries disabled) → settle wait (strictly > the PUT timeout) → GET-verify the
-nonce. Retention (logs 90d, rejected-enroll 30d) is a one-time lifecycle setup on the bucket
+(`rejected-enroll/…`). Name uniqueness: a candidate name is claimed only after
+`SET lock:claim:{name} NX EX` succeeds in Valkey (a lock already taken draws a new name); then GET (absent) →
+PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
+deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is
+never released and lives `--registry-claim-settle` (strictly > that deadline), so a timed-out PUT has landed or
+died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d) is a one-time lifecycle setup on the bucket
 (`docs/PROJECT.md` §5); tunneld only gets, puts and deletes objects.
 
 ## 7. Ban engine
@@ -310,6 +332,14 @@ writer: events still queued when `--shutdown-grace` expires are dropped, counted
 Errors the Go HTTP servers report themselves (e.g. a failed TLS handshake) go through slog as well: at Debug on
 the internet-facing enroll / control / `:80` servers (attacker-driven, like `no-route`), at Warn on the
 WireGuard-only mesh and internal servers.
+
+Enrollment and issuance timing is visible at Debug: every ACME HTTP request logs `acme request` (`ca`,
+`account`, `method`, `path`, `status`, the CA's `retry_after`, `paced` = the time the budget transport held it,
+`took` = the CA's answer time; a request the transport refuses or abandons before sending logs `paced` and `err`
+with no `took`, and a request whose send fails logs `paced`, `took` and `err` with no `status` or `retry_after`), and every completed step of the enrollment and issuance processing logs `enroll step` /
+`issue step` with its `step` and `took` — from the per-IP limit check (after the request body is read and
+parsed) to the registry write and the issuance-lock release; the request-body transfer and the response write
+are not timed.
 
 A `--log` sink that fails to write (disk full, unwritable file) is never silent: the
 fan-out handler counts every failed record in `tunneld_log_sink_errors_total` and writes the sink's
