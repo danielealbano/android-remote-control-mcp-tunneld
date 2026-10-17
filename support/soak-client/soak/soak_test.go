@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -222,9 +223,14 @@ func clientGone(r *http.Request, err error) bool {
 
 func fakePhone(t *testing.T, short bool) (*httptest.Server, func() *http.Transport) {
 	t.Helper()
+	var every4th atomic.Int64
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/op" {
 			http.NotFound(w, r)
+			return
+		}
+		if strings.HasPrefix(r.Host, "dead.") || strings.HasPrefix(r.Host, "every4th.") && every4th.Add(1)%4 != 0 {
+			http.Error(w, "no tunnel", http.StatusServiceUnavailable)
 			return
 		}
 		n, err := strconv.Atoi(r.URL.Query().Get("resp"))
@@ -277,7 +283,7 @@ func runSoakUntil(t *testing.T, names []string, transport func() *http.Transport
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
-		result <- soak(ctx, testConfig(), names, rec, soakOptions{newTransport: transport, flushEvery: 20 * time.Millisecond})
+		result <- soak(ctx, testConfig(), names, rec, soakOptions{newTransport: transport, flushEvery: 20 * time.Millisecond, maxBackoff: 40 * time.Millisecond, maxFailures: maxFailures})
 	}()
 	deadline, ok := t.Deadline()
 	if !ok {
@@ -334,6 +340,125 @@ func TestSoak_AgainstFakePhonesReusesAndReconnects(t *testing.T) {
 	}
 	if len(rows) < 1+len(names) || (len(rows)-1)%len(names) != 0 {
 		t.Fatalf("got %d CSV rows, want the header plus whole flushes of %d phones", len(rows), len(names))
+	}
+}
+
+func TestNextBackoff_Variants(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		cur      time.Duration
+		interval time.Duration
+		want     time.Duration
+	}{
+		{name: "first failure waits one interval", cur: 0, interval: time.Second, want: time.Second},
+		{name: "doubles", cur: 2 * time.Second, interval: time.Second, want: 4 * time.Second},
+		{name: "capped at 16 s", cur: 8 * time.Second, interval: time.Second, want: 16 * time.Second},
+		{name: "stays at the cap", cur: 16 * time.Second, interval: time.Second, want: 16 * time.Second},
+		{name: "never faster than the interval", cur: 30 * time.Second, interval: 30 * time.Second, want: 30 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextBackoff(tc.cur, tc.interval, maxBackoff); got != tc.want {
+				t.Fatalf("nextBackoff(%s, %s) = %s, want %s", tc.cur, tc.interval, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAfterOp_ReturnsToTheNormalPaceAfterASuccess(t *testing.T) {
+	t.Parallel()
+	steps := []struct {
+		ok   bool
+		want time.Duration
+	}{
+		{ok: false, want: time.Second},
+		{ok: false, want: 2 * time.Second},
+		{ok: false, want: 4 * time.Second},
+		{ok: true, want: 0},
+		{ok: false, want: time.Second},
+		{ok: true, want: 0},
+		{ok: true, want: 0},
+	}
+	var backoff time.Duration
+	for i, s := range steps {
+		backoff = afterOp(s.ok, backoff, time.Second, maxBackoff)
+		if backoff != s.want {
+			t.Fatalf("step %d (ok=%v): backoff = %s, want %s", i+1, s.ok, backoff, s.want)
+		}
+	}
+}
+
+func TestSoak_StopsWhenEveryTunnelKeepsFailing(t *testing.T) {
+	t.Parallel()
+	_, transport := fakePhone(t, false)
+	names := []string{"dead"}
+	var out, logs bytes.Buffer
+	rec, err := newRecorder(&out, names, time.Now(), slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	start := time.Now()
+	err = soak(context.Background(), cfg, names, rec, soakOptions{newTransport: transport, flushEvery: time.Hour, maxBackoff: time.Second, maxFailures: 4})
+	elapsed := time.Since(start)
+	if !errors.Is(err, errNoTunnelWorks) {
+		t.Fatalf("soak = %v, want errNoTunnelWorks", err)
+	}
+	if got := rec.total["dead"].errors; got != 5 {
+		t.Fatalf("errors = %d, want 5 (more than the limit of 4)", got)
+	}
+	if wait := cfg.interval * (1 + 2 + 4 + 8); elapsed < wait {
+		t.Fatalf("stopped after %s, want at least the %s of backed-off retries", elapsed, wait)
+	}
+	rows, err := csv.NewReader(bytes.NewReader(out.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[1][1] != "dead" || rows[1][3] != "5" {
+		t.Fatalf("CSV rows = %v, want the header and the dead phone's 5 errors", rows)
+	}
+	if !strings.Contains(logs.String(), "kind=status_503") {
+		t.Fatalf("the failure was not logged: %s", logs.String())
+	}
+}
+
+func TestSoak_ASuccessResetsTheFailureStreak(t *testing.T) {
+	t.Parallel()
+	_, transport := fakePhone(t, false)
+	names := []string{"every4th"}
+	var out, logs bytes.Buffer
+	rec, err := newRecorder(&out, names, time.Now(), slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- soak(ctx, testConfig(), names, rec, soakOptions{newTransport: transport, flushEvery: time.Hour, maxBackoff: 20 * time.Millisecond, maxFailures: 3})
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		rec.mu.Lock()
+		ok, failed := rec.total["every4th"].ok, rec.total["every4th"].errors
+		rec.mu.Unlock()
+		if ok >= 3 && failed >= 9 {
+			break
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("soak stopped although every 4th operation succeeds: %v (ok %d, errors %d); logs: %s", err, ok, failed, logs.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not reached: ok %d, errors %d", ok, failed)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatal(err)
 	}
 }
 
