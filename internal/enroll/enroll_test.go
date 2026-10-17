@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -321,35 +322,6 @@ func TestIssueAcmeFailure(t *testing.T) {
 	}
 }
 
-func TestClaimZombiePutLoserRedraws(t *testing.T) {
-	st := tunneltest.NewStore()
-	idCSR, idPub := newCSR(t)
-	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "gts"},
-	})
-	// A competitor's record + nonce lands between our PUT and our verify GET, so our verify sees a
-	// different nonce → we redraw and still succeed with a different name.
-	var injected bool
-	st.BeforeVerifyGet = func(name string) {
-		if injected {
-			return
-		}
-		injected = true
-		if err := st.PutName(context.Background(), name, store.NameRecord{Schema: 1, ClaimNonce: "competitor-nonce"}); err != nil {
-			t.Errorf("inject the competitor claim: %v", err)
-		}
-	}
-	nonce := mintNonce(t, svc)
-	res, ee := svc.Enroll(context.Background(), "3.3.3.3", Request{Nonce: nonce, IdentityCSR: idCSR})
-	if ee != nil {
-		t.Fatalf("should redraw and succeed: %v", ee)
-	}
-	if res.Name == "" {
-		t.Error("expected a claimed name after redraw")
-	}
-}
-
 func TestEnrollInvalidNonce(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)
@@ -392,5 +364,50 @@ func TestAttestReason_MatchesObservAttestResults(t *testing.T) {
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("attest results = %v, observ.AttestResults = %v", got, want)
+	}
+}
+
+type recordingNames struct {
+	*tunneltest.Store
+	mu   sync.Mutex
+	puts []store.NameRecord
+}
+
+func (c *recordingNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	c.mu.Lock()
+	c.puts = append(c.puts, rec)
+	c.mu.Unlock()
+	return c.Store.PutName(ctx, name, rec)
+}
+
+func TestEnroll_SingleRegistryWriteCarriesTheFullRecord(t *testing.T) {
+	t.Parallel()
+	names := &recordingNames{Store: tunneltest.NewStore()}
+	idCSR, idPub := newCSR(t)
+	dev := store.DeviceInfo{OSVersion: 150000, OSPatch: 202609, SecurityLevel: "TrustedEnvironment"}
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: names, Evidence: names.Store, TunnelDomain: "example.test",
+		Verifier: devVerifier{fakeVerifier: fakeVerifier{key: idPub}, dev: dev}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
+	if ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	wantFP, err := keyFingerprint(idPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names.mu.Lock()
+	defer names.mu.Unlock()
+	if len(names.puts) != 1 {
+		t.Fatalf("enrollment must write the registry once (the claim), got %d writes", len(names.puts))
+	}
+	got := names.puts[0]
+	if got.IdentityKeyFP != wantFP || got.Device != dev || got.Schema != 1 || got.EnrolledAt.IsZero() {
+		t.Errorf("the claim write must carry the full Phase-1 record: %+v", got)
+	}
+	rec, err := names.GetName(context.Background(), res.Name)
+	if err != nil || rec != got {
+		t.Errorf("stored record = %+v (err %v), want the claim write %+v", rec, err, got)
 	}
 }

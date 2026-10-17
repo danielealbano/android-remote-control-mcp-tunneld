@@ -34,16 +34,14 @@ type CertRecord struct {
 	ARIID     string    `json:"ari_id"`
 }
 
-// NameRecord is the names/<name> registry object. The issuing CA lives TOP-LEVEL (sibling of cert);
-// claim_nonce is the write-verify claim discriminator (16 crypto-random bytes hex), written at claim
-// time and PRESERVED on every LWW update. It NEVER stores cert PEM, private keys, or attestation
+// NameRecord is the names/<name> registry object. The issuing CA lives TOP-LEVEL (sibling of cert).
+// It NEVER stores cert PEM, private keys, or attestation
 // chains for accepted enrollments.
 type NameRecord struct {
 	Schema        int        `json:"schema"`
 	EnrolledAt    time.Time  `json:"enrolled_at"`
 	LastRenewedAt time.Time  `json:"last_renewed_at"`
 	IdentityKeyFP string     `json:"identity_key_fpr"`
-	ClaimNonce    string     `json:"claim_nonce"`
 	CA            string     `json:"ca"` // top-level issuing CA — the ONLY place the CA is stored
 	Cert          CertRecord `json:"cert"`
 	Device        DeviceInfo `json:"device"`

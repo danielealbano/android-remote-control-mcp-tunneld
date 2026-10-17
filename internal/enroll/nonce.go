@@ -1,4 +1,4 @@
-// Package enroll implements attested enrollment: the challenge nonce, the write-verify name-claim
+// Package enroll implements attested enrollment: the challenge nonce, the name-claim
 // protocol (no conditional S3 writes), the seven-point attestation gate with key binding + CSR
 // proof-of-possession, the issuance cap, and the server-TLS enroll HTTP handler. It declares a
 // consumer-side PublicIssuer interface so it does not depend on internal/acme.

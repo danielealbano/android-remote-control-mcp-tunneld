@@ -47,7 +47,7 @@ func NewS3Store(ctx context.Context, cfg S3Config) (*S3Store, error) {
 		Credentials:  creds,
 		BaseEndpoint: aws.String(cfg.Endpoint),
 		UsePathStyle: cfg.ForcePathStyle,
-		// Retries DISABLED for every request: the write-verify claim depends on a timed-out PUT NOT
+		// Retries DISABLED for every request: the claim depends on a timed-out PUT NOT
 		// being replayed, and the LWW/GET/DELETE paths handle their own errors.
 		RetryMaxAttempts: 1,
 		Retryer:          aws.NopRetryer{},

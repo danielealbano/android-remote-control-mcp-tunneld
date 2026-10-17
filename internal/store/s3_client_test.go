@@ -17,7 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-// TestS3ClientSingleAttempt covers the plan's "s3 client single-attempt" row — the write-verify claim
+// TestS3ClientSingleAttempt covers the claim
 // invariant: a failing PUT is NEVER silently replayed by SDK retries (a timed-out claim PUT replayed
 // later would be a zombie write).
 func TestS3ClientSingleAttempt(t *testing.T) {

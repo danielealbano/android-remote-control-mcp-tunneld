@@ -1,8 +1,8 @@
 // Package store is tunneld's FIRST durable server-side state: the name registry and the connection
 // logs, on any PLAIN S3 provider. It uses ONLY plain GetObject/PutObject/DeleteObject — no
 // conditional-write / atomic-PUT feature — so it runs on any S3 (production targets a plain S3 such as
-// OVH; MinIO is a local/e2e stand-in). Name uniqueness comes from the write-verify claim protocol in
-// internal/enroll, not from storage semantics. See docs/PROTOCOL.md and docs/ARCHITECTURE.md §5.
+// OVH; MinIO is a local/e2e stand-in). Name uniqueness comes from the claim protocol in
+// internal/enroll, not from storage semantics. See docs/PROTOCOL.md.
 package store
 
 import (
@@ -16,11 +16,11 @@ var ErrNotFound = errors.New("store: name not found")
 // NameStore is the name-registry surface (consumers: enroll claim/rollback/LWW, phone renewal).
 type NameStore interface {
 	GetName(ctx context.Context, name string) (NameRecord, error) // ErrNotFound if absent
-	// PutName is a plain PUT used both for the write-verify claim and for single-owner LWW updates.
+	// PutName is a plain PUT used both for the claim and for single-owner LWW updates.
 	// Registry writes have SDK auto-retries DISABLED (a claim PUT retried after a timeout is a zombie
 	// write); the caller's ctx carries the claim deadline.
 	PutName(ctx context.Context, name string, rec NameRecord) error
-	// DeleteName is a plain DELETE — rollback of a failed enrollment AFTER a verified claim only.
+	// DeleteName is a plain DELETE — rollback of a failed enrollment.
 	DeleteName(ctx context.Context, name string) error
 }
 

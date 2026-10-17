@@ -8,13 +8,17 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -72,7 +76,7 @@ func newLoggedService(t *testing.T, names NameStore, ev EvidenceStore) (*Service
 func TestClaimName_ReadFailuresAreLoggedAndJoined(t *testing.T) {
 	names := &faultyNames{Store: tunneltest.NewStore(), getErr: func(int64) error { return errInjected }}
 	svc, buf, _ := newLoggedService(t, names, names.Store)
-	_, _, err := svc.claimName(context.Background())
+	_, err := svc.claimName(context.Background(), store.NameRecord{})
 	if !errors.Is(err, errClaimLost) || !errors.Is(err, errInjected) {
 		t.Fatalf("claimName = %v, want errClaimLost joined with the last read error", err)
 	}
@@ -97,12 +101,29 @@ func TestClaimName_WriteFailureLoggedAndRedrawn(t *testing.T) {
 	st := tunneltest.NewStore()
 	st.FailNextPut = errInjected
 	svc, buf, _ := newLoggedService(t, st, st)
-	name, _, err := svc.claimName(context.Background())
+	name, err := svc.claimName(context.Background(), store.NameRecord{})
 	if err != nil || name == "" {
 		t.Fatalf("claimName = (%q, %v), want a claim on the next candidate", name, err)
 	}
 	if !strings.Contains(buf.String(), `msg="name claim write failed (name abandoned)"`) {
 		t.Fatalf("the abandoned candidate must be logged; log = %q", buf.String())
+	}
+}
+
+type failingPutNames struct{ *tunneltest.Store }
+
+func (failingPutNames) PutName(context.Context, string, store.NameRecord) error { return errInjected }
+
+func TestClaimName_WriteFailuresAreJoined(t *testing.T) {
+	t.Parallel()
+	names := failingPutNames{Store: tunneltest.NewStore()}
+	svc, buf, _ := newLoggedService(t, names, names.Store)
+	_, err := svc.claimName(context.Background(), store.NameRecord{})
+	if !errors.Is(err, errClaimLost) || !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "enroll: claim write") {
+		t.Fatalf("claimName = %v, want errClaimLost joined with the wrapped write error", err)
+	}
+	if strings.Count(buf.String(), `msg="name claim write failed (name abandoned)"`) != 8 {
+		t.Fatalf("every abandoned candidate must be logged; log = %q", buf.String())
 	}
 }
 
@@ -178,11 +199,14 @@ func TestIssue_FailuresAreLogged(t *testing.T) {
 
 func TestClaimName_CancelledCallerIsSilent(t *testing.T) {
 	tests := []struct {
-		name    string
-		setup   func(*faultyNames)
-		wantErr bool
+		name      string
+		setup     func(*faultyNames)
+		preCancel bool
 	}{
-		{name: "read fails", wantErr: true, setup: func(n *faultyNames) {
+		{name: "lock fails", preCancel: true, setup: func(n *faultyNames) {
+			n.getErr = func(int64) error { return nil }
+		}},
+		{name: "read fails", setup: func(n *faultyNames) {
 			n.getErr = func(int64) error { return context.Canceled }
 		}},
 		{name: "write fails", setup: func(n *faultyNames) {
@@ -196,12 +220,19 @@ func TestClaimName_CancelledCallerIsSilent(t *testing.T) {
 			tc.setup(names)
 			svc, buf, _ := newLoggedService(t, names, names.Store)
 			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			if _, _, err := svc.claimName(ctx); (err != nil) != tc.wantErr {
-				t.Fatalf("claimName error = %v, wantErr %v", err, tc.wantErr)
+			if tc.preCancel {
+				cancel()
+			} else {
+				svc.rdb.AddHook(tunneltest.CancelAfter("set", cancel))
+			}
+			if _, err := svc.claimName(ctx, store.NameRecord{}); err == nil {
+				t.Fatal("a cancelled caller must not claim a name")
 			}
 			if strings.Contains(buf.String(), "name claim") {
 				t.Fatalf("a claim failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
+			}
+			if names.NameCount() != 0 {
+				t.Fatal("no name may be written for a cancelled caller")
 			}
 		})
 	}
@@ -269,13 +300,14 @@ func TestRecordCert_CancelledReReadIsSilent(t *testing.T) {
 	svc, buf, idCSR := newLoggedService(t, names, names.Store)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, ClaimNonce: "c"}, Request{IdentityCSR: idCSR},
+	enrolled := time.Unix(1000, 0).UTC()
+	svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: enrolled}, Request{IdentityCSR: idCSR},
 		store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})
 	if strings.Contains(buf.String(), "name record re-read failed") {
 		t.Fatalf("a re-read failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
 	}
 	rec, err := names.Store.GetName(context.Background(), "n")
-	if err != nil || rec.ClaimNonce != "c" || rec.CA != "letsencrypt" {
+	if err != nil || !rec.EnrolledAt.Equal(enrolled) || rec.CA != "letsencrypt" {
 		t.Fatalf("the record must still be written from the earlier read: %+v %v", rec, err)
 	}
 }
@@ -304,4 +336,180 @@ func TestRecordRejection_LogsUnparseableClaimedIdentity(t *testing.T) {
 	if len(st.Rejected) != 1 || st.Rejected[0].ClaimedPackage != "" || st.Rejected[0].SignerDigestHex != "" {
 		t.Fatalf("the evidence must still be recorded with empty claimed fields: %+v", st.Rejected)
 	}
+}
+
+func TestService_StepTimingsLoggedAtDebug(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	svc, buf, idCSR := newLoggedService(t, st, st)
+	h := newTestHandler(t, svc, nil)
+	b, err := json.Marshal(enrollRequestBody{Nonce: hexEncode(mintNonce(t, svc)), IdentityCSR: csrPEM(t, idCSR)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
+	req.RemoteAddr = "203.0.113.18:5000"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("enroll failed: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp enrollResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ee := svc.Issue(context.Background(), resp.Name, "203.0.113.18", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, resp.Name+".example.test"),
+	}); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+
+	var want []string
+	for _, s := range []string{"limit-check", "issue-nonce", "limit", "nonce", "attest", "claim-lock", "claim-get",
+		"claim-put", "claim", "sign"} {
+		want = append(want, `level=DEBUG msg="enroll step" step=`+s+" took=")
+	}
+	for _, s := range []string{"nonce", "attest", "registry-read", "issuance-lock", "sign", "acme", "issuance-record",
+		"registry-write", "issuance-unlock"} {
+		want = append(want, `level=DEBUG msg="issue step" step=`+s+" took=")
+	}
+	log := buf.String()
+	at := 0
+	for _, w := range want {
+		i := strings.Index(log[at:], w)
+		if i < 0 {
+			t.Fatalf("missing (or out of order) %q after offset %d; log = %q", w, at, log)
+		}
+		at += i + len(w)
+	}
+	if !strings.Contains(log, `step=acme took=0s tunnel=`+resp.Name+` ip=203.0.113.18 ca=letsencrypt`) {
+		t.Errorf("the acme step must carry the tunnel, ip and issuing CA; log = %q", log)
+	}
+}
+
+func TestClaimName_LockFailuresAreLoggedAndJoined(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	logger, buf := captureLogger()
+	svc, mr := newService(t, Config{Names: st, Logger: logger})
+	mr.SetError("ERR injected")
+	_, err := svc.claimName(context.Background(), store.NameRecord{})
+	if !errors.Is(err, errClaimLost) || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("claimName = %v, want errClaimLost joined with the lock error", err)
+	}
+	if !strings.Contains(buf.String(), `msg="name claim lock failed (trying another name)"`) {
+		t.Fatalf("each failed lock must be logged; log = %q", buf.String())
+	}
+	if st.NameCount() != 0 {
+		t.Fatal("no name may be written without its lock")
+	}
+}
+
+type clockedNames struct {
+	*tunneltest.Store
+	mu       *sync.Mutex
+	now      *time.Time
+	get, put time.Duration
+}
+
+func (c *clockedNames) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	*c.now = c.now.Add(d)
+}
+
+func (c *clockedNames) GetName(ctx context.Context, name string) (store.NameRecord, error) {
+	c.advance(c.get)
+	return c.Store.GetName(ctx, name)
+}
+
+func (c *clockedNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	c.advance(c.put)
+	return c.Store.PutName(ctx, name, rec)
+}
+
+func TestClaimName_StepTimingsArePerStep(t *testing.T) {
+	t.Parallel()
+	logger, buf := captureLogger()
+	var mu sync.Mutex
+	clk := time.Unix(1_700_000_000, 0)
+	names := &clockedNames{Store: tunneltest.NewStore(), mu: &mu, now: &clk, get: 2 * time.Second, put: 3 * time.Second}
+	svc, _ := newService(t, Config{Names: names, Logger: logger})
+	svc.SetClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clk
+	})
+	if _, err := svc.claimName(context.Background(), store.NameRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"step=claim-lock took=0s", "step=claim-get took=2s", "step=claim-put took=3s"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("missing %q (each step's own duration); log = %q", want, buf.String())
+		}
+	}
+}
+
+func TestClaimName_OneDeadlineCoversReadAndWrite(t *testing.T) {
+	t.Parallel()
+	const timeout = 2 * time.Second
+	names := &deadlineNames{Store: tunneltest.NewStore(), getDelay: 50 * time.Millisecond}
+	svc, _ := newService(t, Config{Names: names, ClaimTimeout: timeout, ClaimSettle: 5 * time.Second})
+	svc.rdb.AddHook(names)
+	before := time.Now()
+	if _, err := svc.claimName(context.Background(), store.NameRecord{}); err != nil {
+		t.Fatal(err)
+	}
+	names.mu.Lock()
+	defer names.mu.Unlock()
+	if names.getDL.IsZero() || !names.setDL.Equal(names.getDL) || !names.getDL.Equal(names.putDL) {
+		t.Fatalf("the lock, the read and the PUT must share one claim deadline: set %v get %v put %v", names.setDL, names.getDL, names.putDL)
+	}
+	if names.putDL.Before(before.Add(timeout)) || names.putDL.After(names.getAt.Add(timeout)) {
+		t.Fatalf("the claim deadline %v must start before the lock and the read: want within [%v, %v]",
+			names.putDL, before.Add(timeout), names.getAt.Add(timeout))
+	}
+}
+
+type deadlineNames struct {
+	*tunneltest.Store
+	getDelay            time.Duration
+	mu                  sync.Mutex
+	getAt               time.Time
+	setDL, getDL, putDL time.Time
+}
+
+func (d *deadlineNames) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (d *deadlineNames) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "set" {
+			dl, _ := ctx.Deadline()
+			d.mu.Lock()
+			d.setDL = dl
+			d.mu.Unlock()
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (d *deadlineNames) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (d *deadlineNames) GetName(ctx context.Context, name string) (store.NameRecord, error) {
+	dl, _ := ctx.Deadline()
+	d.mu.Lock()
+	d.getAt, d.getDL = time.Now(), dl
+	d.mu.Unlock()
+	time.Sleep(d.getDelay)
+	return d.Store.GetName(ctx, name)
+}
+
+func (d *deadlineNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	dl, _ := ctx.Deadline()
+	d.mu.Lock()
+	d.putDL = dl
+	d.mu.Unlock()
+	return d.Store.PutName(ctx, name, rec)
 }

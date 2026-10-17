@@ -20,7 +20,6 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 		EnrolledAt:    time.Unix(1000, 0).UTC(),
 		LastRenewedAt: time.Unix(2000, 0).UTC(),
 		IdentityKeyFP: "sha256:abc",
-		ClaimNonce:    "0011223344556677",
 	}
 	in.SetCert(store.CertInfo{
 		CA: "letsencrypt", Serial: "01", NotBefore: time.Unix(1000, 0).UTC(),
@@ -46,9 +45,6 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 	} else if _, dup := certObj["ca"]; dup {
 		t.Error("ca must NOT appear inside the cert sub-object")
 	}
-	if raw["claim_nonce"] != "0011223344556677" {
-		t.Errorf("claim_nonce missing/wrong: %v", raw["claim_nonce"])
-	}
 	dev, _ := raw["device"].(map[string]any)
 	if dev["os_version"] == nil {
 		t.Error("device.os_version must be present")
@@ -64,7 +60,7 @@ func TestNameRecordJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.CA != "letsencrypt" || out.Cert.NotBefore.IsZero() || out.ClaimNonce != in.ClaimNonce {
+	if out.CA != "letsencrypt" || out.Cert.NotBefore.IsZero() || out.IdentityKeyFP != in.IdentityKeyFP {
 		t.Errorf("round-trip mismatch: %+v", out)
 	}
 }
@@ -128,12 +124,12 @@ func TestFakeGetPutDeleteRoundTrip(t *testing.T) {
 	if _, err := s.GetName(ctx, "x"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("absent name should be ErrNotFound, got %v", err)
 	}
-	rec := store.NameRecord{Schema: 1, ClaimNonce: "n1"}
+	rec := store.NameRecord{Schema: 1, IdentityKeyFP: "n1"}
 	if err := s.PutName(ctx, "x", rec); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetName(ctx, "x")
-	if err != nil || got.ClaimNonce != "n1" {
+	if err != nil || got.IdentityKeyFP != "n1" {
 		t.Fatalf("get after put: %+v %v", got, err)
 	}
 	if err := s.DeleteName(ctx, "x"); err != nil {
@@ -157,11 +153,11 @@ func TestFakeFailAndZombiePut(t *testing.T) {
 	}
 
 	s.ZombieNextPut = errors.New("timeout but landed")
-	if err := s.PutName(ctx, "b", store.NameRecord{ClaimNonce: "z"}); err == nil {
+	if err := s.PutName(ctx, "b", store.NameRecord{IdentityKeyFP: "z"}); err == nil {
 		t.Error("ZombieNextPut should error")
 	}
 	got, err := s.GetName(ctx, "b")
-	if err != nil || got.ClaimNonce != "z" {
+	if err != nil || got.IdentityKeyFP != "z" {
 		t.Errorf("zombie put must land the record despite the error: %+v %v", got, err)
 	}
 }
