@@ -4,13 +4,18 @@ package limit
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func cooldownKey(ca string) string { return "acme-cooldown:" + ca }
 func failuresKey(ca string) string { return "acme-fail:" + ca }
+func limitedKey(ca string) string  { return "acme-429:" + ca }
 
 // SetCACooldown marks ca as cooling for d (the TTL IS the cooldown).
 func (l *Limiter) SetCACooldown(ctx context.Context, ca string, d time.Duration) error {
@@ -34,6 +39,30 @@ func (l *Limiter) CACooldown(ctx context.Context, ca string) (time.Duration, err
 		return 0, nil
 	}
 	return d, nil
+}
+
+func (l *Limiter) MarkCALimited(ctx context.Context, ca string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return fmt.Errorf("set acme 429 mark %s: ttl must be positive, got %s", ca, ttl)
+	}
+	if err := l.rdb.Set(ctx, limitedKey(ca), rand.Text(), ttl).Err(); err != nil {
+		return fmt.Errorf("set acme 429 mark %s: %w", ca, err)
+	}
+	return nil
+}
+
+func (l *Limiter) CAWaitState(ctx context.Context, ca string) (time.Duration, string, error) {
+	pipe := l.rdb.Pipeline()
+	wait := pipe.PTTL(ctx, cooldownKey(ca))
+	mark := pipe.Get(ctx, limitedKey(ca))
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return 0, "", fmt.Errorf("read acme wait state %s: %w", ca, err)
+	}
+	m, err := mark.Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, "", fmt.Errorf("read acme 429 mark %s: %w", ca, err)
+	}
+	return max(wait.Val(), 0), m, nil
 }
 
 // BumpCAFailures increments the consecutive-failure counter for ca (window is always

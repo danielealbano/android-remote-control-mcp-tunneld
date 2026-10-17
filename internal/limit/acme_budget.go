@@ -67,10 +67,14 @@ func (b Bucket) waitFor(s bucketState, now time.Time, need float64) time.Duratio
 }
 
 func (b Bucket) spend(s bucketState, now time.Time) bucketState {
+	return b.spendN(s, now, 1)
+}
+
+func (b Bucket) spendN(s bucketState, now time.Time, n float64) bucketState {
 	if now.Before(s.at) {
-		return bucketState{tokens: s.tokens - 1, at: s.at}
+		return bucketState{tokens: s.tokens - n, at: s.at}
 	}
-	return bucketState{tokens: b.tokensAt(s, now) - 1, at: now}
+	return bucketState{tokens: b.tokensAt(s, now) - n, at: now}
 }
 
 func (l *Limiter) withBudgetLock(ctx context.Context, ca string, fn func() error) error {
@@ -278,6 +282,57 @@ func (l *Limiter) TakeACME(ctx context.Context, ca string, bs []Bucket) (time.Du
 		return nil
 	})
 	return wait, err
+}
+
+func (l *Limiter) PrepayACME(ctx context.Context, ca string, b Bucket, n int) (int, time.Duration, error) {
+	n = min(n, int(b.Capacity))
+	if n <= 0 {
+		return 0, 0, nil
+	}
+	var wait time.Duration
+	err := l.withBudgetLock(ctx, ca, func() error {
+		now := l.now()
+		states, err := l.readBuckets(ctx, []Bucket{b}, now)
+		if err != nil {
+			return err
+		}
+		if b.tokensAt(states[0], now) < float64(n) {
+			wait = max(b.waitFor(states[0], now, float64(n)), time.Millisecond)
+			return nil
+		}
+		pipe := l.rdb.Pipeline()
+		writeBucket(ctx, pipe, b, b.spendN(states[0], now, float64(n)), now)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("prepay acme request budget: %w", err)
+		}
+		return nil
+	})
+	if err != nil || wait > 0 {
+		return 0, wait, err
+	}
+	return n, 0, nil
+}
+
+func (l *Limiter) RefundACME(ctx context.Context, ca string, b Bucket, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	return l.withBudgetLock(ctx, ca, func() error {
+		now := l.now()
+		states, err := l.readBuckets(ctx, []Bucket{b}, now)
+		if err != nil {
+			return err
+		}
+		if now.Before(states[0].at) {
+			return nil
+		}
+		pipe := l.rdb.Pipeline()
+		writeBucket(ctx, pipe, b, bucketState{tokens: min(b.Capacity, b.tokensAt(states[0], now)+float64(n)), at: now}, now)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("refund acme request budget: %w", err)
+		}
+		return nil
+	})
 }
 
 func (l *Limiter) ResyncACME(ctx context.Context, ca string, bs []Bucket, retryAfter time.Duration) error {

@@ -209,6 +209,48 @@ func TestCACooldownAndFailures(t *testing.T) {
 	}
 }
 
+func TestCAWaitState_ReadsTheWaitUntilAndThe429Mark(t *testing.T) {
+	t.Parallel()
+	ctx := ctxT(t)
+	rdb, mr := newTestRedis(t)
+	l := NewLimiter(rdb, 1, 1, 1, time.Hour)
+	if cool, mark, err := l.CAWaitState(ctx, "gts-1"); err != nil || cool != 0 || mark != "" {
+		t.Fatalf("CAWaitState = %s, %q, %v; want no wait and no mark", cool, mark, err)
+	}
+	if err := l.SetCACooldown(ctx, "gts-1", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.MarkCALimited(ctx, "gts-1", 3*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	cool, first, err := l.CAWaitState(ctx, "gts-1")
+	if err != nil || cool != time.Minute || first == "" {
+		t.Fatalf("CAWaitState = %s, %q, %v; want the 1 m wait and a mark", cool, first, err)
+	}
+	if ttl := mr.TTL(limitedKey("gts-1")); ttl != 3*time.Minute {
+		t.Fatalf("429 mark TTL = %s, want 3 m", ttl)
+	}
+	if err := l.MarkCALimited(ctx, "gts-1", 3*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, second, err := l.CAWaitState(ctx, "gts-1"); err != nil || second == "" || second == first {
+		t.Fatalf("a second 429 must leave a new mark: first %q, second %q (%v)", first, second, err)
+	}
+	if _, mark, err := l.CAWaitState(ctx, "gts-2"); err != nil || mark != "" {
+		t.Fatalf("another account's mark = %q (%v), want none", mark, err)
+	}
+	if err := l.MarkCALimited(ctx, "gts-1", 0); err == nil {
+		t.Fatal("a mark without a TTL must be refused")
+	}
+	mr.Close()
+	if _, _, err := l.CAWaitState(ctx, "gts-1"); err == nil {
+		t.Fatal("a failed read must return an error")
+	}
+	if err := l.MarkCALimited(ctx, "gts-1", time.Minute); err == nil {
+		t.Fatal("a failed write must return an error")
+	}
+}
+
 func TestAcquireReleaseStreamGlobalCap(t *testing.T) {
 	ctx := ctxT(t)
 	l := newLimiter(t, 1, 1, 1)
