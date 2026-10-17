@@ -110,6 +110,27 @@ func TestLazyCA_ResolveCancelWhileBuildHangs(t *testing.T) {
 	close(release) // let the abandoned build finish + cache in the background
 }
 
+func TestLazyCA_ObtainReportsTheAttemptDeadline(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	l := newLazyCA(CAGTS, 0, 0, func(ctx context.Context) (caIssuer, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, errors.New("released")
+	}, testLogger())
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour)
+	defer cancel()
+	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassTransient || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("obtain = %v, want a transient attempt deadline", err)
+	}
+}
+
 func TestLazyCA_ShouldRenewNeverTriggersBuild(t *testing.T) {
 	var builds atomic.Int32
 	l := newLazyCA("x", 160*time.Hour, 48*time.Hour, func(context.Context) (caIssuer, error) {

@@ -56,6 +56,7 @@ func buildACMEChain(cfg config.ServeCmd, lim *limit.Limiter, chal *acme.Challeng
 		CooldownDefault: cfg.ACMECooldownDefault, BackoffInitial: cfg.ACMEBackoffInitial,
 		BackoffMax: cfg.ACMEBackoffMax, RenewMargin: cfg.ACMERenewMargin, ShortlivedLifetime: shortlivedLifetime,
 		NodeID: nodeID, Nodes: nodes, Budgets: budgets, PollEvery: cfg.ACMEPollInterval,
+		MaxAttemptTimeout: config.MaxACMEAttemptTimeout,
 	}
 	chain, err := acme.NewChain(chainCfg, legoCfgs...)
 	if err != nil {

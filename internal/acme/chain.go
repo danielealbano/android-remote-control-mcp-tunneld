@@ -35,6 +35,10 @@ type Recorder interface {
 	ACMERateLimited(ca string)
 }
 
+type preparer interface {
+	prepare(ctx context.Context) error
+}
+
 // nopRecorder is used when no recorder is injected.
 type nopRecorder struct{}
 
@@ -54,17 +58,20 @@ type ChainConfig struct {
 	RenewMargin        time.Duration
 	ShortlivedLifetime time.Duration // 160h
 
-	NodeID    string
-	Nodes     NodeLister
-	Budgets   Budgets
-	PollEvery time.Duration
-	RunBudget time.Duration
-	Rand      func(n int) int
+	NodeID            string
+	Nodes             NodeLister
+	Budgets           Budgets
+	PollEvery         time.Duration
+	RunBudget         time.Duration
+	FinalizeGrace     time.Duration
+	MaxAttemptTimeout time.Duration
+	Rand              func(n int) int
 }
 
 const (
-	settleTimeout    = 5 * time.Second
-	defaultRunBudget = 290 * time.Second
+	settleTimeout        = 5 * time.Second
+	defaultRunBudget     = 290 * time.Second
+	defaultFinalizeGrace = 30 * time.Second
 )
 
 // chainIssuer implements enroll.PublicIssuer. Issue and renew use the SAME LE→GTS→ZeroSSL order, so
@@ -91,6 +98,9 @@ func NewChainIssuer(cfg ChainConfig, accounts ...*account) (*chainIssuer, error)
 	}
 	if cfg.RunBudget <= 0 {
 		cfg.RunBudget = defaultRunBudget
+	}
+	if cfg.FinalizeGrace <= 0 {
+		cfg.FinalizeGrace = defaultFinalizeGrace
 	}
 	c := &chainIssuer{cfg: cfg, now: time.Now}
 	for _, ca := range []string{CALetsEncrypt, CAGTS, CAZeroSSL} {
@@ -208,13 +218,22 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 }
 
 func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.CertificateRequest, name, fqdn string, leRenewal bool, live []string) ([]byte, store.CertInfo, time.Duration, error) {
+	if p, ok := a.issuer.(preparer); ok {
+		pctx, cancel := context.WithTimeout(ctx, a.timeout)
+		err := p.prepare(pctx)
+		cancel()
+		if err != nil {
+			return nil, store.CertInfo{}, 0, err
+		}
+	}
 	onCreate, onSuccess := c.cfg.Budgets.orderBuckets(a, fqdn, leRenewal)
 	member := mintMember()
 	timeout := a.timeout
 	if d, ok := ctx.Deadline(); ok {
 		timeout = min(timeout, time.Until(d))
 	}
-	ok, wait, err := c.cfg.Limiter.ReserveACME(ctx, a.ca, append(slices.Clone(onCreate), onSuccess...), c.cfg.NodeID, member, c.now().Add(timeout), live)
+	reserved := slices.Concat(onCreate, onSuccess)
+	ok, wait, err := c.cfg.Limiter.ReserveACME(ctx, a.ca, reserved, c.cfg.NodeID, member, c.now().Add(timeout+c.cfg.FinalizeGrace), live)
 	switch {
 	case err != nil:
 		c.cfg.Logger.Warn("acme budget reservation failed (trying the account)", "ca", a.ca, "name", name, "err", err, "account", a.label)
@@ -222,12 +241,33 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 		c.cfg.Logger.Debug("acme account out of budget (skipped)", "ca", a.ca, "name", name, "retry_after", wait, "account", a.label)
 		return nil, store.CertInfo{}, wait, nil
 	}
+	prepayBucket, perOrder := c.cfg.Budgets.prepayBucket(a)
+	var mark string
+	if perOrder > 0 {
+		var merr error
+		if _, mark, merr = c.cfg.Limiter.CAWaitState(ctx, a.id); merr != nil {
+			c.cfg.Logger.Warn("acme 429 mark read failed (no prepay; requests draw on the shared budget)", "ca", a.ca, "name", name, "err", merr, "account", a.label)
+			perOrder = 0
+		}
+	}
+	prepaid, pwait, perr := c.cfg.Limiter.PrepayACME(ctx, a.ca, prepayBucket, perOrder)
+	switch {
+	case perr != nil:
+		c.cfg.Logger.Warn("acme request budget prepay failed (trying the account)", "ca", a.ca, "name", name, "err", perr, "account", a.label)
+	case pwait > 0:
+		if rerr := c.cfg.Limiter.ReleaseACME(ctx, reserved, c.cfg.NodeID, member); rerr != nil {
+			c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", rerr, "account", a.label)
+		}
+		c.cfg.Logger.Debug("acme account out of request budget (skipped)", "ca", a.ca, "name", name, "retry_after", pwait, "account", a.label)
+		return nil, store.CertInfo{}, pwait, nil
+	}
 	var nameBucket, domainBucket limit.Bucket
 	if a.ca == CALetsEncrypt {
 		nameBucket, domainBucket = c.cfg.Budgets.leName(fqdn), c.cfg.Budgets.leDomain(fqdn)
 	}
 	tr := newOrderTrack(nameBucket, domainBucket)
-	actx, cancel := context.WithTimeout(withTrack(ctx, tr), timeout)
+	tr.setPrepaid(prepayBucket.Key, prepaid, mark)
+	actx, cancel := attemptContext(withTrack(ctx, tr), tr, timeout, c.cfg.FinalizeGrace)
 	pemChain, info, oerr := a.issuer.obtain(actx, csr, name)
 	cancel()
 	out := tr.outcome()
@@ -258,11 +298,29 @@ func (c *chainIssuer) settle(ctx context.Context, a *account, member string, onC
 	if err := c.cfg.Limiter.ReleaseACME(sctx, release, c.cfg.NodeID, member); err != nil {
 		c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", err, "account", a.label)
 	}
+	if left, mark := tr.drainPrepaid(); left > 0 {
+		c.refund(sctx, a, left, mark)
+	}
 	if out.abandoned {
 		for _, f := range tr.takeCleanups() {
 			if err := f(sctx); err != nil {
 				c.cfg.Logger.Warn("abandoned order's challenge cleanup failed (it expires by TTL)", "ca", a.ca, "err", err, "account", a.label)
 			}
+		}
+	}
+}
+
+func (c *chainIssuer) refund(ctx context.Context, a *account, left int, mark string) {
+	_, cur, err := c.cfg.Limiter.CAWaitState(ctx, a.id)
+	switch {
+	case err != nil:
+		c.cfg.Logger.Warn("acme 429 mark read failed (refund skipped; the budget refills on its own)", "ca", a.ca, "err", err, "account", a.label)
+	case cur != "" && cur != mark:
+		c.cfg.Logger.Debug("acme order dropped its prepaid requests", "ca", a.ca, "account", a.label, "reason", "the account answered 429", "dropped", left)
+	default:
+		prepayBucket, _ := c.cfg.Budgets.prepayBucket(a)
+		if err := c.cfg.Limiter.RefundACME(ctx, a.ca, prepayBucket, left); err != nil {
+			c.cfg.Logger.Warn("acme request budget refund failed (the budget refills on its own)", "ca", a.ca, "err", err, "account", a.label)
 		}
 	}
 }
@@ -449,6 +507,29 @@ func backoff(initial, maxDur time.Duration, n int) time.Duration {
 		return maxDur
 	}
 	return d
+}
+
+func attemptContext(parent context.Context, tr *orderTrack, timeout, grace time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	go func() {
+		t := time.NewTimer(timeout)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if tr.finalizeSent() {
+			t.Reset(grace)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+		cancel(context.DeadlineExceeded)
+	}()
+	return ctx, func() { cancel(context.Canceled) }
 }
 
 // asIssuerError extracts a *IssuerError from err (via Unwrap chain) without importing errors here.

@@ -64,12 +64,13 @@ type LegoConfig struct {
 	HTTP      HTTPChallenges
 	Logger    *slog.Logger
 
-	AccountID      string
-	Label          string
-	ResolveOnly    bool
-	AttemptTimeout time.Duration
-	PollFirst      time.Duration
-	Wrap           func(http.RoundTripper) http.RoundTripper
+	AccountID       string
+	Label           string
+	ResolveOnly     bool
+	AttemptTimeout  time.Duration
+	CertificateWait time.Duration
+	PollFirst       time.Duration
+	Wrap            func(http.RoundTripper) http.RoundTripper
 }
 
 // dnsChallengeOpts builds the lego DNS-01 challenge options from the propagation-tuning config.
@@ -116,12 +117,7 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 		key = k
 	}
 	user := &acmeUser{email: cfg.Email, key: key}
-	lc := lego.NewConfig(user)
-	lc.CADirURL = cfg.DirectoryURL
-	if cfg.Wrap != nil {
-		lc.HTTPClient.Transport = cfg.Wrap(lc.HTTPClient.Transport)
-	}
-	client, err := lego.NewClient(lc)
+	client, err := lego.NewClient(newLegoConfig(cfg, user))
 	if err != nil {
 		return nil, fmt.Errorf("acme: new lego client (%s): %w", cfg.CAID, err)
 	}
@@ -183,6 +179,18 @@ func NewLegoClient(ctx context.Context, cfg LegoConfig) (*legoClient, error) {
 	return lc2, nil
 }
 
+func newLegoConfig(cfg LegoConfig, user registration.User) *lego.Config {
+	lc := lego.NewConfig(user)
+	lc.CADirURL = cfg.DirectoryURL
+	if cfg.CertificateWait > 0 {
+		lc.Certificate.Timeout = cfg.CertificateWait
+	}
+	if cfg.Wrap != nil {
+		lc.HTTPClient.Transport = cfg.Wrap(lc.HTTPClient.Transport)
+	}
+	return lc
+}
+
 func (l *legoClient) id() string { return l.cfg.CAID }
 
 func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
@@ -237,7 +245,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 	select {
 	case <-ctx.Done():
 		abandon()
-		return nil, store.CertInfo{}, transient(ctx.Err())
+		return nil, store.CertInfo{}, transient(context.Cause(ctx))
 	case d := <-limited:
 		abandon()
 		return nil, store.CertInfo{}, rateLimited(d, errCARateLimited)

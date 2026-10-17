@@ -1122,15 +1122,42 @@ func TestServeCmd_ACMEDefaults(t *testing.T) {
 	}
 	for flag, got := range map[string][2]time.Duration{
 		"--acme-attempt-timeout-le":      {c.ACMEAttemptTimeoutLE, 20 * time.Second},
-		"--acme-attempt-timeout-gts":     {c.ACMEAttemptTimeoutGTS, 40 * time.Second},
+		"--acme-attempt-timeout-gts":     {c.ACMEAttemptTimeoutGTS, 60 * time.Second},
 		"--acme-attempt-timeout-zerossl": {c.ACMEAttemptTimeoutZeroSSL, 90 * time.Second},
 		"--acme-poll-first-le":           {c.ACMEPollFirstLE, 2 * time.Second},
-		"--acme-poll-first-gts":          {c.ACMEPollFirstGTS, 5600 * time.Millisecond},
+		"--acme-poll-first-gts":          {c.ACMEPollFirstGTS, 3 * time.Second},
 		"--acme-poll-first-zerossl":      {c.ACMEPollFirstZeroSSL, 15200 * time.Millisecond},
 		"--acme-poll-interval":           {c.ACMEPollInterval, 2 * time.Second},
 	} {
 		if got[0] != got[1] {
 			t.Errorf("%s default = %s, want %s", flag, got[0], got[1])
 		}
+	}
+}
+
+func TestValidate_ACMEAttemptTimeoutCapped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		flag    string
+		set     func(*ServeCmd, time.Duration)
+		v       time.Duration
+		wantErr bool
+	}{
+		{"--acme-attempt-timeout-le", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutLE = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-le", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutLE = d }, 101 * time.Second, true},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutGTS = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutGTS = d }, 101 * time.Second, true},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutZeroSSL = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutZeroSSL = d }, 101 * time.Second, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag+"="+tc.v.String(), func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c, tc.v)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr || (err != nil && !strings.Contains(err.Error(), tc.flag)) {
+				t.Fatalf("Validate() = %v, wantErr %v (naming %s)", err, tc.wantErr, tc.flag)
+			}
+		})
 	}
 }

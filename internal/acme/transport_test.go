@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
@@ -40,6 +41,7 @@ func (l *lockedBuffer) String() string {
 }
 
 type transportHarness struct {
+	mr   *miniredis.Miniredis
 	lim  *limit.Limiter
 	rec  *recordingChainRecorder
 	logs *lockedBuffer
@@ -53,10 +55,10 @@ func newTransportHarness(t *testing.T, acct *account, budgets Budgets) *transpor
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	lim := limit.NewLimiter(rdb, 1, 1, 1, time.Hour)
-	h := &transportHarness{lim: lim, rec: &recordingChainRecorder{}, logs: &lockedBuffer{}}
+	h := &transportHarness{mr: mr, lim: lim, rec: &recordingChainRecorder{}, logs: &lockedBuffer{}}
 	h.bt = &budgetTransport{
 		base: http.DefaultTransport, acct: acct, budgets: budgets, requests: lim, cooldowns: lim,
-		recorder: h.rec, cooldown: 2 * time.Second, firstPoll: 300 * time.Millisecond, pollEvery: 200 * time.Millisecond,
+		recorder: h.rec, cooldown: 2 * time.Second, markTTL: 3 * time.Minute, firstPoll: 300 * time.Millisecond, pollEvery: 200 * time.Millisecond,
 		logger: slog.New(slog.NewTextHandler(h.logs, nil)), now: time.Now,
 	}
 	h.hc = &http.Client{Transport: h.bt}
@@ -146,6 +148,13 @@ func TestBudgetTransport_429(t *testing.T) {
 	if cool, err := h.lim.CACooldown(ctx, acct.id); err != nil || cool != 7*time.Second {
 		t.Fatalf("account wait-until = %s (%v), want 7 s", cool, err)
 	}
+	_, mark, err := h.lim.CAWaitState(ctx, acct.id)
+	if err != nil || mark == "" {
+		t.Fatalf("429 mark = %q (%v), want one", mark, err)
+	}
+	if ttl := h.mr.TTL("acme-429:" + acct.id); ttl != h.bt.markTTL {
+		t.Fatalf("429 mark TTL = %s, want the transport's %s", ttl, h.bt.markTTL)
+	}
 	if wait, err := h.lim.TakeACME(ctx, CALetsEncrypt, []limit.Bucket{b.leDomain("p.example.com")}); err != nil || wait <= 6*time.Second {
 		t.Fatalf("the domain bucket must be resynced to the Retry-After, wait = %s (%v)", wait, err)
 	}
@@ -179,6 +188,141 @@ func TestBudgetTransport_429NeverShortens(t *testing.T) {
 	if cool, err := h.lim.CACooldown(ctx, acct.id); err != nil || cool != time.Minute {
 		t.Fatalf("wait-until = %s (%v), want the longer 60 s kept", cool, err)
 	}
+	if _, mark, err := h.lim.CAWaitState(ctx, acct.id); err != nil || mark == "" {
+		t.Fatalf("429 mark = %q (%v), want one even when the wait-until is not extended", mark, err)
+	}
+}
+
+type markRecorder struct {
+	bounds []time.Duration
+	ttls   []time.Duration
+}
+
+func (m *markRecorder) CAWaitState(context.Context, string) (time.Duration, string, error) {
+	return 0, "", nil
+}
+
+func (m *markRecorder) SetCACooldown(context.Context, string, time.Duration) error { return nil }
+
+func (m *markRecorder) MarkCALimited(ctx context.Context, _ string, ttl time.Duration) error {
+	if dl, ok := ctx.Deadline(); ok {
+		m.bounds = append(m.bounds, time.Until(dl))
+	}
+	m.ttls = append(m.ttls, ttl)
+	return errors.New("valkey down")
+}
+
+type callOrder struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (c *callOrder) add(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, name)
+}
+
+func (c *callOrder) got() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.calls)
+}
+
+func (c *callOrder) TakeACME(context.Context, string, []limit.Bucket) (time.Duration, error) {
+	c.add("take")
+	return 0, nil
+}
+
+func (c *callOrder) ResyncACME(context.Context, string, []limit.Bucket, time.Duration) error {
+	c.add("resync")
+	return nil
+}
+
+func (c *callOrder) CAWaitState(context.Context, string) (time.Duration, string, error) {
+	c.add("wait-state")
+	return 0, "", nil
+}
+
+func (c *callOrder) SetCACooldown(context.Context, string, time.Duration) error {
+	c.add("wait-until")
+	return nil
+}
+
+func (c *callOrder) MarkCALimited(context.Context, string, time.Duration) error {
+	c.add("mark")
+	return nil
+}
+
+func TestBudgetTransport_429MarksAfterTheResync(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		body    io.Reader
+		wantErr bool
+		want    []string
+	}{
+		{name: "the account is marked before and after the budget resync", body: strings.NewReader("{}"), want: []string{"wait-until", "mark", "resync", "mark"}},
+		{name: "an unreadable 429 body still marks the account", body: iotest.ErrReader(errors.New("boom")), wantErr: true, want: []string{"wait-until", "mark"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+			h := newTransportHarness(t, acct, testBudgets())
+			calls := &callOrder{}
+			h.bt.requests, h.bt.cooldowns = calls, calls
+			resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"5"}}, Body: io.NopCloser(tc.body)}
+			if _, err := h.bt.rateLimited(context.Background(), resp, nil); (err != nil) != tc.wantErr {
+				t.Fatalf("rateLimited error = %v, want error %v", err, tc.wantErr)
+			}
+			if got := calls.got(); !slices.Equal(got, tc.want) {
+				t.Fatalf("Valkey calls = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBudgetTransport_HeldRequestReportsTheAttemptDeadline(t *testing.T) {
+	t.Parallel()
+	acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+	h := newTransportHarness(t, acct, testBudgets())
+	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	if err := h.lim.SetCACooldown(context.Background(), acct.id, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 50*time.Millisecond, time.Hour)
+	defer cancel()
+	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/authz/1", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a request held past the attempt deadline = %v, want context.DeadlineExceeded", err)
+	}
+	if ca.count() != 0 {
+		t.Fatal("a held request must not be sent")
+	}
+}
+
+func TestBudgetTransport_429MarkWriteFailureBoundedAndLogged(t *testing.T) {
+	t.Parallel()
+	acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+	h := newTransportHarness(t, acct, testBudgets())
+	marks := &markRecorder{}
+	h.bt.cooldowns = marks
+	resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"5"}},
+		Body: io.NopCloser(strings.NewReader("{}"))}
+	if _, err := h.bt.rateLimited(context.Background(), resp, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(marks.bounds) != 2 {
+		t.Fatalf("mark writes = %d, want one before and one after the resync", len(marks.bounds))
+	}
+	for i, bound := range marks.bounds {
+		if bound <= 0 || bound > budgetOpTimeout || marks.ttls[i] != h.bt.markTTL {
+			t.Fatalf("mark write %d: deadline %s, TTL %s; want within budgetOpTimeout (%s) and the transport's %s", i+1, bound, marks.ttls[i], budgetOpTimeout, h.bt.markTTL)
+		}
+	}
+	if want := `msg="acme account 429 mark write failed (running orders keep their prepaid requests)"`; !strings.Contains(h.logs.String(), want) {
+		t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
+	}
 }
 
 type scriptedCooldowns struct {
@@ -187,19 +331,21 @@ type scriptedCooldowns struct {
 	reads int
 }
 
-func (s *scriptedCooldowns) CACooldown(context.Context, string) (time.Duration, error) {
+func (s *scriptedCooldowns) CAWaitState(context.Context, string) (time.Duration, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reads++
 	if len(s.waits) == 0 {
-		return 0, nil
+		return 0, "", nil
 	}
 	d := s.waits[0]
 	s.waits = s.waits[1:]
-	return d, nil
+	return d, "", nil
 }
 
 func (s *scriptedCooldowns) SetCACooldown(context.Context, string, time.Duration) error { return nil }
+
+func (s *scriptedCooldowns) MarkCALimited(context.Context, string, time.Duration) error { return nil }
 
 func (s *scriptedCooldowns) readCount() int {
 	s.mu.Lock()
@@ -514,11 +660,15 @@ func (b *blockingBudget) ResyncACME(ctx context.Context, _ string, _ []limit.Buc
 	return b.wait(ctx)
 }
 
-func (b *blockingBudget) CACooldown(ctx context.Context, _ string) (time.Duration, error) {
-	return 0, b.wait(ctx)
+func (b *blockingBudget) CAWaitState(ctx context.Context, _ string) (time.Duration, string, error) {
+	return 0, "", b.wait(ctx)
 }
 
 func (b *blockingBudget) SetCACooldown(ctx context.Context, _ string, _ time.Duration) error {
+	return b.wait(ctx)
+}
+
+func (b *blockingBudget) MarkCALimited(ctx context.Context, _ string, _ time.Duration) error {
 	return b.wait(ctx)
 }
 
@@ -528,10 +678,15 @@ func TestBudgetTransport_ValkeyCallsBounded(t *testing.T) {
 	h := newTransportHarness(t, acct, testBudgets())
 	stuck := &blockingBudget{}
 	h.bt.requests, h.bt.cooldowns = stuck, stuck
+	h.bt.logger = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	ctx := withTrack(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}))
-	if _, err := h.do(ctx, t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	tr.setPrepaid(testBudgets().gtsRequests(acct).Key, 2, "")
+	if _, err := h.do(withTrack(context.Background(), tr), t, http.MethodGet, ca.srv.URL+"/x", nil); err != nil {
 		t.Fatalf("a stuck Valkey must fail open, got %v", err)
+	}
+	if left, _ := tr.drainPrepaid(); left != 0 {
+		t.Fatalf("prepaid left %d, want the balance dropped when the 429 mark cannot be read", left)
 	}
 	bounds := stuck.recorded()
 	if len(bounds) != 2 {
@@ -545,7 +700,8 @@ func TestBudgetTransport_ValkeyCallsBounded(t *testing.T) {
 	if ca.count() != 1 {
 		t.Fatal("the request must be sent")
 	}
-	for _, want := range []string{`msg="acme account wait-until check failed (request sent)"`, `msg="acme request budget unavailable (request sent)"`} {
+	for _, want := range []string{`msg="acme account wait-until check failed (request sent)"`, `msg="acme request budget unavailable (request sent)"`,
+		`msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the wait-until check failed" dropped=2`} {
 		if !strings.Contains(h.logs.String(), want) {
 			t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
 		}
@@ -678,28 +834,32 @@ type gatedCooldowns struct {
 	release chan struct{}
 }
 
-func (g *gatedCooldowns) CACooldown(ctx context.Context, _ string) (time.Duration, error) {
+func (g *gatedCooldowns) CAWaitState(ctx context.Context, _ string) (time.Duration, string, error) {
 	select {
 	case g.entered <- struct{}{}:
 	default:
 	}
 	select {
 	case <-g.release:
-		return 0, nil
+		return 0, "", nil
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, "", ctx.Err()
 	}
 }
 
 func (g *gatedCooldowns) SetCACooldown(context.Context, string, time.Duration) error { return nil }
+
+func (g *gatedCooldowns) MarkCALimited(context.Context, string, time.Duration) error { return nil }
 
 func TestBudgetTransport_AbandonedDuringItsChecksNotSent(t *testing.T) {
 	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
 	h := newTransportHarness(t, acct, testBudgets())
 	gate := &gatedCooldowns{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	h.bt.cooldowns = gate
+	h.bt.logger = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusCreated) })
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	tr.setPrepaid("le:requests:le-acct", 1, "")
 	req, err := http.NewRequestWithContext(withTrack(context.Background(), tr), http.MethodPost, ca.srv.URL+"/new-order", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -724,4 +884,418 @@ func TestBudgetTransport_AbandonedDuringItsChecksNotSent(t *testing.T) {
 	if tr.outcome().created {
 		t.Fatal("a request that was never sent must not count as a created order")
 	}
+	if left, _ := tr.drainPrepaid(); left != 1 {
+		t.Fatalf("prepaid left %d, want the unit of the refused request given back", left)
+	}
+	if log := h.logs.String(); !strings.Contains(log, `msg="acme request" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
+		!strings.Contains(log, "err=") || strings.Contains(log, "took=") {
+		t.Errorf("a request abandoned during its checks must log paced and err without took; log = %q", log)
+	}
+}
+
+func TestBudgetTransport_LogsEachRequestAtDebug(t *testing.T) {
+	t.Parallel()
+	ok := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3")
+		w.WriteHeader(http.StatusOK)
+	})
+	bare := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+	b := testBudgets()
+	tests := []struct {
+		name    string
+		tracked bool
+		method  string
+		url     string
+		want    []string
+		wantRA  string
+		wantErr bool
+	}{
+		{name: "untracked", method: http.MethodGet, url: ok.srv.URL + "/directory",
+			want: []string{"method=GET", "path=/directory", "status=200", "retry_after=3", "paced=", "took="}, wantRA: "3"},
+		{name: "tracked", tracked: true, method: http.MethodPost, url: ok.srv.URL + "/new-order",
+			want: []string{"method=POST", "path=/new-order", "status=200", "retry_after=3", "paced=", "took="}, wantRA: "3"},
+		{name: "tracked without the CA's Retry-After", tracked: true, method: http.MethodPost, url: bare.srv.URL + "/challenge/x",
+			want: []string{"method=POST", "path=/challenge/x", "status=200", `retry_after=""`, "paced=", "took="}, wantRA: "2"},
+		{name: "transport error", method: http.MethodGet, url: gone.URL + "/directory", wantErr: true,
+			want: []string{"method=GET", "path=/directory", "paced=", "took=", "err="}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+			h := newTransportHarness(t, acct, b)
+			h.bt.logger = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			ctx := context.Background()
+			if tc.tracked {
+				ctx = withTrack(ctx, newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com")))
+			}
+			resp, err := h.do(ctx, t, tc.method, tc.url, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && resp.Header.Get("Retry-After") != tc.wantRA {
+				t.Errorf("response Retry-After = %q, want %q", resp.Header.Get("Retry-After"), tc.wantRA)
+			}
+			line := ""
+			for _, l := range strings.Split(h.logs.String(), "\n") {
+				if strings.Contains(l, `msg="acme request"`) {
+					line = l
+				}
+			}
+			if !strings.Contains(line, "level=DEBUG") || !strings.Contains(line, "ca=gts account=gts-1") {
+				t.Fatalf("want one Debug acme request line for the account; log = %q", h.logs.String())
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(line, w) {
+					t.Errorf("line %q lacks %q", line, w)
+				}
+			}
+		})
+	}
+}
+
+func TestBudgetTransport_ShortRetryAfterOnTrackedResponses(t *testing.T) {
+	t.Parallel()
+	b := testBudgets()
+	tests := []struct {
+		name    string
+		ca      string
+		tracked bool
+		status  int
+		caRA    string
+		want    string
+	}{
+		{name: "tracked without Retry-After", tracked: true, status: http.StatusOK, want: "2"},
+		{name: "Let's Encrypt gets 1 s", ca: CALetsEncrypt, tracked: true, status: http.StatusOK, want: "1"},
+		{name: "ZeroSSL gets 1 s", ca: CAZeroSSL, tracked: true, status: http.StatusOK, want: "1"},
+		{name: "tracked keeps the CA's value", tracked: true, status: http.StatusOK, caRA: "5", want: "5"},
+		{name: "tracked error response untouched", tracked: true, status: http.StatusBadRequest, want: ""},
+		{name: "untracked untouched", status: http.StatusOK, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				if tc.caRA != "" {
+					w.Header().Set("Retry-After", tc.caRA)
+				}
+				w.WriteHeader(tc.status)
+			})
+			acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+			if tc.ca != "" {
+				acct = &account{ca: tc.ca, id: tc.ca + "-acct", label: "local"}
+			}
+			h := newTransportHarness(t, acct, b)
+			ctx := context.Background()
+			if tc.tracked {
+				ctx = withTrack(ctx, newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com")))
+			}
+			resp, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/challenge/x", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.Header.Get("Retry-After"); got != tc.want {
+				t.Errorf("Retry-After = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+type clockedBudget struct {
+	clk  *testClock
+	hold time.Duration
+}
+
+func (b clockedBudget) TakeACME(context.Context, string, []limit.Bucket) (time.Duration, error) {
+	b.clk.advance(b.hold)
+	return 0, nil
+}
+
+func (b clockedBudget) ResyncACME(context.Context, string, []limit.Bucket, time.Duration) error {
+	return nil
+}
+
+type clockedRoundTripper struct {
+	clk    *testClock
+	answer time.Duration
+}
+
+func (r clockedRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.clk.advance(r.answer)
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody, Request: req}, nil
+}
+
+func TestBudgetTransport_LogsHoldAndAnswerTimesSeparately(t *testing.T) {
+	t.Parallel()
+	clk := &testClock{t: time.Unix(1_700_000_000, 0)}
+	logs := &lockedBuffer{}
+	bt := &budgetTransport{
+		base: clockedRoundTripper{clk: clk, answer: 300 * time.Millisecond},
+		acct: &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}, budgets: testBudgets(),
+		requests: clockedBudget{clk: clk, hold: 600 * time.Millisecond}, cooldowns: &scriptedCooldowns{},
+		recorder: &recordingChainRecorder{}, cooldown: 2 * time.Second, now: clk.now,
+		logger: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://ca.example.test/directory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := bt.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunneltest.CloseOrLog(t, resp.Body)
+	if want := `path=/directory status=200 retry_after="" paced=600ms took=300ms`; !strings.Contains(logs.String(), want) {
+		t.Errorf("want the hold in paced and only the CA's answer in took (%s); log = %q", want, logs.String())
+	}
+}
+
+func TestBudgetTransport_LogsUnsentRequests(t *testing.T) {
+	t.Parallel()
+	b := testBudgets()
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, h *transportHarness, acct *account) context.Context
+		wantErr error
+	}{
+		{name: "refused under a wait-until", wantErr: errAccountCooling,
+			prepare: func(t *testing.T, h *transportHarness, acct *account) context.Context {
+				if err := h.lim.SetCACooldown(context.Background(), acct.id, time.Minute); err != nil {
+					t.Fatal(err)
+				}
+				return context.Background()
+			}},
+		{name: "abandoned order", wantErr: errOrderAbandoned,
+			prepare: func(*testing.T, *transportHarness, *account) context.Context {
+				tr := newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com"))
+				tr.abandon()
+				return withTrack(context.Background(), tr)
+			}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
+			h := newTransportHarness(t, acct, b)
+			h.bt.logger = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+			if _, err := h.do(tc.prepare(t, h, acct), t, http.MethodPost, ca.srv.URL+"/new-order", nil); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if ca.count() != 0 {
+				t.Fatal("nothing may be sent")
+			}
+			log := h.logs.String()
+			if !strings.Contains(log, `msg="acme request" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
+				!strings.Contains(log, "err=") || strings.Contains(log, "took=") {
+				t.Errorf("an unsent request must log paced and err without took; log = %q", log)
+			}
+		})
+	}
+}
+
+func TestBudgetTransport_DropsAlternateChains(t *testing.T) {
+	t.Parallel()
+	const chainType = "application/pem-certificate-chain"
+	b := testBudgets()
+	tests := []struct {
+		name        string
+		tracked     bool
+		contentType string
+		links       []string
+		want        []string
+	}{
+		{name: "separate link values", tracked: true, contentType: chainType,
+			links: []string{`<https://ca.test/cert/1/1>;rel="alternate"`, `<https://ca.test/issuer>;rel="up"`},
+			want:  []string{`<https://ca.test/issuer>;rel="up"`}},
+		{name: "one combined link value", tracked: true, contentType: chainType,
+			links: []string{`<https://ca.test/cert/1/1>; rel="alternate", <https://ca.test/issuer>; rel="up"`},
+			want:  []string{`<https://ca.test/issuer>; rel="up"`}},
+		{name: "only alternates", tracked: true, contentType: chainType + "; charset=utf-8",
+			links: []string{`<https://ca.test/cert/1/1>;rel="alternate", <https://ca.test/cert/1/2>;rel="alternate"`},
+			want:  nil},
+		{name: "not a certificate download", tracked: true, contentType: "application/json",
+			links: []string{`<https://ca.test/cert/1/1>;rel="alternate"`},
+			want:  []string{`<https://ca.test/cert/1/1>;rel="alternate"`}},
+		{name: "untracked", contentType: chainType,
+			links: []string{`<https://ca.test/cert/1/1>;rel="alternate"`},
+			want:  []string{`<https://ca.test/cert/1/1>;rel="alternate"`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				for _, l := range tc.links {
+					w.Header().Add("Link", l)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			h := newTransportHarness(t, &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}, b)
+			ctx := context.Background()
+			if tc.tracked {
+				ctx = withTrack(ctx, newOrderTrack(b.leName("p.example.com"), b.leDomain("p.example.com")))
+			}
+			resp, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/cert/1", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.Header.Values("Link"); !slices.Equal(got, tc.want) {
+				t.Errorf("Link = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBudgetTransport_UsesPrepaidBeforeSharedBudget(t *testing.T) {
+	t.Parallel()
+	small := limit.Rate{Count: 10, Period: time.Hour, Burst: 10}
+	b := testBudgets()
+	b.GTSRequests, b.GTSCertPolls = small, small
+	acct := &account{ca: CAGTS, id: "gts-acct", label: "gts-1"}
+	level := func(t *testing.T, h *transportHarness, bk limit.Bucket) float64 {
+		t.Helper()
+		lv, err := h.lim.ACMEBudgetLevel(context.Background(), bk, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lv
+	}
+	t.Run("prepaid requests skip the shared budget", func(t *testing.T) {
+		h := newTransportHarness(t, acct, b)
+		h.lim.SetClock(func() time.Time { return frozenNow })
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(b.gtsRequests(acct).Key, 2, "")
+		ctx := withTrack(context.Background(), tr)
+		for range 3 {
+			if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/authz/1", nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := level(t, h, b.gtsRequests(acct)); got != 0.9 {
+			t.Fatalf("shared request budget level = %v, want 0.9 (only the third request charged)", got)
+		}
+	})
+	t.Run("a prepaid certificate download still charges the cert-poll budget", func(t *testing.T) {
+		h := newTransportHarness(t, acct, b)
+		h.lim.SetClock(func() time.Time { return frozenNow })
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(b.gtsRequests(acct).Key, 1, "")
+		if _, err := h.do(withTrack(context.Background(), tr), t, http.MethodPost, ca.srv.URL+"/cert/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if req, cert := level(t, h, b.gtsRequests(acct)), level(t, h, b.gtsCertPolls(acct)); req != 1 || cert != 0.9 {
+			t.Fatalf("request/cert-poll levels = %v/%v, want 1/0.9", req, cert)
+		}
+	})
+	t.Run("a request held by a wait-until keeps its prepaid unit", func(t *testing.T) {
+		h := newTransportHarness(t, acct, b)
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		if err := h.lim.SetCACooldown(context.Background(), acct.id, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(b.gtsRequests(acct).Key, 1, "")
+		ctx, cancel := context.WithTimeout(withTrack(context.Background(), tr), 50*time.Millisecond)
+		defer cancel()
+		if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/authz/1", nil); err == nil {
+			t.Fatal("a request held past its context must fail")
+		}
+		if left, _ := tr.drainPrepaid(); ca.count() != 0 || left != 1 {
+			t.Fatalf("sent %d, prepaid left %d; want nothing sent and the unit given back", ca.count(), left)
+		}
+	})
+	t.Run("a prepaid download held by the cert-poll budget uses one unit when it is sent", func(t *testing.T) {
+		slow := b
+		slow.GTSCertPolls = limit.Rate{Count: 1, Period: 300 * time.Millisecond, Burst: 1}
+		h := newTransportHarness(t, acct, slow)
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		ctx := context.Background()
+		if wait, err := h.lim.TakeACME(ctx, CAGTS, []limit.Bucket{slow.gtsCertPolls(acct)}); err != nil || wait != 0 {
+			t.Fatalf("drain the cert-poll budget: wait %s (%v)", wait, err)
+		}
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(slow.gtsRequests(acct).Key, 2, "")
+		held, cancel := context.WithTimeout(withTrack(ctx, tr), 50*time.Millisecond)
+		defer cancel()
+		if _, err := h.do(held, t, http.MethodPost, ca.srv.URL+"/cert/1", nil); err == nil {
+			t.Fatal("a download held past its context must fail")
+		}
+		if _, err := h.do(withTrack(ctx, tr), t, http.MethodPost, ca.srv.URL+"/cert/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if left, _ := tr.drainPrepaid(); ca.count() != 1 || left != 1 {
+			t.Fatalf("sent %d, prepaid left %d; want one download sent and one unit used", ca.count(), left)
+		}
+	})
+	t.Run("an expired mark keeps the prepaid balance", func(t *testing.T) {
+		h := newTransportHarness(t, acct, b)
+		h.lim.SetClock(func() time.Time { return frozenNow })
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(b.gtsRequests(acct).Key, 2, "an-expired-mark")
+		if _, err := h.do(withTrack(context.Background(), tr), t, http.MethodPost, ca.srv.URL+"/authz/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := level(t, h, b.gtsRequests(acct)); got != 1 {
+			t.Fatalf("shared request budget level = %v, want 1 (the prepaid unit used)", got)
+		}
+		if left, _ := tr.drainPrepaid(); left != 1 {
+			t.Fatalf("prepaid left %d, want 1", left)
+		}
+	})
+	t.Run("a 429 on the account drops the prepaid balance", func(t *testing.T) {
+		h := newTransportHarness(t, acct, b)
+		h.lim.SetClock(func() time.Time { return frozenNow })
+		h.bt.logger = slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		ca := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		ctx := context.Background()
+		if err := h.lim.MarkCALimited(ctx, acct.id, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		_, before, err := h.lim.CAWaitState(ctx, acct.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setPrepaid(b.gtsRequests(acct).Key, 3, before)
+		if _, err := h.do(withTrack(ctx, tr), t, http.MethodPost, ca.srv.URL+"/authz/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := level(t, h, b.gtsRequests(acct)); got != 1 {
+			t.Fatalf("shared request budget level = %v, want 1 (a mark older than the prepay keeps the balance)", got)
+		}
+		if err := h.lim.MarkCALimited(ctx, acct.id, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.do(withTrack(ctx, tr), t, http.MethodPost, ca.srv.URL+"/authz/1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := level(t, h, b.gtsRequests(acct)); got != 0.9 {
+			t.Fatalf("shared request budget level = %v, want 0.9 (the request after the 429 charged)", got)
+		}
+		if left, _ := tr.drainPrepaid(); left != 0 {
+			t.Fatalf("prepaid left %d, want the balance dropped", left)
+		}
+		if want := `msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the account answered 429" dropped=2`; !strings.Contains(h.logs.String(), want) {
+			t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
+		}
+	})
 }
