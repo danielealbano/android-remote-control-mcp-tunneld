@@ -135,11 +135,13 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	// READ-ONLY per-IP limit pre-gate BEFORE any side effect: an over-limit caller must not be able to
 	// mint Valkey nonce keys by flooding POST /api/v1/enroll (the unauthenticated surface must not mint
 	// unbounded keys). Enroll below still runs the authoritative consuming check.
+	t := h.svc.now()
 	if e := h.svc.enrollLimitCheck(r.Context(), ip); e != nil {
 		h.rec.EnrollmentResult(e.Reason)
 		h.writeErr(w, e, statusForError(e))
 		return
 	}
+	t = h.svc.logStep("enroll step", "limit-check", t, "ip", ip)
 
 	// Mint the single-use nonce for the follow-up mTLS POST /api/v1/issue (Phase 2) BEFORE enrolling: a mint
 	// failure must fail the request before any name is claimed (an unused nonce simply expires by TTL,
@@ -151,6 +153,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
+	h.svc.logStep("enroll step", "issue-nonce", t, "ip", ip)
 
 	res, ee := h.svc.Enroll(r.Context(), ip, Request{
 		Nonce:          nonce,

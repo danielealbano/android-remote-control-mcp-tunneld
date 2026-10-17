@@ -457,7 +457,7 @@ func (tunnelAddr) Network() string { return "tunnel" }
 func (tunnelAddr) String() string  { return "tunnel" }
 
 // TestIntegration_Registry exercises the durable name registry against REAL MinIO with the real enroll
-// service (no full server / ACME needed): rejected-enrollment evidence, and the concurrent write-verify
+// service (no full server / ACME needed): rejected-enrollment evidence, and the concurrent
 // name-claim race (exactly one claimant wins a forced collision; the loser redraws to a distinct name).
 func TestIntegration_Registry(t *testing.T) {
 	redisURL := tunneltest.StartValkey(t)
@@ -500,7 +500,7 @@ func TestIntegration_Registry(t *testing.T) {
 			Verifier: stubVerifier{}, Issuer: stubIssuer{}, AttestOptional: true,
 			TunnelDomain: itTunnelDomain, NameLength: 12, IssuePerWeek: 3,
 			EnrollHour: 1000, EnrollMinute: 1000,
-			ClaimTimeout: 200 * time.Millisecond, ClaimSettle: 600 * time.Millisecond,
+			ClaimTimeout: 3 * time.Second, ClaimSettle: 5 * time.Second,
 		})
 		var mu sync.Mutex
 		calls := 0

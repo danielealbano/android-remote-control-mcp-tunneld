@@ -33,13 +33,13 @@ SNI (a ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME TLS-ALPN
 ## 2. Enrollment (two-phase)
 
 Enrollment is TWO phases. **Phase 1** (server-TLS `POST /api/v1/enroll` on `--enroll-host`, no client cert —
-the phone has no identity yet) verifies attestation, assigns + write-verify-claims the name, and signs a
+the phone has no identity yet) verifies attestation, assigns + claims the name, and signs a
 **bootstrap identity cert** (CN = the assigned name). **Phase 2** (mTLS `POST /api/v1/issue` on `--control-host`)
 generates the certificates: because the server assigned the name in Phase 1, the phone learns it BEFORE
 building the TLS CSR, so the public cert is issued for the server-dictated `<name>.<tunnel-domain>` while
 the TLS private key never leaves the phone. Phase 2 regenerates the identity cert and the public cert
-**together** and is also the single path for every renewal. The name registry uses a **write-verify
-claim** over plain S3 (no conditional writes), so it runs on any S3 provider.
+**together** and is also the single path for every renewal. A name is claimed under a per-name **Valkey
+lock**, then written to the registry over plain S3 (no conditional writes), so it runs on any S3 provider.
 
 ```mermaid
 sequenceDiagram
@@ -57,8 +57,8 @@ sequenceDiagram
     EP->>AT: verify seven point predicate
     AT-->>EP: pass plus attested leaf key
     EP->>EP: key binding plus identity CSR proof-of-possession
-    EP->>REG: claim name (GET absent, PUT with nonce, settle wait, GET verify nonce)
-    REG-->>EP: claim verified
+    EP->>REG: claim name (Valkey lock SET NX EX, then GET absent, PUT the record)
+    REG-->>EP: name claimed
     EP->>EP: sign bootstrap identity cert for K1 (CN is the assigned name)
     EP-->>PhoneApp: assigned name plus identity cert plus issue nonce
     Note over PhoneApp,ACME: Phase 2 - certificate generation (mTLS, also every renewal)
@@ -90,8 +90,12 @@ TrustedEnvironment` (Software rejected; StrongBox not required) ∧ `verifiedBoo
 stale). A KeyDescription that does not parse — including a malformed informational field such as the OS
 version or a patch level — fails the chain (`attest-untrusted`).
 
-**Write-verify claim invariant**: the settle wait MUST strictly exceed the claim-PUT timeout, and
-registry writes disable SDK auto-retries (a retried claim PUT would be a self-inflicted zombie write).
+**Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
+(`lock:claim:{name}`, `SET NX EX`; a lock already taken draws a new name). The lock, the registry read and the claim PUT run under one
+`--registry-claim-timeout` deadline that starts before the lock. The lock is never released and lives
+`--registry-claim-settle`, which MUST strictly exceed that deadline, so a timed-out claim PUT has landed or died
+before the name can be claimed again. Registry writes disable SDK
+auto-retries (a retried claim PUT would be a self-inflicted zombie write).
 
 **Phase-1 HTTP surface** (server-TLS on `--enroll-host`, JSON, all binary blobs hex/PEM as noted):
 

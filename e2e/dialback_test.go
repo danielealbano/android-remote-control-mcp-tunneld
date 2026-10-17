@@ -81,8 +81,6 @@ func TestE2E_DialBackAcrossReplicas(t *testing.T) {
 	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(tunnelAppDevicePort)) })
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+tunnelAppPkg)
-	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg) })
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
 
 	caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
@@ -94,9 +92,9 @@ func TestE2E_DialBackAcrossReplicas(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		adbCleanup(t, serial, "shell", "am", "broadcast", "-a", tunnelAppPkg+".stop", "-n", tunnelAppPkg+"/.CommandReceiver", "-f", "0x00000020")
+		adbCleanup(t, serial, amCommandArgs(tunnelAppPkg, "stop")...)
 	})
-	amBroadcast(t, serial, tunnelAppPkg, "enroll",
+	amCommand(t, serial, tunnelAppPkg, "enroll",
 		"edgePort", strconv.Itoa(tunnelAppDevicePort),
 		"appNonce", hex.EncodeToString(nonce[:]),
 		"pebbleCaPath", dataDir+"/files/pebble-ca.pem",

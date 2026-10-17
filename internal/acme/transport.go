@@ -9,11 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+)
+
+var (
+	linkValue    = regexp.MustCompile(`<[^>]*>[^<]*`)
+	alternateRel = regexp.MustCompile(`;\s*rel="alternate"`)
 )
 
 var (
@@ -33,8 +40,9 @@ type requestBudget interface {
 }
 
 type accountCooldowns interface {
-	CACooldown(ctx context.Context, ca string) (time.Duration, error)
+	CAWaitState(ctx context.Context, ca string) (time.Duration, string, error)
 	SetCACooldown(ctx context.Context, ca string, d time.Duration) error
+	MarkCALimited(ctx context.Context, ca string, ttl time.Duration) error
 }
 
 type budgetTransport struct {
@@ -45,6 +53,7 @@ type budgetTransport struct {
 	cooldowns accountCooldowns
 	recorder  Recorder
 	cooldown  time.Duration
+	markTTL   time.Duration
 	firstPoll time.Duration
 	pollEvery time.Duration
 	logger    *slog.Logger
@@ -52,12 +61,15 @@ type budgetTransport struct {
 }
 
 func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	start := t.now()
 	tr := trackFrom(req.Context())
-	if err := t.before(req, tr); err != nil {
+	paid, err := t.before(req, tr)
+	if err != nil {
+		t.logUnsent(req, start, err)
 		return nil, closeRequestBody(req, err)
 	}
 	if tr == nil {
-		resp, err := t.base.RoundTrip(req)
+		resp, err := t.send(req, start)
 		if err != nil {
 			return nil, err
 		}
@@ -69,9 +81,13 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	sent := tr.markSent(req.Method, req.URL.String())
 	if tr.abandoned() {
 		tr.markAnswered(sent)
+		if paid {
+			tr.returnPrepaid()
+		}
+		t.logUnsent(req, start, errOrderAbandoned)
 		return nil, closeRequestBody(req, errOrderAbandoned)
 	}
-	resp, err := t.base.RoundTrip(req)
+	resp, err := t.send(req, start)
 	if err != nil {
 		return nil, err
 	}
@@ -79,11 +95,62 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp, err = t.rateLimited(req.Context(), resp, tr)
 	} else {
 		resp, err = t.observe(req, resp, tr)
+		if err == nil && resp.StatusCode/100 == 2 {
+			if resp.Header.Get("Retry-After") == "" {
+				resp.Header.Set("Retry-After", validationPoll(t.acct.ca))
+			}
+			dropAlternateChains(resp.Header)
+		}
 	}
 	if err == nil {
 		tr.markAnswered(sent)
 	}
 	return resp, err
+}
+
+func (t *budgetTransport) send(req *http.Request, start time.Time) (*http.Response, error) {
+	sent := t.now()
+	resp, err := t.base.RoundTrip(req)
+	took := t.now().Sub(sent)
+	if err != nil {
+		t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+			"paced", sent.Sub(start), "took", took, "err", err)
+		return nil, err
+	}
+	t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+		"status", resp.StatusCode, "retry_after", resp.Header.Get("Retry-After"), "paced", sent.Sub(start), "took", took)
+	return resp, nil
+}
+
+func (t *budgetTransport) logUnsent(req *http.Request, start time.Time, err error) {
+	t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+		"paced", t.now().Sub(start), "err", err)
+}
+
+func validationPoll(ca string) string {
+	if ca == CAGTS {
+		return "2"
+	}
+	return "1"
+}
+
+func dropAlternateChains(h http.Header) {
+	if !strings.HasPrefix(h.Get("Content-Type"), "application/pem-certificate-chain") {
+		return
+	}
+	var kept []string
+	for _, v := range h.Values("Link") {
+		for _, lv := range linkValue.FindAllString(v, -1) {
+			lv = strings.TrimSpace(strings.TrimRight(strings.TrimSpace(lv), ","))
+			if !alternateRel.MatchString(lv) {
+				kept = append(kept, lv)
+			}
+		}
+	}
+	h.Del("Link")
+	for _, lv := range kept {
+		h.Add("Link", lv)
+	}
 }
 
 func closeRequestBody(req *http.Request, err error) error {
@@ -95,44 +162,56 @@ func closeRequestBody(req *http.Request, err error) error {
 	return err
 }
 
-func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
+func (t *budgetTransport) before(req *http.Request, tr *orderTrack) (bool, error) {
 	ctx := req.Context()
 	if tr != nil && tr.abandoned() {
-		return errOrderAbandoned
+		return false, errOrderAbandoned
 	}
-	cool := t.cooling(ctx)
+	cool, mark, known := t.waitState(ctx)
 	bs := t.budgets.requestBuckets(t.acct, req)
 	if tr == nil {
 		if cool > 0 {
-			return errAccountCooling
+			return false, errAccountCooling
 		}
 		wait, err := t.take(ctx, bs)
 		if err != nil {
 			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
-			return nil
+			return false, nil
 		}
 		if wait > 0 {
-			return errAccountBudget
+			return false, errAccountBudget
 		}
-		return nil
+		return false, nil
 	}
 	poll := tr.isPoll(req.URL.String())
 	for {
-		for ; cool > 0; cool = t.cooling(ctx) {
+		for ; cool > 0; cool, mark, known = t.waitState(ctx) {
 			if err := t.sleep(ctx, tr, cool); err != nil {
-				return err
+				return false, err
 			}
 		}
 		if poll {
 			if d := tr.pollDue(t.firstPoll, t.pollEvery).Sub(t.now()); d > 0 {
 				if err := t.sleep(ctx, tr, d); err != nil {
-					return err
+					return false, err
 				}
-				cool = t.cooling(ctx)
+				cool, mark, known = t.waitState(ctx)
 				continue
 			}
 		}
-		wait, err := t.take(ctx, bs)
+		if n := tr.dropPrepaid(mark, known); n > 0 {
+			reason := "the account answered 429"
+			if !known {
+				reason = "the wait-until check failed"
+			}
+			t.logger.Debug("acme order dropped its prepaid requests", "ca", t.acct.ca, "account", t.acct.label, "reason", reason, "dropped", n)
+		}
+		charge := bs
+		key, paid := tr.usePrepaid()
+		if paid {
+			charge = slices.DeleteFunc(slices.Clone(bs), func(b limit.Bucket) bool { return b.Key == key })
+		}
+		wait, err := t.take(ctx, charge)
 		if err != nil {
 			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 			wait = 0
@@ -141,24 +220,27 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) error {
 			if poll {
 				tr.markPoll(t.now())
 			}
-			return nil
+			return paid, nil
+		}
+		if paid {
+			tr.returnPrepaid()
 		}
 		if err := t.sleep(ctx, tr, wait); err != nil {
-			return err
+			return false, err
 		}
-		cool = t.cooling(ctx)
+		cool, mark, known = t.waitState(ctx)
 	}
 }
 
-func (t *budgetTransport) cooling(ctx context.Context) time.Duration {
+func (t *budgetTransport) waitState(ctx context.Context) (time.Duration, string, bool) {
 	octx, cancel := context.WithTimeout(ctx, budgetOpTimeout)
 	defer cancel()
-	cool, err := t.cooldowns.CACooldown(octx, t.acct.id)
+	cool, mark, err := t.cooldowns.CAWaitState(octx, t.acct.id)
 	if err != nil {
 		t.logger.Warn("acme account wait-until check failed (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
-		return 0
+		return 0, "", false
 	}
-	return cool
+	return cool, mark, true
 }
 
 func (t *budgetTransport) take(ctx context.Context, bs []limit.Bucket) (time.Duration, error) {
@@ -175,7 +257,7 @@ func (t *budgetTransport) sleep(ctx context.Context, tr *orderTrack, d time.Dura
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return context.Cause(ctx)
 	case <-tr.done:
 		return errOrderAbandoned
 	case <-timer.C:
@@ -194,6 +276,7 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 		d = t.cooldown
 	}
 	t.setWaitUntil(ctx, d)
+	t.markLimited(ctx)
 	if tr != nil {
 		tr.signalLimited(d)
 	}
@@ -212,6 +295,7 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 		t.logger.Debug("acme 429 body is not a problem document (no budget resync)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 	t.resync(ctx, t.budgets.resyncBuckets(t.acct, problem.Detail, tr), d)
+	t.markLimited(ctx)
 	t.logger.Warn("acme CA answered 429; the account waits", "ca", t.acct.ca, "account", t.acct.label, "retry_after", d, "detail", problem.Detail)
 	return resp, nil
 }
@@ -221,6 +305,14 @@ func (t *budgetTransport) setWaitUntil(ctx context.Context, d time.Duration) {
 	defer cancel()
 	if err := t.cooldowns.SetCACooldown(octx, t.acct.id, d); err != nil {
 		t.logger.Warn("acme account wait-until write failed", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+	}
+}
+
+func (t *budgetTransport) markLimited(ctx context.Context) {
+	octx, cancel := context.WithTimeout(ctx, budgetOpTimeout)
+	defer cancel()
+	if err := t.cooldowns.MarkCALimited(octx, t.acct.id, t.markTTL); err != nil {
+		t.logger.Warn("acme account 429 mark write failed (running orders keep their prepaid requests)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 }
 

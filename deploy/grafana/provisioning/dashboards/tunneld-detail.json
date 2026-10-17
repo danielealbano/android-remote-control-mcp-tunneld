@@ -279,13 +279,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(tunneld_bytes_total{node=\"$node\"}[5m])",
+     "expr": "rate(tunneld_bytes_total{node=\"$node\"}[5m]) * 8",
      "legendFormat": "{{direction}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -369,7 +369,7 @@
    "id": 7,
    "type": "timeseries",
    "title": "Enrollments and attestation by result",
-   "description": "Per hour.",
+   "description": "Count per time step (at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -380,6 +380,7 @@
     "x": 12,
     "y": 12
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -387,7 +388,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_enrollments_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_enrollments_total{node=\"$node\"} - last_over_time(tunneld_enrollments_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_enrollments_total{node=\"$node\"} < last_over_time(tunneld_enrollments_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "enroll {{result}}"
     },
     {
@@ -396,7 +397,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_attest_verify_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_attest_verify_total{node=\"$node\"} - last_over_time(tunneld_attest_verify_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_attest_verify_total{node=\"$node\"} < last_over_time(tunneld_attest_verify_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "attest {{result}}"
     }
    ],
@@ -405,6 +406,7 @@
      "unit": "short",
      "custom": {
       "drawStyle": "line",
+      "lineInterpolation": "stepBefore",
       "lineWidth": 1,
       "fillOpacity": 10,
       "stacking": {
@@ -432,7 +434,7 @@
    "id": 8,
    "type": "timeseries",
    "title": "ACME issuance by CA and result",
-   "description": "Per hour.",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -443,6 +445,7 @@
     "x": 0,
     "y": 20
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -450,7 +453,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_acme_issue_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_acme_issue_total{node=\"$node\"} - last_over_time(tunneld_acme_issue_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_issue_total{node=\"$node\"} < last_over_time(tunneld_acme_issue_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "{{ca}} {{result}}"
     }
    ],
@@ -458,11 +461,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -486,7 +490,7 @@
    "id": 9,
    "type": "timeseries",
    "title": "ACME renewals and cooldowns",
-   "description": "Per hour.",
+   "description": "Count per time step (at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -497,6 +501,7 @@
     "x": 12,
     "y": 20
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -504,7 +509,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_acme_renew_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_acme_renew_total{node=\"$node\"} - last_over_time(tunneld_acme_renew_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_renew_total{node=\"$node\"} < last_over_time(tunneld_acme_renew_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "renew {{ca}} {{result}}"
     },
     {
@@ -513,7 +518,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_acme_cooldown_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_acme_cooldown_total{node=\"$node\"} - last_over_time(tunneld_acme_cooldown_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_cooldown_total{node=\"$node\"} < last_over_time(tunneld_acme_cooldown_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "cooldown {{ca}}"
     }
    ],
@@ -522,6 +527,7 @@
      "unit": "short",
      "custom": {
       "drawStyle": "line",
+      "lineInterpolation": "stepBefore",
       "lineWidth": 1,
       "fillOpacity": 10,
       "stacking": {
@@ -1062,7 +1068,7 @@
    "id": 19,
    "type": "timeseries",
    "title": "Conn-log dropped / log-sink errors",
-   "description": "Per hour; both must stay 0.",
+   "description": "Count per time step (at least 1 min); both must stay 0. A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1073,6 +1079,7 @@
     "x": 0,
     "y": 68
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -1080,7 +1087,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_connlog_dropped_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_connlog_dropped_total{node=\"$node\"} - last_over_time(tunneld_connlog_dropped_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_connlog_dropped_total{node=\"$node\"} < last_over_time(tunneld_connlog_dropped_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "conn-log dropped"
     },
     {
@@ -1089,7 +1096,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "increase(tunneld_log_sink_errors_total{node=\"$node\"}[1h])",
+     "expr": "sum_over_time(((tunneld_log_sink_errors_total{node=\"$node\"} - last_over_time(tunneld_log_sink_errors_total{node=\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_log_sink_errors_total{node=\"$node\"} < last_over_time(tunneld_log_sink_errors_total{node=\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s])",
      "legendFormat": "log-sink errors"
     }
    ],
@@ -1098,6 +1105,7 @@
      "unit": "short",
      "custom": {
       "drawStyle": "line",
+      "lineInterpolation": "stepBefore",
       "lineWidth": 1,
       "fillOpacity": 10,
       "stacking": {

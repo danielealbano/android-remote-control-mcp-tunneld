@@ -30,6 +30,10 @@ type NodeLister interface {
 
 var errNoNodeLister = errors.New("acme: the chain needs a live-node lister")
 
+var errNoMaxAttemptTimeout = errors.New("acme: the chain needs the maximum attempt timeout")
+
+var errAttemptTimeoutAboveMax = errors.New("acme: an account's attempt timeout exceeds the maximum")
+
 type BudgetLevel struct {
 	CA      string
 	Account string
@@ -78,6 +82,21 @@ func (b Budgets) zerosslOrders(a *account) limit.Bucket {
 }
 func (b Budgets) zerosslRequests(a *account) limit.Bucket {
 	return b.ZeroSSLRequests.Bucket("zerossl:requests:" + a.id)
+}
+
+const (
+	gtsRequestsPerOrder     = 9
+	zerosslRequestsPerOrder = 9
+)
+
+func (b Budgets) prepayBucket(a *account) (limit.Bucket, int) {
+	switch a.ca {
+	case CAGTS:
+		return b.gtsRequests(a), gtsRequestsPerOrder
+	case CAZeroSSL:
+		return b.zerosslRequests(a), zerosslRequestsPerOrder
+	}
+	return limit.Bucket{}, 0
 }
 
 func (b Budgets) orderBuckets(a *account, fqdn string, leRenewal bool) (onCreate, onSuccess []limit.Bucket) {

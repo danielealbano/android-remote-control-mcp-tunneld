@@ -73,15 +73,13 @@ func TestE2E_SoakApp(t *testing.T) {
 	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(soakAppClientDevicePort)) })
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+soakAppPkg)
-	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+soakAppPkg) })
 	adbRunAs(t, serial, soakAppPkg, "rm -f files/ready files/error files/names.txt files/forgotten")
 
 	caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
 	adbRunAs(t, serial, soakAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")
 	dataDir := strings.TrimSpace(string(adbRunAs(t, serial, soakAppPkg, "pwd")))
 
-	amBroadcast(t, serial, soakAppPkg, "forget",
+	amCommand(t, serial, soakAppPkg, "forget",
 		"enrollHost", e2eEnrollHost,
 		"controlHost", e2eControlHost,
 		"tunnelDomain", e2eTunnelDomain,
@@ -91,7 +89,7 @@ func TestE2E_SoakApp(t *testing.T) {
 	start := func(count int) []string {
 		t.Helper()
 		adbRunAs(t, serial, soakAppPkg, "rm -f files/ready")
-		amBroadcast(t, serial, soakAppPkg, "start",
+		amCommand(t, serial, soakAppPkg, "start",
 			"count", strconv.Itoa(count),
 			"spacingSeconds", "0",
 			"parallel", "true",
@@ -112,7 +110,7 @@ func TestE2E_SoakApp(t *testing.T) {
 		return names
 	}
 	t.Cleanup(func() {
-		adbCleanup(t, serial, "shell", "am", "broadcast", "-a", soakAppPkg+".stop", "-n", soakAppPkg+"/.CommandReceiver", "-f", "0x00000020")
+		adbCleanup(t, serial, amCommandArgs(soakAppPkg, "stop")...)
 	})
 
 	first := start(soakFirstPhones)
@@ -121,7 +119,6 @@ func TestE2E_SoakApp(t *testing.T) {
 		t.Fatalf("scaling to %d phones changed the running ones: %v -> %v", soakPhones, first, scaled)
 	}
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+soakAppPkg)
 	names := start(soakPhones)
 	if strings.Join(names, ",") != strings.Join(scaled, ",") {
 		t.Fatalf("after a reinstall the phones were not resumed: %v -> %v", scaled, names)

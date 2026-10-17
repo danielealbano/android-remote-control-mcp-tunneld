@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,13 +252,26 @@ type PebbleEnv struct {
 	TLSPort      int
 }
 
-type pebbleSetup struct{ hostValidation bool }
+type pebbleSetup struct {
+	hostValidation bool
+	alternateRoots int
+}
 
 type PebbleOption func(*pebbleSetup) error
 
 func WithHostValidation() PebbleOption {
 	return func(s *pebbleSetup) error {
 		s.hostValidation = true
+		return nil
+	}
+}
+
+func WithAlternateRoots(n int) PebbleOption {
+	return func(s *pebbleSetup) error {
+		if n < 1 {
+			return fmt.Errorf("alternate roots must be >= 1, got %d", n)
+		}
+		s.alternateRoots = n
 		return nil
 	}
 }
@@ -366,17 +380,21 @@ func StartPebble(t *testing.T, opts ...PebbleOption) *PebbleEnv {
 		).WithDeadline(pebbleStartupTimeout),
 	})
 
+	env := map[string]string{
+		"PEBBLE_VA_NOSLEEP":      "1",
+		"PEBBLE_WFE_NONCEREJECT": "0",
+	}
+	if setup.alternateRoots > 0 {
+		env["PEBBLE_ALTERNATE_ROOTS"] = strconv.Itoa(setup.alternateRoots)
+	}
 	// Pebble: ACME directory on 14000, management (issuing roots) on 15000. NOSLEEP + no nonce rejection
 	// make validation deterministic and fast for tests.
 	pebble := startContainer(t, testcontainers.ContainerRequest{
-		Image:        pebbleImage,
-		ExposedPorts: []string{"14000/tcp", "15000/tcp"},
-		Cmd:          []string{"-config", pebbleConfig, "-dnsserver", "challtestsrv:8053"},
-		Files:        files,
-		Env: map[string]string{
-			"PEBBLE_VA_NOSLEEP":      "1",
-			"PEBBLE_WFE_NONCEREJECT": "0",
-		},
+		Image:          pebbleImage,
+		ExposedPorts:   []string{"14000/tcp", "15000/tcp"},
+		Cmd:            []string{"-config", pebbleConfig, "-dnsserver", "challtestsrv:8053"},
+		Files:          files,
+		Env:            env,
 		Networks:       []string{nw.Name},
 		NetworkAliases: map[string][]string{nw.Name: {"pebble"}},
 		WaitingFor: wait.ForAll(

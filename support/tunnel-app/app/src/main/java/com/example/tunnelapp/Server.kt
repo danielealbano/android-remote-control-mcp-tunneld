@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference
 // Server is the phone's local HTTPS edge: Ktor on the Netty engine, TLS via sslConnector backed by the
 // non-exportable TLS TEE key + issued cert (ServerTls). Fixed loopback port so a renewal restart is
 // transparent (the tunnel splices to it per dial-back).
-class Server(private val port: Int, private val appNonce: String, private val name: String) {
+class Server(private val port: Int, private val appNonce: String, private val name: String, private val stats: Stats) {
     private class Material(val key: PrivateKey, val chain: Array<X509Certificate>)
     private val material = AtomicReference<Material>()
     // engine is mutated by start/swapIdentity/stop from different threads; @Synchronized serializes them (so
@@ -67,6 +67,7 @@ class Server(private val port: Int, private val appNonce: String, private val na
             module = {
                 routing {
                     get("/info") {
+                        stats.request()
                         val leaf = material.get().chain[0]
                         val sha = MessageDigest.getInstance("SHA-256").digest(leaf.encoded)
                         call.respondText(
@@ -83,6 +84,7 @@ class Server(private val port: Int, private val appNonce: String, private val na
                         )
                     }
                     get("/wait") {
+                        stats.request()
                         val raw = call.request.queryParameters["seconds"]
                         val seconds = if (raw == null) 1 else raw.toIntOrNull()?.takeIf { it >= 0 } ?: run {
                             call.respondText("bad seconds: $raw", status = HttpStatusCode.BadRequest)

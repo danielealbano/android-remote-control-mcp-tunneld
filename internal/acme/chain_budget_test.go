@@ -288,7 +288,7 @@ func settleLevels(t *testing.T, f *trackingFake, timeout time.Duration) ([3]floa
 	var ran atomic.Bool
 	f.cleanupRan = &ran
 	a := acct(f, "le-1", timeout)
-	ac := newAccountChain(t, ChainConfig{}, a)
+	ac := newAccountChain(t, ChainConfig{FinalizeGrace: 20 * time.Millisecond}, a)
 	_, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test")
 	orders, name, domain := leBuckets(a, "p.example.test")
 	return [3]float64{ac.level(t, orders), ac.level(t, name), ac.level(t, domain)}, ran.Load(), err
@@ -625,5 +625,451 @@ func TestChain_FailureWhileWaitingDoesNotBumpTheStreak(t *testing.T) {
 	}
 	if len(ac.rec.cooldowns) != 0 {
 		t.Fatalf("a failure while the account already waits must set no cooldown, got %v", ac.rec.cooldowns)
+	}
+}
+
+func TestAttemptContext(t *testing.T) {
+	t.Parallel()
+	wait := func(t *testing.T, ctx context.Context) {
+		t.Helper()
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("the attempt context was never cancelled")
+		}
+	}
+	t.Run("unfinalized order stops at the deadline", func(t *testing.T) {
+		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), 20*time.Millisecond, time.Hour)
+		defer cancel()
+		wait(t, ctx)
+		if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			t.Fatalf("cause = %v, want the attempt deadline", context.Cause(ctx))
+		}
+	})
+	t.Run("finalized order gets the grace", func(t *testing.T) {
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.markFinalized(time.Now())
+		start := time.Now()
+		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond)
+		defer cancel()
+		wait(t, ctx)
+		if elapsed := time.Since(start); elapsed < 220*time.Millisecond || !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			t.Fatalf("cancelled after %s with cause %v, want the deadline plus the grace", elapsed, context.Cause(ctx))
+		}
+	})
+	t.Run("finalize sent but unanswered gets the grace", func(t *testing.T) {
+		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+		tr.setOrder("https://ca.test/order/1", "https://ca.test/finalize/1")
+		tr.markSent(http.MethodPost, "https://ca.test/finalize/1")
+		start := time.Now()
+		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond)
+		defer cancel()
+		wait(t, ctx)
+		if elapsed := time.Since(start); elapsed < 220*time.Millisecond {
+			t.Fatalf("cancelled after %s, want the deadline plus the grace", elapsed)
+		}
+	})
+	t.Run("caller cancel", func(t *testing.T) {
+		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), time.Hour, time.Hour)
+		cancel()
+		wait(t, ctx)
+		if !errors.Is(context.Cause(ctx), context.Canceled) {
+			t.Fatalf("cause = %v, want the caller's cancel", context.Cause(ctx))
+		}
+	})
+}
+
+func TestChain_PrepaysAndRefundsRequestBudget(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1", onObtain: func(ctx context.Context) {
+		tr := trackFrom(ctx)
+		for range 3 {
+			if _, ok := tr.usePrepaid(); !ok {
+				t.Error("the order must start with a prepaid balance")
+			}
+		}
+	}}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 0.7 {
+		t.Fatalf("GTS request budget level = %v, want 0.7 (the 3 requests used; the other 6 of the 9 prepaid refunded)", got)
+	}
+}
+
+func TestChain_RefundsTheRequestBudgetOfAnOrderThatDoesNotIssue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		err       error
+		block     bool
+		finalized bool
+		grace     time.Duration
+	}{
+		{name: "the CA refuses the order", err: transient(errors.New("down"))},
+		{name: "the order is abandoned at its deadline", block: true},
+		{name: "a finalized order is abandoned after the grace", block: true, finalized: true, grace: 30 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gts := &trackingFake{caID: CAGTS, label: "gts-1", err: tc.err, block: tc.block, created: tc.finalized, finalized: tc.finalized,
+				onObtain: func(ctx context.Context) {
+					if _, ok := trackFrom(ctx).usePrepaid(); !ok {
+						t.Error("the order must start with a prepaid balance")
+					}
+				}}
+			a := acct(gts, "gts-1", 30*time.Millisecond)
+			ac := newAccountChain(t, ChainConfig{FinalizeGrace: tc.grace}, a)
+			if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err == nil {
+				t.Fatal("an order that does not issue must fail")
+			}
+			if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 0.9 {
+				t.Fatalf("GTS request budget level = %v, want 0.9 (the one request used; the other 8 of the 9 prepaid refunded)", got)
+			}
+		})
+	}
+}
+
+func TestChain_SkipsAccountWithoutRequestBudget(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	ac.spend(t, CAGTS, smallBudgets().gtsRequests(a), 2)
+	_, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited || ie.Retry <= 0 {
+		t.Fatalf("err = %v, want rate-limited with a retry-after", err)
+	}
+	if gts.calls.Load() != 0 {
+		t.Fatal("an account without request budget for a whole order must not be asked")
+	}
+	if got := ac.level(t, smallBudgets().gtsOrders(a)); got != 1 {
+		t.Fatalf("GTS order budget level = %v, want 1 (the reservation released)", got)
+	}
+	if !strings.Contains(ac.log.String(), `msg="acme account out of request budget (skipped)"`) {
+		t.Fatalf("the skip must be logged; log = %q", ac.log.String())
+	}
+}
+
+func TestChain_ReservationCoversTheFinalizeGrace(t *testing.T) {
+	t.Parallel()
+	var ac *accountChain
+	var score float64
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	gts.onObtain = func(ctx context.Context) {
+		zs, err := ac.rdb.ZRangeWithScores(ctx, "acme:inflight:"+smallBudgets().gtsOrders(a).Key+":node-test", 0, -1).Result()
+		if err != nil || len(zs) != 1 {
+			t.Errorf("in-flight reservation = %v (err %v), want one", zs, err)
+			return
+		}
+		score = zs[0].Score
+	}
+	ac = newAccountChain(t, ChainConfig{FinalizeGrace: 7 * time.Second}, a)
+	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if want := float64(frozenNow.Add(time.Minute + 7*time.Second).UnixMilli()); score != want {
+		t.Fatalf("reservation score = %v, want the attempt deadline plus the grace %v", score, want)
+	}
+}
+
+var errInjectedValkey = errors.New("injected valkey failure")
+
+type failCmds struct {
+	name  string
+	key   string
+	armed atomic.Bool
+}
+
+func (ac *accountChain) failOn(name, key string, armed bool) *failCmds {
+	h := &failCmds{name: name, key: key}
+	h.armed.Store(armed)
+	ac.rdb.AddHook(h)
+	return h
+}
+
+func (h *failCmds) hits(cmds ...redis.Cmder) bool {
+	if !h.armed.Load() {
+		return false
+	}
+	for _, c := range cmds {
+		if (h.name == "" || c.Name() == h.name) && (h.key == "" || slices.Contains(c.Args(), any(h.key))) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *failCmds) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *failCmds) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if h.hits(cmd) {
+			cmd.SetErr(errInjectedValkey)
+			return errInjectedValkey
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *failCmds) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if h.hits(cmds...) {
+			for _, c := range cmds {
+				c.SetErr(errInjectedValkey)
+			}
+			return errInjectedValkey
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func TestChain_LogsPrepayRefundFailure(t *testing.T) {
+	t.Parallel()
+	var fail *failCmds
+	gts := &trackingFake{caID: CAGTS, label: "gts-1", onObtain: func(context.Context) { fail.armed.Store(true) }}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	fail = ac.failOn("", "acme-budget:"+smallBudgets().gtsRequests(a).Key, false)
+	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ac.log.String(), `msg="acme request budget refund failed (the budget refills on its own)"`) {
+		t.Fatalf("a failed refund must be logged; log = %q", ac.log.String())
+	}
+}
+
+func TestChain_LogsPrepayFailureAndTriesTheAccount(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	ac.failOn("", "acme-budget:"+smallBudgets().gtsRequests(a).Key, true)
+	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if gts.calls.Load() != 1 {
+		t.Fatal("an account whose prepay failed must still be asked")
+	}
+	if !strings.Contains(ac.log.String(), `msg="acme request budget prepay failed (trying the account)"`) {
+		t.Fatalf("a failed prepay must be logged; log = %q", ac.log.String())
+	}
+}
+
+func TestChain_LogsReleaseFailureWhenSkippingWithoutRequestBudget(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	ac.spend(t, CAGTS, smallBudgets().gtsRequests(a), 2)
+	ac.failOn("zrem", "", true)
+	_, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited || ie.Retry <= 0 {
+		t.Fatalf("err = %v, want rate-limited with a retry-after", err)
+	}
+	if gts.calls.Load() != 0 {
+		t.Fatal("an account without request budget for a whole order must not be asked")
+	}
+	for _, want := range []string{`msg="acme budget release failed (the reservation expires at its deadline)"`,
+		`msg="acme account out of request budget (skipped)" ca=gts name=p.example.test retry_after=`} {
+		if !strings.Contains(ac.log.String(), want) {
+			t.Fatalf("log is missing %s; log = %q", want, ac.log.String())
+		}
+	}
+}
+
+func TestChain_DropsPrepaidAfterA429(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		before    bool
+		during    bool
+		expire    bool
+		wantLevel float64
+		wantDrop  bool
+	}{
+		{name: "a 429 during the order drops the balance", during: true, wantLevel: 0.1, wantDrop: true},
+		{name: "a 429 before the prepay keeps the refund", before: true, wantLevel: 1},
+		{name: "a mark that expires during the order keeps the refund", before: true, expire: true, wantLevel: 1},
+		{name: "no 429 refunds the balance", wantLevel: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var ac *accountChain
+			gts := &trackingFake{caID: CAGTS, label: "gts-1", onObtain: func(ctx context.Context) {
+				if tc.during {
+					if err := ac.lim.MarkCALimited(ctx, "gts-1", time.Minute); err != nil {
+						t.Error(err)
+					}
+				}
+				if tc.expire {
+					ac.mr.Del("acme-429:gts-1")
+				}
+			}}
+			a := acct(gts, "gts-1", time.Minute)
+			ac = newAccountChain(t, ChainConfig{}, a)
+			if tc.before {
+				if err := ac.lim.MarkCALimited(context.Background(), "gts-1", time.Minute); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+				t.Fatal(err)
+			}
+			if got := ac.level(t, smallBudgets().gtsRequests(a)); got != tc.wantLevel {
+				t.Fatalf("GTS request budget level = %v, want %v", got, tc.wantLevel)
+			}
+			dropped := strings.Contains(ac.log.String(), `msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the account answered 429" dropped=9`)
+			if dropped != tc.wantDrop {
+				t.Fatalf("drop logged = %v, want %v; log = %q", dropped, tc.wantDrop, ac.log.String())
+			}
+		})
+	}
+}
+
+func TestChain_429MarkReadFailure(t *testing.T) {
+	t.Parallel()
+	t.Run("before the prepay the order runs without one", func(t *testing.T) {
+		t.Parallel()
+		gts := &trackingFake{caID: CAGTS, label: "gts-1", onObtain: func(ctx context.Context) {
+			if _, ok := trackFrom(ctx).usePrepaid(); ok {
+				t.Error("an order whose 429 mark could not be read must not hold a prepaid balance")
+			}
+		}}
+		a := acct(gts, "gts-1", time.Minute)
+		ac := newAccountChain(t, ChainConfig{}, a)
+		ac.failOn("", "acme-429:gts-1", true)
+		if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+			t.Fatal(err)
+		}
+		if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 1 {
+			t.Fatalf("GTS request budget level = %v, want 1 (nothing prepaid)", got)
+		}
+		if !strings.Contains(ac.log.String(), `msg="acme 429 mark read failed (no prepay; requests draw on the shared budget)"`) {
+			t.Fatalf("the failed read must be logged; log = %q", ac.log.String())
+		}
+	})
+	t.Run("at the end the refund is skipped", func(t *testing.T) {
+		t.Parallel()
+		var fail *failCmds
+		gts := &trackingFake{caID: CAGTS, label: "gts-1", onObtain: func(context.Context) { fail.armed.Store(true) }}
+		a := acct(gts, "gts-1", time.Minute)
+		ac := newAccountChain(t, ChainConfig{}, a)
+		fail = ac.failOn("", "acme-429:gts-1", false)
+		if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+			t.Fatal(err)
+		}
+		if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 0.1 {
+			t.Fatalf("GTS request budget level = %v, want 0.1 (the 9 prepaid not refunded)", got)
+		}
+		if !strings.Contains(ac.log.String(), `msg="acme 429 mark read failed (refund skipped; the budget refills on its own)"`) {
+			t.Fatalf("the failed read must be logged; log = %q", ac.log.String())
+		}
+	})
+}
+
+func TestNewChain_RequiresTheMaxAttemptTimeout(t *testing.T) {
+	t.Parallel()
+	if _, err := NewChain(ChainConfig{Nodes: fakeNodes{ids: []string{"node-test"}}}); !errors.Is(err, errNoMaxAttemptTimeout) {
+		t.Fatalf("NewChain = %v, want errNoMaxAttemptTimeout", err)
+	}
+}
+
+func TestNewChain_RejectsAnAttemptTimeoutAboveTheMaximum(t *testing.T) {
+	t.Parallel()
+	_, err := NewChain(ChainConfig{Nodes: fakeNodes{ids: []string{"node-test"}}, MaxAttemptTimeout: 100 * time.Second},
+		LegoConfig{CAID: CAGTS, AccountID: "gts-1", Label: "gts-1", AttemptTimeout: 101 * time.Second})
+	if !errors.Is(err, errAttemptTimeoutAboveMax) {
+		t.Fatalf("NewChain = %v, want errAttemptTimeoutAboveMax", err)
+	}
+}
+
+type delayedFake struct {
+	caID     string
+	delay    time.Duration
+	finalize bool
+}
+
+func (f *delayedFake) obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	if tr := trackFrom(ctx); tr != nil && f.finalize {
+		tr.setOrder("https://ca.example.test/order/1", "https://ca.example.test/finalize/1")
+		tr.markFinalized(time.Now())
+	}
+	select {
+	case <-ctx.Done():
+		return nil, store.CertInfo{}, transient(context.Cause(ctx))
+	case <-time.After(f.delay):
+		return []byte("CERT"), store.CertInfo{CA: f.caID, Serial: "01"}, nil
+	}
+}
+
+func (f *delayedFake) shouldRenew(_ context.Context, cur store.CertInfo, now time.Time) (bool, time.Time, error) {
+	at := cur.NotBefore.Add(112 * time.Hour)
+	return !now.Before(at), at, nil
+}
+
+func (f *delayedFake) id() string { return f.caID }
+
+func TestChain_FinalizedOrderGetsTheGrace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		finalize bool
+		wantOK   bool
+	}{
+		{name: "a finalized order fetches its certificate after the deadline", finalize: true, wantOK: true},
+		{name: "an unfinalized order is abandoned at the deadline", finalize: false, wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &delayedFake{caID: CALetsEncrypt, delay: time.Second, finalize: tc.finalize}
+			ac := newAccountChain(t, ChainConfig{FinalizeGrace: 5 * time.Second},
+				&account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: 100 * time.Millisecond, issuer: f})
+			pemChain, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test")
+			if got := err == nil && string(pemChain) == "CERT"; got != tc.wantOK {
+				t.Fatalf("Obtain = %q, %v; want success %v", pemChain, err, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestLimitedMarkTTL_OutlivesTheLongestOrder(t *testing.T) {
+	t.Parallel()
+	if got, want := limitedMarkTTL(100*time.Second, 30*time.Second), 100*time.Second+30*time.Second+settleTimeout+time.Minute; got != want {
+		t.Fatalf("limitedMarkTTL = %s, want %s", got, want)
+	}
+}
+
+func TestChain_BuildsTheClientBeforeTakingBudget(t *testing.T) {
+	t.Parallel()
+	var lim *limit.Limiter
+	var reqLevel, orderLevel float64
+	var levelErr error
+	a := &account{ca: CAGTS, id: "gts-1", label: "gts-1", timeout: time.Minute}
+	a.issuer = newLazyCA(CAGTS, 160*time.Hour, 48*time.Hour, func(ctx context.Context) (caIssuer, error) {
+		var rerr, oerr error
+		reqLevel, rerr = lim.ACMEBudgetLevel(ctx, smallBudgets().gtsRequests(a), []string{"node-test"})
+		orderLevel, oerr = lim.ACMEBudgetLevel(ctx, smallBudgets().gtsOrders(a), []string{"node-test"})
+		levelErr = errors.Join(rerr, oerr)
+		return &trackingFake{caID: CAGTS, label: "gts-1"}, nil
+	}, testLogger())
+	ac := newAccountChain(t, ChainConfig{}, a)
+	lim = ac.lim
+	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if levelErr != nil {
+		t.Fatal(levelErr)
+	}
+	if reqLevel != 1 || orderLevel != 1 {
+		t.Fatalf("request/order budget levels during the build = %v/%v, want 1/1 (nothing prepaid or reserved yet)", reqLevel, orderLevel)
 	}
 }

@@ -28,6 +28,8 @@ const bandwidthFloorBytesPerSec int64 = wire.ChunkSize
 // must fit strictly inside it so a renewal is attempted before expiry.
 const shortlivedLifetime = 160 * time.Hour
 
+const MaxACMEAttemptTimeout = 100 * time.Second
+
 const (
 	ChallengeDNS01     = "dns-01"
 	ChallengeHTTP01    = "http-01"
@@ -75,8 +77,8 @@ type ServeCmd struct {
 
 	ConnLogDir string `name:"conn-log-dir" help:"Connection-log spool directory on a persistent volume: events are appended locally, uploaded to S3 as per-node 5-minute JSONL objects, then deleted. Required for serve."`
 
-	RegistryClaimTimeout time.Duration `name:"registry-claim-timeout" default:"3s" help:"Hard timeout on the name-claim PUT (SDK retries disabled; timeout = name abandoned)."`
-	RegistryClaimSettle  time.Duration `name:"registry-claim-settle" default:"5s" help:"Settle wait before the claim-verify GET (MUST exceed the claim timeout)."`
+	RegistryClaimTimeout time.Duration `name:"registry-claim-timeout" default:"3s" help:"Hard deadline of one name claim: its Valkey lock, read and PUT (SDK retries disabled; timeout = name abandoned)."`
+	RegistryClaimSettle  time.Duration `name:"registry-claim-settle" default:"5s" help:"Lifetime of the per-name claim lock in Valkey, never released (MUST exceed the claim timeout)."`
 
 	// --- Attestation ---
 	AttestSignerDigestFile string        `name:"attest-signer-digest-file" help:"Hot-reload file of accepted app signing-cert SHA-256 digests. Required for serve."`
@@ -110,11 +112,11 @@ type ServeCmd struct {
 	ACMEBudgetZeroSSLOrders   string `name:"acme-budget-zerossl-orders" default:"200/1h:40" help:"ZeroSSL new orders per account, <count>/<period>[:<burst>]."`
 	ACMEBudgetZeroSSLRequests string `name:"acme-budget-zerossl-requests" default:"240/1m" help:"ZeroSSL ACME requests per account, <count>/<period>[:<burst>]."`
 
-	ACMEAttemptTimeoutLE      time.Duration `name:"acme-attempt-timeout-le" default:"20s" help:"Deadline of one Let's Encrypt order attempt."`
-	ACMEAttemptTimeoutGTS     time.Duration `name:"acme-attempt-timeout-gts" default:"40s" help:"Deadline of one GTS order attempt."`
-	ACMEAttemptTimeoutZeroSSL time.Duration `name:"acme-attempt-timeout-zerossl" default:"90s" help:"Deadline of one ZeroSSL order attempt."`
+	ACMEAttemptTimeoutLE      time.Duration `name:"acme-attempt-timeout-le" default:"20s" help:"Deadline of one Let's Encrypt order attempt (≤ 100s)."`
+	ACMEAttemptTimeoutGTS     time.Duration `name:"acme-attempt-timeout-gts" default:"60s" help:"Deadline of one GTS order attempt (≤ 100s)."`
+	ACMEAttemptTimeoutZeroSSL time.Duration `name:"acme-attempt-timeout-zerossl" default:"90s" help:"Deadline of one ZeroSSL order attempt (≤ 100s)."`
 	ACMEPollFirstLE           time.Duration `name:"acme-poll-first-le" default:"2s" help:"Delay of the first certificate poll after a Let's Encrypt order is finalized."`
-	ACMEPollFirstGTS          time.Duration `name:"acme-poll-first-gts" default:"5.6s" help:"Delay of the first certificate poll after a GTS order is finalized."`
+	ACMEPollFirstGTS          time.Duration `name:"acme-poll-first-gts" default:"3s" help:"Delay of the first certificate poll after a GTS order is finalized."`
 	ACMEPollFirstZeroSSL      time.Duration `name:"acme-poll-first-zerossl" default:"15.2s" help:"Delay of the first certificate poll after a ZeroSSL order is finalized."`
 	ACMEPollInterval          time.Duration `name:"acme-poll-interval" default:"2s" help:"Spacing of the following certificate polls."`
 
@@ -368,6 +370,18 @@ func (c ServeCmd) Validate() error {
 			return fmt.Errorf("%s must be > 0, got %s", d.name, d.v)
 		}
 	}
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{
+		{"--acme-attempt-timeout-le", c.ACMEAttemptTimeoutLE},
+		{"--acme-attempt-timeout-gts", c.ACMEAttemptTimeoutGTS},
+		{"--acme-attempt-timeout-zerossl", c.ACMEAttemptTimeoutZeroSSL},
+	} {
+		if d.v > MaxACMEAttemptTimeout {
+			return fmt.Errorf("%s must be ≤ %s (tunneld's cap; lego stops polling a pending validation after 100 × the Retry-After tunneld supplies: 100s at 1s for Let's Encrypt and ZeroSSL, 200s at 2s for GTS), got %s", d.name, MaxACMEAttemptTimeout, d.v)
+		}
+	}
 	if c.ControlPingInterval > wire.MaxControlPingInterval {
 		return fmt.Errorf("--control-ping-interval must be ≤ %s: phones treat %s without a control frame as a dead connection (docs/PROTOCOL.md §3), got %s", wire.MaxControlPingInterval, wire.ControlSilenceTimeout, c.ControlPingInterval)
 	}
@@ -401,7 +415,7 @@ func (c ServeCmd) Validate() error {
 		return fmt.Errorf("--acme-gts-validity (%s) must exceed %s (the fixed non-LE renewal point = 160h shortlived − --acme-renew-margin): shorter GTS certs would expire before the renewal nudge fires", c.ACMEGTSValidity, shortlivedLifetime-c.ACMERenewMargin)
 	}
 	if c.RegistryClaimSettle <= c.RegistryClaimTimeout {
-		return fmt.Errorf("--registry-claim-settle (%s) must exceed --registry-claim-timeout (%s): the write-verify claim relies on the settle wait outlasting the PUT deadline", c.RegistryClaimSettle, c.RegistryClaimTimeout)
+		return fmt.Errorf("--registry-claim-settle (%s) must exceed --registry-claim-timeout (%s): the claim lock must outlive the claim deadline", c.RegistryClaimSettle, c.RegistryClaimTimeout)
 	}
 	if c.ACMEBackoffInitial > c.ACMEBackoffMax {
 		return fmt.Errorf("--acme-backoff-initial (%s) must be ≤ --acme-backoff-max (%s)", c.ACMEBackoffInitial, c.ACMEBackoffMax)

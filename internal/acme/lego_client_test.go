@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,13 +24,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	legoacme "github.com/go-acme/lego/v5/acme"
 	"github.com/go-acme/lego/v5/certificate"
 	"github.com/go-acme/lego/v5/challenge/dns01"
 	legolog "github.com/go-acme/lego/v5/log"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 // TestClassifyLegoErrors covers the plan's "error classification" row: sample ACME problem documents
@@ -325,5 +329,147 @@ func TestNewLegoClient_ResolveOnly(t *testing.T) {
 	}
 	if n := accountCalls.Load(); n != 1 {
 		t.Fatalf("new-account requests = %d, want exactly the one look-up", n)
+	}
+}
+
+func TestLegoObtain_AttemptDeadlineCause(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	l := &legoClient{
+		cfg: LegoConfig{CAID: CAGTS, Logger: testLogger()},
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			<-release
+			return nil, errors.New("released")
+		},
+	}
+	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour)
+	defer cancel()
+	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassTransient || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("obtain = %v, want a transient attempt deadline", err)
+	}
+}
+
+func TestNewChain_A429MarksTheAccountForLongerThanAnyOrder(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		if _, err := fmt.Fprint(w, `{"type":"urn:ietf:params:acme:error:rateLimited","detail":"slow down"}`); err != nil {
+			t.Errorf("write problem: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGO_CA_CERTIFICATES", caFile)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	ch, err := NewChain(ChainConfig{
+		Limiter: limit.NewLimiter(rdb, 1, 1, 1, time.Hour), Logger: logger,
+		CooldownDefault: time.Hour, BackoffInitial: time.Minute, BackoffMax: 6 * time.Hour,
+		RenewMargin: 48 * time.Hour, ShortlivedLifetime: 160 * time.Hour,
+		NodeID: "node-test", Nodes: fakeNodes{ids: []string{"node-test"}}, Budgets: smallBudgets(),
+		MaxAttemptTimeout: 100 * time.Second,
+	}, LegoConfig{
+		CAID: CAGTS, AccountID: "gts-1", Label: "gts-1", DirectoryURL: srv.URL + "/directory", AccountKey: key,
+		ResolveOnly: true, AttemptTimeout: time.Minute, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ch.Obtain(context.Background(), nil, "p.example.test"); err == nil {
+		t.Fatal("an account whose CA answers 429 must not issue")
+	}
+	if ttl, want := mr.TTL("acme-429:gts-1"), limitedMarkTTL(100*time.Second, defaultFinalizeGrace); ttl != want {
+		t.Fatalf("429 mark TTL = %s, want %s; logs: %s", ttl, want, logs.String())
+	}
+}
+
+func TestNewLegoConfig_CertificateWait(t *testing.T) {
+	t.Parallel()
+	if got := newLegoConfig(LegoConfig{CertificateWait: 90 * time.Second}, &acmeUser{}).Certificate.Timeout; got != 90*time.Second {
+		t.Fatalf("lego certificate wait = %s, want 90s", got)
+	}
+	if got := newLegoConfig(LegoConfig{}, &acmeUser{}).Certificate.Timeout; got != 30*time.Second {
+		t.Fatalf("lego certificate wait without one = %s, want lego's 30s default", got)
+	}
+}
+
+func TestNewChain_CertificateWaitCoversTheAttemptAndTheGrace(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Replay-Nonce", fmt.Sprintf("nonce-%d", time.Now().UnixNano()))
+		switch r.URL.Path {
+		case "/directory":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]string{
+				"newNonce": srv.URL + "/nonce", "newAccount": srv.URL + "/account", "newOrder": srv.URL + "/order",
+			}); err != nil {
+				t.Errorf("directory stub encode: %v", err)
+			}
+		case "/nonce":
+			w.WriteHeader(http.StatusOK)
+		case "/account":
+			w.Header().Set("Location", srv.URL+"/account/1")
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := fmt.Fprint(w, `{"status":"valid"}`); err != nil {
+				t.Errorf("write account: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGO_CA_CERTIFICATES", caFile)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	ch, err := NewChain(ChainConfig{
+		Limiter: limit.NewLimiter(rdb, 1, 1, 1, time.Hour), Logger: logger,
+		NodeID: "node-test", Nodes: fakeNodes{ids: []string{"node-test"}}, Budgets: smallBudgets(),
+		FinalizeGrace: 7 * time.Second, MaxAttemptTimeout: 100 * time.Second,
+	}, LegoConfig{
+		CAID: CAGTS, AccountID: "gts-1", Label: "gts-1", DirectoryURL: srv.URL + "/directory", AccountKey: key,
+		ResolveOnly: true, AttemptTimeout: time.Minute, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lazy, ok := ch.groups[0][0].issuer.(*lazyCA)
+	if !ok {
+		t.Fatalf("the account issuer is %T, want *lazyCA", ch.groups[0][0].issuer)
+	}
+	if err := lazy.prepare(context.Background()); err != nil {
+		t.Fatalf("build the client: %v; logs: %s", err, logs.String())
+	}
+	built, ok := lazy.cached()
+	if !ok {
+		t.Fatal("the built client must be cached")
+	}
+	if got := built.(*legoClient).cfg.CertificateWait; got != time.Minute+7*time.Second {
+		t.Fatalf("certificate wait = %s, want the attempt timeout plus the grace (1m7s)", got)
 	}
 }

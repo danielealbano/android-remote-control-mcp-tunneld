@@ -193,8 +193,8 @@ func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
 	}
 }
 
-// TestSignFailureRollsBack: the plan's "sign failure rolls back" row — any SignIdentity failure after a
-// verified claim deletes the claimed name.
+// TestSignFailureRollsBack: any SignIdentity failure after a
+// claim deletes the claimed name.
 func TestSignFailureRollsBack(t *testing.T) {
 	st := tunneltest.NewStore()
 	// A CSR whose signature verifies but whose key the CA refuses (RSA) forces the sign failure AFTER
@@ -241,7 +241,7 @@ func TestClaimCollisionDrawsNewName(t *testing.T) {
 		return n, nil
 	})
 	// Pre-claim the first candidate.
-	if err := st.PutName(context.Background(), "taken0name0", store.NameRecord{Schema: 1, ClaimNonce: "other"}); err != nil {
+	if err := st.PutName(context.Background(), "taken0name0", store.NameRecord{Schema: 1, IdentityKeyFP: "other"}); err != nil {
 		t.Fatal(err)
 	}
 	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR})
@@ -253,7 +253,7 @@ func TestClaimCollisionDrawsNewName(t *testing.T) {
 	}
 	if rec, err := st.GetName(context.Background(), "taken0name0"); err != nil {
 		t.Fatal(err)
-	} else if rec.ClaimNonce != "other" {
+	} else if rec.IdentityKeyFP != "other" {
 		t.Fatal("the competitor's claim must stand")
 	}
 }
@@ -419,37 +419,6 @@ func TestAttestationOptionalAcceptsWithoutVerify(t *testing.T) {
 	}
 }
 
-// TestClaimSettleWaitBeforeVerify: the plan's "claim settle wait > timeout" row — the verify GET runs
-// only AFTER the full --registry-claim-settle wait has been taken.
-func TestClaimSettleWaitBeforeVerify(t *testing.T) {
-	st := tunneltest.NewStore()
-	idCSR, idPub := newCSR(t)
-	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st, ClaimTimeout: 2 * time.Second, ClaimSettle: 5 * time.Second,
-		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{},
-	})
-	var slept []time.Duration
-	settled := false
-	verifySawSettle := false
-	gets := 0
-	svc.sleep = func(d time.Duration) { slept = append(slept, d); settled = true }
-	st.BeforeVerifyGet = func(string) {
-		gets++
-		if gets == 2 { // 1st GET = existence check (pre-sleep); 2nd GET = the claim verify
-			verifySawSettle = settled
-		}
-	}
-	if _, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR}); ee != nil {
-		t.Fatalf("enroll failed: %v", ee)
-	}
-	if len(slept) == 0 || slept[0] != 5*time.Second {
-		t.Fatalf("the claim must settle-wait exactly --registry-claim-settle before verifying, got %v", slept)
-	}
-	if !verifySawSettle {
-		t.Fatal("the verify GET must run only AFTER the settle wait")
-	}
-}
-
 // TestEnrollPerIPLimit: the plan's "enroll per-IP limit" row — over the minute window, enrollment is
 // refused before attestation.
 func TestEnrollPerIPLimit(t *testing.T) {
@@ -589,82 +558,94 @@ func TestIssue_ConcurrentCallsRespectCap(t *testing.T) {
 	}
 }
 
-// countingNames is a NameStore that counts GETs/PUTs and scripts the claim-verify GET: the initial GET
-// on an unclaimed candidate is a definitive miss (so the claim PUT proceeds); once a record exists, a
-// verify GET returns verifyErr (persistent failure) or, one time, ErrNotFound (PUT definitively lost).
-type countingNames struct {
-	recs           map[string]store.NameRecord
-	gets           int
-	puts           int
-	verifyErr      error
-	verifyGoneOnce bool
-}
-
-func (c *countingNames) GetName(_ context.Context, name string) (store.NameRecord, error) {
-	c.gets++
-	rec, ok := c.recs[name]
-	if !ok {
-		return store.NameRecord{}, store.ErrNotFound
-	}
-	if c.verifyErr != nil {
-		return store.NameRecord{}, c.verifyErr
-	}
-	if c.verifyGoneOnce {
-		c.verifyGoneOnce = false
-		return store.NameRecord{}, store.ErrNotFound
-	}
-	return rec, nil
-}
-
-func (c *countingNames) PutName(_ context.Context, name string, rec store.NameRecord) error {
-	c.puts++
-	c.recs[name] = rec
-	return nil
-}
-
-func (c *countingNames) DeleteName(_ context.Context, name string) error {
-	delete(c.recs, name)
-	return nil
-}
-
-// TestClaimName_VerifyErrorFailsWithoutNewName: a persistent claim-verify GET error fails the claim
-// (retryable) and consumes EXACTLY one candidate — moving on could orphan a claim whose PUT landed.
-func TestClaimName_VerifyErrorFailsWithoutNewName(t *testing.T) {
-	names := &countingNames{recs: map[string]store.NameRecord{}, verifyErr: errors.New("s3 read timeout")}
-	svc, _ := newService(t, Config{Names: names})
-	var drawn []string
+func TestClaimName_LockedCandidateDrawsNewName(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	svc, mr := newService(t, Config{Names: st})
+	names := []string{"held0name00", "free0name00"}
 	svc.SetNameGen(func() (string, error) {
-		n := "cand" + string(rune('a'+len(drawn)))
-		drawn = append(drawn, n)
+		n := names[0]
+		if len(names) > 1 {
+			names = names[1:]
+		}
 		return n, nil
 	})
-
-	name, _, err := svc.claimName(context.Background())
-	if err == nil {
-		t.Fatalf("a persistent verify error must fail the claim, got name %q", name)
+	if err := mr.Set(claimLockKey("held0name00"), "competitor"); err != nil {
+		t.Fatal(err)
 	}
-	if len(drawn) != 1 {
-		t.Fatalf("a persistent verify error must consume exactly one candidate, drew %v", drawn)
+	name, err := svc.claimName(context.Background(), store.NameRecord{})
+	if err != nil || name != "free0name00" {
+		t.Fatalf("claimName = %q, %v; want the unlocked candidate", name, err)
+	}
+	if _, err := st.GetName(context.Background(), "held0name00"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatal("a candidate locked by another claimer must not be written")
 	}
 }
 
-// TestClaimName_VerifyNotFoundDrawsNewName: a definitive NotFound at verify means the PUT did not land,
-// so the candidate is abandoned and the next one is drawn (regression for the pre-fix behavior).
-func TestClaimName_VerifyNotFoundDrawsNewName(t *testing.T) {
-	names := &countingNames{recs: map[string]store.NameRecord{}, verifyGoneOnce: true}
-	svc, _ := newService(t, Config{Names: names})
-	var drawn []string
+func TestClaimName_LockKeptForTheSettleWindow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		putFail bool
+	}{
+		{name: "claimed"},
+		{name: "write failed (zombie window)", putFail: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := tunneltest.NewStore()
+			svc, mr := newService(t, Config{Names: st, ClaimTimeout: 2 * time.Second, ClaimSettle: 5 * time.Second})
+			var drawn []string
+			svc.SetNameGen(func() (string, error) {
+				n := "cand0name0" + string(rune('a'+len(drawn)))
+				drawn = append(drawn, n)
+				return n, nil
+			})
+			if tc.putFail {
+				st.FailNextPut = errors.New("deadline exceeded")
+			}
+			name, err := svc.claimName(context.Background(), store.NameRecord{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ttl := mr.TTL(claimLockKey(drawn[0])); ttl != 5*time.Second {
+				t.Fatalf("the first candidate's lock must stay for --registry-claim-settle, TTL = %v", ttl)
+			}
+			if _, err := st.GetName(context.Background(), name); err != nil {
+				t.Fatal(err)
+			}
+			if ttl := mr.TTL(claimLockKey(name)); ttl != 5*time.Second {
+				t.Fatalf("the winning candidate's lock must stay for --registry-claim-settle, TTL = %v", ttl)
+			}
+		})
+	}
+}
+
+func TestClaimName_ZombieWriteNeverGetsAnOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st := tunneltest.NewStore()
+	svc, mr := newService(t, Config{Names: st, ClaimTimeout: 3 * time.Second, ClaimSettle: 5 * time.Second})
+	draws := []string{"zomb0name00", "zomb0name00", "free0name00", "zomb0name00", "next0name00"}
 	svc.SetNameGen(func() (string, error) {
-		n := "cand" + string(rune('a'+len(drawn)))
-		drawn = append(drawn, n)
+		n := draws[0]
+		draws = draws[1:]
 		return n, nil
 	})
-
-	name, _, err := svc.claimName(context.Background())
-	if err != nil {
-		t.Fatalf("a NotFound at verify must redraw and then succeed, got %v", err)
+	st.ZombieNextPut = errors.New("timeout but landed")
+	name, err := svc.claimName(ctx, store.NameRecord{IdentityKeyFP: "zombie"})
+	if err != nil || name != "free0name00" {
+		t.Fatalf("claimName = %q, %v; the zombie's name must be abandoned and its redraw refused by the lock", name, err)
 	}
-	if len(drawn) != 2 || name != drawn[1] {
-		t.Fatalf("a NotFound at verify must draw a new candidate, drew %v won %q", drawn, name)
+	if ttl := mr.TTL(claimLockKey("zomb0name00")); ttl != 5*time.Second {
+		t.Fatalf("the abandoned name's lock must stay for --registry-claim-settle, TTL = %v", ttl)
+	}
+	mr.FastForward(6 * time.Second)
+	name, err = svc.claimName(ctx, store.NameRecord{IdentityKeyFP: "second"})
+	if err != nil || name != "next0name00" {
+		t.Fatalf("claimName = %q, %v; after the lock expired the landed zombie record must still refuse its name", name, err)
+	}
+	if rec, err := st.GetName(ctx, "zomb0name00"); err != nil || rec.IdentityKeyFP != "zombie" {
+		t.Fatalf("the zombie record must stay unowned and untouched: %+v %v", rec, err)
 	}
 }

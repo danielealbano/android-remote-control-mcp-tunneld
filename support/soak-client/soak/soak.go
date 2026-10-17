@@ -32,9 +32,13 @@ import (
 const (
 	maxResponse = 65536
 	maxRequest  = 1 << 20
+	maxBackoff  = 16 * time.Second
+	maxFailures = 1000
 )
 
 var nameRE = regexp.MustCompile(`^[a-z0-9-]{1,63}$`)
+
+var errNoTunnelWorks = errors.New("every tunnel keeps failing")
 
 type config struct {
 	namesFile string
@@ -331,50 +335,92 @@ func startDelay(i, n int, ramp time.Duration) time.Duration {
 	return ramp * time.Duration(i) / time.Duration(n)
 }
 
+type failureStreak struct {
+	n     atomic.Int64
+	limit int64
+}
+
+func (s *failureStreak) failed() error {
+	if n := s.n.Add(1); n > s.limit {
+		return fmt.Errorf("%w: %d operations failed in a row across all phones", errNoTunnelWorks, n)
+	}
+	return nil
+}
+
+func (s *failureStreak) succeeded() { s.n.Store(0) }
+
+func nextBackoff(cur, interval, ceiling time.Duration) time.Duration {
+	return max(interval, min(2*cur, ceiling))
+}
+
+func afterOp(ok bool, backoff, interval, ceiling time.Duration) time.Duration {
+	if ok {
+		return 0
+	}
+	return nextBackoff(backoff, interval, ceiling)
+}
+
 type worker struct {
-	phone     string
-	delay     time.Duration
-	url       string
-	client    *http.Client
-	closeIdle func()
-	cfg       config
-	rec       *recorder
+	phone      string
+	delay      time.Duration
+	url        string
+	client     *http.Client
+	closeIdle  func()
+	cfg        config
+	rec        *recorder
+	maxBackoff time.Duration
+	streak     *failureStreak
 }
 
 func (w *worker) run(ctx context.Context) error {
-	start := time.NewTimer(w.delay)
+	timer := time.NewTimer(w.delay)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		start.Stop()
 		return nil
-	case <-start.C:
+	case <-timer.C:
 	}
-	tick := time.NewTicker(w.cfg.interval)
-	defer tick.Stop()
 	recon := time.NewTicker(w.cfg.reconnect)
 	defer recon.Stop()
+	var backoff time.Duration
+	timer.Reset(0)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-recon.C:
 			w.closeIdle()
-		case <-tick.C:
-			if err := w.op(ctx); err != nil {
-				return err
-			}
+			continue
+		case <-timer.C:
 		}
+		next := time.Now().Add(w.cfg.interval)
+		ok, err := w.op(ctx)
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if ok {
+			w.streak.succeeded()
+		} else if err := w.streak.failed(); err != nil {
+			return err
+		}
+		if backoff = afterOp(ok, backoff, w.cfg.interval, w.maxBackoff); backoff > 0 {
+			next = time.Now().Add(backoff)
+		}
+		timer.Reset(time.Until(next))
 	}
 }
 
-func (w *worker) op(parent context.Context) error {
+func (w *worker) op(parent context.Context) (bool, error) {
 	reqN, err := sizeAround(w.cfg.reqBytes)
 	if err != nil {
-		return err
+		return false, err
 	}
 	respN, err := sizeAround(w.cfg.respBytes)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ctx, cancel := context.WithTimeout(parent, w.cfg.timeout)
 	defer cancel()
@@ -382,7 +428,7 @@ func (w *worker) op(parent context.Context) error {
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { newConn.Store(!i.Reused) }})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url+"?resp="+strconv.Itoa(respN), bytes.NewReader(pattern(reqN)))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return false, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	start := time.Now()
@@ -391,7 +437,7 @@ func (w *worker) op(parent context.Context) error {
 		if parent.Err() == nil {
 			w.rec.failure(w.phone, classify(err), err)
 		}
-		return nil
+		return false, nil
 	}
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if cerr := resp.Body.Close(); cerr != nil && readErr == nil {
@@ -399,7 +445,7 @@ func (w *worker) op(parent context.Context) error {
 	}
 	lat := time.Since(start)
 	if parent.Err() != nil {
-		return nil
+		return false, nil
 	}
 	switch {
 	case readErr != nil:
@@ -411,9 +457,10 @@ func (w *worker) op(parent context.Context) error {
 			w.rec.failure(w.phone, "verify", verr)
 		} else {
 			w.rec.success(w.phone, lat, reqN, len(body), newConn.Load())
+			return true, nil
 		}
 	}
-	return nil
+	return false, nil
 }
 
 func transportFactory(cfg config) (func() *http.Transport, error) {
@@ -452,15 +499,19 @@ func transportFactory(cfg config) (func() *http.Transport, error) {
 type soakOptions struct {
 	newTransport func() *http.Transport
 	flushEvery   time.Duration
+	maxBackoff   time.Duration
+	maxFailures  int64
 }
 
 func soak(ctx context.Context, cfg config, names []string, rec *recorder, opts soakOptions) error {
 	g, gctx := errgroup.WithContext(ctx)
+	streak := &failureStreak{limit: opts.maxFailures}
 	for i, name := range names {
 		tr := opts.newTransport()
 		w := &worker{
 			phone: name, delay: startDelay(i, len(names), cfg.ramp), url: "https://" + name + "." + cfg.domain + "/op",
 			client: &http.Client{Transport: tr}, closeIdle: tr.CloseIdleConnections, cfg: cfg, rec: rec,
+			maxBackoff: opts.maxBackoff, streak: streak,
 		}
 		g.Go(func() error {
 			defer tr.CloseIdleConnections()
@@ -520,7 +571,7 @@ func Run(ctx context.Context, args []string, stdout io.Writer, logger *slog.Logg
 	if err != nil {
 		return errors.Join(err, out.Close())
 	}
-	serr := soak(ctx, cfg, names, rec, soakOptions{newTransport: newTransport, flushEvery: time.Minute})
+	serr := soak(ctx, cfg, names, rec, soakOptions{newTransport: newTransport, flushEvery: time.Minute, maxBackoff: maxBackoff, maxFailures: maxFailures})
 	if cerr := out.Close(); cerr != nil {
 		serr = errors.Join(serr, fmt.Errorf("close %s: %w", cfg.out, cerr))
 	}

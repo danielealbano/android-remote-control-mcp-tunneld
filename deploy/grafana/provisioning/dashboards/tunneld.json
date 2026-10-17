@@ -386,13 +386,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (rate(tunneld_bytes_total{node=~\"$node\"}[5m]))",
+     "expr": "sum by (node) (rate(tunneld_bytes_total{node=~\"$node\"}[5m])) * 8",
      "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -421,7 +421,7 @@
   {
    "id": 9,
    "type": "row",
-   "title": "Enrollment and certificates (per hour)",
+   "title": "Enrollment and certificates",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -435,7 +435,7 @@
    "id": 10,
    "type": "timeseries",
    "title": "Enrollments by result",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -446,6 +446,7 @@
     "x": 0,
     "y": 22
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -453,7 +454,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (result) (increase(tunneld_enrollments_total{node=~\"$node\"}[1h]))",
+     "expr": "sum by (result) (sum_over_time(((tunneld_enrollments_total{node=~\"$node\"} - last_over_time(tunneld_enrollments_total{node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_enrollments_total{node=~\"$node\"} < last_over_time(tunneld_enrollments_total{node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{result}}"
     }
    ],
@@ -461,11 +462,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -489,7 +491,7 @@
    "id": 11,
    "type": "timeseries",
    "title": "Attestation outcomes",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -500,6 +502,7 @@
     "x": 12,
     "y": 22
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -507,7 +510,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (result) (increase(tunneld_attest_verify_total{node=~\"$node\"}[1h]))",
+     "expr": "sum by (result) (sum_over_time(((tunneld_attest_verify_total{node=~\"$node\"} - last_over_time(tunneld_attest_verify_total{node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_attest_verify_total{node=~\"$node\"} < last_over_time(tunneld_attest_verify_total{node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{result}}"
     }
    ],
@@ -515,11 +518,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -543,7 +547,7 @@
    "id": 12,
    "type": "timeseries",
    "title": "ACME issuance failures by CA",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -554,6 +558,7 @@
     "x": 0,
     "y": 30
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -561,7 +566,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (ca) (increase(tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"}[1h]))",
+     "expr": "sum by (ca) (sum_over_time(((tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"} - last_over_time(tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"} < last_over_time(tunneld_acme_issue_total{result=\"fail\",node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{ca}}"
     }
    ],
@@ -569,11 +574,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -597,7 +603,7 @@
    "id": 13,
    "type": "timeseries",
    "title": "ACME issuance successes by CA",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -608,6 +614,7 @@
     "x": 12,
     "y": 30
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -615,7 +622,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (ca) (increase(tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"}[1h]))",
+     "expr": "sum by (ca) (sum_over_time(((tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"} - last_over_time(tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"} < last_over_time(tunneld_acme_issue_total{result=\"ok\",node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{ca}}"
     }
    ],
@@ -623,11 +630,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -651,7 +659,7 @@
    "id": 14,
    "type": "timeseries",
    "title": "ACME renewal failures",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -662,6 +670,7 @@
     "x": 0,
     "y": 38
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -669,7 +678,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(increase(tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"}[1h]))",
+     "expr": "sum(sum_over_time(((tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"} - last_over_time(tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"} < last_over_time(tunneld_acme_renew_total{result=\"fail\",node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "failures"
     }
    ],
@@ -677,11 +686,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -705,7 +715,7 @@
    "id": 15,
    "type": "timeseries",
    "title": "Per-CA cooldowns",
-   "description": "",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -716,6 +726,7 @@
     "x": 12,
     "y": 38
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -723,7 +734,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (ca) (increase(tunneld_acme_cooldown_total{node=~\"$node\"}[1h]))",
+     "expr": "sum by (ca) (sum_over_time(((tunneld_acme_cooldown_total{node=~\"$node\"} - last_over_time(tunneld_acme_cooldown_total{node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_acme_cooldown_total{node=~\"$node\"} < last_over_time(tunneld_acme_cooldown_total{node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{ca}}"
     }
    ],
@@ -731,11 +742,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -880,7 +892,7 @@
    "id": 19,
    "type": "timeseries",
    "title": "Quota exhaustion by window",
-   "description": "Per hour.",
+   "description": "Count per bar (one bar per time step, at least 1 min). A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -891,6 +903,7 @@
     "x": 0,
     "y": 63
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -898,7 +911,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (window) (increase(tunneld_quota_exhausted_total{node=~\"$node\"}[1h]))",
+     "expr": "sum by (window) (sum_over_time(((tunneld_quota_exhausted_total{node=~\"$node\"} - last_over_time(tunneld_quota_exhausted_total{node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_quota_exhausted_total{node=~\"$node\"} < last_over_time(tunneld_quota_exhausted_total{node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "{{window}}"
     }
    ],
@@ -906,11 +919,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },
@@ -1280,7 +1294,7 @@
    "id": 27,
    "type": "timeseries",
    "title": "Conn-log events dropped",
-   "description": "Per hour; must stay 0.",
+   "description": "Count per bar (one bar per time step, at least 1 min); must stay 0. A gap of over 1 h in the data is not counted.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -1291,6 +1305,7 @@
     "x": 0,
     "y": 88
    },
+   "interval": "1m",
    "targets": [
     {
      "refId": "A",
@@ -1298,7 +1313,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(increase(tunneld_connlog_dropped_total{node=~\"$node\"}[1h]))",
+     "expr": "sum(sum_over_time(((tunneld_connlog_dropped_total{node=~\"$node\"} - last_over_time(tunneld_connlog_dropped_total{node=~\"$node\"}[1h] offset 15s)) >= 0 or (tunneld_connlog_dropped_total{node=~\"$node\"} < last_over_time(tunneld_connlog_dropped_total{node=~\"$node\"}[1h] offset 15s)) + 0)[$__interval:15s]))",
      "legendFormat": "dropped"
     }
    ],
@@ -1306,11 +1321,12 @@
     "defaults": {
      "unit": "short",
      "custom": {
-      "drawStyle": "line",
+      "drawStyle": "bars",
+      "barAlignment": -1,
       "lineWidth": 1,
-      "fillOpacity": 10,
+      "fillOpacity": 80,
       "stacking": {
-       "mode": "none"
+       "mode": "normal"
       },
       "showPoints": "never"
      },

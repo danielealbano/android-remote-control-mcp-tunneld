@@ -402,3 +402,66 @@ func TestReserveACME_InflightTTLNeverShortened(t *testing.T) {
 		t.Fatalf("level = %v (%v), want both reservations counted (1/3)", lv, err)
 	}
 }
+
+func TestPrepayACME_TakesNOrWaits(t *testing.T) {
+	t.Parallel()
+	h := newBudgetHarness(t)
+	b := Rate{Count: 120, Period: time.Minute, Burst: 20}.Bucket("gts:requests")
+	for i := range 2 {
+		if got, wait, err := h.l.PrepayACME(ctxT(t), "gts", b, 9); err != nil || wait != 0 || got != 9 {
+			t.Fatalf("prepay %d: got=%d wait=%s err=%v, want 9 tokens now", i+1, got, wait, err)
+		}
+	}
+	got, wait, err := h.l.PrepayACME(ctxT(t), "gts", b, 9)
+	if err != nil || got != 0 || !within(wait, 3500*time.Millisecond, time.Millisecond) {
+		t.Fatalf("third prepay: got=%d wait=%s err=%v, want none and the 3.5 s until 9 tokens", got, wait, err)
+	}
+	if tokens := h.tokens(t, b); tokens != 2 {
+		t.Fatalf("a refused prepay must not spend: tokens = %v, want 2", tokens)
+	}
+}
+
+func TestPrepayACME_CappedAtCapacity(t *testing.T) {
+	t.Parallel()
+	h := newBudgetHarness(t)
+	b := Rate{Count: 5, Period: time.Minute, Burst: 5}.Bucket("zerossl:requests")
+	if got, wait, err := h.l.PrepayACME(ctxT(t), "zerossl", b, 9); err != nil || wait != 0 || got != 5 {
+		t.Fatalf("got=%d wait=%s err=%v, want the whole 5-token bucket", got, wait, err)
+	}
+}
+
+func TestRefundACME(t *testing.T) {
+	t.Parallel()
+	t.Run("adds back up to capacity", func(t *testing.T) {
+		h := newBudgetHarness(t)
+		b := Rate{Count: 120, Period: time.Minute, Burst: 20}.Bucket("gts:requests")
+		if _, _, err := h.l.PrepayACME(ctxT(t), "gts", b, 9); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.l.RefundACME(ctxT(t), "gts", b, 4); err != nil {
+			t.Fatal(err)
+		}
+		if tokens := h.tokens(t, b); tokens != 15 {
+			t.Fatalf("tokens = %v, want 20 - 9 + 4", tokens)
+		}
+		if err := h.l.RefundACME(ctxT(t), "gts", b, 50); err != nil {
+			t.Fatal(err)
+		}
+		if tokens := h.tokens(t, b); tokens != 20 {
+			t.Fatalf("tokens = %v, want the capacity 20", tokens)
+		}
+	})
+	t.Run("ignored while a 429 resync holds the bucket", func(t *testing.T) {
+		h := newBudgetHarness(t)
+		b := Rate{Count: 120, Period: time.Minute, Burst: 20}.Bucket("gts:requests")
+		if err := h.l.ResyncACME(ctxT(t), "gts", []Bucket{b}, 30*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.l.RefundACME(ctxT(t), "gts", b, 9); err != nil {
+			t.Fatal(err)
+		}
+		if wait, err := h.l.TakeACME(ctxT(t), "gts", []Bucket{b}); err != nil || !within(wait, 30*time.Second, time.Millisecond) {
+			t.Fatalf("wait=%s err=%v, want the resync's 30 s kept", wait, err)
+		}
+	})
+}

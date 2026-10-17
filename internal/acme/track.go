@@ -23,6 +23,9 @@ type orderTrack struct {
 	orderSent   bool
 	finalSent   bool
 	cleanups    []func(context.Context) error
+	prepaidKey  string
+	prepaidMark string
+	prepaid     int
 	limited     chan time.Duration
 	done        chan struct{}
 	once        sync.Once
@@ -44,6 +47,53 @@ const (
 
 func newOrderTrack(name, domain limit.Bucket) *orderTrack {
 	return &orderTrack{name: name, domain: domain, limited: make(chan time.Duration, 1), done: make(chan struct{})}
+}
+
+func (t *orderTrack) setPrepaid(key string, n int, mark string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prepaidKey, t.prepaid, t.prepaidMark = key, n, mark
+}
+
+func (t *orderTrack) dropPrepaid(mark string, known bool) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if known && (mark == "" || mark == t.prepaidMark) {
+		return 0
+	}
+	n := t.prepaid
+	t.prepaid = 0
+	return n
+}
+
+func (t *orderTrack) usePrepaid() (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.prepaid <= 0 {
+		return "", false
+	}
+	t.prepaid--
+	return t.prepaidKey, true
+}
+
+func (t *orderTrack) returnPrepaid() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prepaid++
+}
+
+func (t *orderTrack) drainPrepaid() (int, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := t.prepaid
+	t.prepaid = 0
+	return n, t.prepaidMark
+}
+
+func (t *orderTrack) finalizeSent() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.finalSent || !t.finalizedAt.IsZero()
 }
 
 func withTrack(ctx context.Context, t *orderTrack) context.Context {

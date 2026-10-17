@@ -1,39 +1,43 @@
 package com.example.soakapp
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
 import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
-class SoakService : Service() {
+object Soak {
     private class Phone(val name: String, val tunnel: Tunnel)
 
+    val stats = Stats()
     private val phones = ConcurrentHashMap<Int, Phone>()
     private val lifecycle = Any()
     private val startLock = Any()
+    private val starting = AtomicInteger()
     @Volatile private var running = false
     private var runningEnv: String? = null
-    private var wakeLock: PowerManager.WakeLock? = null
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    fun active(): Boolean = phones.isNotEmpty() || starting.get() > 0
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        when (intent?.getStringExtra("command")) {
-            "start" -> Thread { guarded("start") { doStart(intent) } }.start()
-            "stop" -> Thread { guarded("stop") { doStop() } }.start()
-            "forget" -> Thread { guarded("forget") { doForget(intent) } }.start()
+    fun state(): String = when {
+        starting.get() > 0 -> "starting"
+        phones.isNotEmpty() -> "running"
+        else -> "stopped"
+    }
+
+    fun phoneCount(): Int = phones.size
+
+    fun command(filesDir: File, intent: Intent) {
+        when (intent.getStringExtra("command")) {
+            "start" -> {
+                starting.incrementAndGet()
+                Thread { try { guarded(filesDir, "start") { doStart(filesDir, intent) } } finally { starting.decrementAndGet() } }.start()
+            }
+            "stop" -> Thread { guarded(filesDir, "stop") { doStop() } }.start()
+            "forget" -> Thread { guarded(filesDir, "forget") { doForget(filesDir, intent) } }.start()
         }
-        return START_NOT_STICKY
     }
 
     private fun env(intent: Intent) = Env(
@@ -42,7 +46,7 @@ class SoakService : Service() {
         intent.getStringExtra("tunnelDomain")!!,
     )
 
-    private fun doStart(intent: Intent) {
+    private fun doStart(filesDir: File, intent: Intent) {
         val count = intent.getStringExtra("count")!!.toInt()
         require(count >= 1) { "count must be >= 1, got $count" }
         val spacingSeconds = intent.getStringExtra("spacingSeconds")?.toLong() ?: 65L
@@ -61,11 +65,6 @@ class SoakService : Service() {
                 }
                 running = true
                 runningEnv = env.key
-                if (wakeLock == null) {
-                    wakeLock = getSystemService(PowerManager::class.java)
-                        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "soakapp:run")
-                        .also { it.acquire() }
-                }
             }
             val todo = (0 until count).filter { !phones.containsKey(it) }
             val failures = CopyOnWriteArrayList<String>()
@@ -87,7 +86,7 @@ class SoakService : Service() {
                 }
             }
             if (failures.isNotEmpty()) File(filesDir, "failures.txt").writeText(failures.joinToString("\n", postfix = "\n"))
-            writeNames()
+            writeNames(filesDir)
             File(filesDir, "ready").writeText("${phones.size}\n")
         }
     }
@@ -95,27 +94,31 @@ class SoakService : Service() {
     private fun bringUp(net: Net, store: PhoneStore, env: Env, i: Int, jitter: Boolean) {
         val saved = store.load(i)
         val id = if (saved != null) {
-            restore(net, i, saved)
+            restore(net, i, saved).also { stats.resumed() }
         } else {
             if (jitter) Thread.sleep(Random.nextLong(0, 5001))
             Keys.deleteAll(Enroll.aliasPrefix(env, i))
-            val (fresh, issueNonce) = Enroll.enroll(net, i, env.enrollHost, env.controlHost, env.tunnelDomain)
+            val (fresh, issueNonce) = failing(i, stats::enrollFailed) { Enroll.enroll(net, i, env.enrollHost, env.controlHost, env.tunnelDomain) }
+            stats.enrolled()
             store.save(i, fresh)
-            Enroll.issue(fresh, issueNonce)
+            failing(i, stats::issueFailed) { Enroll.issue(fresh, issueNonce) }
+            stats.issued(fresh.state().caId)
             store.save(i, fresh)
             fresh
         }
         if (id.state().tlsAlias.isEmpty()) {
             Log.i(TAG, "phone $i (${id.name}): saved without a public cert; issuing only, never re-enrolling")
-            Enroll.issue(id, null)
+            failing(i, stats::issueFailed) { Enroll.issue(id, null) }
+            stats.issued(id.state().caId)
             store.save(i, id)
         }
         val (key, chain) = id.tlsCredential()
-        val responder = Responder(i).also { it.install(key, chain) }
+        val responder = Responder(i, stats).also { it.install(key, chain) }
         val renewLock = Any()
-        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), responder) { nonce ->
+        val tunnel = Tunnel(i, net, id.mtlsClient(), env.controlHost, net.dialBack(env.controlHost, id), responder, stats) { nonce ->
             synchronized(renewLock) {
                 Enroll.issue(id, nonce)
+                stats.renewed(id.state().caId)
                 store.save(i, id)
                 id.tlsCredential().let { (k, c) -> responder.install(k, c) }
             }
@@ -123,10 +126,18 @@ class SoakService : Service() {
         Thread { tunnel.run() }.apply { isDaemon = true }.start()
         if (!tunnel.awaitBound(60)) {
             tunnel.stop()
+            stats.removed(i)
             error("phone $i (${id.name}): control stream not bound within 60s")
         }
         phones[i] = Phone(id.name, tunnel)
         Log.i(TAG, "phone $i bound as ${id.name}${if (saved != null) " (resumed)" else ""}")
+    }
+
+    private fun <T> failing(phone: Int, record: (String) -> Unit, block: () -> T): T = try {
+        block()
+    } catch (t: Throwable) {
+        record("phone $phone: $t")
+        throw t
     }
 
     private fun restore(net: Net, i: Int, saved: PhoneStore.Saved): Identity {
@@ -144,7 +155,7 @@ class SoakService : Service() {
         )
     }
 
-    private fun doForget(intent: Intent) {
+    private fun doForget(filesDir: File, intent: Intent) {
         val env = env(intent)
         val root = File(filesDir, "phones")
         synchronized(startLock) {
@@ -160,7 +171,7 @@ class SoakService : Service() {
         }
     }
 
-    private fun writeNames() {
+    private fun writeNames(filesDir: File) {
         val tmp = File(filesDir, "names.txt.tmp")
         tmp.writeText(phones.toSortedMap().values.joinToString("") { it.name + "\n" })
         check(tmp.renameTo(File(filesDir, "names.txt"))) { "could not move names.txt into place" }
@@ -169,27 +180,20 @@ class SoakService : Service() {
     private fun doStop() {
         synchronized(lifecycle) {
             running = false
-            phones.values.forEach { it.tunnel.stop() }
+            phones.forEach { (i, p) ->
+                p.tunnel.stop()
+                stats.removed(i)
+            }
             phones.clear()
             runningEnv = null
-            wakeLock?.let { if (it.isHeld) it.release() }
-            wakeLock = null
         }
-        stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
     }
 
-    private fun guarded(label: String, block: () -> Unit) = try {
+    private fun guarded(filesDir: File, label: String, block: () -> Unit) = try {
         block()
     } catch (t: Throwable) {
         Log.e(TAG, "$label failed", t)
+        stats.commandFailed("$label: $t")
         File(filesDir, "error").writeText("$label: $t\n${t.stackTraceToString()}")
-    }
-
-    private fun notification(): Notification {
-        val ch = "soak"
-        getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(NotificationChannel(ch, "soak", NotificationManager.IMPORTANCE_LOW))
-        return Notification.Builder(this, ch).setContentTitle("soak-app")
-            .setSmallIcon(android.R.drawable.stat_sys_upload).build()
     }
 }

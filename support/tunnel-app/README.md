@@ -9,8 +9,11 @@ renewal.
 
 ## What it does
 
-The app is driven over adb (no launcher activity — an exported `CommandReceiver` forwards
-`am broadcast` commands to a foreground `TunnelService`). On `enroll` it:
+The app is one full-screen activity driven over adb with `am start` commands. It keeps the screen on while
+the tunnel runs (shown over the lock screen) and shows live figures: the tunnel (name, node, reconnects),
+traffic (requests, connections, errors, in and out in Mbit/s averaged over the last minute), the certificate (CA, expiry, renewals, enrollment and issuance failures) and
+device health. It has no foreground service (Android 15+ lets a `dataSync` one run only 6 h a day), so it
+runs only while it is on screen. On `enroll` it:
 
 - generates two **non-exportable, TEE-backed EC P-256** AndroidKeyStore keys — an **identity** key
   hardware-attested over the server enroll nonce, and a **TLS** key for the local server;
@@ -30,10 +33,9 @@ cert) and hot-swaps the server cert. On `stop` it tears everything down. Status 
 app-internal files the test reads with `run-as` (the debug APK is debuggable): `info.json`
 (`{name, tls_cert_sha256}`), a `ready` marker (the assigned name), or an `error` file on failure.
 
-The test drives it with `am broadcast -a com.example.tunnelapp.<enroll|refresh|stop> -n
-com.example.tunnelapp/.CommandReceiver` (with `-f 0x00000020` so the freshly-installed, stopped app's
-receiver is reached), passing the edge port, the app nonce, the pushed Pebble-CA path, and the enroll/
-control hosts + tunnel domain as string extras.
+The test drives it with `am start -n com.example.tunnelapp/.MainActivity -e command <enroll|refresh|stop>`,
+passing the edge port, the app nonce, the pushed Pebble-CA path, and the enroll/control hosts + tunnel domain
+as string extras.
 
 ## Building and publishing the fixtures
 

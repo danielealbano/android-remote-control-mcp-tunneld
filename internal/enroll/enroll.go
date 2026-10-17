@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
@@ -107,13 +106,12 @@ type Service struct {
 	rec     observ.Recorder
 	logger  *slog.Logger
 	now     func() time.Time
-	sleep   func(time.Duration)
 	nameGen func() (string, error)
 }
 
-// NewService builds the enrollment service (injectable clock/sleep for tests).
+// NewService builds the enrollment service (injectable clock for tests).
 func NewService(cfg Config) *Service {
-	s := &Service{cfg: cfg, rdb: cfg.RDB, rec: cfg.Recorder, logger: cfg.Logger, now: time.Now, sleep: time.Sleep}
+	s := &Service{cfg: cfg, rdb: cfg.RDB, rec: cfg.Recorder, logger: cfg.Logger, now: time.Now}
 	if s.rec == nil {
 		s.rec = observ.Nop{}
 	}
@@ -126,27 +124,28 @@ func NewService(cfg Config) *Service {
 	return s
 }
 
-// SetClock overrides the clock+sleep (tests only): the settle wait becomes instant.
+// SetClock overrides the clock (tests only).
 func (s *Service) SetClock(now func() time.Time) {
 	s.now = now
-	s.sleep = func(time.Duration) {}
 }
 
 // SetNameGen overrides the candidate-name generator (tests only): used to force a name collision in the
-// write-verify claim race. Default is ca.GenerateName with the configured prefix/length/reserved set.
+// claim race. Default is ca.GenerateName with the configured prefix/length/reserved set.
 func (s *Service) SetNameGen(f func() (string, error)) { s.nameGen = f }
 
 var errClaimLost = errors.New("enroll: claim lost")
 
-// Enroll runs PHASE 1: attestation + key binding → generate + write-verify-claim a fresh name → sign the
+// Enroll runs PHASE 1: attestation + key binding → generate + claim a fresh name → sign the
 // bootstrap identity (mTLS) cert. It issues NO public cert and takes NO TLS CSR; the phone then reaches
 // the mTLS POST /api/v1/issue endpoint (see Issue) to regenerate its identity and obtain the public WebPKI cert
 // for <name>.<tunnel-domain>. Any post-claim failure rolls the freshly claimed name back (plain
-// DeleteName, safe only because the claim was verified).
+// DeleteName).
 func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *Error) {
+	t := s.now()
 	if e := s.enrollLimit(ctx, ip); e != nil {
 		return Result{}, e
 	}
+	t = s.logStep("enroll step", "limit", t, "ip", ip)
 
 	// Consume + validate the single-use nonce. A control-plane error is retryable/internal; a genuinely
 	// absent/replayed nonce is invalid_nonce.
@@ -156,6 +155,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
+	t = s.logStep("enroll step", "nonce", t, "ip", ip)
 
 	// Attestation gate (skipped only in the fail-closed test-only optional mode) + key binding. No name
 	// exists yet at Phase 1, so rejections are recorded with an empty tunnel name.
@@ -163,18 +163,28 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	if e != nil {
 		return Result{}, e
 	}
+	t = s.logStep("enroll step", "attest", t, "ip", ip)
 
-	// Generate + write-verify-claim a fresh name.
-	name, claimNonce, err := s.claimName(ctx)
+	// Generate + claim a fresh name.
+	rec := store.NameRecord{Device: att.Device}
+	if req.IdentityCSR != nil {
+		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
+		if err != nil {
+			s.logger.Warn("identity key fingerprint failed (recorded empty)", "ip", ip, "err", err)
+		}
+		rec.IdentityKeyFP = fp
+	}
+	name, err := s.claimName(ctx, rec)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.logger.Warn("enrollment name claim failed", "ip", ip, "err", err)
 		}
 		return Result{}, &Error{Reason: "name_unavailable", Retryable: true}
 	}
+	t = s.logStep("enroll step", "claim", t, "ip", ip, "tunnel", name)
 
 	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
-	// failure rolls the freshly claimed name back (plain delete — safe only after a VERIFIED claim);
+	// failure rolls the freshly claimed name back (plain delete);
 	// a rollback failure would orphan the claim in the indefinitely-retained registry, so it is logged.
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
@@ -184,9 +194,14 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		}
 		return Result{}, signError(err)
 	}
-
-	s.recordIdentity(ctx, name, claimNonce, req, att.Device)
+	s.logStep("enroll step", "sign", t, "ip", ip, "tunnel", name)
 	return Result{Name: name, IdentityCert: identityPEM}, nil
+}
+
+func (s *Service) logStep(msg, step string, since time.Time, attrs ...any) time.Time {
+	now := s.now()
+	s.logger.Debug(msg, append([]any{"step", step, "took", now.Sub(since)}, attrs...)...)
+	return now
 }
 
 // Issue runs PHASE 2 (and every renewal): for an already-enrolled, mTLS-authenticated tunnel (name from
@@ -194,6 +209,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 // rebinds + rotates the identity cert, and obtains (first public cert) or renews (subsequent) the public
 // WebPKI cert for <name>.<tunnel-domain>. It regenerates the identity + public certs TOGETHER.
 func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Result, *Error) {
+	t := s.now()
 	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
 		// A control-plane (Valkey/script) error is retryable and distinct from a genuinely absent/replayed
 		// nonce — do NOT mislabel a Valkey outage as invalid_nonce.
@@ -204,10 +220,12 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
+	t = s.logStep("issue step", "nonce", t, "tunnel", name, "ip", ip)
 	att, e := s.attestAndBind(ctx, ip, name, req)
 	if e != nil {
 		return Result{}, e
 	}
+	t = s.logStep("issue step", "attest", t, "tunnel", name, "ip", ip)
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
 	// and MUST request exactly <name>.<tunnel-domain>.
 	if err := req.TLSCSR.CheckSignature(); err != nil {
@@ -239,6 +257,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
+	t = s.logStep("issue step", "registry-read", t, "tunnel", name, "ip", ip)
 
 	// Issuance cap (keyed on the name): acquire the per-tunnel issuance lock so concurrent /api/v1/issue calls
 	// for one name are serialized and cannot both pass the weekly cap they only commit against on success.
@@ -260,15 +279,18 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, &Error{Reason: "issuance_cap", Retryable: true, RetryAfter: 7 * 24 * time.Hour}
 	}
 	defer func() {
+		ut := s.now()
 		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.cfg.Limiter.IssuanceEnd(ectx, name, orderID); err != nil {
 			s.logger.Warn("issuance lock release failed (lock self-expires)", "tunnel", name, "err", err)
 		}
+		s.logStep("issue step", "issuance-unlock", ut, "tunnel", name, "ip", ip)
 	}()
 	hbCtx, hbStop := context.WithCancel(ctx)
 	defer hbStop()
 	go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
+	t = s.logStep("issue step", "issuance-lock", t, "tunnel", name, "ip", ip)
 
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
@@ -276,6 +298,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		s.logSignError(name, ip, err)
 		return Result{}, signError(err)
 	}
+	t = s.logStep("issue step", "sign", t, "tunnel", name, "ip", ip)
 
 	// Public cert: Obtain on the FIRST issuance for this name (full spillover), Renew afterwards
 	// (LE-first opportunistic migration).
@@ -299,13 +322,16 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if renewal {
 		s.rec.ACMERenew(info.CA, "ok")
 	}
+	t = s.logStep("issue step", "acme", t, "tunnel", name, "ip", ip, "ca", info.CA)
 
-	// Count this SUCCESSFUL issuance, then LWW-record the cert metadata (preserving the claim nonce).
+	// Count this SUCCESSFUL issuance, then LWW-record the cert metadata.
 	if err := s.cfg.Limiter.IssuanceRecord(ctx, name); err != nil {
 		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
 		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
 	}
+	t = s.logStep("issue step", "issuance-record", t, "tunnel", name, "ip", ip)
 	s.recordCert(ctx, name, cur, req, info, att.Device)
+	s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
 }
@@ -380,92 +406,70 @@ func csrMatchesTunnel(csr *x509.CertificateRequest, name, tunnelDomain string) b
 	}
 }
 
-// claimName runs the write-verify claim protocol over PLAIN S3 (no conditional writes): per candidate,
-// GET (exists → new name) → PUT with a fresh claim_nonce under the claim-timeout deadline (SDK retries
-// disabled; timeout = abandon this name permanently) → wait settle (strictly > timeout) → GET-verify
-// the nonce. Bounded loop.
-func (s *Service) claimName(ctx context.Context) (name, claimNonce string, err error) {
-	var lastReadErr error
+func (s *Service) claimName(ctx context.Context, rec store.NameRecord) (string, error) {
+	var lastErr error
 	for attempt := 0; attempt < 8; attempt++ {
 		cand, err := s.nameGen()
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
-		// GET: if it already exists, draw a new name.
-		if _, err := s.cfg.Names.GetName(ctx, cand); err == nil {
-			continue
-		} else if !errors.Is(err, store.ErrNotFound) {
-			if ctx.Err() == nil {
-				s.logger.Warn("name claim read failed (trying another name)", "name", cand, "err", err)
-			}
-			lastReadErr = err
-			continue // transient — try a different name
-		}
-
-		nonce := newClaimNonce()
-		rec := store.NameRecord{Schema: 1, EnrolledAt: s.now().UTC(), LastRenewedAt: s.now().UTC(), ClaimNonce: nonce}
-
-		putCtx, cancel := context.WithTimeout(ctx, s.cfg.ClaimTimeout)
-		putErr := s.cfg.Names.PutName(putCtx, cand, rec)
-		cancel()
-		if putErr != nil {
-			// Timeout/error: abandon this name PERMANENTLY (a retried PUT would be a zombie write).
-			if ctx.Err() == nil {
-				s.logger.Warn("name claim write failed (name abandoned)", "name", cand, "err", putErr)
-			}
-			continue
-		}
-
-		// Settle wait (strictly > the PUT timeout) so any zombie PUT has landed or died.
-		s.sleep(s.cfg.ClaimSettle)
-
-		got, gerr := s.cfg.Names.GetName(ctx, cand)
-		for r := 0; r < 2 && gerr != nil && !errors.Is(gerr, store.ErrNotFound); r++ {
-			s.sleep(time.Second)
-			got, gerr = s.cfg.Names.GetName(ctx, cand)
-		}
-		if errors.Is(gerr, store.ErrNotFound) {
-			continue // our PUT definitively did not land — this candidate is clean to abandon
-		}
-		if gerr != nil {
-			// Persistent verify failure: fail the enrollment (retryable) rather than drawing a new name —
-			// if the PUT landed, moving on would orphan the claim forever.
-			return "", "", fmt.Errorf("enroll: claim verify: %w", gerr)
-		}
-		if got.ClaimNonce == nonce {
-			return cand, nonce, nil
-		}
-		// Lost the race — new name.
-	}
-	return "", "", errors.Join(errClaimLost, lastReadErr)
-}
-
-// recordIdentity writes the Phase-1 registry record (name claimed, bootstrap identity signed, attested
-// device scalars) preserving the claim nonce, with NO cert info yet (the public cert lands at Issue).
-// Best-effort: the claimName PUT already created the record; a failure is logged, never silent.
-func (s *Service) recordIdentity(ctx context.Context, name, claimNonce string, req Request, dev store.DeviceInfo) {
-	rec := store.NameRecord{
-		Schema: 1, EnrolledAt: s.now().UTC(), LastRenewedAt: s.now().UTC(), ClaimNonce: claimNonce,
-		Device: dev,
-	}
-	if req.IdentityCSR != nil {
-		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
+		claimed, err := s.claimCandidate(ctx, cand, rec)
 		if err != nil {
-			s.logger.Warn("identity key fingerprint failed (recorded empty)", "tunnel", name, "err", err)
+			lastErr = err
 		}
-		rec.IdentityKeyFP = fp
+		if claimed {
+			return cand, nil
+		}
 	}
-	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
-		s.logger.Warn("registry identity record write failed", "tunnel", name, "err", err)
-	}
+	return "", errors.Join(errClaimLost, lastErr)
 }
+
+func (s *Service) claimCandidate(ctx context.Context, cand string, rec store.NameRecord) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, s.cfg.ClaimTimeout)
+	defer cancel()
+	t := s.now()
+	locked, err := s.rdb.SetNX(cctx, claimLockKey(cand), 1, s.cfg.ClaimSettle).Result()
+	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.Warn("name claim lock failed (trying another name)", "name", cand, "err", err)
+		}
+		return false, fmt.Errorf("enroll: claim lock %q: %w", cand, err)
+	}
+	if !locked {
+		return false, nil
+	}
+	t = s.logStep("enroll step", "claim-lock", t, "name", cand)
+	// GET: if it already exists, draw a new name.
+	if _, err := s.cfg.Names.GetName(cctx, cand); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		if ctx.Err() == nil {
+			s.logger.Warn("name claim read failed (trying another name)", "name", cand, "err", err)
+		}
+		return false, fmt.Errorf("enroll: claim read %q: %w", cand, err) // transient — try a different name
+	}
+	t = s.logStep("enroll step", "claim-get", t, "name", cand)
+
+	rec.Schema, rec.EnrolledAt, rec.LastRenewedAt = 1, s.now().UTC(), s.now().UTC()
+	if err := s.cfg.Names.PutName(cctx, cand, rec); err != nil {
+		// Timeout/error: abandon this name PERMANENTLY (a retried PUT would be a zombie write).
+		if ctx.Err() == nil {
+			s.logger.Warn("name claim write failed (name abandoned)", "name", cand, "err", err)
+		}
+		return false, fmt.Errorf("enroll: claim write %q: %w", cand, err)
+	}
+	s.logStep("enroll step", "claim-put", t, "name", cand)
+	return true, nil
+}
+
+func claimLockKey(name string) string { return "lock:claim:" + name }
 
 // recordCert LWW-updates the registry record with the issued cert + rotated identity-key fingerprint +
-// the freshly-attested device scalars, preserving the claim nonce. A failure here is non-fatal (the
+// the freshly-attested device scalars. A failure here is non-fatal (the
 // certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
 func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo) {
 	// Re-read for the freshest record; on a transient read failure fall back to `cur` (the record Issue
-	// already read this call) so the claim_nonce + enrolled_at are PRESERVED, never zeroed.
+	// already read this call) so the enrolled_at is PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -570,12 +574,6 @@ func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 		return &Error{Reason: "enroll_rate", Retryable: true, RetryAfter: ra}
 	}
 	return nil
-}
-
-func newClaimNonce() string {
-	var b [16]byte
-	rand.Read(b[:]) // crypto/rand.Read never fails (it panics internally on a broken source)
-	return hex.EncodeToString(b[:])
 }
 
 // isECDSAP256 reports whether a public key is ECDSA on the NIST P-256 curve (the ONLY key type

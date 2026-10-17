@@ -3,6 +3,7 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -50,18 +51,33 @@ func NewChain(cfg ChainConfig, legoCfgs ...LegoConfig) (*chainIssuer, error) {
 	if cfg.Recorder != nil {
 		rec = cfg.Recorder
 	}
+	if cfg.MaxAttemptTimeout <= 0 {
+		return nil, errNoMaxAttemptTimeout
+	}
+	if cfg.FinalizeGrace <= 0 {
+		cfg.FinalizeGrace = defaultFinalizeGrace
+	}
+	markTTL := limitedMarkTTL(cfg.MaxAttemptTimeout, cfg.FinalizeGrace)
 	accounts := make([]*account, 0, len(legoCfgs))
 	for _, lc := range legoCfgs {
+		if lc.AttemptTimeout > cfg.MaxAttemptTimeout {
+			return nil, fmt.Errorf("%w: %s %s %s > %s", errAttemptTimeoutAboveMax, lc.CAID, lc.Label, lc.AttemptTimeout, cfg.MaxAttemptTimeout)
+		}
+		lc.CertificateWait = lc.AttemptTimeout + cfg.FinalizeGrace
 		a := &account{ca: lc.CAID, id: lc.AccountID, label: lc.Label, timeout: lc.AttemptTimeout}
 		lc.Wrap = func(base http.RoundTripper) http.RoundTripper {
 			return &budgetTransport{base: base, acct: a, budgets: cfg.Budgets, requests: cfg.Limiter, cooldowns: cfg.Limiter,
-				recorder: rec, cooldown: cfg.CooldownDefault, firstPoll: lc.PollFirst, pollEvery: cfg.PollEvery, logger: logger, now: time.Now}
+				recorder: rec, cooldown: cfg.CooldownDefault, markTTL: markTTL, firstPoll: lc.PollFirst, pollEvery: cfg.PollEvery, logger: logger, now: time.Now}
 		}
 		a.issuer = newLazyCA(lc.CAID, lc.Shortlived, lc.RenewMargin,
 			func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, lc) }, logger)
 		accounts = append(accounts, a)
 	}
 	return NewChainIssuer(cfg, accounts...)
+}
+
+func limitedMarkTTL(maxAttempt, grace time.Duration) time.Duration {
+	return maxAttempt + grace + settleTimeout + time.Minute
 }
 
 func (l *lazyCA) id() string { return l.caID }
@@ -97,7 +113,7 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 	})
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, context.Cause(ctx)
 	case r := <-ch:
 		if r.Err != nil {
 			return nil, r.Err
@@ -106,13 +122,26 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 	}
 }
 
-func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
+func (l *lazyCA) prepare(ctx context.Context) error {
+	_, err := l.client(ctx)
+	return err
+}
+
+func (l *lazyCA) client(ctx context.Context) (caIssuer, error) {
 	c, err := l.resolve(ctx)
 	if err != nil {
 		if ie := classifyLego(err); ie.Class == ClassRateLimited {
-			return nil, store.CertInfo{}, ie
+			return nil, ie
 		}
-		return nil, store.CertInfo{}, transient(err)
+		return nil, transient(err)
+	}
+	return c, nil
+}
+
+func (l *lazyCA) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
+	c, err := l.client(ctx)
+	if err != nil {
+		return nil, store.CertInfo{}, err
 	}
 	return c.obtain(ctx, csr, name)
 }

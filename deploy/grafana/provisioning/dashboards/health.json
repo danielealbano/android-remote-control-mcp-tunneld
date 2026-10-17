@@ -2721,15 +2721,15 @@
   {
    "id": 44,
    "type": "timeseries",
-   "title": "eth0 traffic per node (in + out)",
-   "description": "Lines: 90 Mbit/s (24 h average limit) and 150 Mbit/s (instant limit).",
+   "title": "eth0 24 h average per node (% of the 90 Mbit/s limit)",
+   "description": "In + out averaged over the last 24 h; 100% is the 90 Mbit/s 24 h average limit.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 9,
-    "w": 24,
+    "w": 12,
     "x": 0,
     "y": 53
    },
@@ -2740,22 +2740,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8",
-     "legendFormat": "{{node}} now"
-    },
-    {
-     "refId": "B",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400",
-     "legendFormat": "{{node}} 24 h average"
+     "expr": "sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400 / 90000000 * 100",
+     "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "bps",
+     "unit": "percent",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -2763,27 +2754,61 @@
       "stacking": {
        "mode": "none"
       },
-      "showPoints": "never",
-      "thresholdsStyle": {
-       "mode": "line"
-      }
+      "showPoints": "never"
      },
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "transparent",
-        "value": null
-       },
-       {
-        "color": "orange",
-        "value": 90000000.0
-       },
-       {
-        "color": "red",
-        "value": 150000000.0
-       }
-      ]
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 45,
+   "type": "timeseries",
+   "title": "eth0 traffic now per node (% of the 150 Mbit/s limit)",
+   "description": "In + out over the last minute; 100% is the 150 Mbit/s instant limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 53
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8 / 150000000 * 100",
+     "legendFormat": "{{node}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
      },
      "min": 0
     },

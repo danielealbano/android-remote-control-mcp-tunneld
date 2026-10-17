@@ -36,7 +36,8 @@ You MUST ALWAYS read these documents before ANY work, in this order:
 4. **`docs/plans/3_e2e_encrypted_tunneling_20260817175922.md`** — the decision record (every design
    decision was agreed with the user there, incl. the `## Deviations` log). CANONICAL when a design
    detail is disputed — except the dial-back/data path, whose decision record is
-   **`docs/plans/16_entry_node_dial_back_20261014192454.md`**.
+   **`docs/plans/16_entry_node_dial_back_20261014192454.md`**, and the name claim: the user replaced Plan 3's
+   write-verify claim with the Valkey claim lock on 2026-10-16 (described in `docs/ARCHITECTURE.md` §6).
 
 You MUST ALSO follow `go.md`, `github.md`, `agent.md`, and `development_pipeline.md`. It is
 ABSOLUTELY MANDATORY to pass ALL quality gates before any work is considered done.
@@ -56,7 +57,7 @@ does NOT duplicate them.
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`kong.DefaultEnvars`, `--s3-*` → `TUNNELD_S_3_*`); `Validate()` enforces every cross-field invariant at startup. |
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/issue`) + replica↔replica mesh control RPCs; binary control frames per `docs/PROTOCOL.md`; the data path is an HTTP/1.1-upgraded dial-back connection (`/api/v1/data`) carrying an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
-| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; write-verify name claim. |
+| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; Valkey-locked name claim. |
 | ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, optional CAs, per-account Valkey issuance budgets + wait-until/backoff, several GTS accounts looked up by key, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
@@ -126,8 +127,8 @@ MUST NOT be relaxed without explicit user direction.
 ### Valkey (transient) + S3 (durable) state — SACRED
 - **NO permanent Valkey state, EVER.** Every key (routing `tunnel:{name}`, node registry + the `nodes` id
   set, rate-limit windows, the `conc:{name}` stream-cap sorted set, the per-second `bw:`/`pkt:` bandwidth windows and the per-direction
-  `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
-  locks, the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private, the ACME issuance budgets (`acme-budget:` via `HSET` + pipelined `PEXPIRE`, TTL = time to refill + 1 h; `acme:inflight:` via `ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT`, TTL = deadline + 1 min, never shortened; `lock:acme-budget:` a `SETNX` lock, 2 s TTL)) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, a
+  `traf:{name}:{dir}:day/week:{n}` traffic windows, enrollment nonces, ACME cooldown/backoff, the per-account 429 mark `acme-429:` (`SET … EX`, longer than any order lives), the ACME challenge keys `acme:alpn:` / `acme:http:`, the per-name
+  locks, the name-claim lock `lock:claim:` (TTL `--registry-claim-settle`, never released), the reserved-host issuance lock `lock:acme-self:` and the shared reserved-host cert `acme:self-cert:` — TTL = until the cert's NotAfter; it holds the private key, so Valkey stays private, the ACME issuance budgets (`acme-budget:` via `HSET` + pipelined `PEXPIRE`, TTL = time to refill + 1 h; `acme:inflight:` via `ZADD` + pipelined `EXPIRE NX` + `EXPIRE GT`, TTL = deadline + 1 min, never shortened; `lock:acme-budget:` a `SETNX` lock, 2 s TTL)) gets a TTL in the SAME round-trip as its mutation — via `SET … EX`, a `SETNX … EX` lock, a
   pipelined `EXPIRE NX` right after the `INCR`, or a pipelined `PEXPIRE` (the `conc:{name}` and `nodes` sets); the per-account ACME wait-until uses a pipelined `EXPIRE GT` + `SET NX EX` so it is never shortened. `EXPIRE NX` self-heals a skipped TTL on the next
   same-window write, so a plain pipeline is the correct, simpler tool for the self-healing transient
   counters. Per the engineering posture, this uses **NO Lua / WATCH / MULTI-EXEC** — a single command, a
@@ -144,8 +145,9 @@ MUST NOT be relaxed without explicit user direction.
   reset its quota just by reconnecting.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
-  Name uniqueness is the **write-verify claim** (GET-absent → PUT nonce under a hard timeout, SDK
-  retries disabled → settle wait > the PUT timeout → GET-verify). Retention (logs 90d, rejected-enroll
+  Name uniqueness is the **Valkey claim lock**: `SET lock:claim:{name} NX EX` (taken → new name; never
+  released; TTL `--registry-claim-settle` > the claim deadline) → GET-absent → PUT the record, all under one
+  `--registry-claim-timeout` deadline started before the lock, SDK retries disabled. Retention (logs 90d, rejected-enroll
   30d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
   `docs/PROJECT.md` §5). Connection logs are only SPOOLED on the node
   (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
@@ -241,7 +243,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME issuance budgets + wait-until |
 | `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
-| `store` | `internal/store`: durable S3/MinIO name registry (write-verify claim), connection logs, rejected-enroll evidence |
+| `store` | `internal/store`: durable S3/MinIO name registry, connection logs, rejected-enroll evidence |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, several GTS accounts looked up by key) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |

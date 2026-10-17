@@ -14,21 +14,29 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 internal const val TAG = "TunnelApp"
 
 // Tunnel maintains the outbound mTLS HTTP/2 control connection.
 class Tunnel(
-    private val client: OkHttpClient,   // the identity-mTLS client (Identity.mtlsClient())
+    client: OkHttpClient,   // the identity-mTLS client (Identity.mtlsClient())
     private val controlHost: String,
     private val port: Int,
     private val dialBack: DialBack,
     private val localServerPort: () -> Int, // lambda defers reading the server's fixed loopback port
+    private val stats: Stats,
     private val onRenewNudge: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(true)
     private val bound = CountDownLatch(1)
     private val renewals = SingleFlight()
+    private val node = AtomicReference("unknown")
+    private var everBound = false
+    private val client = client.newBuilder().addNetworkInterceptor { chain ->
+        chain.connection()?.route()?.socketAddress?.address?.hostAddress?.let { node.set(it) }
+        chain.proceed(chain.request())
+    }.build()
 
     fun awaitBound(seconds: Long): Boolean = bound.await(seconds, TimeUnit.SECONDS)
     fun stop() = running.set(false)
@@ -39,6 +47,7 @@ class Tunnel(
         while (running.get()) {
             try { serveControlOnce(); backoff = 200L } catch (t: Throwable) { Log.w(TAG, "control connection ended", t) }
             if (!running.get()) break
+            stats.disconnected()
             Thread.sleep(backoff); backoff = (backoff * 2).coerceAtMost(5_000L)
         }
     }
@@ -61,6 +70,8 @@ class Tunnel(
                     return
                 }
                 bound.countDown()
+                if (running.get()) stats.connected(node.get(), everBound)
+                everBound = true
                 val source = resp.body.source()
                 try {
                     while (running.get()) {
@@ -77,7 +88,12 @@ class Tunnel(
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
                                     val started = renewals.launch("renewal") {
-                                        try { onRenewNudge(n) } catch (t: Throwable) { Log.w(TAG, "renewal failed; keeping the current certs", t) }
+                                        try {
+                                            onRenewNudge(n)
+                                        } catch (t: Throwable) {
+                                            Log.w(TAG, "renewal failed; keeping the current certs", t)
+                                            stats.issueFailed("renewal failed: $t")
+                                        }
                                     }
                                     if (!started) Log.i(TAG, "renewal already in progress; RENEW_NUDGE ignored")
                                 }
@@ -104,18 +120,21 @@ class Tunnel(
             return
         }
         val local = try {
-            Socket("127.0.0.1", localServerPort()).apply { tcpNoDelay = true }
+            LocalConnect.open(localServerPort())
         } catch (t: Throwable) {
             Log.w(TAG, "local server unreachable for a dial-back to $addr", t)
+            stats.error("local server unreachable for a dial-back to $addr: $t")
             return
         }
         val remote = try {
             dialBack.open(token, addr, useHttps, useMtls)
         } catch (t: Throwable) {
             Log.w(TAG, "dial-back to $addr failed", t)
+            stats.error("dial-back to $addr failed: $t")
             try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
             return
         }
+        stats.connection()
         splice(local, remote)
     }
 
@@ -127,14 +146,14 @@ class Tunnel(
                 try { remote.socket.close() } catch (t: Throwable) { Log.d(TAG, "dial-back socket close failed", t) }
             }
         }
-        val up = Thread { copy({ local.getInputStream() }, { remote.socket.getOutputStream() }, "upstream"); closeBoth() }
+        val up = Thread { copy({ local.getInputStream() }, { remote.socket.getOutputStream() }, "upstream", stats::bytesOut); closeBoth() }
             .apply { isDaemon = true; start() }
-        copy({ remote.input }, { local.getOutputStream() }, "downstream")
+        copy({ remote.input }, { local.getOutputStream() }, "downstream", stats::bytesIn)
         closeBoth()
         up.join()
     }
 
-    private fun copy(source: () -> InputStream, sink: () -> OutputStream, dir: String) {
+    private fun copy(source: () -> InputStream, sink: () -> OutputStream, dir: String, counted: (Int) -> Unit) {
         try {
             val src = source()
             val dst = sink()
@@ -144,6 +163,7 @@ class Tunnel(
                 if (n < 0) break
                 dst.write(buf, 0, n)
                 dst.flush()
+                counted(n)
             }
         } catch (t: Throwable) {
             Log.d(TAG, "$dir copy ended", t)

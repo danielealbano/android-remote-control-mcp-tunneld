@@ -11,8 +11,8 @@ import (
 )
 
 // Store is a thread-safe in-memory store.Store fake for assertions. The exported hook fields let the
-// write-verify race tests inject interleavings: a claim PUT that "times out" client-side but lands
-// later (zombie), a competing claimant writing between another's PUT and verify, etc.
+// race tests inject interleavings: a claim PUT that "times out" client-side but lands
+// later (zombie), etc.
 type Store struct {
 	mu       sync.Mutex
 	names    map[string]store.NameRecord
@@ -21,13 +21,11 @@ type Store struct {
 
 	// FailNextPut, when non-nil, is returned by the next PutName call WITHOUT writing (a clean PUT
 	// failure). ZombieNextPut simulates a timed-out-but-landed PUT: the record IS written, the error
-	// IS returned. BeforeVerifyGet runs before each GetName so a test can land a competing/zombie
-	// write between a claimant's PUT and its verify. RejectedErr, when non-nil, fails every
+	// IS returned. RejectedErr, when non-nil, fails every
 	// PutRejectedEnrollment (evidence-store outage).
-	FailNextPut     error
-	ZombieNextPut   error
-	BeforeVerifyGet func(name string)
-	RejectedErr     error
+	FailNextPut   error
+	ZombieNextPut error
+	RejectedErr   error
 }
 
 // NewStore builds an empty fake.
@@ -37,9 +35,6 @@ var _ store.Store = (*Store)(nil)
 
 // GetName returns the record or store.ErrNotFound.
 func (s *Store) GetName(_ context.Context, name string) (store.NameRecord, error) {
-	if s.BeforeVerifyGet != nil {
-		s.BeforeVerifyGet(name)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rec, ok := s.names[name]

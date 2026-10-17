@@ -220,3 +220,25 @@ func TestOrderTrack_UnansweredRequestsCount(t *testing.T) {
 		t.Fatal("an answered finalize without a 2xx must not count as finalized")
 	}
 }
+
+func TestPrepayBucket_PerCA(t *testing.T) {
+	t.Parallel()
+	b := testBudgets()
+	tests := []struct {
+		ca      string
+		wantKey string
+		wantN   int
+	}{
+		{ca: CALetsEncrypt, wantKey: "", wantN: 0},
+		{ca: CAGTS, wantKey: "gts:requests:acct", wantN: 9},
+		{ca: CAZeroSSL, wantKey: "zerossl:requests:acct", wantN: 9},
+	}
+	for _, tc := range tests {
+		t.Run(tc.ca, func(t *testing.T) {
+			bk, n := b.prepayBucket(&account{ca: tc.ca, id: "acct"})
+			if bk.Key != tc.wantKey || n != tc.wantN {
+				t.Fatalf("prepayBucket = %q/%d, want %q/%d", bk.Key, n, tc.wantKey, tc.wantN)
+			}
+		})
+	}
+}

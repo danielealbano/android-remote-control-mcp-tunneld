@@ -5,6 +5,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.IOException
+import java.security.ProviderException
 
 class IssueRetryTest {
     private class Recorder(failures: List<Throwable>, private val nonceFailures: List<Throwable> = emptyList()) {
@@ -110,5 +111,35 @@ class IssueRetryTest {
             assertSame(err, t)
         }
         assertEquals(emptyList<Long>(), r.sleeps)
+    }
+
+    @Test
+    fun keyGenerationFailureRetriesFiveTimesTwoSecondsApart() {
+        val r = Recorder(List(5) { ProviderException("Failed to generate key pair.") })
+        r.run("n0")
+        assertEquals(listOf("n0", "fresh-1", "fresh-2", "fresh-3", "fresh-4", "fresh-5"), r.issued)
+        assertEquals(List(5) { 2_000L }, r.sleeps)
+    }
+
+    @Test
+    fun keyGenerationFailureGivesUpAfterFiveRetries() {
+        val last = ProviderException("Failed to generate key pair.")
+        val r = Recorder(List(5) { ProviderException("Failed to generate key pair.") } + last)
+        try {
+            r.run("n0")
+            fail("a sixth key generation failure must be thrown")
+        } catch (t: ProviderException) {
+            assertSame(last, t)
+        }
+        assertEquals(6, r.issued.size)
+        assertEquals(List(5) { 2_000L }, r.sleeps)
+    }
+
+    @Test
+    fun keyGenerationRetriesDoNotUseTheOtherRetries() {
+        val r = Recorder(List(5) { ProviderException("Failed to generate key pair.") } + List(3) { retryable(1) })
+        r.run("n0")
+        assertEquals(9, r.issued.size)
+        assertEquals(List(5) { 2_000L } + List(3) { 1_000L }, r.sleeps)
     }
 }

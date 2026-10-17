@@ -2,6 +2,7 @@ package acme
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -519,6 +520,7 @@ func TestChain_LogsEachCAFailure(t *testing.T) {
 func TestChain_LogsBookkeepingErrors(t *testing.T) {
 	tests := []struct {
 		name string
+		ca   string
 		err  error
 		want []string
 	}{
@@ -532,13 +534,15 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 		}},
 		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed",
 			"acme budget reservation failed (trying the account)", "acme budget spend failed (the reservation expires at its deadline)"}},
+		{name: "GTS order without a request-budget prepay", ca: CAGTS, want: []string{
+			"acme budget reservation failed (trying the account)", "acme 429 mark read failed (no prepay; requests draw on the shared budget)"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			mr := miniredis.RunT(t)
 			ch, _ := newChainOn(t, mr, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))},
-				&fakeCA{caID: CALetsEncrypt, err: tc.err})
+				&fakeCA{caID: cmp.Or(tc.ca, CALetsEncrypt), err: tc.err})
 			mr.Close()
 			_, _, err := ch.Obtain(context.Background(), nil, "name")
 			if (err == nil) != (tc.err == nil) {
