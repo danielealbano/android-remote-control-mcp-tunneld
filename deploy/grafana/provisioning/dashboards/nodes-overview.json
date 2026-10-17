@@ -414,13 +414,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_receive_bytes_total{device=\"eth0\",node=~\"$node\"}[5m])",
+     "expr": "rate(node_network_receive_bytes_total{device=\"eth0\",node=~\"$node\"}[5m]) * 8",
      "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -468,13 +468,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_transmit_bytes_total{device=\"eth0\",node=~\"$node\"}[5m])",
+     "expr": "rate(node_network_transmit_bytes_total{device=\"eth0\",node=~\"$node\"}[5m]) * 8",
      "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -738,13 +738,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_receive_bytes_total{device=\"wg0\",node=~\"$node\"}[5m])",
+     "expr": "rate(node_network_receive_bytes_total{device=\"wg0\",node=~\"$node\"}[5m]) * 8",
      "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -792,13 +792,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_transmit_bytes_total{device=\"wg0\",node=~\"$node\"}[5m])",
+     "expr": "rate(node_network_transmit_bytes_total{device=\"wg0\",node=~\"$node\"}[5m]) * 8",
      "legendFormat": "{{node}}"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,

@@ -723,7 +723,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_receive_bytes_total{device=~\"eth0|wg0\",node=\"$node\"}[5m])",
+     "expr": "rate(node_network_receive_bytes_total{device=~\"eth0|wg0\",node=\"$node\"}[5m]) * 8",
      "legendFormat": "{{device}} in"
     },
     {
@@ -732,13 +732,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(node_network_transmit_bytes_total{device=~\"eth0|wg0\",node=\"$node\"}[5m])",
+     "expr": "rate(node_network_transmit_bytes_total{device=~\"eth0|wg0\",node=\"$node\"}[5m]) * 8",
      "legendFormat": "{{device}} out"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
@@ -840,7 +840,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(wireguard_peer_receive_bytes_total{node=\"$node\"}[5m])",
+     "expr": "rate(wireguard_peer_receive_bytes_total{node=\"$node\"}[5m]) * 8",
      "legendFormat": "{{peer}} in"
     },
     {
@@ -849,13 +849,13 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "rate(wireguard_peer_transmit_bytes_total{node=\"$node\"}[5m])",
+     "expr": "rate(wireguard_peer_transmit_bytes_total{node=\"$node\"}[5m]) * 8",
      "legendFormat": "{{peer}} out"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "Bps",
+     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,
