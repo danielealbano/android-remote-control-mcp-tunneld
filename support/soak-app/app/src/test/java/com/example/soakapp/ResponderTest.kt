@@ -52,6 +52,7 @@ class ResponderTest {
     }
 
     private val listener = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+    private val stats = Stats()
 
     @After
     fun closeListener() = listener.close()
@@ -78,7 +79,7 @@ class ResponderTest {
     }
 
     private fun session(): Session {
-        val responder = Responder(1).also { it.install(key, arrayOf(cert)) }
+        val responder = Responder(1, stats).also { it.install(key, arrayOf(cert)) }
         val (done, error) = serveNext(responder)
         val trust = KeyStore.getInstance(KeyStore.getDefaultType()).apply { load(null, null); setCertificateEntry("phone", cert) }
         val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(trust) }
@@ -158,6 +159,11 @@ class ResponderTest {
         s.client.close()
         assertTrue(s.done.await(5, TimeUnit.SECONDS))
         assertNull(s.error.get())
+        val snap = stats.snapshot("running", 1)
+        assertEquals(2L, snap.served)
+        assertEquals(6L, snap.bytesIn)
+        assertEquals(6L, snap.bytesOut)
+        assertEquals(0L, snap.errors)
     }
 
     @Test
@@ -170,6 +176,10 @@ class ResponderTest {
             assertEquals("close", r.headers["connection"])
             s.assertEof()
         }
+        val snap = stats.snapshot("running", 1)
+        assertEquals(2L, snap.errors)
+        assertEquals(0L, snap.served)
+        assertTrue(snap.lastError!!.text.contains("answered 404"))
     }
 
     @Test
@@ -227,7 +237,7 @@ class ResponderTest {
     @Test
     fun setupFailureClosesSocket() {
         val accepted = AtomicReference<Socket>()
-        val (done, error) = serveNext(Responder(1), accepted)
+        val (done, error) = serveNext(Responder(1, stats), accepted)
         Socket(InetAddress.getLoopbackAddress(), listener.localPort).use {
             assertTrue(done.await(5, TimeUnit.SECONDS))
         }

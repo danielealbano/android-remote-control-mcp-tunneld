@@ -18,7 +18,7 @@ import javax.net.ssl.X509TrustManager
 
 class Net(caPath: String?, private val port: Int?) {
     private val trust: X509TrustManager = trustManager(caPath?.let { loadRoots(it) })
-    private val dns: Dns = if (port == null) Dns.SYSTEM else Dns { listOf(InetAddress.getByName("127.0.0.1")) }
+    private val dns: Dns = if (port == null) ShuffledDns(Dns.SYSTEM) else Dns { listOf(InetAddress.getByName("127.0.0.1")) }
 
     fun url(host: String, path: String): String = if (port == null) "https://$host$path" else "https://$host:$port$path"
 

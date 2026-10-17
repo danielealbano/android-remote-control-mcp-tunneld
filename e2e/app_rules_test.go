@@ -75,10 +75,8 @@ func prepareApp(t *testing.T, serial string, inf *e2eInfra, pkg, fixture string)
 	}
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+pkg)
-	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+pkg) })
 	t.Cleanup(func() {
-		adbCleanup(t, serial, "shell", "am", "broadcast", "-a", pkg+".stop", "-n", pkg+"/.CommandReceiver", "-f", "0x00000020")
+		adbCleanup(t, serial, amCommandArgs(pkg, "stop")...)
 	})
 	adbRunAs(t, serial, pkg, "rm -f files/ready files/error files/info.json files/names.txt files/failures.txt files/forgotten")
 	caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
@@ -93,7 +91,7 @@ func enrollTunnelApp(t *testing.T, serial, caPath string) string {
 		t.Fatal(err)
 	}
 	appNonce := hex.EncodeToString(nonce[:])
-	amBroadcast(t, serial, tunnelAppPkg, "enroll",
+	amCommand(t, serial, tunnelAppPkg, "enroll",
 		"edgePort", strconv.Itoa(appRulesDevicePort),
 		"appNonce", appNonce,
 		"pebbleCaPath", caPath,
@@ -106,7 +104,7 @@ func enrollTunnelApp(t *testing.T, serial, caPath string) string {
 
 func forgetSoakPhones(t *testing.T, serial string) {
 	t.Helper()
-	amBroadcast(t, serial, soakAppPkg, "forget",
+	amCommand(t, serial, soakAppPkg, "forget",
 		"enrollHost", e2eEnrollHost,
 		"controlHost", e2eControlHost,
 		"tunnelDomain", e2eTunnelDomain,
@@ -117,7 +115,7 @@ func forgetSoakPhones(t *testing.T, serial string) {
 func startSoakPhones(t *testing.T, serial, caPath string, count int) string {
 	t.Helper()
 	adbRunAs(t, serial, soakAppPkg, "rm -f files/ready files/failures.txt")
-	amBroadcast(t, serial, soakAppPkg, "start",
+	amCommand(t, serial, soakAppPkg, "start",
 		"count", strconv.Itoa(count),
 		"spacingSeconds", "0",
 		"parallel", "true",
@@ -262,7 +260,7 @@ func TestE2E_ReferenceTunnelAppRenewRetrySucceeds(t *testing.T) {
 	}
 	adb(t, serial, "logcat", "-c")
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/info.json")
-	amBroadcast(t, serial, tunnelAppPkg, "refresh")
+	amCommand(t, serial, tunnelAppPkg, "refresh")
 	if got := readyName(t, serial, tunnelAppPkg); got != name {
 		t.Fatalf("after the refresh the assigned name changed: %q -> %q", name, got)
 	}

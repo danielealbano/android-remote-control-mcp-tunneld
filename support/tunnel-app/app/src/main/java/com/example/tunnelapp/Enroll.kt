@@ -89,8 +89,7 @@ class EnrollError(val reason: String, val retryable: Boolean, val retryAfterSec:
     RuntimeException("enroll: $reason (status $status)")
 
 object Enroll {
-    // enroll: two-phase attested enrollment → a fully-issued Identity.
-    fun enroll(port: Int, enrollHost: String, controlHost: String, tunnelDomain: String, trust: X509TrustManager): Identity {
+    fun enroll(port: Int, enrollHost: String, controlHost: String, tunnelDomain: String, trust: X509TrustManager): Pair<Identity, String> {
         val server = Tls.serverClient(trust)
         val nonce = getJson(server, "https://$enrollHost:$port/api/v1/enroll/nonce").getString("nonce")
         val idAlias = "tunnel-identity-0"
@@ -106,8 +105,7 @@ object Enroll {
             r.getString("name"), port, enrollHost, controlHost, tunnelDomain, trust,
             idAlias, "", parseChain(r.getString("identity_cert")), emptyArray(), "", 0,
         )
-        issue(id, r.getString("issue_nonce"))
-        return id
+        return id to r.getString("issue_nonce")
     }
 
     // issue: Phase 2 / every renewal, serialized by id.issueLock so two overlapping renewals cannot collide

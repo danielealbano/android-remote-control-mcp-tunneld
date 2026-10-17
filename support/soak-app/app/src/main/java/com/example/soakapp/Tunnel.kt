@@ -11,31 +11,44 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 internal const val TAG = "SoakApp"
 
 class Tunnel(
     private val phone: Int,
     private val net: Net,
-    private val client: OkHttpClient,
+    client: OkHttpClient,
     private val controlHost: String,
     private val dialBack: DialBack,
     private val responder: Responder,
+    private val stats: Stats,
     private val onRenewNudge: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(true)
     private val bound = CountDownLatch(1)
     private val renewals = SingleFlight()
+    private val node = AtomicReference("unknown")
+    private var everBound = false
+    private val client = client.newBuilder().addNetworkInterceptor { chain ->
+        chain.connection()?.route()?.socketAddress?.address?.hostAddress?.let { node.set(it) }
+        chain.proceed(chain.request())
+    }.build()
 
     fun awaitBound(seconds: Long): Boolean = bound.await(seconds, TimeUnit.SECONDS)
     fun stop() = running.set(false)
 
     fun run() {
         var backoff = 200L
-        while (running.get()) {
-            try { serveControlOnce(); backoff = 200L } catch (t: Throwable) { Log.w(TAG, "phone $phone: control connection ended", t) }
-            if (!running.get()) break
-            Thread.sleep(backoff); backoff = (backoff * 2).coerceAtMost(5_000L)
+        try {
+            while (running.get()) {
+                try { serveControlOnce(); backoff = 200L } catch (t: Throwable) { Log.w(TAG, "phone $phone: control connection ended", t) }
+                if (!running.get()) break
+                stats.disconnected(phone)
+                Thread.sleep(backoff); backoff = (backoff * 2).coerceAtMost(5_000L)
+            }
+        } finally {
+            stats.removed(phone)
         }
     }
 
@@ -57,6 +70,8 @@ class Tunnel(
                     return
                 }
                 bound.countDown()
+                if (running.get()) stats.connected(phone, node.get(), everBound)
+                everBound = true
                 val source = resp.body.source()
                 try {
                     while (running.get()) {
@@ -73,7 +88,12 @@ class Tunnel(
                                 .takeIf { it.isNotEmpty() }
                                 ?.let { n ->
                                     val started = renewals.launch("renewal") {
-                                        try { onRenewNudge(n) } catch (t: Throwable) { Log.w(TAG, "phone $phone: renewal failed; keeping the current certs", t) }
+                                        try {
+                                            onRenewNudge(n)
+                                        } catch (t: Throwable) {
+                                            Log.w(TAG, "phone $phone: renewal failed; keeping the current certs", t)
+                                            stats.issueFailed("phone $phone: renewal failed: $t")
+                                        }
                                     }
                                     if (!started) Log.i(TAG, "phone $phone: renewal already in progress; RENEW_NUDGE ignored")
                                 }
@@ -103,12 +123,14 @@ class Tunnel(
             dialBack.open(token, addr, useHttps, useMtls)
         } catch (t: Throwable) {
             Log.w(TAG, "phone $phone: dial-back to $addr failed", t)
+            stats.error("phone $phone: dial-back to $addr failed: $t")
             return
         }
         try {
             responder.serve(remote, controlHost)
         } catch (t: Throwable) {
             Log.d(TAG, "phone $phone: dial-back session from $addr ended", t)
+            stats.error("phone $phone: session from $addr ended: $t")
         }
     }
 

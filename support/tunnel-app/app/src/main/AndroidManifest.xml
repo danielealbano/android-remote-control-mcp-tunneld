@@ -1,20 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application android:label="tunnel-app" android:allowBackup="false">
-        <service
-            android:name=".TunnelService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-        <receiver android:name=".CommandReceiver" android:exported="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
-                <action android:name="com.example.tunnelapp.enroll" />
-                <action android:name="com.example.tunnelapp.refresh" />
-                <action android:name="com.example.tunnelapp.stop" />
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </receiver>
+        </activity>
     </application>
 </manifest>

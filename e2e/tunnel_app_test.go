@@ -112,20 +112,6 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 			t.Logf("adb cleanup: %s", msg)
 		}
 	})
-	// Android 12+ blocks a background broadcast receiver from calling startForegroundService(); put the app
-	// on the power allowlist (as a real user-installed tunnel app would be exempted from battery
-	// optimization) so its CommandReceiver may start the foreground TunnelService.
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+tunnelAppPkg)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg).CombinedOutput()
-		if err != nil {
-			t.Logf("adb cleanup failed: %v: %s", err, out)
-		} else if msg := strings.TrimSpace(string(out)); msg != "" {
-			t.Logf("adb cleanup: %s", msg)
-		}
-	})
 	// install -r keeps app data, so clear any stale status files from a prior interrupted run.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
 
@@ -144,9 +130,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	}
 	appNonce := hex.EncodeToString(appNonceBytes[:])
 
-	// FLAG_INCLUDE_STOPPED_PACKAGES (0x20): the freshly-installed app is in the stopped state, so the
-	// broadcast must be allowed to wake its manifest-declared receiver.
-	amBroadcast(t, serial, tunnelAppPkg, "enroll",
+	amCommand(t, serial, tunnelAppPkg, "enroll",
 		"edgePort", strconv.Itoa(tunnelAppDevicePort),
 		"appNonce", appNonce,
 		"pebbleCaPath", caPath,
@@ -199,7 +183,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// Refresh: force a fresh /api/v1/issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
 	// completion markers first; the app rewrites them after the swap.
 	adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error")
-	amBroadcast(t, serial, tunnelAppPkg, "refresh")
+	amCommand(t, serial, tunnelAppPkg, "refresh")
 	if name2 := strings.TrimSpace(string(pollAppFile(t, serial, tunnelAppPkg, "ready", 150*time.Second))); name2 != name {
 		t.Fatalf("after refresh the assigned name changed: %q -> %q", name, name2)
 	}
@@ -224,7 +208,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	t.Logf("refresh rotated the cert: %s -> %s", f1, info2.TLSCertSHA256)
 
 	// Server-driven nudge: reissue (single replica → owner == this node → local nudge) forces a RENEW_NUDGE
-	// frame WITHOUT a refresh broadcast; the app decodes it, re-issues, and hot-swaps the cert. This
+	// frame; the app decodes it, re-issues, and hot-swaps the cert. This
 	// exercises the Kotlin RENEW_NUDGE-decode → Enroll.issue → swap path on real hardware.
 	f2 := info2.TLSCertSHA256
 	if status, reissued := postAdminReissue(t, inf.internal[edge], name); status != http.StatusOK || !reissued {
@@ -252,7 +236,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// streams (the h2 streams multiplex over ONE tunnel connection).
 	runWaitLoad(t, edge, fqdn, inf.pebble.IssuingRoots)
 
-	amBroadcast(t, serial, tunnelAppPkg, "stop")
+	amCommand(t, serial, tunnelAppPkg, "stop")
 }
 
 const tunnelAppModesDevicePort = 18461
@@ -276,8 +260,6 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	inf := startE2EInfra(t)
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
-	adb(t, serial, "shell", "cmd", "deviceidle", "whitelist", "+"+tunnelAppPkg)
-	t.Cleanup(func() { adbCleanup(t, serial, "shell", "cmd", "deviceidle", "whitelist", "-"+tunnelAppPkg) })
 
 	for _, mode := range []struct {
 		name  string
@@ -323,9 +305,9 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() {
-				adbCleanup(t, serial, "shell", "am", "broadcast", "-a", tunnelAppPkg+".stop", "-n", tunnelAppPkg+"/.CommandReceiver", "-f", "0x00000020")
+				adbCleanup(t, serial, amCommandArgs(tunnelAppPkg, "stop")...)
 			})
-			amBroadcast(t, serial, tunnelAppPkg, "enroll",
+			amCommand(t, serial, tunnelAppPkg, "enroll",
 				"edgePort", strconv.Itoa(tunnelAppDevicePort),
 				"appNonce", hex.EncodeToString(nonce[:]),
 				"pebbleCaPath", dataDir+"/files/pebble-ca.pem",
@@ -353,18 +335,17 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	}
 }
 
-// amBroadcast sends `am broadcast` with
-// FLAG_INCLUDE_STOPPED_PACKAGES and the given string extras (key, value pairs).
-func amBroadcast(t *testing.T, serial, pkg, cmd string, kv ...string) {
+func amCommand(t *testing.T, serial, pkg, cmd string, kv ...string) {
 	t.Helper()
-	args := []string{"shell", "am", "broadcast",
-		"-a", pkg + "." + cmd,
-		"-n", pkg + "/.CommandReceiver",
-		"-f", "0x00000020"}
+	adb(t, serial, amCommandArgs(pkg, cmd, kv...)...)
+}
+
+func amCommandArgs(pkg, cmd string, kv ...string) []string {
+	args := []string{"shell", "am", "start", "-n", pkg + "/.MainActivity", "-e", "command", cmd}
 	for i := 0; i+1 < len(kv); i += 2 {
 		args = append(args, "-e", kv[i], kv[i+1])
 	}
-	adb(t, serial, args...)
+	return args
 }
 
 // pollAppFile polls (via run-as) until files/<name> exists (→ returns its content) or files/error appears

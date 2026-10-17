@@ -13,7 +13,7 @@ import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 
-class Responder(private val phone: Int) {
+class Responder(private val phone: Int, private val stats: Stats) {
     private class Head(val method: String, val target: String, val length: Long, val close: Boolean)
 
     private val context = AtomicReference<SSLContext>()
@@ -46,9 +46,20 @@ class Responder(private val phone: Int) {
                     .firstOrNull { it.startsWith("resp=") }?.removePrefix("resp=")?.toIntOrNull()
                     ?.takeIf { it in 0..MAX_RESPONSE }
                 when {
-                    head.method != "POST" || path != "/op" -> { respond(output, 404, 0, true); return }
-                    size == null -> { respond(output, 400, 0, true); return }
-                    else -> respond(output, 200, size, head.close)
+                    head.method != "POST" || path != "/op" -> {
+                        respond(output, 404, 0, true)
+                        stats.error("phone $phone: ${head.method} $path answered 404")
+                        return
+                    }
+                    size == null -> {
+                        respond(output, 400, 0, true)
+                        stats.error("phone $phone: ${head.method} $path answered 400")
+                        return
+                    }
+                    else -> {
+                        respond(output, 200, size, head.close)
+                        stats.served(head.length, size.toLong())
+                    }
                 }
                 if (head.close) return
             }
