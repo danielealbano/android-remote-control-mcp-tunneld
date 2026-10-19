@@ -1,0 +1,62 @@
+version: 2
+
+# tunneld is a standalone Go module released on `v<semver>` tags. goreleaser builds the multi-arch
+# binaries + archives, pushes the multi-arch docker image to ghcr.io, and creates the GitHub release
+# with the archives + checksums attached.
+project_name: tunneld
+
+before:
+  hooks:
+    - go mod download
+    - sh scripts/third-party-licenses.sh
+
+builds:
+  - id: tunneld
+    main: ./cmd/tunneld
+    binary: tunneld
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: tunneld
+    ids:
+      - tunneld
+    formats:
+      - tar.gz
+    name_template: "tunneld_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE.md
+      - README.md
+      - THIRD_PARTY_LICENSES.txt
+
+checksum:
+  name_template: checksums.txt
+
+dockers_v2:
+  - id: tunneld
+    ids:
+      - tunneld
+    dockerfile: Dockerfile.goreleaser
+    images:
+      - "ghcr.io/danielealbano/android-remote-control-mcp-tunneld"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    extra_files:
+      - THIRD_PARTY_LICENSES.txt
+    labels:
+      "org.opencontainers.image.source": "https://github.com/danielealbano/android-remote-control-mcp-tunneld"
+      "org.opencontainers.image.description": "Self-hosted end-to-end-encrypted tunnel server (tunneld)"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "AGPL-3.0-or-later"

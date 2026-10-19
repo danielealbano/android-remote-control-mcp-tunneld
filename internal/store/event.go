@@ -1,0 +1,86 @@
+package store
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"time"
+)
+
+// Close-reason enum values (also the connection-log close_reason field). min-rate/evicted are CLOSE
+// reasons, never rejection-counter labels.
+const (
+	CloseClientClose    = "client-close"
+	ClosePhoneClose     = "phone-close"
+	CloseBanEvict       = "ban-evict"
+	CloseQuotaExhausted = "quota-exhausted"
+	CloseIdleTimeout    = "idle-timeout"
+	CloseMinRate        = "min-rate"
+	CloseEvicted        = "evicted"
+	CloseServerShutdown = "server-shutdown"
+	CloseAdminTerminate = "admin-terminate"
+	CloseCertExpired    = "cert-expired"
+	CloseError          = "error"
+)
+
+// Event is one connection-log event (start OR end) for a public OR phone connection — one schema, one
+// pipeline. node_start (a nanosecond process-start timestamp) is present on EVERY event to tie events
+// to a process incarnation (crash detection). JA4 (tls_fp) is recorded on both sides; on phone
+// connections it is an anomaly tripwire only, never a gate.
+type Event struct {
+	Schema       int    `json:"schema"`
+	Event        string `json:"event"` // "start" | "end"
+	Conn         string `json:"conn"`  // 8-hex conn id (see NewConnID)
+	Type         string `json:"type"`  // "public" | "phone"
+	Tunnel       string `json:"tunnel"`
+	NodeHostname string `json:"node_hostname"`
+	NodeStart    string `json:"node_start"` // RFC3339Nano process-start timestamp
+
+	TSStart    time.Time `json:"ts_start"`
+	TSEnd      time.Time `json:"ts_end,omitzero"`
+	DurationMS int64     `json:"duration_ms,omitempty"`
+
+	SrcIP      string `json:"src_ip"`
+	SrcPort    int    `json:"src_port"`
+	SNI        string `json:"sni,omitempty"` // public only
+	ALPN       string `json:"alpn,omitempty"`
+	TLSVersion string `json:"tls_version,omitempty"`
+	TLSFP      string `json:"tls_fp,omitempty"` // JA4
+
+	BytesIn  int64 `json:"bytes_in,omitempty"`  // end only, from the peer's perspective
+	BytesOut int64 `json:"bytes_out,omitempty"` // end only
+
+	CloseReason string `json:"close_reason,omitempty"`
+
+	// Phone-only:
+	IdentityCertSerial string `json:"identity_cert_serial,omitempty"`
+	IdentityKeyFP      string `json:"identity_key_fpr,omitempty"`
+}
+
+// tsNanosLayout sorts chronologically as a string in an S3 listing.
+const tsNanosLayout = "20060102T150405.000000000Z"
+
+// connIDRand is the entropy source for NewConnID; a package var so a test can force the rand-failure
+// path that exercises MustConnID's fallback. Production always uses crypto/rand.
+var connIDRand = rand.Read
+
+// NewConnID mints an 8-lowercase-hex connection/stream id (4 crypto/rand bytes). Uniqueness among
+// the live ids of one tunnel is enforced by the consumers (route-bind re-roll on collision) — a
+// collision is detected and retried, never silent.
+func NewConnID() (string, error) {
+	var buf [4]byte
+	if _, err := connIDRand(buf[:]); err != nil {
+		return "", fmt.Errorf("store: conn id rand: %w", err)
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+// MustConnID mints a conn/stream id, falling back to a deterministic non-empty id ("00000000") on the
+// practically impossible crypto/rand failure.
+func MustConnID() string {
+	id, err := NewConnID()
+	if err != nil {
+		return "00000000"
+	}
+	return id
+}

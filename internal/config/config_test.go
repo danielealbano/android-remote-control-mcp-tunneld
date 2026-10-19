@@ -1,0 +1,1162 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/alecthomas/kong"
+)
+
+// validCfg returns a ServeCmd that passes the E2E Validate; individual tests copy and mutate one field.
+func validCfg(t *testing.T) ServeCmd {
+	t.Helper()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return ServeCmd{
+		Listen:                    ":443",
+		InternalListen:            ":9090",
+		TunnelDomain:              "example.test",
+		EnrollHost:                "enroll.example.test",
+		ControlHost:               "connect.example.test",
+		NameLength:                10,
+		DialBackAdvertise:         "203.0.113.10:443",
+		DialBackHTTPS:             true,
+		DialBackMTLS:              true,
+		MeshListen:                ":9443",
+		MeshAdvertise:             "node-a:9443",
+		MeshPoolSize:              4,
+		MeshCertTTL:               24 * time.Hour,
+		MaxClients:                10000,
+		RedisURL:                  "redis://localhost:6379/0",
+		CACert:                    cert,
+		CAKey:                     key,
+		CertValidity:              4380 * time.Hour,
+		S3Endpoint:                "http://localhost:9000",
+		S3Region:                  "us-east-1",
+		S3Bucket:                  "tunneld",
+		S3AccessKey:               "access",
+		S3SecretKey:               "secret",
+		S3ForcePathStyle:          true,
+		RegistryClaimTimeout:      3 * time.Second,
+		RegistryClaimSettle:       5 * time.Second,
+		AttestSignerDigestFile:    digest,
+		AttestRootURL:             "https://android.googleapis.com/attestation/root",
+		AttestStatusURL:           "https://android.googleapis.com/attestation/status",
+		AttestRefresh:             time.Hour,
+		AttestStatusMaxStale:      24 * time.Hour,
+		ACMEDirLE:                 "https://acme-v02.api.letsencrypt.org/directory",
+		ACMEDirGTS:                "https://dv.acme-v02.api.pki.goog/directory",
+		ACMEDirZeroSSL:            "https://acme.zerossl.com/v2/DV90",
+		ACMEEmail:                 "ops@example.test",
+		ACMELEProfile:             "shortlived",
+		ACMEGTSValidity:           168 * time.Hour,
+		ACMEAccountDir:            dir,
+		ConnLogDir:                t.TempDir(),
+		ACMEDNSProvider:           "cloudflare",
+		ACMEChallengeLE:           ChallengeTLSALPN01,
+		ACMEChallengeGTS:          ChallengeTLSALPN01,
+		ACMEChallengeZeroSSL:      ChallengeHTTP01,
+		ACMEHTTPListen:            ":80",
+		ACMEEABZeroSSLKID:         "k",
+		ACMEEABZeroSSLHMAC:        "h",
+		ACMEGTSAccounts:           []string{"gts"},
+		ACMEBudgetLEDomain:        "50/168h",
+		ACMEBudgetLEOrders:        "300/3h",
+		ACMEBudgetLEName:          "5/168h",
+		ACMEBudgetGTSOrders:       "100/1h",
+		ACMEBudgetGTSRequests:     "120/1m",
+		ACMEBudgetGTSCertPolls:    "50/1m",
+		ACMEBudgetZeroSSLOrders:   "200/1h:40",
+		ACMEBudgetZeroSSLRequests: "240/1m",
+		ACMEAttemptTimeoutLE:      20 * time.Second,
+		ACMEAttemptTimeoutGTS:     40 * time.Second,
+		ACMEAttemptTimeoutZeroSSL: 90 * time.Second,
+		ACMEPollFirstLE:           2 * time.Second,
+		ACMEPollFirstGTS:          5600 * time.Millisecond,
+		ACMEPollFirstZeroSSL:      15200 * time.Millisecond,
+		ACMEPollInterval:          2 * time.Second,
+		ACMECooldownDefault:       time.Hour,
+		ACMEBackoffInitial:        time.Minute,
+		ACMEBackoffMax:            6 * time.Hour,
+		ACMERenewMargin:           48 * time.Hour,
+		IssuePerWeek:              3,
+		LimitTrafficDay:           "1gb",
+		LimitTrafficWeek:          "4gb",
+		LimitConnRate:             10,
+		LimitStreamPending:        64,
+		LimitConnIdle:             120 * time.Second,
+		LimitConnMinRate:          "2kb",
+		LimitConnMinGrace:         60 * time.Second,
+		LimitConnEvictIdle:        10 * time.Second,
+		LimitConnProtectRate:      "256kb",
+		HandshakeTimeout:          10 * time.Second, LimitDialBackTimeout: 10 * time.Second,
+		ControlPingInterval: 30 * time.Second,
+		RouteTTL:            30 * time.Second,
+		BanPoll:             10 * time.Second,
+		LimitBandwidth:      "1mbit",
+		LimitPackets:        100,
+		LimitConcurrent:     4,
+		LimitEnrollHour:     20,
+		LimitEnrollMinute:   2,
+		LimitEnrollBody:     "16kb",
+		ShutdownGrace:       15 * time.Second,
+		Log:                 []string{"output=std;level=info"},
+	}
+}
+
+func TestValidateAcceptsValidConfig(t *testing.T) {
+	if err := validCfg(t).Validate(); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsBadNameLength(t *testing.T) {
+	for _, n := range []int{0, 5, 33, 64} {
+		c := validCfg(t)
+		c.NameLength = n
+		if err := c.Validate(); err == nil {
+			t.Errorf("name-length %d expected error", n)
+		}
+	}
+}
+
+func TestValidateRejectsOversizeLabel(t *testing.T) {
+	c := validCfg(t)
+	c.NamePrefix = string(make([]byte, 60)) // 60 + 10 > 63
+	c.NameLength = 10
+	if err := c.Validate(); err == nil {
+		t.Error("prefix+name-length > 63 expected error")
+	}
+}
+
+func TestValidateRejectsUnreadableCAPaths(t *testing.T) {
+	c := validCfg(t)
+	c.CACert = ""
+	if err := c.Validate(); err == nil {
+		t.Error("empty --ca-cert expected error")
+	}
+	c = validCfg(t)
+	c.CAKey = filepath.Join(t.TempDir(), "does-not-exist.pem")
+	if err := c.Validate(); err == nil {
+		t.Error("missing --ca-key file expected error")
+	}
+}
+
+func TestValidateRequiresAttestSignerDigestFile(t *testing.T) {
+	c := validCfg(t)
+	c.AttestSignerDigestFile = ""
+	if err := c.Validate(); err == nil {
+		t.Error("empty --attest-signer-digest-file expected error")
+	}
+	c = validCfg(t)
+	c.AttestSignerDigestFile = filepath.Join(t.TempDir(), "nope.txt")
+	if err := c.Validate(); err == nil {
+		t.Error("unreadable --attest-signer-digest-file expected error")
+	}
+}
+
+func TestValidateRequiresS3Fields(t *testing.T) {
+	for _, mut := range []func(*ServeCmd){
+		func(c *ServeCmd) { c.S3Endpoint = "" },
+		func(c *ServeCmd) { c.S3Bucket = "" },
+		func(c *ServeCmd) { c.S3AccessKey = "" },
+		func(c *ServeCmd) { c.S3SecretKey = "" },
+	} {
+		c := validCfg(t)
+		mut(&c)
+		if err := c.Validate(); err == nil {
+			t.Error("empty required S3 field expected error")
+		}
+	}
+}
+
+func TestValidateRequiresMeshACMEFields(t *testing.T) {
+	for _, mut := range []func(*ServeCmd){
+		func(c *ServeCmd) { c.MeshAdvertise = "" },
+		func(c *ServeCmd) { c.ACMEEmail = "" },
+		func(c *ServeCmd) { c.ACMEAccountDir = "" },
+	} {
+		c := validCfg(t)
+		mut(&c)
+		if err := c.Validate(); err == nil {
+			t.Error("empty required mesh/acme field expected error")
+		}
+	}
+}
+
+func TestValidateMeshPoolSizeRange(t *testing.T) {
+	c := validCfg(t)
+	c.MeshPoolSize = 0
+	if err := c.Validate(); err == nil {
+		t.Error("--mesh-pool-size 0 expected error")
+	}
+}
+
+func TestValidateTrafficWeekGEDay(t *testing.T) {
+	c := validCfg(t)
+	c.LimitTrafficWeek = "512mb"
+	c.LimitTrafficDay = "1gb"
+	if err := c.Validate(); err == nil {
+		t.Error("week < day expected error")
+	}
+}
+
+func TestValidateRenewMarginFitsShortlived(t *testing.T) {
+	c := validCfg(t)
+	c.ACMERenewMargin = 200 * time.Hour
+	if err := c.Validate(); err == nil {
+		t.Error("--acme-renew-margin 200h expected error (>= 160h)")
+	}
+}
+
+func TestValidateRegistrySettleGreaterThanTimeout(t *testing.T) {
+	c := validCfg(t)
+	c.RegistryClaimSettle = 2 * time.Second
+	c.RegistryClaimTimeout = 3 * time.Second
+	if err := c.Validate(); err == nil {
+		t.Error("settle <= timeout expected error")
+	}
+	if err := validCfg(t).Validate(); err != nil {
+		t.Errorf("default settle > timeout expected pass, got %v", err)
+	}
+}
+
+func TestServeCmd_Validate_S3EndpointScheme(t *testing.T) {
+	c := validCfg(t)
+	c.S3Endpoint = "localhost:9000" // no scheme
+	if err := c.Validate(); err == nil {
+		t.Error("scheme-less --s3-endpoint expected error")
+	}
+	c.S3Endpoint = "http://localhost:9000"
+	if err := c.Validate(); err != nil {
+		t.Errorf("http:// --s3-endpoint expected pass, got %v", err)
+	}
+}
+
+func TestServeCmd_Validate_AttestStaleVsRefresh(t *testing.T) {
+	c := validCfg(t)
+	c.AttestStatusMaxStale = c.AttestRefresh // max-stale == refresh
+	if err := c.Validate(); err == nil {
+		t.Error("--attest-status-max-stale <= --attest-refresh expected error")
+	}
+	if err := validCfg(t).Validate(); err != nil {
+		t.Errorf("default 24h/1h expected pass, got %v", err)
+	}
+}
+
+func TestServeCmd_Validate_GTSValidityVsRenewal(t *testing.T) {
+	c := validCfg(t)
+	c.ACMEGTSValidity = 72 * time.Hour
+	c.ACMERenewMargin = 48 * time.Hour // renewal point = 160h-48h = 112h > 72h
+	if err := c.Validate(); err == nil {
+		t.Error("--acme-gts-validity 72h with 48h margin expected error")
+	}
+	if err := validCfg(t).Validate(); err != nil {
+		t.Errorf("default 168h validity expected pass, got %v", err)
+	}
+}
+
+func TestValidateAttestationOptionalFailClosed(t *testing.T) {
+	c := validCfg(t)
+	c.AttestationOptional = true
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "")
+	if err := c.Validate(); err == nil {
+		t.Error("--attestation-optional without sentinel expected error")
+	}
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+	if err := c.Validate(); err != nil {
+		t.Errorf("--attestation-optional with sentinel expected pass, got %v", err)
+	}
+}
+
+func TestValidateRequiresBandwidthFloor(t *testing.T) {
+	// Floor is 16384 B/s (= wire.ChunkSize). 128kbit = 16000 B/s is just below and rejected.
+	for _, bw := range []string{"128kbit"} {
+		c := validCfg(t)
+		c.LimitBandwidth = bw
+		if err := c.Validate(); err == nil {
+			t.Errorf("--limit-bandwidth %s expected error (below floor)", bw)
+		}
+	}
+	// 256kbit = 32000 B/s and 1mbit = 125000 B/s clear the 16384 floor.
+	for _, bw := range []string{"256kbit", "1mbit"} {
+		c := validCfg(t)
+		c.LimitBandwidth = bw
+		if err := c.Validate(); err != nil {
+			t.Errorf("--limit-bandwidth %s expected pass, got %v", bw, err)
+		}
+	}
+}
+
+func TestValidateRejectsZeroIntegerLimits(t *testing.T) {
+	mut := []func(*ServeCmd){
+		func(c *ServeCmd) { c.MaxClients = 0 },
+		func(c *ServeCmd) { c.LimitConcurrent = 0 },
+		func(c *ServeCmd) { c.LimitPackets = 0 },
+		func(c *ServeCmd) { c.LimitConnRate = 0 },
+		func(c *ServeCmd) { c.IssuePerWeek = 0 },
+		func(c *ServeCmd) { c.LimitStreamPending = 0 },
+	}
+	for i, m := range mut {
+		c := validCfg(t)
+		m(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("case %d: zero integer limit expected error", i)
+		}
+	}
+}
+
+func TestValidateRejectsBadRedisLimitsLog(t *testing.T) {
+	c := validCfg(t)
+	c.RedisURL = "://not-a-url"
+	if err := c.Validate(); err == nil {
+		t.Error("unparseable --redis-url expected error")
+	}
+	c = validCfg(t)
+	c.LimitTrafficDay = "bogus"
+	if err := c.Validate(); err == nil {
+		t.Error("bad --limit-traffic-day expected error")
+	}
+	c = validCfg(t)
+	c.Log = []string{"output=std;level=nonsense"}
+	if err := c.Validate(); err == nil {
+		t.Error("bad --log spec expected error")
+	}
+}
+
+func TestValidate_DurationLowerBounds(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"control-ping-interval zero", func(c *ServeCmd) { c.ControlPingInterval = 0 }},
+		{"handshake-timeout negative", func(c *ServeCmd) { c.HandshakeTimeout = -time.Second }},
+		{"ban-poll zero", func(c *ServeCmd) { c.BanPoll = 0 }},
+		{"cert-validity zero", func(c *ServeCmd) { c.CertValidity = 0 }},
+		{"mesh-cert-ttl negative", func(c *ServeCmd) { c.MeshCertTTL = -time.Hour }},
+		{"attest-refresh zero", func(c *ServeCmd) { c.AttestRefresh = 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s: expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_ControlPingIntervalCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		interval time.Duration
+		wantErr  bool
+	}{
+		{name: "at the cap", interval: 30 * time.Second},
+		{name: "over the cap", interval: 31 * time.Second, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ControlPingInterval = tc.interval
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "--control-ping-interval") {
+				t.Fatalf("error %q must name --control-ping-interval", err)
+			}
+		})
+	}
+}
+
+func TestValidate_ZeroSizeRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"limit-traffic-day", func(c *ServeCmd) { c.LimitTrafficDay = "0b" }},
+		{"limit-conn-min-rate", func(c *ServeCmd) { c.LimitConnMinRate = "0" }},
+		{"limit-conn-protect-rate", func(c *ServeCmd) { c.LimitConnProtectRate = "0b" }},
+		{"limit-enroll-body", func(c *ServeCmd) { c.LimitEnrollBody = "0b" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s=0 expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_HostAndDomain(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"empty domain", func(c *ServeCmd) { c.TunnelDomain = "" }},
+		{"dotless domain", func(c *ServeCmd) { c.TunnelDomain = "example" }},
+		{"empty enroll host", func(c *ServeCmd) { c.EnrollHost = "" }},
+		{"dotless enroll host", func(c *ServeCmd) { c.EnrollHost = "enroll" }},
+		{"empty control host", func(c *ServeCmd) { c.ControlHost = "" }},
+		{"dotless control host", func(c *ServeCmd) { c.ControlHost = "connect" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s expected error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_ListenAddressesRejectGarbage(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*ServeCmd)
+	}{
+		{"listen", func(c *ServeCmd) { c.Listen = "not-an-addr" }},
+		{"mesh-listen", func(c *ServeCmd) { c.MeshListen = "nope" }},
+		{"internal-listen", func(c *ServeCmd) { c.InternalListen = "bad" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); err == nil {
+				t.Errorf("%s: a non-host:port address must be rejected", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidate_EnrollControlHostCollision(t *testing.T) {
+	c := validCfg(t)
+	c.ControlHost = "ENROLL.example.test" // equal to EnrollHost modulo case
+	if err := c.Validate(); err == nil {
+		t.Fatal("equal enroll/control hosts must be rejected (case-insensitive)")
+	}
+}
+
+func TestValidate_NamePrefixCharset(t *testing.T) {
+	cases := []struct {
+		name    string
+		prefix  string
+		wantErr bool
+	}{
+		{"lowercase ok", "ab-1", false},
+		{"empty ok", "", false},
+		{"uppercase normalized ok", "Ab", false}, // lowercased at runtime → valid, not rejected
+		{"underscore", "a_b", true},
+		{"leading dash", "-ab", true},
+		{"dot", "a.b", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.NamePrefix = tc.prefix
+			if gotErr := c.Validate() != nil; gotErr != tc.wantErr {
+				t.Errorf("prefix %q: gotErr=%v wantErr=%v", tc.prefix, gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseByteSize_Overflow(t *testing.T) {
+	for _, in := range []string{"9223372036854775807kb", "9999999999999gb"} {
+		if _, err := ParseByteSize(in); err == nil {
+			t.Errorf("ParseByteSize(%q) expected overflow error", in)
+		}
+	}
+}
+
+func TestParseBitrate_Overflow(t *testing.T) {
+	for _, in := range []string{"9223372036854775807kbit", "99999999999gbit"} {
+		if _, err := ParseBitrate(in); err == nil {
+			t.Errorf("ParseBitrate(%q) expected overflow error", in)
+		}
+	}
+}
+
+// TestEnvTwinOverridesFlag exercises one env twin per kong type category: int, size
+// string, duration, repeatable []string, plain string. The full required-for-serve set is supplied via
+// env so kong's automatic Validate passes on parse.
+func TestEnvTwinOverridesFlag(t *testing.T) {
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Required-for-serve flags (no defaults) supplied via their env twins.
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+	// Overrides under test (one per kong type category):
+	t.Setenv("TUNNELD_MAX_CLIENTS", "42")            // int twin
+	t.Setenv("TUNNELD_S3_BUCKET", "envbucket")       // plain string twin
+	t.Setenv("TUNNELD_LIMIT_TRAFFIC_DAY", "2gb")     // size string twin
+	t.Setenv("TUNNELD_CONTROL_PING_INTERVAL", "25s") // duration twin
+	t.Setenv("TUNNELD_ACME_DNS_PROVIDER", "route53") // plain string twin
+	t.Setenv("TUNNELD_LOG", "output=std;level=warn") // repeatable []string twin
+
+	var cli struct {
+		Serve ServeCmd `cmd:""`
+	}
+	parser, err := kong.New(&cli, kong.Name("tunneld"), EnvTwins())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"serve"}); err != nil {
+		t.Fatalf("parse with env twins failed: %v", err)
+	}
+	if cli.Serve.MaxClients != 42 {
+		t.Errorf("max-clients twin = %d", cli.Serve.MaxClients)
+	}
+	if cli.Serve.S3Bucket != "envbucket" {
+		t.Errorf("s3-bucket twin = %q", cli.Serve.S3Bucket)
+	}
+	if cli.Serve.LimitTrafficDay != "2gb" {
+		t.Errorf("limit-traffic-day twin = %q", cli.Serve.LimitTrafficDay)
+	}
+	if cli.Serve.ControlPingInterval != 25*time.Second {
+		t.Errorf("control-ping-interval twin = %s", cli.Serve.ControlPingInterval)
+	}
+	if cli.Serve.ACMEDNSProvider != "route53" {
+		t.Errorf("acme-dns-provider twin = %q", cli.Serve.ACMEDNSProvider)
+	}
+	if len(cli.Serve.Log) != 1 || cli.Serve.Log[0] != "output=std;level=warn" {
+		t.Errorf("log twin = %v", cli.Serve.Log)
+	}
+}
+
+// TestRemovedLegacyFlagsRejected asserts the legacy pre-E2E flags removed in the E2E rework are no longer
+// accepted (parsing them yields an unknown-flag error).
+func TestRemovedLegacyFlagsRejected(t *testing.T) {
+	for _, flag := range []string{
+		"--client-ip-header=X-Real-Ip", "--limit-body=1mb", "--limit-rps=10", "--ping-interval=30s",
+		"--limit-request-timeout=60s", "--connect-auth-timeout=5s", "--limit-connect-pending=64",
+	} {
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), EnvTwins())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Assert the error is specifically an UNKNOWN-FLAG error: parsing with no required flags would
+		// fail Validate() regardless, so a bare err != nil would pass even if the legacy flag were re-added.
+		_, perr := parser.Parse([]string{"serve", flag})
+		if perr == nil {
+			t.Errorf("removed flag %q must be rejected", flag)
+			continue
+		}
+		if !strings.Contains(perr.Error(), "unknown flag") {
+			t.Errorf("removed flag %q must yield an unknown-flag error, got: %v", flag, perr)
+		}
+	}
+}
+
+func TestServeCmd_NoGTSEABFlags(t *testing.T) {
+	for _, flag := range []string{"--acme-eab-gts-kid=k", "--acme-eab-gts-hmac=h"} {
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), EnvTwins())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, perr := parser.Parse([]string{"serve", flag})
+		if perr == nil || !strings.Contains(perr.Error(), "unknown flag") {
+			t.Errorf("%s must yield an unknown-flag error, got: %v", flag, perr)
+		}
+	}
+}
+
+func TestValidate_ACMEChallenge(t *testing.T) {
+	tests := []struct {
+		name    string
+		mut     func(*ServeCmd)
+		wantErr bool
+	}{
+		{name: "le tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeTLSALPN01 }},
+		{name: "gts tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeTLSALPN01 }},
+		{name: "le http-01", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeHTTP01 }},
+		{name: "gts dns-01", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeDNS01 }},
+		{name: "zerossl dns-01", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeDNS01 }},
+		{name: "zerossl tls-alpn-01", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeTLSALPN01 }, wantErr: true},
+		{name: "le empty", mut: func(c *ServeCmd) { c.ACMEChallengeLE = "" }, wantErr: true},
+		{name: "gts empty", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = "" }, wantErr: true},
+		{name: "zerossl empty", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = "" }, wantErr: true},
+		{name: "le unknown", mut: func(c *ServeCmd) { c.ACMEChallengeLE = "dns-02" }, wantErr: true},
+		{name: "gts unknown", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = "TLS-ALPN-01" }, wantErr: true},
+		{name: "zerossl unknown", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = "http01" }, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_DNSProviderOnlyWithDNS01(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		mut      func(*ServeCmd)
+		wantErr  bool
+	}{
+		{name: "no dns-01 without provider", mut: func(*ServeCmd) {}},
+		{name: "le dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeDNS01 }, wantErr: true},
+		{name: "gts dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeGTS = ChallengeDNS01 }, wantErr: true},
+		{name: "zerossl dns-01 without provider", mut: func(c *ServeCmd) { c.ACMEChallengeZeroSSL = ChallengeDNS01 }, wantErr: true},
+		{name: "le dns-01 with provider", provider: "cloudflare", mut: func(c *ServeCmd) { c.ACMEChallengeLE = ChallengeDNS01 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEDNSProvider = tc.provider
+			tc.mut(&c)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ACMEHTTPListen(t *testing.T) {
+	tests := []struct {
+		name    string
+		listen  string
+		zerossl string
+		wantErr bool
+	}{
+		{name: "http-01 with port only", listen: ":80", zerossl: ChallengeHTTP01},
+		{name: "http-01 with host and port", listen: "0.0.0.0:8080", zerossl: ChallengeHTTP01},
+		{name: "http-01 malformed", listen: "not-an-addr", zerossl: ChallengeHTTP01, wantErr: true},
+		{name: "http-01 empty", listen: "", zerossl: ChallengeHTTP01, wantErr: true},
+		{name: "no http-01 malformed ignored", listen: "not-an-addr", zerossl: ChallengeDNS01},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEChallengeZeroSSL = tc.zerossl
+			c.ACMEHTTPListen = tc.listen
+			err := c.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestServeCmd_UsesChallenge(t *testing.T) {
+	tests := []struct {
+		name             string
+		le, gts, zerossl string
+		method           string
+		want             bool
+	}{
+		{name: "le only", le: ChallengeDNS01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeDNS01, want: true},
+		{name: "gts only", le: ChallengeHTTP01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeTLSALPN01, want: true},
+		{name: "zerossl only", le: ChallengeTLSALPN01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeHTTP01, want: true},
+		{name: "none", le: ChallengeTLSALPN01, gts: ChallengeTLSALPN01, zerossl: ChallengeHTTP01, method: ChallengeDNS01, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ServeCmd{ACMEChallengeLE: tc.le, ACMEChallengeGTS: tc.gts, ACMEChallengeZeroSSL: tc.zerossl,
+				ACMEDirLE: "https://le.example.test/dir", ACMEGTSAccounts: []string{"gts"}, ACMEEABZeroSSLKID: "k", ACMEEABZeroSSLHMAC: "h"}
+			if got := c.UsesChallenge(tc.method); got != tc.want {
+				t.Errorf("UsesChallenge(%q) = %v, want %v", tc.method, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestKongDefaults_ACMEChallenge(t *testing.T) {
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S3_BUCKET", "tunneld")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+
+	newParser := func(cli any) *kong.Kong {
+		t.Helper()
+		parser, err := kong.New(cli, kong.Name("tunneld"), EnvTwins())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parser
+	}
+
+	var cli struct {
+		Serve ServeCmd `cmd:""`
+	}
+	if _, err := newParser(&cli).Parse([]string{"serve"}); err != nil {
+		t.Fatalf("parse with defaults failed: %v", err)
+	}
+	if cli.Serve.ACMEChallengeLE != ChallengeTLSALPN01 || cli.Serve.ACMEChallengeGTS != ChallengeTLSALPN01 ||
+		cli.Serve.ACMEChallengeZeroSSL != ChallengeHTTP01 {
+		t.Errorf("challenge defaults = %q/%q/%q", cli.Serve.ACMEChallengeLE, cli.Serve.ACMEChallengeGTS, cli.Serve.ACMEChallengeZeroSSL)
+	}
+	if cli.Serve.ACMEHTTPListen != ":80" {
+		t.Errorf("acme-http-listen default = %q", cli.Serve.ACMEHTTPListen)
+	}
+
+	var bad struct {
+		Serve ServeCmd `cmd:""`
+	}
+	_, err := newParser(&bad).Parse([]string{"serve", "--acme-challenge-zerossl=tls-alpn-01"})
+	if err == nil {
+		t.Fatal("--acme-challenge-zerossl=tls-alpn-01 must be rejected")
+	}
+	if !strings.Contains(err.Error(), `must be one of "dns-01","http-01" but got "tls-alpn-01"`) {
+		t.Errorf("expected kong's enum error, got: %v", err)
+	}
+}
+
+func TestValidate_ConnLogDir(t *testing.T) {
+	t.Parallel()
+	c := validCfg(t)
+	c.ConnLogDir = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--conn-log-dir is required") {
+		t.Fatalf("a missing --conn-log-dir must be rejected, got %v", err)
+	}
+	c = validCfg(t)
+	c.ConnLogDir = filepath.Join(t.TempDir(), "not-yet-created")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a not-yet-existing --conn-log-dir is created at startup and must validate: %v", err)
+	}
+	c = validCfg(t)
+	file := filepath.Join(t.TempDir(), "spool")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.ConnLogDir = file
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("a --conn-log-dir that is a file must be rejected, got %v", err)
+	}
+	c.ConnLogDir = filepath.Join(file, "sub")
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("--conn-log-dir %q: ", c.ConnLogDir)) || !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("a --conn-log-dir that cannot be stat'ed must be rejected with the cause, got %v", err)
+	}
+}
+
+func TestValidate_DialBackAdvertise(t *testing.T) {
+	tests := []struct {
+		name      string
+		advertise string
+		wantErr   string
+		wantCause bool
+	}{
+		{name: "missing", advertise: "", wantErr: "--dialback-advertise is required"},
+		{name: "no host", advertise: ":443", wantErr: "needs a host"},
+		{name: "no port", advertise: "node-a.example.test", wantErr: "must be host:port", wantCause: true},
+		{name: "port zero", advertise: "node-a.example.test:0", wantErr: "must be 1-65535"},
+		{name: "port too high", advertise: "node-a.example.test:65536", wantErr: "must be 1-65535"},
+		{name: "port not a number", advertise: "node-a.example.test:x", wantErr: `port "x"`, wantCause: true},
+		{name: "hostname", advertise: "node-a.example.test:443"},
+		{name: "ipv6", advertise: "[2001:db8::1]:443"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.DialBackAdvertise = tc.advertise
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if tc.wantCause && errors.Unwrap(err) == nil {
+				t.Errorf("Validate() = %v, want it to wrap the parse cause", err)
+			}
+		})
+	}
+}
+
+func TestValidate_DialBackMTLSRequiresHTTPS(t *testing.T) {
+	c := validCfg(t)
+	c.DialBackHTTPS = false
+	c.DialBackMTLS = true
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--dialback-mtls requires --dialback-https") {
+		t.Fatalf("Validate() = %v, want the mTLS-without-HTTPS error", err)
+	}
+	c.DialBackMTLS = false
+	if err := c.Validate(); err != nil {
+		t.Fatalf("plain dial-back without mTLS must validate: %v", err)
+	}
+}
+
+func TestValidate_PlainListenerCheckedWhenDialBackPlain(t *testing.T) {
+	c := validCfg(t)
+	c.DialBackHTTPS = false
+	c.DialBackMTLS = false
+	c.ACMEChallengeLE = ChallengeTLSALPN01
+	c.ACMEChallengeGTS = ChallengeTLSALPN01
+	c.ACMEChallengeZeroSSL = ChallengeDNS01
+	c.ACMEDNSProvider = "cloudflare"
+	c.ACMEHTTPListen = "not-an-addr"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--acme-http-listen") {
+		t.Fatalf("Validate() = %v, want the --acme-http-listen error", err)
+	}
+}
+
+func TestServesPlainHTTP(t *testing.T) {
+	tests := []struct {
+		name    string
+		zerossl string
+		https   bool
+		want    bool
+	}{
+		{name: "http-01 and https dial-back", zerossl: ChallengeHTTP01, https: true, want: true},
+		{name: "http-01 and plain dial-back", zerossl: ChallengeHTTP01, https: false, want: true},
+		{name: "no http-01 and plain dial-back", zerossl: ChallengeDNS01, https: false, want: true},
+		{name: "no http-01 and https dial-back", zerossl: ChallengeDNS01, https: true, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ServeCmd{ACMEChallengeLE: ChallengeTLSALPN01, ACMEChallengeGTS: ChallengeTLSALPN01, ACMEChallengeZeroSSL: tc.zerossl, DialBackHTTPS: tc.https,
+				ACMEDirLE: "https://le.example.test/dir", ACMEGTSAccounts: []string{"gts"}, ACMEEABZeroSSLKID: "k", ACMEEABZeroSSLHMAC: "h"}
+			if got := c.ServesPlainHTTP(); got != tc.want {
+				t.Errorf("ServesPlainHTTP() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func setRequiredServeEnv(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "ca.pem")
+	key := filepath.Join(dir, "ca-key.pem")
+	digest := filepath.Join(dir, "signers.txt")
+	for _, f := range []string{cert, key, digest} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TUNNELD_CA_CERT", cert)
+	t.Setenv("TUNNELD_CA_KEY", key)
+	t.Setenv("TUNNELD_ATTEST_SIGNER_DIGEST_FILE", digest)
+	t.Setenv("TUNNELD_MESH_ADVERTISE", "node-a:9443")
+	t.Setenv("TUNNELD_S3_ENDPOINT", "http://localhost:9000")
+	t.Setenv("TUNNELD_S3_ACCESS_KEY", "access")
+	t.Setenv("TUNNELD_S3_SECRET_KEY", "secret")
+	t.Setenv("TUNNELD_S3_BUCKET", "tunneld")
+	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
+	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
+	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
+}
+
+func TestDialBackEnvTwins(t *testing.T) {
+	parse := func(t *testing.T) ServeCmd {
+		t.Helper()
+		var cli struct {
+			Serve ServeCmd `cmd:""`
+		}
+		parser, err := kong.New(&cli, kong.Name("tunneld"), EnvTwins())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse([]string{"serve"}); err != nil {
+			t.Fatalf("parse with env twins failed: %v", err)
+		}
+		return cli.Serve
+	}
+	t.Run("defaults", func(t *testing.T) {
+		setRequiredServeEnv(t)
+		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+		c := parse(t)
+		if c.DialBackAdvertise != "203.0.113.10:443" || !c.DialBackHTTPS || !c.DialBackMTLS {
+			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags true", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		}
+	})
+	t.Run("plain", func(t *testing.T) {
+		setRequiredServeEnv(t)
+		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:80")
+		t.Setenv("TUNNELD_DIALBACK_HTTPS", "false")
+		t.Setenv("TUNNELD_DIALBACK_MTLS", "false")
+		c := parse(t)
+		if c.DialBackAdvertise != "203.0.113.10:80" || c.DialBackHTTPS || c.DialBackMTLS {
+			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags false", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		}
+	})
+}
+
+func TestValidate_ACMEBudgetFlags(t *testing.T) {
+	tests := []struct {
+		flag string
+		set  func(*ServeCmd, string)
+	}{
+		{"--acme-budget-le-domain", func(c *ServeCmd, v string) { c.ACMEBudgetLEDomain = v }},
+		{"--acme-budget-le-orders", func(c *ServeCmd, v string) { c.ACMEBudgetLEOrders = v }},
+		{"--acme-budget-le-name", func(c *ServeCmd, v string) { c.ACMEBudgetLEName = v }},
+		{"--acme-budget-gts-orders", func(c *ServeCmd, v string) { c.ACMEBudgetGTSOrders = v }},
+		{"--acme-budget-gts-requests", func(c *ServeCmd, v string) { c.ACMEBudgetGTSRequests = v }},
+		{"--acme-budget-gts-cert-polls", func(c *ServeCmd, v string) { c.ACMEBudgetGTSCertPolls = v }},
+		{"--acme-budget-zerossl-orders", func(c *ServeCmd, v string) { c.ACMEBudgetZeroSSLOrders = v }},
+		{"--acme-budget-zerossl-requests", func(c *ServeCmd, v string) { c.ACMEBudgetZeroSSLRequests = v }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag, func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c, "bad")
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.flag) {
+				t.Fatalf("Validate() = %v, want an error naming %s", err, tc.flag)
+			}
+		})
+	}
+}
+
+func TestValidate_GTSAccounts(t *testing.T) {
+	tests := []struct {
+		name    string
+		ids     []string
+		wantErr bool
+	}{
+		{name: "none (no GTS)", ids: nil},
+		{name: "two accounts", ids: []string{"gts-1", "gts-2"}},
+		{name: "upper case", ids: []string{"Gts"}, wantErr: true},
+		{name: "duplicate", ids: []string{"gts", "gts"}, wantErr: true},
+		{name: "collides with zerossl", ids: []string{"zerossl"}, wantErr: true},
+		{name: "collides with letsencrypt", ids: []string{"letsencrypt"}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEGTSAccounts = tc.ids
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_ACMEDurationsPositive(t *testing.T) {
+	tests := []struct {
+		flag string
+		set  func(*ServeCmd)
+	}{
+		{"--acme-attempt-timeout-le", func(c *ServeCmd) { c.ACMEAttemptTimeoutLE = 0 }},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd) { c.ACMEAttemptTimeoutGTS = 0 }},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd) { c.ACMEAttemptTimeoutZeroSSL = 0 }},
+		{"--acme-poll-first-le", func(c *ServeCmd) { c.ACMEPollFirstLE = 0 }},
+		{"--acme-poll-first-gts", func(c *ServeCmd) { c.ACMEPollFirstGTS = 0 }},
+		{"--acme-poll-first-zerossl", func(c *ServeCmd) { c.ACMEPollFirstZeroSSL = 0 }},
+		{"--acme-poll-interval", func(c *ServeCmd) { c.ACMEPollInterval = 0 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag, func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.flag) {
+				t.Fatalf("Validate() = %v, want an error naming %s", err, tc.flag)
+			}
+		})
+	}
+}
+
+func TestValidate_ZeroSSLEABPair(t *testing.T) {
+	tests := []struct {
+		name      string
+		kid, hmac string
+		wantErr   bool
+	}{
+		{name: "both", kid: "k", hmac: "h"},
+		{name: "neither", kid: "", hmac: ""},
+		{name: "kid only", kid: "k", wantErr: true},
+		{name: "hmac only", hmac: "h", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = tc.kid, tc.hmac
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_NoCAEnabled(t *testing.T) {
+	none := func(c *ServeCmd) {
+		c.ACMEDirLE = ""
+		c.ACMEGTSAccounts = nil
+		c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "", ""
+	}
+	tests := []struct {
+		name    string
+		mut     func(*ServeCmd)
+		wantErr bool
+	}{
+		{name: "no CA left", mut: none, wantErr: true},
+		{name: "only LE", mut: func(c *ServeCmd) { none(c); c.ACMEDirLE = "https://le.example.test/dir" }},
+		{name: "only GTS (empty LE dir is not URL-checked)", mut: func(c *ServeCmd) { none(c); c.ACMEGTSAccounts = []string{"gts"} }},
+		{name: "only ZeroSSL", mut: func(c *ServeCmd) { none(c); c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "k", "h" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mut(&c)
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestUsesChallenge_OnlyEnabledCAs(t *testing.T) {
+	c := ServeCmd{
+		ACMEDirLE: "https://le.example.test/dir", ACMEChallengeLE: ChallengeTLSALPN01,
+		ACMEChallengeGTS: ChallengeDNS01, ACMEChallengeZeroSSL: ChallengeHTTP01, DialBackHTTPS: true,
+	}
+	if c.UsesChallenge(ChallengeDNS01) {
+		t.Error("GTS is not enabled (no account listed), so its dns-01 must not count")
+	}
+	if c.UsesChallenge(ChallengeHTTP01) || c.ServesPlainHTTP() {
+		t.Error("ZeroSSL is not enabled (no EAB), so its http-01 must not open the plain listener")
+	}
+	if !c.UsesChallenge(ChallengeTLSALPN01) {
+		t.Error("the enabled LE's tls-alpn-01 must count")
+	}
+	c.ACMEGTSAccounts = []string{"gts"}
+	c.ACMEEABZeroSSLKID, c.ACMEEABZeroSSLHMAC = "k", "h"
+	if !c.UsesChallenge(ChallengeDNS01) || !c.ServesPlainHTTP() {
+		t.Error("once GTS and ZeroSSL are enabled, their methods must count")
+	}
+}
+
+func TestServeCmd_ACMEDefaults(t *testing.T) {
+	setRequiredServeEnv(t)
+	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+	var cli struct {
+		Serve ServeCmd `cmd:""`
+	}
+	parser, err := kong.New(&cli, kong.Name("tunneld"), EnvTwins())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"serve"}); err != nil {
+		t.Fatalf("parse with defaults failed: %v", err)
+	}
+	c := cli.Serve
+	if len(c.ACMEGTSAccounts) != 0 || !c.LEEnabled() || c.GTSEnabled() || c.ZeroSSLEnabled() {
+		t.Fatalf("CA defaults: gts=%v le=%v zerossl=%v, want LE only", c.ACMEGTSAccounts, c.LEEnabled(), c.ZeroSSLEnabled())
+	}
+	for flag, got := range map[string]string{
+		"--acme-budget-le-domain":        c.ACMEBudgetLEDomain,
+		"--acme-budget-le-orders":        c.ACMEBudgetLEOrders,
+		"--acme-budget-le-name":          c.ACMEBudgetLEName,
+		"--acme-budget-gts-orders":       c.ACMEBudgetGTSOrders,
+		"--acme-budget-gts-requests":     c.ACMEBudgetGTSRequests,
+		"--acme-budget-gts-cert-polls":   c.ACMEBudgetGTSCertPolls,
+		"--acme-budget-zerossl-orders":   c.ACMEBudgetZeroSSLOrders,
+		"--acme-budget-zerossl-requests": c.ACMEBudgetZeroSSLRequests,
+	} {
+		want := map[string]string{
+			"--acme-budget-le-domain": "50/168h", "--acme-budget-le-orders": "300/3h", "--acme-budget-le-name": "5/168h",
+			"--acme-budget-gts-orders": "100/1h", "--acme-budget-gts-requests": "120/1m", "--acme-budget-gts-cert-polls": "50/1m",
+			"--acme-budget-zerossl-orders": "200/1h:40", "--acme-budget-zerossl-requests": "240/1m",
+		}[flag]
+		if got != want {
+			t.Errorf("%s default = %q, want %q", flag, got, want)
+		}
+	}
+	for flag, got := range map[string][2]time.Duration{
+		"--acme-attempt-timeout-le":      {c.ACMEAttemptTimeoutLE, 20 * time.Second},
+		"--acme-attempt-timeout-gts":     {c.ACMEAttemptTimeoutGTS, 60 * time.Second},
+		"--acme-attempt-timeout-zerossl": {c.ACMEAttemptTimeoutZeroSSL, 90 * time.Second},
+		"--acme-poll-first-le":           {c.ACMEPollFirstLE, 2 * time.Second},
+		"--acme-poll-first-gts":          {c.ACMEPollFirstGTS, 3 * time.Second},
+		"--acme-poll-first-zerossl":      {c.ACMEPollFirstZeroSSL, 15200 * time.Millisecond},
+		"--acme-poll-interval":           {c.ACMEPollInterval, 2 * time.Second},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s default = %s, want %s", flag, got[0], got[1])
+		}
+	}
+}
+
+func TestValidate_ACMEAttemptTimeoutCapped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		flag    string
+		set     func(*ServeCmd, time.Duration)
+		v       time.Duration
+		wantErr bool
+	}{
+		{"--acme-attempt-timeout-le", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutLE = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-le", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutLE = d }, 101 * time.Second, true},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutGTS = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-gts", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutGTS = d }, 101 * time.Second, true},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutZeroSSL = d }, 100 * time.Second, false},
+		{"--acme-attempt-timeout-zerossl", func(c *ServeCmd, d time.Duration) { c.ACMEAttemptTimeoutZeroSSL = d }, 101 * time.Second, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag+"="+tc.v.String(), func(t *testing.T) {
+			c := validCfg(t)
+			tc.set(&c, tc.v)
+			err := c.Validate()
+			if (err != nil) != tc.wantErr || (err != nil && !strings.Contains(err.Error(), tc.flag)) {
+				t.Fatalf("Validate() = %v, wantErr %v (naming %s)", err, tc.wantErr, tc.flag)
+			}
+		})
+	}
+}

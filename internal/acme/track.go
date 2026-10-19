@@ -1,0 +1,221 @@
+package acme
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+)
+
+type trackKey struct{}
+
+type orderTrack struct {
+	name        limit.Bucket
+	domain      limit.Bucket
+	mu          sync.Mutex
+	orderURL    string
+	finalizeURL string
+	finalizedAt time.Time
+	lastPoll    time.Time
+	created     bool
+	orderSent   bool
+	finalSent   bool
+	cleanups    []func(context.Context) error
+	prepaidKey  string
+	prepaidMark string
+	prepaid     int
+	limited     chan time.Duration
+	done        chan struct{}
+	once        sync.Once
+}
+
+type orderOutcome struct {
+	created   bool
+	finalized bool
+	abandoned bool
+}
+
+type sentRequest int
+
+const (
+	sentOther sentRequest = iota
+	sentOrder
+	sentFinalize
+)
+
+func newOrderTrack(name, domain limit.Bucket) *orderTrack {
+	return &orderTrack{name: name, domain: domain, limited: make(chan time.Duration, 1), done: make(chan struct{})}
+}
+
+func (t *orderTrack) setPrepaid(key string, n int, mark string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prepaidKey, t.prepaid, t.prepaidMark = key, n, mark
+}
+
+func (t *orderTrack) dropPrepaid(mark string, known bool) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if known && (mark == "" || mark == t.prepaidMark) {
+		return 0
+	}
+	n := t.prepaid
+	t.prepaid = 0
+	return n
+}
+
+func (t *orderTrack) usePrepaid() (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.prepaid <= 0 {
+		return "", false
+	}
+	t.prepaid--
+	return t.prepaidKey, true
+}
+
+func (t *orderTrack) returnPrepaid() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.prepaid++
+}
+
+func (t *orderTrack) drainPrepaid() (int, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := t.prepaid
+	t.prepaid = 0
+	return n, t.prepaidMark
+}
+
+func (t *orderTrack) finalizeSent() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.finalSent || !t.finalizedAt.IsZero()
+}
+
+func withTrack(ctx context.Context, t *orderTrack) context.Context {
+	return context.WithValue(ctx, trackKey{}, t)
+}
+
+func trackFrom(ctx context.Context) *orderTrack {
+	t, _ := ctx.Value(trackKey{}).(*orderTrack)
+	return t
+}
+
+func withoutTrack(ctx context.Context) context.Context {
+	return context.WithValue(ctx, trackKey{}, (*orderTrack)(nil))
+}
+
+func (t *orderTrack) abandon() { t.once.Do(func() { close(t.done) }) }
+
+func (t *orderTrack) abandoned() bool {
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *orderTrack) signalLimited(d time.Duration) {
+	select {
+	case t.limited <- d:
+	default:
+	}
+}
+
+func (t *orderTrack) onAbandon(f func(context.Context) error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cleanups = append(t.cleanups, f)
+}
+
+func (t *orderTrack) takeCleanups() []func(context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	fs := t.cleanups
+	t.cleanups = nil
+	return fs
+}
+
+func (t *orderTrack) hasOrder() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.created
+}
+
+func (t *orderTrack) setOrder(orderURL, finalizeURL string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.orderURL, t.finalizeURL, t.created = orderURL, finalizeURL, true
+}
+
+func (t *orderTrack) isFinalize(u string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.finalizeURL != "" && u == t.finalizeURL
+}
+
+func (t *orderTrack) markFinalized(at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.finalizedAt = at
+}
+
+func (t *orderTrack) isPoll(u string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.finalizedAt.IsZero() && u == t.orderURL
+}
+
+func (t *orderTrack) pollDue(first, every time.Duration) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	due := t.finalizedAt.Add(first)
+	if !t.lastPoll.IsZero() {
+		if next := t.lastPoll.Add(every); next.After(due) {
+			due = next
+		}
+	}
+	return due
+}
+
+func (t *orderTrack) markPoll(at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastPoll = at
+}
+
+func (t *orderTrack) markSent(method, u string) sentRequest {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch {
+	case t.finalizeURL != "" && u == t.finalizeURL:
+		t.finalSent = true
+		return sentFinalize
+	case !t.created && method == http.MethodPost:
+		t.orderSent = true
+		return sentOrder
+	}
+	return sentOther
+}
+
+func (t *orderTrack) markAnswered(s sentRequest) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch s {
+	case sentOrder:
+		t.orderSent = false
+	case sentFinalize:
+		t.finalSent = false
+	}
+}
+
+func (t *orderTrack) outcome() orderOutcome {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return orderOutcome{created: t.created || t.orderSent, finalized: !t.finalizedAt.IsZero() || t.finalSent, abandoned: t.abandoned()}
+}

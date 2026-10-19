@@ -1,0 +1,63 @@
+package limit
+
+import (
+	"context"
+	"strconv"
+
+	"github.com/redis/go-redis/v9"
+)
+
+// TunnelStat is the live per-tunnel window snapshot for the admin stats endpoint.
+type TunnelStat struct {
+	Conc    int64 `json:"conc"`
+	BwIn    int64 `json:"bw_in"` // bytes in the last COMPLETE second (sec-1)
+	BwOut   int64 `json:"bw_out"`
+	DayIn   int64 `json:"day_in"`
+	DayOut  int64 `json:"day_out"`
+	WeekIn  int64 `json:"week_in"`
+	WeekOut int64 `json:"week_out"`
+}
+
+// TunnelWindows batch-reads conc + last-complete-second bandwidth + day/week traffic for names, computing
+// every key from name + clock (no metric-keyspace SCAN). These are GLOBAL shared counters, so the values
+// are the cross-replica aggregate. The six string windows are one MGET — both in a single pipeline.
+func (l *Limiter) TunnelWindows(ctx context.Context, names []string) (map[string]TunnelStat, error) {
+	if len(names) == 0 {
+		return map[string]TunnelStat{}, nil
+	}
+	sec := l.now().Unix()
+	prev := strconv.FormatInt(sec-1, 10) // last complete second
+	d := strconv.FormatInt(sec/86400, 10)
+	w := strconv.FormatInt(sec/86400/7, 10)
+	const perName = 6 // six string windows
+	keys := make([]string, 0, len(names)*perName)
+	for _, n := range names {
+		keys = append(keys,
+			"bw:"+n+":in:"+prev, "bw:"+n+":out:"+prev,
+			"traf:"+n+":in:day:"+d, "traf:"+n+":out:day:"+d,
+			"traf:"+n+":in:week:"+w, "traf:"+n+":out:week:"+w,
+		)
+	}
+	pipe := l.rdb.Pipeline()
+	nowMS := strconv.FormatInt(l.now().UnixMilli(), 10)
+	concCmds := make([]*redis.IntCmd, len(names))
+	for i, n := range names {
+		concCmds[i] = pipe.ZCount(ctx, concKey(n), nowMS, "+inf")
+	}
+	mget := pipe.MGet(ctx, keys...)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+	vals := mget.Val()
+	out := make(map[string]TunnelStat, len(names))
+	for i, n := range names {
+		b := i * perName
+		conc := concCmds[i].Val()
+		out[n] = TunnelStat{
+			Conc: conc, BwIn: l.atoiCap(keys[b], vals[b]), BwOut: l.atoiCap(keys[b+1], vals[b+1]),
+			DayIn: l.atoiCap(keys[b+2], vals[b+2]), DayOut: l.atoiCap(keys[b+3], vals[b+3]),
+			WeekIn: l.atoiCap(keys[b+4], vals[b+4]), WeekOut: l.atoiCap(keys[b+5], vals[b+5]),
+		}
+	}
+	return out, nil
+}

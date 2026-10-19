@@ -1,0 +1,1094 @@
+//go:build e2e
+
+// Package e2e is the end-to-end tier: it runs TWO real tunneld replicas (in-process server.Run instances
+// sharing one testcontainers Valkey + MinIO + Pebble/challtestsrv), a raw-TLS frontend connecting
+// directly to a replica's :443, and the reference phone client. It exercises per-tunnel quota
+// exhaustion and ACME CA spillover. No proxy anywhere.
+package e2e
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/server"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+)
+
+const (
+	e2eTunnelDomain = "example.test"
+	e2eEnrollHost   = "enroll.example.test"
+	e2eControlHost  = "connect.example.test"
+	e2eBucket       = "tunneld-e2e"
+)
+
+// e2eInfra is the shared testcontainers infrastructure for a set of replicas.
+type e2eInfra struct {
+	redisURL string
+	s3URL    string
+	access   string
+	secret   string
+	pebble   *tunneltest.PebbleEnv
+	caCert   string
+	caKey    string
+	internal map[string]string // edge address → that replica's internal (metrics/healthz) address
+}
+
+func startE2EInfra(t *testing.T) *e2eInfra {
+	t.Helper()
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, e2eBucket)
+	pebble := tunneltest.StartPebble(t)
+	shim := tunneltest.StartACMEDNSShim(t, pebble)
+	t.Setenv("HTTPREQ_ENDPOINT", shim)
+	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+	caCert, caKey := writeCA(t)
+	return &e2eInfra{redisURL: redisURL, s3URL: s3URL, access: access, secret: secret, pebble: pebble, caCert: caCert, caKey: caKey, internal: map[string]string{}}
+}
+
+// replicaOpts tweaks a replica's config for a specific scenario.
+type replicaOpts struct {
+	acmeDirLE  string // override the LE directory (for spillover); empty = Pebble
+	trafficDay string // override --limit-traffic-day; empty = 1gb
+	concurrent int    // override --limit-concurrent; 0 = 8
+	bandwidth  string // override --limit-bandwidth; empty = 10mbit
+	dialBack   time.Duration
+	banFile    string
+
+	acmeDirGTS     string
+	leNameBudget   string
+	backoffInitial time.Duration
+	backoffMax     time.Duration
+
+	dialBackAdvertise string
+	dialBackPlain     bool
+	dialBackNoMTLS    bool
+	// Real attestation (NOT optional): when attestRootURL is set, the replica runs the full seven-point
+	// attestation gate against these live root/status URLs + signer allowlist (empty = dummy + optional).
+	attestRootURL    string
+	attestStatusURL  string
+	attestSignerFile string
+
+	edgeAddr         string
+	acmeHTTPListen   string
+	challengeLE      string
+	challengeGTS     string
+	challengeZeroSSL string
+	logger           *slog.Logger
+}
+
+// startReplica runs a real server.Run on loopback against the shared infra and returns its public edge
+// address. It waits until the replica is serving. freeAddr probes-and-closes
+// ports, so server.Run's bind can lose a race to another process — and the internal-listener bind is now
+// fatal — so a boot that exits before serving is retried with fresh ports (bounded).
+func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
+	t.Helper()
+	for range 5 {
+		if addr, ok := inf.runReplicaOnce(t, opts); ok {
+			return addr
+		}
+	}
+	t.Fatal("startReplica: replica never bound its listeners after 5 attempts (port races)")
+	return ""
+}
+
+// runReplicaOnce attempts one replica boot. It returns (edgeAddr, true) once the
+// replica is serving, or ("", false) when server.Run exits before becoming ready (a freeAddr port race —
+// the caller retries with fresh ports).
+func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, bool) {
+	t.Helper()
+	edgeAddr := freeAddr(t)
+	if opts.edgeAddr != "" {
+		edgeAddr = opts.edgeAddr
+	}
+	meshAddr := freeAddr(t)
+	internalAddr := freeAddr(t)
+	acmeHTTPListen := freeAddr(t)
+	if opts.acmeHTTPListen != "" {
+		acmeHTTPListen = opts.acmeHTTPListen
+	}
+
+	leDir := inf.pebble.DirectoryURL
+	if opts.acmeDirLE != "" {
+		leDir = opts.acmeDirLE
+	}
+	trafficDay := "1gb"
+	if opts.trafficDay != "" {
+		trafficDay = opts.trafficDay
+	}
+	concurrent := 8
+	if opts.concurrent != 0 {
+		concurrent = opts.concurrent
+	}
+
+	bandwidth := "10mbit"
+	if opts.bandwidth != "" {
+		bandwidth = opts.bandwidth
+	}
+	dialBack := 10 * time.Second
+	if opts.dialBack != 0 {
+		dialBack = opts.dialBack
+	}
+	advertise := edgeAddr
+	if opts.dialBackPlain {
+		advertise = acmeHTTPListen
+	}
+	if opts.dialBackAdvertise != "" {
+		advertise = opts.dialBackAdvertise
+	}
+
+	challengeLE, challengeGTS, challengeZeroSSL := config.ChallengeDNS01, config.ChallengeDNS01, config.ChallengeDNS01
+	if opts.challengeLE != "" {
+		challengeLE = opts.challengeLE
+	}
+	if opts.challengeGTS != "" {
+		challengeGTS = opts.challengeGTS
+	}
+	if opts.challengeZeroSSL != "" {
+		challengeZeroSSL = opts.challengeZeroSSL
+	}
+	logger := testOutputLogger()
+	if opts.logger != nil {
+		logger = opts.logger
+	}
+
+	// Attestation: default is the dummy unreachable URLs + optional mode. When a real root URL is given,
+	// run the full attestation gate against it (the reference-client test uses this).
+	attestOptional := true
+	attestRoot := "http://127.0.0.1:1/root"
+	attestStatus := "http://127.0.0.1:1/status"
+	attestSigner := emptyFile(t)
+	if opts.attestRootURL != "" {
+		attestOptional = false
+		attestRoot = opts.attestRootURL
+		attestStatus = opts.attestStatusURL
+		attestSigner = opts.attestSignerFile
+	}
+
+	cfg := config.ServeCmd{
+		RedisURL: inf.redisURL, Listen: edgeAddr, MeshListen: meshAddr, InternalListen: internalAddr,
+		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
+		TunnelDomain: e2eTunnelDomain, EnrollHost: e2eEnrollHost, ControlHost: e2eControlHost, NameLength: 10,
+		DialBackAdvertise: advertise, DialBackHTTPS: !opts.dialBackPlain, DialBackMTLS: !opts.dialBackPlain && !opts.dialBackNoMTLS,
+		CACert: inf.caCert, CAKey: inf.caKey, CertValidity: 4380 * time.Hour,
+		S3Endpoint: inf.s3URL, S3Region: "us-east-1", S3Bucket: e2eBucket,
+		S3AccessKey: inf.access, S3SecretKey: inf.secret, S3ForcePathStyle: true,
+		RegistryClaimTimeout: 3 * time.Second, RegistryClaimSettle: 5 * time.Second,
+		AttestSignerDigestFile: attestSigner,
+		AttestRootURL:          attestRoot, AttestStatusURL: attestStatus,
+		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: attestOptional,
+		ACMEDirLE: leDir, ACMEDirGTS: inf.pebble.DirectoryURL, ACMEDirZeroSSL: inf.pebble.DirectoryURL,
+		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
+		ACMEChallengeLE: challengeLE, ACMEChallengeGTS: challengeGTS, ACMEChallengeZeroSSL: challengeZeroSSL,
+		ACMEHTTPListen:   acmeHTTPListen,
+		ACMEDNSResolvers: []string{inf.pebble.DNSResolver}, ACMEDNSSkipPropagationCheck: true,
+		ACMECooldownDefault: time.Second, ACMEBackoffInitial: time.Second, ACMEBackoffMax: 5 * time.Second,
+		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 10,
+		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
+		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: concurrent, LimitPackets: 100000, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: dialBack,
+		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 1 * time.Second,
+		LimitConnMinRate: "1kb", LimitConnProtectRate: "1mb", LimitBandwidth: bandwidth,
+		LimitTrafficDay: trafficDay, LimitTrafficWeek: "4gb",
+		BanPoll: time.Second, ShutdownGrace: 3 * time.Second, Log: []string{"output=std;level=error"},
+	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	if opts.leNameBudget != "" {
+		cfg.ACMEBudgetLEName = opts.leNameBudget
+	}
+	if opts.backoffInitial != 0 {
+		cfg.ACMEBackoffInitial = opts.backoffInitial
+	}
+	if opts.backoffMax != 0 {
+		cfg.ACMEBackoffMax = opts.backoffMax
+	}
+	if opts.banFile != "" {
+		cfg.BanFile = []string{opts.banFile}
+	}
+	if opts.acmeDirGTS != "" {
+		cfg.ACMEDirGTS = opts.acmeDirGTS
+		tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")
+	} else {
+		tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", inf.pebble.DirectoryURL)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx, cfg, logger, "e2e") }()
+
+	deadline := time.Now().Add(120 * time.Second)
+	var healthErr error
+	for time.Now().Before(deadline) {
+		select {
+		case runErr := <-done:
+			cancel()
+			// Run exited before serving. Usually a freeAddr port race (retry with fresh ports), but log
+			// the actual error so a NON-port failure (e.g. a fatal config/ACME error) is diagnosable.
+			t.Logf("replica boot attempt exited before serving: %v", runErr)
+			return "", false
+		default:
+		}
+		var ok bool
+		if ok, healthErr = healthOK(internalAddr); ok {
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case runErr := <-done:
+					if runErr != nil {
+						t.Errorf("replica run: %v", runErr)
+					}
+				case <-time.After(20 * time.Second):
+					t.Error("replica did not drain within 20s")
+				}
+			})
+			tunneltest.WaitReservedHosts(t, edgeAddr, []string{e2eEnrollHost, e2eControlHost}, 120*time.Second)
+			inf.internal[edgeAddr] = internalAddr
+			return edgeAddr, true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	runErr := <-done
+	t.Fatalf("replica never became ready (last health probe: %v; run: %v)", healthErr, runErr)
+	return "", false
+}
+
+// echoPhone enrolls a tunnel via enrollAddr, connects the phone control to controlAddr, and serves an
+// echoing TLS-terminating backend. It returns the live client (whose identity rotates on a renewal) and
+// the initial identity (for the frontend to derive the SNI + trust; its Name is stable across renewals).
+func echoPhone(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*client.Client, *client.Identity) {
+	t.Helper()
+	c, ident, _ := echoPhoneRun(t, inf, enrollAddr, controlAddr)
+	return c, ident
+}
+
+func echoPhoneRun(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (*client.Client, *client.Identity, <-chan struct{}) {
+	t.Helper()
+	ctx := context.Background()
+	ident, err := client.Enroll(ctx, enrollAddr, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	phoneTLS := phoneServerTLS(t, ident)
+	backend := func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			tunneltest.Logger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			tunneltest.Logger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	}
+	c, err := client.New(controlAddr, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, ident, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			t.Logf("tunnel client run ended: %v", err)
+		}
+	}()
+	// Close honors its "call once Run has returned" contract: cancel, JOIN Run, then Close (no leaked
+	// control transport, no Close-before-Run-return).
+	t.Cleanup(func() {
+		cancel()
+		<-runDone
+		c.Close()
+	})
+	return c, ident, runDone
+}
+
+// TestE2E_CrossNodeAndFastPath enrolls one tunnel, binds it on replica B, and proves both the frontend on
+// A → owner B and entering at the owner replica B work.
+// The phone stays bound to B throughout; no route rebinding occurs.
+func TestE2E_CrossNodeAndFastPath(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+
+	// Enroll via A, but run the phone's control connection on B → B owns the route.
+	_, ident := echoPhone(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// Cross-node: the frontend hits A; A meshes to the owner B.
+	var lastErr error
+	if !waitBool(30*time.Second, func() bool {
+		lastErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return lastErr == nil
+	}) {
+		t.Fatalf("cross-node mesh roundtrip never succeeded: %v", lastErr)
+	}
+
+	// Fast path: the frontend hits B directly (owner == entry).
+	if !waitBool(15*time.Second, func() bool {
+		lastErr = frontendRoundtrip(edgeB, fqdn, inf.pebble.IssuingRoots)
+		return lastErr == nil
+	}) {
+		t.Fatalf("same-node fast-path roundtrip never succeeded: %v", lastErr)
+	}
+}
+
+// TestE2E_CrossNodeRenewNudge proves the cross-node force-renew path: the phone's control connection is
+// owned by replica B, but /api/v1/admin/tunnels/<name>/reissue is POSTed to the NON-owner replica A. A routes
+// to the owner over /api/v1/mesh/control, B mints a nonce and nudges the phone, and the Go client answers by
+// rotating its public cert. An unknown tunnel (no bound route) is 404.
+func TestE2E_CrossNodeRenewNudge(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+
+	// Enroll via A, run the phone's control connection on B → B owns the route.
+	c, ident := echoPhone(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("route never bound on the owner replica: %v", rtErr)
+	}
+
+	before := sha256.Sum256(c.Identity().PublicCertPEM)
+
+	// Force a reissue via the NON-owner replica A; A meshes to the owner B, which nudges the phone.
+	status, reissued := postAdminReissue(t, inf.internal[edgeA], ident.Name)
+	if status != http.StatusOK || !reissued {
+		t.Fatalf("reissue on the non-owner replica = (status %d, reissued %v), want (200, true)", status, reissued)
+	}
+
+	// The Go client answers the RENEW_NUDGE by rotating its public cert.
+	if !waitBool(30*time.Second, func() bool {
+		return sha256.Sum256(c.Identity().PublicCertPEM) != before
+	}) {
+		t.Fatal("the client's public cert never rotated after the cross-node nudge")
+	}
+
+	// An unknown tunnel has no bound route → 404.
+	if s, _ := postAdminReissue(t, inf.internal[edgeA], "nosuchtunnel"); s != http.StatusNotFound {
+		t.Fatalf("reissue for an unknown tunnel = %d, want 404", s)
+	}
+}
+
+// TestE2E_CrossNodeTerminate proves the cross-node terminate path: the phone's control connection is owned
+// by replica B, but /api/v1/admin/tunnels/<name>/terminate is POSTed to the NON-owner replica A, and B
+// closes the phone control connection (its teardown unbinds the route). The Go reference client does NOT auto-reconnect, so the deterministic observable is the route
+// transitioning to unbound (LookupRoute ok=false).
+func TestE2E_CrossNodeTerminate(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+
+	// Enroll via A, run the phone's control connection on B → B owns the route.
+	_, ident := echoPhone(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// A registry over the shared Valkey, to observe the route bind → unbind.
+	opt, err := redis.ParseURL(inf.redisURL)
+	if err != nil {
+		t.Fatalf("parse redis url: %v", err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the route is bound on the owner (a cross-node roundtrip through A proves B owns the phone).
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("route never bound on the owner replica: %v", rtErr)
+	}
+
+	live, err := dialTunnelTLS(edgeA, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("open a live splice through A: %v", err)
+	}
+	defer tunneltest.CloseLogged(live)
+	if err := echoOn(live); err != nil {
+		t.Fatalf("the live splice through A does not echo: %v", err)
+	}
+
+	// Terminate via the NON-owner replica A; A meshes to the owner B, which closes the phone conn.
+	status, terminated := postAdminTerminate(t, inf.internal[edgeA], ident.Name)
+	if status != http.StatusOK || !terminated {
+		t.Fatalf("terminate on the non-owner replica = (status %d, terminated %v), want (200, true)", status, terminated)
+	}
+	if err := live.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the splice entered through A must be torn down by the terminate, read = %v", err)
+	}
+
+	// The owner's teardown unbinds the route; the Go client does not reconnect, so it stays unbound.
+	var lookupErr error
+	if !waitBool(30*time.Second, func() bool {
+		var ok bool
+		_, _, ok, lookupErr = reg.LookupRoute(context.Background(), ident.Name)
+		return lookupErr == nil && !ok
+	}) {
+		t.Fatalf("the route was not unbound after cross-node terminate (last lookup error: %v)", lookupErr)
+	}
+}
+
+func TestE2E_TunnelNameBanEndsSplicesOnEveryNode(t *testing.T) {
+	inf := startE2EInfra(t)
+	banFile := emptyFile(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{banFile: banFile})
+
+	_, ident, runDone := echoPhoneRun(t, inf, edgeA, edgeB)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("route never bound on the owner replica: %v", rtErr)
+	}
+
+	live, err := dialTunnelTLS(edgeA, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("open a live splice through A: %v", err)
+	}
+	defer tunneltest.CloseLogged(live)
+	started := time.Now()
+	if err := echoOn(live); err != nil {
+		t.Fatalf("the live splice through A does not echo: %v", err)
+	}
+
+	f, err := os.OpenFile(banFile, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("tunnel-name " + ident.Name + "\n"); err != nil {
+		tunneltest.CloseLogged(f)
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := live.SetReadDeadline(started.Add(8 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := live.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a name ban on the owner must end the splice through A before its first route check, read = %v", err)
+	}
+	select {
+	case <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the owner must close the banned phone's control connection")
+	}
+}
+
+func TestE2E_RenewedIdentityTakesOverAcrossNodes(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+	ctx := context.Background()
+
+	cA, ident, runDoneA := echoPhoneRun(t, inf, edgeA, edgeA)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("route never bound on replica A: %v", rtErr)
+	}
+	opt, err := redis.ParseURL(inf.redisURL)
+	if err != nil {
+		t.Fatalf("parse redis url: %v", err)
+	}
+	rdb := redis.NewClient(opt)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeA, _, ok, err := reg.LookupRoute(ctx, ident.Name)
+	if err != nil || !ok {
+		t.Fatalf("route lookup: ok=%v err=%v", ok, err)
+	}
+
+	renewCtx, renewCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer renewCancel()
+	nonce, err := client.FetchIssueNonce(renewCtx, edgeA, e2eEnrollHost, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("fetch an issue nonce: %v", err)
+	}
+	if err := cA.Renew(renewCtx, nonce); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	renewed := cA.Identity()
+	idBlock, _ := pem.Decode(renewed.IdentityCertPEM)
+	pubBlock, _ := pem.Decode(renewed.PublicCertPEM)
+	if idBlock == nil || pubBlock == nil {
+		t.Fatal("the renewed identity must carry PEM certs")
+	}
+	idCert, err := x509.ParseCertificate(idBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubCert, err := x509.ParseCertificate(pubBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idCert.Subject.CommonName != ident.Name || !slices.Contains(pubCert.DNSNames, fqdn) {
+		t.Fatalf("the renewed certs must keep the name: identity CN %q, public SANs %v, want %q", idCert.Subject.CommonName, pubCert.DNSNames, ident.Name)
+	}
+
+	var hitsB atomic.Int32
+	tlsB := phoneServerTLS(t, renewed)
+	backendB := func(s io.ReadWriteCloser) {
+		hitsB.Add(1)
+		conn := tls.Server(&rwcConn{rwc: s}, tlsB)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			tunneltest.Logger().Warn("renewed phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			tunneltest.Logger().Debug("renewed phone stream ended with an error", "err", err)
+		}
+	}
+	cB, err := client.New(edgeB, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots, renewed, backendB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtxB, cancelB := context.WithCancel(ctx)
+	runDoneB := make(chan struct{})
+	go func() {
+		defer close(runDoneB)
+		if err := cB.Run(runCtxB); err != nil && runCtxB.Err() == nil {
+			t.Logf("renewed tunnel client run ended: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		cancelB()
+		<-runDoneB
+		cB.Close()
+	})
+
+	var lookupErr error
+	if !waitBool(30*time.Second, func() bool {
+		var node string
+		node, _, ok, lookupErr = reg.LookupRoute(ctx, ident.Name)
+		return lookupErr == nil && ok && node != nodeA
+	}) {
+		t.Fatalf("the renewed identity must bind the name on replica B (last lookup error: %v)", lookupErr)
+	}
+	select {
+	case <-runDoneA:
+	case <-time.After(20 * time.Second):
+		t.Fatal("replica A must close the replaced connection at its next heartbeat")
+	}
+	for _, edge := range []string{edgeA, edgeB} {
+		if err := frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots); err != nil {
+			t.Fatalf("a public connection through %s must reach the renewed phone: %v", edge, err)
+		}
+	}
+	if hitsB.Load() < 2 {
+		t.Fatalf("both public connections must reach B's backend, got %d", hitsB.Load())
+	}
+}
+
+func TestE2E_ReservedCertsSharedAcrossReplicas(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{})
+	edgeB := inf.startReplica(t, replicaOpts{})
+	for _, host := range []string{e2eEnrollHost, e2eControlHost} {
+		serialA, errA := tunneltest.ServedSerial(t, edgeA, host)
+		serialB, errB := tunneltest.ServedSerial(t, edgeB, host)
+		if serialA == "" || serialB == "" {
+			t.Fatalf("both replicas must serve a %s certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if errA != nil || errB != nil {
+			t.Logf("%s probe handshake ended after the certificate (A: %v, B: %v)", host, errA, errB)
+		}
+		if serialA != serialB {
+			t.Errorf("replica B must reuse replica A's %s certificate (one ACME order per host), serials %s vs %s", host, serialA, serialB)
+		}
+	}
+}
+
+// TestE2E_Spillover forces the LE directory unreachable so the ACME chain spills to GTS (the Pebble test
+// CA): the issued public cert must come from the fallback CA.
+func TestE2E_Spillover(t *testing.T) {
+	inf := startE2EInfra(t)
+	edge := inf.startReplica(t, replicaOpts{acmeDirLE: "https://127.0.0.1:1/dir"})
+
+	ident, err := client.Enroll(context.Background(), edge, e2eEnrollHost, e2eControlHost, e2eTunnelDomain, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll (spillover): %v", err)
+	}
+	if ident.CA != "gts" {
+		t.Fatalf("primary LE unreachable must spill to GTS, got CA=%q", ident.CA)
+	}
+}
+
+// TestE2E_Quota drives more traffic than the per-tunnel day cap allows; the edge must cut the stream
+// (the full echo cannot complete).
+func TestE2E_Quota(t *testing.T) {
+	inf := startE2EInfra(t)
+	edge := inf.startReplica(t, replicaOpts{trafficDay: "48kb"})
+	_, ident := echoPhone(t, inf, edge, edge)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	// Wait for bind (a small roundtrip succeeds), then exceed the cap.
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("initial roundtrip never succeeded: %v", rtErr)
+	}
+	if err := frontendTransfer(edge, fqdn, inf.pebble.IssuingRoots, 256*1024); err == nil {
+		t.Fatal("a transfer well past --limit-traffic-day must be cut by the quota, but it completed")
+	}
+	var metricErr error
+	if !waitBool(10*time.Second, func() bool {
+		var positive bool
+		positive, metricErr = metricCounterPositive(inf.internal[edge], "tunneld_quota_exhausted_total")
+		return positive
+	}) {
+		t.Fatalf("the cut must be attributed to the quota (tunneld_quota_exhausted_total; last scrape error: %v)", metricErr)
+	}
+}
+
+// TestE2E_Eviction fills a tunnel's concurrent-stream cap with idle connections, then opens one more:
+// the edge must evict a least-active (idle) stream so the new connection succeeds.
+func TestE2E_Eviction(t *testing.T) {
+	inf := startE2EInfra(t)
+	edge := inf.startReplica(t, replicaOpts{concurrent: 2})
+	_, ident := echoPhone(t, inf, edge, edge)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("initial roundtrip never succeeded: %v", rtErr)
+	}
+
+	// Fill the concurrency cap (2) with idle, handshaked connections.
+	c1, err := dialTunnelTLS(edge, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("c1: %v", err)
+	}
+	defer tunneltest.CloseOrLog(t, c1)
+	c2, err := dialTunnelTLS(edge, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("c2: %v", err)
+	}
+	defer tunneltest.CloseOrLog(t, c2)
+
+	// A third connection must succeed by evicting a least-active idle stream (rolling rate 0 < protect).
+	var c3 *tls.Conn
+	if !waitBool(15*time.Second, func() bool {
+		c3, err = dialTunnelTLS(edge, fqdn, inf.pebble.IssuingRoots)
+		if err != nil {
+			return false
+		}
+		if eerr := echoOn(c3); eerr != nil {
+			tunneltest.CloseOrLog(t, c3) // a leaked conn would join the eviction population under test
+			err = eerr
+			return false
+		}
+		return true
+	}) {
+		t.Fatalf("the over-cap connection must evict an idle stream and round-trip: %v", err)
+	}
+	tunneltest.CloseOrLog(t, c3)
+
+	// The over-cap admission must have EVICTED one of the two idle victims (not silently admitted a
+	// third): exactly one of c1/c2 must observe its socket closed by the edge. If the concurrency cap
+	// were unenforced, both would stay open and this assertion would fail.
+	isEvicted := func(c *tls.Conn) bool {
+		if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		_, rerr := c.Read(make([]byte, 1))
+		if rerr == nil {
+			return false // read data on an idle conn → not the evicted victim
+		}
+		var ne net.Error
+		if errors.As(rerr, &ne) && ne.Timeout() {
+			return false // read deadline hit on a still-open idle conn → not evicted
+		}
+		return true // EOF / reset → the edge closed this (evicted) victim
+	}
+	evicted := 0
+	if isEvicted(c1) {
+		evicted++
+	}
+	if isEvicted(c2) {
+		evicted++
+	}
+	if evicted != 1 {
+		t.Fatalf("exactly one of c1/c2 must be evicted by the over-cap admission, got %d", evicted)
+	}
+}
+
+func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
+	const alpnServed, httpServed = "acme tls-alpn-01 challenge served", "acme http-01 challenge served"
+	tests := []struct {
+		method         string
+		served, unused string
+	}{
+		{method: config.ChallengeTLSALPN01, served: alpnServed, unused: httpServed},
+		{method: config.ChallengeHTTP01, served: httpServed, unused: alpnServed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method, func(t *testing.T) {
+			inf := startE2EInfra(t)
+			logsA, logsB := tunneltest.NewLogCounter(testOutputLogger().Handler()), tunneltest.NewLogCounter(testOutputLogger().Handler())
+			var edgeB string
+			for range 5 {
+				p := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
+				inf.pebble = p
+				t.Setenv("LEGO_CA_CERTIFICATES", p.MinicaFile)
+				if addr, ok := inf.runReplicaOnce(t, replicaOpts{
+					edgeAddr:       net.JoinHostPort(p.HostIP, strconv.Itoa(p.TLSPort)),
+					acmeHTTPListen: net.JoinHostPort(p.HostIP, strconv.Itoa(p.HTTPPort)),
+					challengeLE:    tc.method, challengeGTS: tc.method, challengeZeroSSL: config.ChallengeHTTP01,
+					logger: logsB.Logger(),
+				}); ok {
+					edgeB = addr
+					break
+				}
+			}
+			if edgeB == "" {
+				t.Fatal("replica B never bound Pebble's validation ports after 5 attempts")
+			}
+			servedByBBeforeA := logsB.Count(tc.served)
+
+			edgeA := inf.startReplica(t, replicaOpts{
+				challengeLE: tc.method, challengeGTS: tc.method, challengeZeroSSL: config.ChallengeHTTP01,
+				logger: logsA.Logger(),
+			})
+			_, ident := echoPhone(t, inf, edgeA, edgeA)
+			fqdn := ident.Name + "." + e2eTunnelDomain
+			var lastErr error
+			if !waitBool(30*time.Second, func() bool {
+				lastErr = frontendRoundtrip(edgeA, fqdn, inf.pebble.IssuingRoots)
+				return lastErr == nil
+			}) {
+				t.Fatalf("frontend roundtrip via replica A never succeeded: %v", lastErr)
+			}
+
+			if logsB.Count(tc.served) <= servedByBBeforeA {
+				t.Fatalf("replica B answered none of replica A's %s validations", tc.method)
+			}
+			if n := logsB.Count(tc.unused); n != 0 {
+				t.Fatalf("replica B answered %d validations with the other method", n)
+			}
+			if a, b := logsA.Count(tc.served), logsA.Count(tc.unused); a != 0 || b != 0 {
+				t.Fatalf("replica A answered validations itself (%d/%d); every validation must reach replica B", a, b)
+			}
+		})
+	}
+}
+
+// --- helpers ---
+
+func echoOn(conn *tls.Conn) error {
+	msg := []byte("evict-check")
+	if _, err := conn.Write(msg); err != nil {
+		return err
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return err
+	}
+	if string(buf) != string(msg) {
+		return fmt.Errorf("echo mismatch: %q", buf)
+	}
+	return nil
+}
+
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	tunneltest.CloseOrLog(t, ln)
+	return addr
+}
+
+func emptyFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "signers.txt")
+	if err := os.WriteFile(p, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func testOutputLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+func writeCA(t *testing.T) (certPath, keyPath string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "tunneld-e2e-ca"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "ca.pem")
+	keyPath = filepath.Join(dir, "ca-key.pem")
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
+	t.Helper()
+	keyDER, err := x509.MarshalECPrivateKey(id.PublicCertKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(id.PublicCertPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("phone public keypair: %v", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+}
+
+// metricCounterPositive GETs the replica's internal /metrics and reports whether any exposition line for
+// the given counter family carries a value > 0 (i.e. the counter fired at least once).
+func metricCounterPositive(internalAddr, family string) (bool, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + internalAddr + "/metrics")
+	if err != nil {
+		return false, err
+	}
+	defer tunneltest.CloseLogged(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, family) {
+			continue
+		}
+		// The family name must be followed by a label set or a space — not by more name characters
+		// (skip prefix-sharing families such as <family>_created).
+		rest := line[len(family):]
+		if rest != "" && rest[0] != ' ' && rest[0] != '{' {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			return false, fmt.Errorf("parse %q: %w", line, err)
+		}
+		if v > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// postAdminAction POSTs /api/v1/admin/tunnels/<name>/<action> to a replica's internal listener and returns
+// the HTTP status and, on a 200, the decoded result boolean under respField (false for any non-200, so
+// callers can assert both the 200 path and the 404 no-route path).
+func postAdminAction(t *testing.T, internalAddr, action, name, respField string) (int, bool) {
+	t.Helper()
+	c := &http.Client{Timeout: 5 * time.Second}
+	u := "http://" + internalAddr + "/api/v1/admin/tunnels/" + url.PathEscape(name) + "/" + action
+	resp, err := c.Post(u, "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST %s: %v", u, err)
+	}
+	defer tunneltest.CloseOrLog(t, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, false
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode %s response: %v", u, err)
+	}
+	applied, _ := out[respField].(bool)
+	return resp.StatusCode, applied
+}
+
+// postAdminReissue forces a reissue (renewal) for name, routed to the tunnel's owner node.
+func postAdminReissue(t *testing.T, internalAddr, name string) (int, bool) {
+	t.Helper()
+	return postAdminAction(t, internalAddr, "reissue", name, "reissued")
+}
+
+// postAdminTerminate terminates name's live phone connection.
+func postAdminTerminate(t *testing.T, internalAddr, name string) (int, bool) {
+	t.Helper()
+	return postAdminAction(t, internalAddr, "terminate", name, "terminated")
+}
+
+func healthOK(internalAddr string) (bool, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + internalAddr + "/healthz")
+	if err != nil {
+		return false, err
+	}
+	tunneltest.CloseLogged(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("healthz status %d", resp.StatusCode)
+	}
+	return true, nil
+}
+
+func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
+	conn, err := dialTunnelTLS(edgeAddr, fqdn, roots)
+	if err != nil {
+		return err
+	}
+	defer tunneltest.CloseLogged(conn)
+	msg := []byte("e2e-hello")
+	if _, err := conn.Write(msg); err != nil {
+		return err
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return fmt.Errorf("read echo: %w", err)
+	}
+	if string(buf) != string(msg) {
+		return fmt.Errorf("echo mismatch: %q", buf)
+	}
+	return nil
+}
+
+// frontendTransfer writes n bytes and tries to read them all back; it returns an error if the full echo
+// does not complete (e.g. the quota cut the stream).
+func frontendTransfer(edgeAddr, fqdn string, roots *x509.CertPool, n int) error {
+	conn, err := dialTunnelTLS(edgeAddr, fqdn, roots)
+	if err != nil {
+		return err
+	}
+	defer tunneltest.CloseLogged(conn)
+	payload := make([]byte, n)
+	done := make(chan error, 1)
+	go func() {
+		_, werr := conn.Write(payload)
+		done <- werr
+	}()
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		tunneltest.CloseLogged(conn)
+		return errors.Join(fmt.Errorf("read %d bytes: %w", n, err), <-done)
+	}
+	return <-done
+}
+
+func dialTunnelTLS(edgeAddr, fqdn string, roots *x509.CertPool) (*tls.Conn, error) {
+	raw, err := net.DialTimeout("tcp", edgeAddr, 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if err := raw.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return nil, errors.Join(fmt.Errorf("set deadline: %w", err), raw.Close())
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err := conn.Handshake(); err != nil {
+		return nil, errors.Join(fmt.Errorf("handshake: %w", err), raw.Close())
+	}
+	return conn, nil
+}
+
+func waitBool(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+type rwcConn struct{ rwc io.ReadWriteCloser }
+
+func (c *rwcConn) Read(b []byte) (int, error)       { return c.rwc.Read(b) }
+func (c *rwcConn) Write(b []byte) (int, error)      { return c.rwc.Write(b) }
+func (c *rwcConn) Close() error                     { return c.rwc.Close() }
+func (c *rwcConn) LocalAddr() net.Addr              { return tunnelAddr{} }
+func (c *rwcConn) RemoteAddr() net.Addr             { return tunnelAddr{} }
+func (c *rwcConn) SetDeadline(time.Time) error      { return nil }
+func (c *rwcConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *rwcConn) SetWriteDeadline(time.Time) error { return nil }
+
+type tunnelAddr struct{}
+
+func (tunnelAddr) Network() string { return "tunnel" }
+func (tunnelAddr) String() string  { return "tunnel" }

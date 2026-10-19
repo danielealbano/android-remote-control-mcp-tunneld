@@ -1,0 +1,97 @@
+x-logging: &caplog
+  driver: json-file
+  options: { max-size: "50m", max-file: "1" }
+
+# No-proxy E2E topology: tunneld IS the internet edge on raw :443 (it terminates NOTHING — it relays
+# opaque TLS bytes to the phone, which holds the WebPKI cert). There is NO Traefik/Cloudflare and NO
+# per-tunnel TLS here. Multi-replica / mesh deployments run ONE tunneld per host (the cross-node mesh is
+# exercised by the e2e tier); this single-host stack runs one replica. Durable state lives in MinIO (a
+# LOCAL plain-S3 stand-in — production points --s3-endpoint at any plain-S3 provider); transient control
+# state lives in Valkey.
+services:
+  tunneld:
+    build: { context: .., args: { VERSION: "${TUNNELD_VERSION:-dev}" } }
+    image: tunneld:local
+    restart: unless-stopped
+    depends_on:
+      valkey: { condition: service_started }
+      createbuckets: { condition: service_completed_successfully }
+    # Run as the OPERATOR's uid (see .env.example): the distroless default uid 65532 cannot read the
+    # operator-owned 0600 CA key / attestation files or write the bind-mounted ./logs + ./acme dirs.
+    user: "${DEPLOY_UID:?set to your uid — run: id -u}"
+    # ONLY the TUNNELD_* env twins (+ the lego DNS-provider secret) — NEVER `env_file: .env`.
+    env_file:
+      - { path: tunneld.env, required: false }   # required:false so `docker compose config -q` passes on
+        # a bare checkout (only the .example exists); at RUNTIME a missing file is caught fast by tunneld's
+        # own Validate() (mandatory --s3-*/--acme-*/--mesh-advertise/etc.)
+    environment:
+      # Topology (not secrets); the domain values come from the SINGLE source in .env — `environment:`
+      # overrides `env_file:`, so these are never duplicated in tunneld.env.
+      TUNNELD_REDIS_URL: redis://valkey:6379
+      TUNNELD_TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?TUNNEL_DOMAIN required (see deploy/.env.example)}
+      TUNNELD_ENROLL_HOST: ${ENROLL_HOST:?ENROLL_HOST required}
+      TUNNELD_CONTROL_HOST: ${CONTROL_HOST:?CONTROL_HOST required}
+      TUNNELD_DIALBACK_ADVERTISE: ${DIALBACK_ADVERTISE:?DIALBACK_ADVERTISE required (this host public address:443)}
+      TUNNELD_MESH_ADVERTISE: tunneld:9443   # this host's mesh dial address (self on a single-replica host)
+      # Durable store. SINGLE source in .env, shared with the MinIO stand-in; production points the
+      # endpoint at any plain-S3 provider.
+      TUNNELD_S3_ENDPOINT: http://minio:9000
+      TUNNELD_S3_BUCKET: ${S3_BUCKET:?S3_BUCKET required}
+      TUNNELD_S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY required}
+      TUNNELD_S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY required}
+    volumes:
+      - ./ca:/ca:ro
+      - ./attest:/attest:ro         # the hot-reloadable app signer-digest allowlist (see tunneld.env)
+      - banfiles:/banfiles:ro       # fetcher-produced feeds (droplist.bans, DB-IP)
+      - ./banfiles:/banfiles-manual:ro   # manual bans: edit deploy/banfiles/bans.txt on the HOST — hot-reloaded within --ban-poll
+      - ./acme:/acme                # bind mount (operator-owned): ACME account keys + reserved-host self-certs
+      - ./logs:/logs                # bind mount (operator-owned, writable by DEPLOY_UID)
+      - ./conn-logs:/conn-logs
+    ports: ["443:443", "80:80"]     # Mesh (:9443) + internal
+                                    # metrics (:9090) stay on the compose network — never publish them.
+    logging: *caplog
+
+  valkey:
+    image: valkey/valkey:9.1-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]   # transient control state only
+    logging: *caplog
+
+  minio:
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    restart: unless-stopped
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?S3_ACCESS_KEY required}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?S3_SECRET_KEY required}
+    volumes:
+      - minio-data:/data
+    logging: *caplog
+
+  # One-shot: create the durable-state bucket. Production uses the provider's own bucket; document the
+  # PRE-GO-LIVE read-after-write probe in docs/PROJECT.md.
+  createbuckets:
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
+    depends_on:
+      minio: { condition: service_started }
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}"; do sleep 1; done
+        mc mb --ignore-existing "local/${S3_BUCKET}"
+    logging: *caplog
+
+  fetcher:
+    image: alpine:3
+    restart: unless-stopped
+    command: ["/bin/sh", "/opt/fetcher/command.sh"]
+    volumes:
+      - ./fetcher/command.sh:/opt/fetcher/command.sh:ro
+      - ./scripts:/scripts:ro           # droplist/DB-IP fetch scripts (see docs/PROJECT.md)
+      - banfiles:/banfiles
+    logging: *caplog
+
+volumes:
+  banfiles: {}
+  minio-data: {}

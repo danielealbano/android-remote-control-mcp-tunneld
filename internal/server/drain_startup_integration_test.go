@@ -1,0 +1,636 @@
+//go:build integration
+
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+)
+
+// TestIntegration_DrainWritesShutdownEndEvents holds a LIVE public splice open across a server drain and
+// asserts its close_reason=server-shutdown end event lands in MinIO — the ordered drain (join public
+// handlers → flush the async conn-log queue) must not lose it.
+func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
+	env := startIntegrationServer(t)
+	ctx := context.Background()
+
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	fqdn := ident.Name + "." + itTunnelDomain
+
+	phoneTLS := phoneServerTLS(t, ident)
+	backend := func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	}
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
+
+	// Wait for the phone to bind, then open a LIVE public splice and keep it open across the drain.
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("frontend roundtrip never succeeded (phone never bound): %v", rtErr)
+	}
+	live := dialFrontend(t, env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	defer tunneltest.CloseOrLog(t, live)
+	// One echo confirms a real public splice exists at drain time.
+	if _, err := live.Write([]byte("live")); err != nil {
+		t.Fatalf("live write: %v", err)
+	}
+	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
+		t.Fatalf("live echo: %v", err)
+	}
+
+	// Drain: cancel Run and wait for it to return. The ordered drain must enqueue the public splice's
+	// server-shutdown end event AND flush the async conn-log queue before Run returns.
+	if err := env.drain(); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	found := waitBool(15*time.Second, func() bool {
+		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/") {
+			if !strings.HasSuffix(k, ".jsonl") {
+				continue
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+				var ev store.Event
+				if err := json.Unmarshal(line, &ev); err != nil {
+					t.Fatalf("connection log %s has an invalid JSON line: %v", k, err)
+				}
+				if ev.Tunnel == ident.Name && ev.Event == "end" && ev.Type == "public" && ev.CloseReason == store.CloseServerShutdown {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if !found {
+		t.Fatal("drain did not write a public close_reason=server-shutdown end event to MinIO")
+	}
+}
+
+// TestIntegration_MeshListenFailureClosesRawListener pre-occupies the mesh port so the mesh bind (the last
+// construction step) fails, and asserts Run errors AND the raw :443 listener was closed on that error, so
+// cfg.Listen is immediately rebindable (no leaked bound-but-unserved socket).
+func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunneltest.CloseOrLog(t, occupied)
+	meshAddr := occupied.Addr().String()
+	edgeAddr := freeAddr(t)
+
+	// Unreachable ACME (port 1).
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, meshAddr,
+		"https://127.0.0.1:1/dir", "https://127.0.0.1:1/dir", "https://127.0.0.1:1/dir", nil)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- Run(ctx, cfg, testLogger(), "it-mesh") }()
+
+	select {
+	case runErr := <-errCh:
+		if runErr == nil {
+			t.Fatal("Run must fail when the mesh port is already bound")
+		}
+		if !strings.Contains(runErr.Error(), "mesh listen") {
+			t.Fatalf("expected a mesh-listen failure, got %v", runErr)
+		}
+	case <-time.After(90 * time.Second):
+		t.Fatal("Run did not return after the mesh-bind failure")
+	}
+
+	// The raw listener must have been closed on the construction error — cfg.Listen is rebindable now.
+	reln, err := net.Listen("tcp", edgeAddr)
+	if err != nil {
+		t.Fatalf("cfg.Listen must be rebindable after a failed startup (raw listener leaked): %v", err)
+	}
+	tunneltest.CloseOrLog(t, reln)
+}
+
+func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) (config.ServeCmd, *hangACMEListener, func()) {
+	t.Helper()
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+
+	hang := newHangACMEListener(t)
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, freeAddr(t), freeAddr(t),
+		hang.url(), hang.url(), hang.url(), nil)
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, testLogger(), "it-pending") }()
+	var stopOnce sync.Once
+	stop := func() {
+		stopOnce.Do(func() {
+			cancel()
+			hang.release()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run: %v", err)
+				}
+			case <-time.After(90 * time.Second):
+				t.Error("Run did not return after cancellation")
+			}
+		})
+	}
+	t.Cleanup(stop)
+
+	var dialErr error
+	if !waitBool(5*time.Second, func() bool {
+		var c net.Conn
+		c, dialErr = net.DialTimeout("tcp", cfg.Listen, 500*time.Millisecond)
+		if dialErr != nil {
+			return false
+		}
+		tunneltest.CloseOrLog(t, c)
+		return true
+	}) {
+		t.Fatalf(":443 must accept TCP while reserved-host issuance is still pending (last dial error: %v)", dialErr)
+	}
+	return cfg, hang, stop
+}
+
+func TestIntegration_ListenersServeWhileReservedIssuancePending(t *testing.T) {
+	cfg, _, stop := startPendingIssuanceServer(t)
+
+	raw, err := net.DialTimeout("tcp", cfg.Listen, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: "unrouted.other.test", InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	if err := conn.Handshake(); err == nil {
+		t.Fatal("an unrouted SNI must be closed, not served")
+	}
+	tunneltest.CloseOrLog(t, raw)
+	if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="no-route"}`,
+		func(v float64) bool { return v >= 1 }); !met {
+		t.Fatalf("an unrouted SNI must be recorded as no-route (no-route = %v, last scrape error: %v)", v, err)
+	}
+
+	for _, host := range []string{itEnrollHost, itControlHost} {
+		if ok, err := tunneltest.ServesCertificate(t, cfg.Listen, host); ok || err == nil {
+			t.Fatalf("%s must present no certificate while its issuance is pending (presented=%v, probe error=%v)", host, ok, err)
+		}
+	}
+	stop()
+}
+
+func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
+	now := time.Now()
+	leaves := map[string][]byte{}
+	cfg, hang, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
+		for _, host := range []string{itEnrollHost, itControlHost} {
+			leaves[host] = writeReservedBundle(t, c.ACMEAccountDir, host, now.Add(-150*time.Hour), now.Add(10*time.Hour))
+		}
+	})
+	if !waitBool(30*time.Second, func() bool { return hang.held() > 0 }) {
+		t.Fatal("the renewal of the due cache never reached the (hanging) ACME directory")
+	}
+	for _, host := range []string{itEnrollHost, itControlHost} {
+		leaf := presentedLeaf(t, cfg.Listen, host)
+		if string(leaf) != string(leaves[host]) {
+			t.Fatalf("%s: the cached certificate must be served while its renewal is pending", host)
+		}
+	}
+	stop()
+}
+
+func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
+	t.Run("not bound without http-01 or plain dial-backs", func(t *testing.T) {
+		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
+		if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
+			tunneltest.CloseOrLog(t, c)
+			t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
+		}
+		stop()
+	})
+	t.Run("bound for plain dial-backs", func(t *testing.T) {
+		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
+			c.ACMEHTTPListen = freeAddr(t)
+			c.DialBackAdvertise = c.ACMEHTTPListen
+			c.DialBackHTTPS, c.DialBackMTLS = false, false
+		})
+		hc := &http.Client{Timeout: 5 * time.Second}
+		get := func(path string) int {
+			t.Helper()
+			resp, err := hc.Get("http://" + cfg.ACMEHTTPListen + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			tunneltest.CloseOrLog(t, resp.Body)
+			return resp.StatusCode
+		}
+		if code := get("/api/v1/data"); code != http.StatusBadRequest {
+			t.Fatalf("GET /api/v1/data without an upgrade = %d, want 400 from the phone handler", code)
+		}
+		if v, err := metricLineValue(cfg.InternalListen, `tunneld_rejections_total{reason="acme-http-miss"}`); err != nil || v != 0 {
+			t.Fatalf("a dial-back request must not count as acme-http-miss (value %v, scrape error %v)", v, err)
+		}
+		if code := get("/.well-known/acme-challenge/unknown-token-0123456789"); code != http.StatusNotFound {
+			t.Fatalf("an unknown ACME challenge = %d, want 404", code)
+		}
+		if v, met, err := waitMetric(10*time.Second, cfg.InternalListen, `tunneld_rejections_total{reason="acme-http-miss"}`,
+			func(v float64) bool { return v == 1 }); !met {
+			t.Fatalf("the ACME path must keep recording acme-http-miss (value %v, scrape error %v)", v, err)
+		}
+		stop()
+	})
+}
+
+func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
+	var grace time.Duration
+	env := startIntegrationServer(t, func(c *config.ServeCmd) { grace = c.ShutdownGrace })
+	ctx := context.Background()
+
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	fqdn := ident.Name + "." + itTunnelDomain
+	phoneTLS := phoneServerTLS(t, ident)
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("frontend roundtrip never succeeded (phone never bound): %v", rtErr)
+	}
+	live := dialFrontend(t, env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	defer tunneltest.CloseOrLog(t, live)
+	if _, err := live.Write([]byte("live")); err != nil {
+		t.Fatalf("live write: %v", err)
+	}
+	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
+		t.Fatalf("live echo: %v", err)
+	}
+
+	blackHole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunneltest.CloseOrLog(t, blackHole)
+	var heldMu sync.Mutex
+	var held []net.Conn
+	defer func() {
+		heldMu.Lock()
+		defer heldMu.Unlock()
+		for _, hc := range held {
+			tunneltest.CloseOrLog(t, hc)
+		}
+	}()
+	go func() {
+		for {
+			hc, aerr := blackHole.Accept()
+			if aerr != nil {
+				if !errors.Is(aerr, net.ErrClosed) {
+					testLogger().Warn("black-hole accept failed", "err", aerr)
+				}
+				return
+			}
+			heldMu.Lock()
+			held = append(held, hc)
+			heldMu.Unlock()
+		}
+	}()
+	reg, err := router.NewRegistry(env.rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.RegisterNode(ctx, "unreachable-peer", router.NodeInfo{Advertise: blackHole.Addr().String()}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := reg.LiveNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var self string
+	for id := range nodes {
+		if id != "unreachable-peer" {
+			self = id
+		}
+	}
+	if self == "" || len(nodes) != 2 {
+		t.Fatalf("live nodes = %v, want the server and the unreachable peer", nodes)
+	}
+
+	start := time.Now()
+	if err := env.drain(); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > grace+2*time.Second {
+		t.Fatalf("Run returned %s after cancel, want within ShutdownGrace (%s) + 2s", elapsed, grace)
+	}
+	if _, ok, err := reg.LookupNode(ctx, self); err != nil || ok {
+		t.Fatalf("the drained node must be deregistered (ok=%v err=%v)", ok, err)
+	}
+
+	var publicEnd, phoneEnd bool
+	if !waitBool(15*time.Second, func() bool {
+		publicEnd, phoneEnd = false, false
+		for _, k := range tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/") {
+			if !strings.HasSuffix(k, ".jsonl") {
+				continue
+			}
+			for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+				var ev store.Event
+				if err := json.Unmarshal(line, &ev); err != nil {
+					t.Fatalf("connection log %s has an invalid JSON line: %v", k, err)
+				}
+				if ev.Tunnel != ident.Name || ev.Event != "end" {
+					continue
+				}
+				switch ev.Type {
+				case "public":
+					publicEnd = publicEnd || ev.CloseReason == store.CloseServerShutdown
+				case "phone":
+					phoneEnd = true
+				}
+			}
+		}
+		return publicEnd && phoneEnd
+	}) {
+		t.Fatalf("drain events in MinIO: public server-shutdown end=%v, phone end=%v; want both", publicEnd, phoneEnd)
+	}
+}
+
+func writeReservedBundle(t *testing.T, accountDir, host string, notBefore, notAfter time.Time) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
+		NotBefore: notBefore, NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := &reservedCerts{dir: filepath.Join(accountDir, "self"), logger: testLogger(), now: time.Now}
+	rc.persist(host,
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		store.CertInfo{NotBefore: notBefore, NotAfter: notAfter})
+	return der
+}
+
+func presentedLeaf(t *testing.T, edgeAddr, host string) []byte {
+	t.Helper()
+	var leaf []byte
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(d, "tcp", edgeAddr, &tls.Config{
+		ServerName: host, InsecureSkipVerify: true, MinVersion: tls.VersionTLS12,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) > 0 {
+				leaf = cs.PeerCertificates[0].Raw
+			}
+			return nil
+		},
+	})
+	if err == nil {
+		if cerr := conn.Close(); cerr != nil {
+			t.Logf("%s: close the probe connection: %v", host, cerr)
+		}
+	}
+	if leaf == nil {
+		t.Fatalf("%s presented no certificate (dial: %v)", host, err)
+	}
+	return leaf
+}
+
+func metricLineValue(internalAddr, series string) (float64, error) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://" + internalAddr + "/metrics")
+	if err != nil {
+		return 0, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err := errors.Join(err, resp.Body.Close()); err != nil {
+		return 0, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("metrics status %d", resp.StatusCode)
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.HasPrefix(line, series+" ") {
+			return strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, series)), 64)
+		}
+	}
+	return 0, nil
+}
+
+func waitMetric(d time.Duration, internalAddr, series string, cond func(float64) bool) (float64, bool, error) {
+	var v float64
+	var err error
+	met := waitBool(d, func() bool {
+		v, err = metricLineValue(internalAddr, series)
+		return err == nil && cond(v)
+	})
+	return v, met, err
+}
+
+// dialFrontend opens a frontend TLS connection to the edge for fqdn (verified against roots) and returns
+// it OPEN (the caller keeps the public splice live).
+func dialFrontend(t *testing.T, edgeAddr, fqdn string, roots *x509.CertPool) *tls.Conn {
+	t.Helper()
+	raw, err := net.DialTimeout("tcp", edgeAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial edge: %v", err)
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err := conn.Handshake(); err != nil {
+		tunneltest.CloseOrLog(t, raw)
+		t.Fatalf("frontend handshake: %v", err)
+	}
+	return conn
+}
+
+// s3GetObject fetches one object's bytes from MinIO (test assertions on connection-log content).
+func s3GetObject(t *testing.T, endpoint, access, secret, bucket, key string) []byte {
+	t.Helper()
+	cli := s3.New(s3.Options{
+		Region:       "us-east-1",
+		Credentials:  credentials.NewStaticCredentialsProvider(access, secret, ""),
+		BaseEndpoint: aws.String(endpoint),
+		UsePathStyle: true,
+	})
+	out, err := cli.GetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		t.Fatalf("get object %q: %v", key, err)
+	}
+	defer tunneltest.CloseOrLog(t, out.Body)
+	b, err := io.ReadAll(out.Body)
+	if err != nil {
+		t.Fatalf("read object %q: %v", key, err)
+	}
+	return b
+}
+
+// hangACMEListener accepts TCP connections and holds them without responding, so an ACME directory fetch
+// pointed at it blocks in its TLS handshake.
+// release() closes the listener and every held connection, letting the fetch fail fast.
+type hangACMEListener struct {
+	ln    net.Listener
+	mu    sync.Mutex
+	conns []net.Conn
+	done  bool
+}
+
+func newHangACMEListener(t *testing.T) *hangACMEListener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &hangACMEListener{ln: ln}
+	go h.accept()
+	return h
+}
+
+func (h *hangACMEListener) accept() {
+	for {
+		c, err := h.ln.Accept()
+		if err != nil {
+			if !errors.Is(err, net.ErrClosed) {
+				testLogger().Warn("hanging ACME listener accept failed", "err", err)
+			}
+			return
+		}
+		h.mu.Lock()
+		if h.done {
+			h.mu.Unlock()
+			tunneltest.CloseLogged(c)
+			continue
+		}
+		h.conns = append(h.conns, c) // hold open, never respond → the dialer's TLS handshake blocks
+		h.mu.Unlock()
+	}
+}
+
+func (h *hangACMEListener) url() string { return "https://" + h.ln.Addr().String() + "/dir" }
+
+func (h *hangACMEListener) held() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.conns)
+}
+
+func (h *hangACMEListener) release() {
+	h.mu.Lock()
+	if h.done {
+		h.mu.Unlock()
+		return
+	}
+	h.done = true
+	conns := h.conns
+	h.conns = nil
+	h.mu.Unlock()
+	tunneltest.CloseLogged(h.ln)
+	for _, c := range conns {
+		tunneltest.CloseLogged(c)
+	}
+}

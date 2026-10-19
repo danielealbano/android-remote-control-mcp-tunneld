@@ -1,0 +1,2830 @@
+{
+ "uid": "health",
+ "title": "Health",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "refresh": "30s",
+ "tags": [
+  "tunneld"
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "stat",
+   "title": "Problems",
+   "description": "Number of failing checks.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(((count(up == 0) or vector(0)) >= bool 1) + ((count(redis_up == 0) or vector(0)) >= bool 1) + (((count(podman_container_state != 2) or vector(0)) + (count(count by (node, name) (max_over_time(podman_container_info[15m])) > 1) or vector(0))) >= bool 1)) + (((count(probe_success{job=~\"blackbox-(enroll|connect)\"} == 0) or vector(0)) >= bool 1) + ((count(probe_ssl_earliest_cert_expiry{job=~\"blackbox-(enroll|connect)\"} - time() < 36 * 3600) or vector(0)) >= bool 1) + ((count(probe_success{job=\"blackbox-healthz\"} == 0) or vector(0)) >= bool 1)) + (((ceil(sum(increase(tunneld_rejections_total{reason=\"acme-failed\"}[15m]))) or vector(0)) >= bool 1) + ((ceil(sum(increase(tunneld_enrollments_total{result=~\"internal|name_unavailable|identity_sign_failed\"}[15m]))) or vector(0)) >= bool 1)) + (((((count(redis_instance_info{service=\"valkey\",role=\"master\"}) or vector(0)) != bool 1) + ((max(redis_connected_slaves{service=\"valkey\"}) or vector(0)) < bool (count(redis_up{service=\"valkey\"}) - 1))) >= bool 1) + (((count(redis_sentinel_master_ok_sentinels < scalar(count(redis_up{service=\"sentinel\"}))) or vector(0)) + (count(redis_sentinel_master_ckquorum_status != 1) or vector(0)) + (count(redis_sentinel_tilt == 1) or vector(0))) >= bool 1) + ((count(redis_memory_used_bytes{service=\"valkey\"} / (redis_memory_max_bytes{service=\"valkey\"} > 0) > 0.8) or vector(0)) >= bool 1) + ((count(redis_aof_last_write_status{service=\"valkey\"} == 0) or vector(0)) >= bool 1) + ((ceil(sum(increase(tunneld_valkey_pool_timeouts_total[15m]))) or vector(0)) >= bool 1)) + (((count(time() - wireguard_peer_latest_handshake_timestamp_seconds > 300) or vector(0)) >= bool 1)) + (((count(1 - node_filesystem_avail_bytes{mountpoint=~\"/|/boot\"} / node_filesystem_size_bytes{mountpoint=~\"/|/boot\"} > 0.85) or vector(0)) >= bool 1) + (((count(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.9) or vector(0)) + (count(1 - node_memory_SwapFree_bytes / (node_memory_SwapTotal_bytes > 0) > 0.25) or vector(0))) >= bool 1) + ((count(avg by (node) (rate(node_cpu_seconds_total{mode=\"idle\"}[15m])) < 0.1) or vector(0)) >= bool 1) + ((count(process_open_fds{job=\"tunneld\"} / process_max_fds{job=\"tunneld\"} > 0.8) or vector(0)) >= bool 1) + ((count(node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8) or vector(0)) >= bool 1) + ((max(abs(node_timex_offset_seconds))) >= bool 0.5) + ((max(sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8)) >= bool 150000000.0) + ((max(sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400)) >= bool 90000000.0)) + (((ceil((sum(increase(tunneld_connlog_dropped_total[15m])) or vector(0)) + (sum(increase(tunneld_log_sink_errors_total[15m])) or vector(0)))) >= bool 1) + (((count(time() - banlist_file_mtime_timestamp_seconds{file=\"droplist.bans\"} > 48 * 3600) or vector(0)) + (count(time() - banlist_file_mtime_timestamp_seconds{file=\"dbip-country-lite.csv\"} > 35 * 86400) or vector(0))) >= bool 1)) + (((ceil(sum(increase(tunneld_rejections_total{reason=\"max-clients\"}[15m]))) or vector(0)) >= bool 1))",
+     "legendFormat": "Problems",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Services",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 0,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((count(up == 0) or vector(0)) >= bool 1) + ((count(redis_up == 0) or vector(0)) >= bool 1) + (((count(podman_container_state != 2) or vector(0)) + (count(count by (node, name) (max_over_time(podman_container_info[15m])) > 1) or vector(0))) >= bool 1)",
+     "legendFormat": "Services",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "Public edge",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 3,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((count(probe_success{job=~\"blackbox-(enroll|connect)\"} == 0) or vector(0)) >= bool 1) + ((count(probe_ssl_earliest_cert_expiry{job=~\"blackbox-(enroll|connect)\"} - time() < 36 * 3600) or vector(0)) >= bool 1) + ((count(probe_success{job=\"blackbox-healthz\"} == 0) or vector(0)) >= bool 1)",
+     "legendFormat": "Public edge",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Certificates",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 6,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((ceil(sum(increase(tunneld_rejections_total{reason=\"acme-failed\"}[15m]))) or vector(0)) >= bool 1) + ((ceil(sum(increase(tunneld_enrollments_total{result=~\"internal|name_unavailable|identity_sign_failed\"}[15m]))) or vector(0)) >= bool 1)",
+     "legendFormat": "Certificates",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Valkey",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 9,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((((count(redis_instance_info{service=\"valkey\",role=\"master\"}) or vector(0)) != bool 1) + ((max(redis_connected_slaves{service=\"valkey\"}) or vector(0)) < bool (count(redis_up{service=\"valkey\"}) - 1))) >= bool 1) + (((count(redis_sentinel_master_ok_sentinels < scalar(count(redis_up{service=\"sentinel\"}))) or vector(0)) + (count(redis_sentinel_master_ckquorum_status != 1) or vector(0)) + (count(redis_sentinel_tilt == 1) or vector(0))) >= bool 1) + ((count(redis_memory_used_bytes{service=\"valkey\"} / (redis_memory_max_bytes{service=\"valkey\"} > 0) > 0.8) or vector(0)) >= bool 1) + ((count(redis_aof_last_write_status{service=\"valkey\"} == 0) or vector(0)) >= bool 1) + ((ceil(sum(increase(tunneld_valkey_pool_timeouts_total[15m]))) or vector(0)) >= bool 1)",
+     "legendFormat": "Valkey",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Mesh",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 12,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((count(time() - wireguard_peer_latest_handshake_timestamp_seconds > 300) or vector(0)) >= bool 1)",
+     "legendFormat": "Mesh",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Resources",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 15,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((count(1 - node_filesystem_avail_bytes{mountpoint=~\"/|/boot\"} / node_filesystem_size_bytes{mountpoint=~\"/|/boot\"} > 0.85) or vector(0)) >= bool 1) + (((count(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.9) or vector(0)) + (count(1 - node_memory_SwapFree_bytes / (node_memory_SwapTotal_bytes > 0) > 0.25) or vector(0))) >= bool 1) + ((count(avg by (node) (rate(node_cpu_seconds_total{mode=\"idle\"}[15m])) < 0.1) or vector(0)) >= bool 1) + ((count(process_open_fds{job=\"tunneld\"} / process_max_fds{job=\"tunneld\"} > 0.8) or vector(0)) >= bool 1) + ((count(node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8) or vector(0)) >= bool 1) + ((max(abs(node_timex_offset_seconds))) >= bool 0.5) + ((max(sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8)) >= bool 150000000.0) + ((max(sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400)) >= bool 90000000.0)",
+     "legendFormat": "Resources",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 8,
+   "type": "stat",
+   "title": "Data",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 18,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((ceil((sum(increase(tunneld_connlog_dropped_total[15m])) or vector(0)) + (sum(increase(tunneld_log_sink_errors_total[15m])) or vector(0)))) >= bool 1) + (((count(time() - banlist_file_mtime_timestamp_seconds{file=\"droplist.bans\"} > 48 * 3600) or vector(0)) + (count(time() - banlist_file_mtime_timestamp_seconds{file=\"dbip-country-lite.csv\"} > 35 * 86400) or vector(0))) >= bool 1)",
+     "legendFormat": "Data",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 9,
+   "type": "stat",
+   "title": "Capacity",
+   "description": "Failing checks in this group.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 3,
+    "x": 21,
+    "y": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((ceil(sum(increase(tunneld_rejections_total{reason=\"max-clients\"}[15m]))) or vector(0)) >= bool 1)",
+     "legendFormat": "Capacity",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 10,
+   "type": "row",
+   "title": "Services",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 8
+   },
+   "panels": []
+  },
+  {
+   "id": 11,
+   "type": "stat",
+   "title": "Scrape targets down",
+   "description": "Prometheus targets that do not answer.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(up == 0) or vector(0)",
+     "legendFormat": "Scrape targets down",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 12,
+   "type": "stat",
+   "title": "Valkey / Sentinel instances down",
+   "description": "Instances the Valkey exporter cannot reach.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(redis_up == 0) or vector(0)",
+     "legendFormat": "Valkey / Sentinel instances down",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 13,
+   "type": "stat",
+   "title": "Containers down or restarted (15 min)",
+   "description": "Containers not running, plus containers restarted in the last 15 minutes.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(count(podman_container_state != 2) or vector(0)) + (count(count by (node, name) (max_over_time(podman_container_info[15m])) > 1) or vector(0))",
+     "legendFormat": "Containers down or restarted (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 14,
+   "type": "row",
+   "title": "Public edge",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 13
+   },
+   "panels": []
+  },
+  {
+   "id": 15,
+   "type": "stat",
+   "title": "Public :443 unreachable",
+   "description": "TLS probe to each node's public :443 for the enroll and connect hosts.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 14
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(probe_success{job=~\"blackbox-(enroll|connect)\"} == 0) or vector(0)",
+     "legendFormat": "Public :443 unreachable",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 16,
+   "type": "stat",
+   "title": "Enroll / connect certificate renewal overdue",
+   "description": "Served certificate expires in under 36 h (renewal starts 48 h before expiry).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 14
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(probe_ssl_earliest_cert_expiry{job=~\"blackbox-(enroll|connect)\"} - time() < 36 * 3600) or vector(0)",
+     "legendFormat": "Enroll / connect certificate renewal overdue",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 17,
+   "type": "stat",
+   "title": "tunneld cannot reach Valkey",
+   "description": "A node's internal /healthz is not 200.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 14
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(probe_success{job=\"blackbox-healthz\"} == 0) or vector(0)",
+     "legendFormat": "tunneld cannot reach Valkey",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 18,
+   "type": "row",
+   "title": "Certificates",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 18
+   },
+   "panels": []
+  },
+  {
+   "id": 19,
+   "type": "stat",
+   "title": "Issuance failed on every CA (15 min)",
+   "description": "Public-certificate issuances where LE, GTS and ZeroSSL all failed.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 19
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "ceil(sum(increase(tunneld_rejections_total{reason=\"acme-failed\"}[15m]))) or vector(0)",
+     "legendFormat": "Issuance failed on every CA (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 20,
+   "type": "stat",
+   "title": "Server-side enrollment errors (15 min)",
+   "description": "Enrollments that failed on the server side, not the client's.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 19
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "ceil(sum(increase(tunneld_enrollments_total{result=~\"internal|name_unavailable|identity_sign_failed\"}[15m]))) or vector(0)",
+     "legendFormat": "Server-side enrollment errors (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 21,
+   "type": "row",
+   "title": "Valkey",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 23
+   },
+   "panels": []
+  },
+  {
+   "id": 22,
+   "type": "stat",
+   "title": "Valkey topology broken",
+   "description": "Not exactly one primary, or not every other instance connected as a replica.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 24
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "((count(redis_instance_info{service=\"valkey\",role=\"master\"}) or vector(0)) != bool 1) + ((max(redis_connected_slaves{service=\"valkey\"}) or vector(0)) < bool (count(redis_up{service=\"valkey\"}) - 1))",
+     "legendFormat": "Valkey topology broken",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 23,
+   "type": "stat",
+   "title": "Sentinel degraded",
+   "description": "A sentinel sees fewer healthy sentinels than configured, fails the quorum check, or is in TILT mode.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 24
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(count(redis_sentinel_master_ok_sentinels < scalar(count(redis_up{service=\"sentinel\"}))) or vector(0)) + (count(redis_sentinel_master_ckquorum_status != 1) or vector(0)) + (count(redis_sentinel_tilt == 1) or vector(0))",
+     "legendFormat": "Sentinel degraded",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 24,
+   "type": "stat",
+   "title": "Valkey memory above 80%",
+   "description": "Used memory above 80% of maxmemory.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 24
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(redis_memory_used_bytes{service=\"valkey\"} / (redis_memory_max_bytes{service=\"valkey\"} > 0) > 0.8) or vector(0)",
+     "legendFormat": "Valkey memory above 80%",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 25,
+   "type": "stat",
+   "title": "Valkey persistence (AOF) failing",
+   "description": "The last AOF write failed.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 12,
+    "y": 24
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(redis_aof_last_write_status{service=\"valkey\"} == 0) or vector(0)",
+     "legendFormat": "Valkey persistence (AOF) failing",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 26,
+   "type": "stat",
+   "title": "Valkey pool timeouts (15 min)",
+   "description": "tunneld commands that gave up waiting for a free Valkey connection.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 16,
+    "y": 24
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "ceil(sum(increase(tunneld_valkey_pool_timeouts_total[15m]))) or vector(0)",
+     "legendFormat": "Valkey pool timeouts (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 27,
+   "type": "row",
+   "title": "Mesh",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 28
+   },
+   "panels": []
+  },
+  {
+   "id": 28,
+   "type": "stat",
+   "title": "WireGuard links down",
+   "description": "Peers whose last handshake is older than 5 minutes.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 29
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(time() - wireguard_peer_latest_handshake_timestamp_seconds > 300) or vector(0)",
+     "legendFormat": "WireGuard links down",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 29,
+   "type": "row",
+   "title": "Resources",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 33
+   },
+   "panels": []
+  },
+  {
+   "id": 30,
+   "type": "stat",
+   "title": "Disk above 85%",
+   "description": "/ or /boot above 85%.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(1 - node_filesystem_avail_bytes{mountpoint=~\"/|/boot\"} / node_filesystem_size_bytes{mountpoint=~\"/|/boot\"} > 0.85) or vector(0)",
+     "legendFormat": "Disk above 85%",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 31,
+   "type": "stat",
+   "title": "Memory pressure",
+   "description": "Under 10% RAM available, or swap above 25% used.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(count(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0.9) or vector(0)) + (count(1 - node_memory_SwapFree_bytes / (node_memory_SwapTotal_bytes > 0) > 0.25) or vector(0))",
+     "legendFormat": "Memory pressure",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 32,
+   "type": "stat",
+   "title": "CPU above 90% (15 min)",
+   "description": "Nodes busier than 90% over the last 15 minutes.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(avg by (node) (rate(node_cpu_seconds_total{mode=\"idle\"}[15m])) < 0.1) or vector(0)",
+     "legendFormat": "CPU above 90% (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 33,
+   "type": "stat",
+   "title": "tunneld file descriptors above 80%",
+   "description": "Open file descriptors above 80% of the process limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 12,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(process_open_fds{job=\"tunneld\"} / process_max_fds{job=\"tunneld\"} > 0.8) or vector(0)",
+     "legendFormat": "tunneld file descriptors above 80%",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 34,
+   "type": "stat",
+   "title": "Connection tracking above 80%",
+   "description": "Kernel connection-tracking table above 80% full.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 16,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "count(node_nf_conntrack_entries / node_nf_conntrack_entries_limit > 0.8) or vector(0)",
+     "legendFormat": "Connection tracking above 80%",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 35,
+   "type": "stat",
+   "title": "Clock drift (worst node)",
+   "description": "Offset from the node's NTP reference; red from 0.5 s.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 34
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(abs(node_timex_offset_seconds))",
+     "legendFormat": "Clock drift (worst node)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 0.5
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 36,
+   "type": "stat",
+   "title": "eth0 traffic now (worst node)",
+   "description": "In + out over the last minute; red from 150 Mbit/s.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 38
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8)",
+     "legendFormat": "eth0 traffic now (worst node)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 150000000.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 37,
+   "type": "stat",
+   "title": "eth0 traffic 24 h average (worst node)",
+   "description": "In + out averaged over 24 h; the hosting fair use is 100 Mbit/s; red from 90 Mbit/s.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 38
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400)",
+     "legendFormat": "eth0 traffic 24 h average (worst node)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 90000000.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 38,
+   "type": "row",
+   "title": "Data",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 42
+   },
+   "panels": []
+  },
+  {
+   "id": 39,
+   "type": "stat",
+   "title": "Logs lost (15 min)",
+   "description": "Connection-log events dropped or log records a sink failed to write.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 43
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "ceil((sum(increase(tunneld_connlog_dropped_total[15m])) or vector(0)) + (sum(increase(tunneld_log_sink_errors_total[15m])) or vector(0)))",
+     "legendFormat": "Logs lost (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 40,
+   "type": "stat",
+   "title": "Ban lists stale",
+   "description": "DROP list older than 48 h or DB-IP file older than 35 days.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 43
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "(count(time() - banlist_file_mtime_timestamp_seconds{file=\"droplist.bans\"} > 48 * 3600) or vector(0)) + (count(time() - banlist_file_mtime_timestamp_seconds{file=\"dbip-country-lite.csv\"} > 35 * 86400) or vector(0))",
+     "legendFormat": "Ban lists stale",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 41,
+   "type": "row",
+   "title": "Capacity",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 47
+   },
+   "panels": []
+  },
+  {
+   "id": 42,
+   "type": "stat",
+   "title": "Connections refused at max-clients (15 min)",
+   "description": "New connections refused because a node reached --max-clients.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 48
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "ceil(sum(increase(tunneld_rejections_total{reason=\"max-clients\"}[15m]))) or vector(0)",
+     "legendFormat": "Connections refused at max-clients (15 min)",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "decimals": 0,
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "OK",
+         "index": 0
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "background",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "center",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 43,
+   "type": "row",
+   "title": "Bandwidth",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 52
+   },
+   "panels": []
+  },
+  {
+   "id": 44,
+   "type": "timeseries",
+   "title": "eth0 24 h average per node (% of the 90 Mbit/s limit)",
+   "description": "In + out averaged over the last 24 h; 100% is the 90 Mbit/s 24 h average limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 53
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (node) (increase(node_network_receive_bytes_total{device=\"eth0\"}[24h]) + increase(node_network_transmit_bytes_total{device=\"eth0\"}[24h])) * 8 / 86400 / 90000000 * 100",
+     "legendFormat": "{{node}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 45,
+   "type": "timeseries",
+   "title": "eth0 traffic now per node (% of the 150 Mbit/s limit)",
+   "description": "In + out over the last minute; 100% is the 150 Mbit/s instant limit.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 53
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (node) (rate(node_network_receive_bytes_total{device=\"eth0\"}[1m]) + rate(node_network_transmit_bytes_total{device=\"eth0\"}[1m])) * 8 / 150000000 * 100",
+     "legendFormat": "{{node}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percent",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  }
+ ]
+}

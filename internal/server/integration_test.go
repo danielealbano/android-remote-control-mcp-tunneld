@@ -1,0 +1,772 @@
+//go:build integration
+
+package server
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/client"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+)
+
+const (
+	itTunnelDomain = "example.test"
+	itEnrollHost   = "enroll.example.test"
+	itControlHost  = "connect.example.test"
+	itBucket       = "tunneld-it"
+)
+
+func emptyFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "signers.txt")
+	if err := os.WriteFile(p, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// itEnv is a running integration server plus its infra handles.
+type itEnv struct {
+	edgeAddr     string
+	internalAddr string
+	acmeHTTPAddr string
+	pebble       *tunneltest.PebbleEnv
+	s3URL        string
+	s3Access     string
+	s3Secret     string
+	rdb          *redis.Client
+	st           *store.S3Store
+	drain        func() error // cancels Run and waits for it to return (idempotent; also run by t.Cleanup)
+}
+
+// itServeConfig builds a valid ServeCmd for the integration server against the given infra endpoints.
+// The three ACME directory URLs and the DNS-01 resolvers are parameterized so a test can point them at
+// Pebble (real issuance) or at a hang/unreachable endpoint (startup-ordering tests).
+func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, meshAddr,
+	acmeDirLE, acmeDirGTS, acmeDirZeroSSL string, dnsResolvers []string) config.ServeCmd {
+	t.Helper()
+	caCert, caKey := writeCA(t)
+	cfg := config.ServeCmd{
+		RedisURL:       redisURL,
+		Listen:         edgeAddr,
+		MeshListen:     meshAddr,
+		InternalListen: freeAddr(t),
+		MeshAdvertise:  "127.0.0.1:19443",
+		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
+
+		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
+		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
+		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
+
+		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
+		S3AccessKey: access, S3SecretKey: secret, S3ForcePathStyle: true,
+		RegistryClaimTimeout: 3 * time.Second, RegistryClaimSettle: 5 * time.Second,
+
+		AttestSignerDigestFile: emptyFile(t),
+		AttestRootURL:          "http://127.0.0.1:1/root", AttestStatusURL: "http://127.0.0.1:1/status",
+		AttestRefresh: time.Hour, AttestStatusMaxStale: 24 * time.Hour, AttestationOptional: true,
+
+		ACMEDirLE: acmeDirLE, ACMEDirGTS: acmeDirGTS, ACMEDirZeroSSL: acmeDirZeroSSL,
+		ACMEEmail: "ops@example.test", ACMELEProfile: "shortlived", ACMEGTSValidity: 168 * time.Hour,
+		ACMEAccountDir: t.TempDir(), ACMEDNSProvider: "httpreq", ConnLogDir: t.TempDir(),
+		ACMEChallengeLE: config.ChallengeDNS01, ACMEChallengeGTS: config.ChallengeDNS01, ACMEChallengeZeroSSL: config.ChallengeDNS01,
+		ACMEDNSResolvers: dnsResolvers, ACMEDNSSkipPropagationCheck: true,
+		ACMECooldownDefault: time.Hour, ACMEBackoffInitial: time.Minute, ACMEBackoffMax: 6 * time.Hour,
+		ACMERenewMargin: 48 * time.Hour, IssuePerWeek: 3,
+
+		RouteTTL: 30 * time.Second, ControlPingInterval: 30 * time.Second,
+		LimitStreamPending: 64, LimitEnrollHour: 1000, LimitEnrollMinute: 1000, LimitEnrollBody: "64kb",
+		MaxClients: 100, LimitConnRate: 1000, LimitConcurrent: 8, LimitPackets: 100000, HandshakeTimeout: 5 * time.Second, LimitDialBackTimeout: 10 * time.Second,
+		LimitConnIdle: 120 * time.Second, LimitConnMinGrace: 60 * time.Second, LimitConnEvictIdle: 10 * time.Second,
+		LimitConnMinRate: "1kb", LimitConnProtectRate: "10kb", LimitBandwidth: "1mbit",
+		LimitTrafficDay: "1gb", LimitTrafficWeek: "4gb",
+		BanPoll: time.Second, ShutdownGrace: 3 * time.Second,
+		Log: []string{"output=std;level=error"},
+	}
+	tunneltest.LooseACMEBudgets(&cfg)
+	tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")
+	return cfg
+}
+
+// startIntegrationServer stands up Valkey + MinIO + Pebble/challtestsrv + the DNS shim, runs the real
+// server.Run on loopback in attestation-optional mode against Pebble, and waits until it is ready.
+func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itEnv {
+	t.Helper()
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
+	pebble := tunneltest.StartPebble(t)
+	shim := tunneltest.StartACMEDNSShim(t, pebble)
+
+	// lego reads these at startup: the httpreq DNS provider endpoint + the Pebble ACME trust anchor.
+	t.Setenv("HTTPREQ_ENDPOINT", shim)
+	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+
+	edgeAddr := freeAddr(t)
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
+		pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, []string{pebble.DNSResolver})
+	tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+
+	env, ok := runIntegrationServer(t, cfg, pebble, testLogger(), redisURL, s3URL, access, secret)
+	if !ok {
+		t.Fatal("integration server exited before serving")
+	}
+	return env
+}
+
+func startChallengeServer(t *testing.T, method string, mutate ...func(*config.ServeCmd)) (*itEnv, *tunneltest.LogCounter) {
+	t.Helper()
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, itBucket)
+	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
+	for range 5 {
+		pebble := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
+		t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
+		cfg := itServeConfig(t, redisURL, s3URL, access, secret,
+			net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.TLSPort)), freeAddr(t),
+			pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, nil)
+		tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
+		cfg.ACMEDNSProvider = ""
+		cfg.ACMEChallengeLE, cfg.ACMEChallengeGTS, cfg.ACMEChallengeZeroSSL = method, method, config.ChallengeHTTP01
+		cfg.ACMEHTTPListen = net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.HTTPPort))
+		for _, m := range mutate {
+			m(&cfg)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("config invalid: %v", err)
+		}
+		logs := tunneltest.NewLogCounter(testLogger().Handler())
+		if env, ok := runIntegrationServer(t, cfg, pebble, logs.Logger(), redisURL, s3URL, access, secret); ok {
+			return env, logs
+		}
+	}
+	t.Fatal("challenge server never bound Pebble's validation ports after 5 attempts")
+	return nil, nil
+}
+
+func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.PebbleEnv, logger *slog.Logger,
+	redisURL, s3URL, access, secret string) (*itEnv, bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, logger, "it") }()
+
+	deadline := time.Now().Add(120 * time.Second)
+	for {
+		enrollOK, enrollErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.EnrollHost)
+		controlOK, controlErr := tunneltest.ServesCertificate(t, cfg.Listen, cfg.ControlHost)
+		if enrollOK && controlOK {
+			break
+		}
+		select {
+		case runErr := <-done:
+			cancel()
+			t.Logf("integration server exited before serving: %v", runErr)
+			return nil, false
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			runErr := <-done
+			t.Fatalf("integration server never served both reserved-host certificates (last probe: %v; run: %v)", errors.Join(enrollErr, controlErr), runErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// drain cancels the server and waits for Run to return, AT MOST ONCE: both t.Cleanup and a test that
+	// exercises shutdown explicitly may call it — the second call is a no-op returning the recorded result.
+	var drainOnce sync.Once
+	var drainErr error
+	drain := func() error {
+		drainOnce.Do(func() {
+			cancel()
+			select {
+			case drainErr = <-done:
+			case <-time.After(20 * time.Second):
+				drainErr = fmt.Errorf("server did not drain within 20s of cancellation")
+			}
+		})
+		return drainErr
+	}
+	t.Cleanup(func() {
+		if err := drain(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rdb := redis.NewClient(opts)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	st, err := store.NewS3Store(context.Background(), store.S3Config{
+		Endpoint: s3URL, Region: "us-east-1", Bucket: itBucket,
+		AccessKey: access, SecretKey: secret, ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &itEnv{
+		edgeAddr: cfg.Listen, internalAddr: cfg.InternalListen, acmeHTTPAddr: cfg.ACMEHTTPListen,
+		pebble: pebble, s3URL: s3URL, s3Access: access, s3Secret: secret, rdb: rdb, st: st, drain: drain,
+	}, true
+}
+
+// TestRun_NamePrefixLowercased verifies the runtime server.Run normalization: an UPPERCASE --name-prefix
+// yields lowercase enrolled tunnel names (so the CN matches the lowercased SNI at the edge), not just the
+// Validate() charset guard.
+func TestRun_NamePrefixLowercased(t *testing.T) {
+	env := startIntegrationServer(t, func(c *config.ServeCmd) { c.NamePrefix = "AB" })
+	ctx := context.Background()
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if !strings.HasPrefix(ident.Name, "ab") {
+		t.Fatalf("an uppercase --name-prefix must yield a lowercase name, got %q", ident.Name)
+	}
+	if strings.ContainsAny(ident.Name, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+		t.Fatalf("the enrolled name must be all-lowercase, got %q", ident.Name)
+	}
+}
+
+// TestIntegration_EnrollConnectRoundtrip exercises the full E2E path against the real assembled server +
+// Valkey + MinIO + Pebble: two-phase enrollment (Pebble issues the public cert), the phone binds, and a
+// frontend TLS session round-trips through the tunnel to the phone (which TLS-terminates with its
+// Pebble-issued cert). It then asserts the MinIO registry + connection-log objects.
+func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
+	env := startIntegrationServer(t)
+	ctx := context.Background()
+
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if ident.Name == "" || len(ident.PublicCertPEM) == 0 {
+		t.Fatalf("enrollment must yield a name + public cert: name=%q pubcert=%d", ident.Name, len(ident.PublicCertPEM))
+	}
+	fqdn := ident.Name + "." + itTunnelDomain
+
+	// The phone TLS-terminates each dial-back data stream with its Pebble-issued public cert and echoes.
+	phoneTLS := phoneServerTLS(t, ident)
+	backend := func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	}
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
+
+	// Once the phone binds, a frontend TLS roundtrip through the edge must succeed.
+	var lastErr error
+	if !waitBool(30*time.Second, func() bool {
+		lastErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return lastErr == nil
+	}) {
+		t.Fatalf("frontend TLS roundtrip never succeeded: %v", lastErr)
+	}
+
+	// MinIO: the name registry object carries the issued cert, and a connection-log object landed.
+	rec, err := env.st.GetName(ctx, ident.Name)
+	if err != nil || rec.CA == "" {
+		t.Errorf("name record missing/incomplete in MinIO: %+v %v", rec, err)
+	}
+
+	// Renewal rotates the certs: inject a server-minted challenge nonce, trigger a renewal via the real
+	// mTLS POST /api/v1/issue (the Renew path, since a cert already exists), and assert the identity cert changes.
+	oldIDCert := string(c.Identity().IdentityCertPEM)
+	nonceHex := randomHex(t)
+	if err := env.rdb.Set(ctx, "enroll-nonce:"+nonceHex, "1", 5*time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Renew(ctx, nonceHex); err != nil {
+		t.Fatalf("renewal via /api/v1/issue failed: %v", err)
+	}
+	if string(c.Identity().IdentityCertPEM) == oldIDCert || len(c.Identity().PublicCertPEM) == 0 {
+		t.Error("renewal must rotate the identity + public certs")
+	}
+	renewed := c.Identity()
+	idBlock, _ := pem.Decode(renewed.IdentityCertPEM)
+	pubBlock, _ := pem.Decode(renewed.PublicCertPEM)
+	if renewed.Name != ident.Name || idBlock == nil || pubBlock == nil {
+		t.Fatalf("the renewed identity must keep the name %q and carry PEM certs, got %q", ident.Name, renewed.Name)
+	}
+	idCert, err := x509.ParseCertificate(idBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubCert, err := x509.ParseCertificate(pubBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idCert.Subject.CommonName != ident.Name || len(pubCert.DNSNames) != 1 || pubCert.DNSNames[0] != fqdn {
+		t.Fatalf("the renewed certs must keep the name: identity CN %q, public SANs %v, want %q / %q", idCert.Subject.CommonName, pubCert.DNSNames, ident.Name, fqdn)
+	}
+	after, err := env.st.GetName(ctx, ident.Name)
+	if err != nil || !after.EnrolledAt.Equal(rec.EnrolledAt) {
+		t.Fatalf("the name record must survive the renewal with its enrolled_at: before %v, after %+v, err %v", rec.EnrolledAt, after, err)
+	}
+	reg, err := router.NewRegistry(env.rdb, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, connBefore, ok, err := reg.LookupRoute(ctx, ident.Name)
+	if err != nil || !ok {
+		t.Fatalf("the route must be bound before the reconnect: ok=%v err=%v", ok, err)
+	}
+	c2, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, renewed, backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run2Ctx, run2Cancel := context.WithCancel(ctx)
+	run2Done := make(chan struct{})
+	go func() {
+		defer close(run2Done)
+		if err := c2.Run(run2Ctx); err != nil && run2Ctx.Err() == nil {
+			testLogger().Warn("renewed tunnel client run failed", "err", err)
+		}
+	}()
+	if !waitBool(30*time.Second, func() bool {
+		_, cid, ok, err := reg.LookupRoute(ctx, ident.Name)
+		return err == nil && ok && cid != connBefore
+	}) {
+		t.Fatal("a client with the renewed identity must bind the same name")
+	}
+	run2Cancel()
+	<-run2Done
+	c2.Close()
+
+	if err := env.drain(); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	keyRe := regexp.MustCompile(`^tunnel-logs/\d{4}/\d{2}/\d{2}/\d{8}T\d{6}\.\d{9}Z-[0-9a-f]{16}\.jsonl$`)
+	keys := tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, "tunnel-logs/")
+	if len(keys) == 0 {
+		t.Fatal("no connection-log object written to MinIO")
+	}
+	events := 0
+	for _, k := range keys {
+		if !keyRe.MatchString(k) {
+			t.Errorf("connection-log key %q does not match the per-node layout", k)
+		}
+		for _, line := range bytes.Split(bytes.TrimSpace(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k)), []byte("\n")) {
+			var ev store.Event
+			if err := json.Unmarshal(line, &ev); err != nil {
+				t.Errorf("connection-log line in %s is not valid JSON: %q (%v)", k, line, err)
+				continue
+			}
+			if ev.Tunnel == ident.Name {
+				events++
+			}
+		}
+	}
+	if events < 2 {
+		t.Errorf("the objects must carry at least the phone start and end events of %s, got %d", ident.Name, events)
+	}
+	if tunneltest.S3LifecycleConfigured(t, env.s3URL, env.s3Access, env.s3Secret, itBucket) {
+		t.Error("tunneld must never write the bucket's lifecycle configuration (retention is an operator setup)")
+	}
+}
+
+func randomHex(t *testing.T) string {
+	t.Helper()
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", b[:])
+}
+
+// phoneServerTLS builds the phone's server-side TLS config from its Pebble-issued public cert + key.
+func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
+	t.Helper()
+	keyDER, err := x509.MarshalECPrivateKey(id.PublicCertKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(id.PublicCertPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("phone public keypair: %v", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+}
+
+// frontendRoundtrip dials the edge, does a full TLS handshake for fqdn (verifying against the Pebble
+// issuing roots), and asserts an echo.
+func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
+	raw, err := net.DialTimeout("tcp", edgeAddr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer tunneltest.CloseLogged(raw)
+	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
+	}
+	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err := conn.Handshake(); err != nil {
+		return fmt.Errorf("handshake: %w", err)
+	}
+	defer tunneltest.CloseLogged(conn)
+	msg := []byte("e2e-roundtrip-hello")
+	if _, err := conn.Write(msg); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		return fmt.Errorf("read echo: %w", err)
+	}
+	if string(buf) != string(msg) {
+		return fmt.Errorf("echo mismatch: got %q", buf)
+	}
+	return nil
+}
+
+func waitBool(d time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// rwcConn adapts an io.ReadWriteCloser (a dial-back data stream) to net.Conn so the phone can wrap it in
+// tls.Server. Addresses + deadlines are inert.
+type rwcConn struct{ rwc io.ReadWriteCloser }
+
+func (c *rwcConn) Read(b []byte) (int, error)       { return c.rwc.Read(b) }
+func (c *rwcConn) Write(b []byte) (int, error)      { return c.rwc.Write(b) }
+func (c *rwcConn) Close() error                     { return c.rwc.Close() }
+func (c *rwcConn) LocalAddr() net.Addr              { return tunnelAddr{} }
+func (c *rwcConn) RemoteAddr() net.Addr             { return tunnelAddr{} }
+func (c *rwcConn) SetDeadline(time.Time) error      { return nil }
+func (c *rwcConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *rwcConn) SetWriteDeadline(time.Time) error { return nil }
+
+type tunnelAddr struct{}
+
+func (tunnelAddr) Network() string { return "tunnel" }
+func (tunnelAddr) String() string  { return "tunnel" }
+
+func TestIntegration_ControlRefusesHTTP1(t *testing.T) {
+	env := startIntegrationServer(t)
+	ctx := context.Background()
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	var chain [][]byte
+	for rest := ident.IdentityCertPEM; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		chain = append(chain, block.Bytes)
+	}
+	if len(chain) == 0 {
+		t.Fatal("the enrolled identity carries no certificate")
+	}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, env.edgeAddr)
+		},
+		TLSClientConfig: &tls.Config{ServerName: itControlHost, RootCAs: env.pebble.IssuingRoots, MinVersion: tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1"},
+			Certificates: []tls.Certificate{{Certificate: chain, PrivateKey: ident.IdentityKey}}},
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
+	}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	pr, pw := io.Pipe()
+	defer tunneltest.CloseLogged(pw)
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, "https://"+itControlHost+"/api/v1/control", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("an HTTP/1.1 control request must be answered while its body stays open: %v", err)
+	}
+	tunneltest.CloseLogged(resp.Body)
+	if resp.ProtoMajor != 1 || resp.StatusCode != http.StatusHTTPVersionNotSupported {
+		t.Fatalf("HTTP/1.1 /api/v1/control = HTTP/%d %d, want HTTP/1 505", resp.ProtoMajor, resp.StatusCode)
+	}
+
+	ictx, icancel := context.WithTimeout(ctx, 10*time.Second)
+	defer icancel()
+	ireq, err := http.NewRequestWithContext(ictx, http.MethodPost, "https://"+itControlHost+"/api/v1/issue", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	iresp, err := hc.Do(ireq)
+	if err != nil {
+		t.Fatalf("POST /api/v1/issue over HTTP/1.1: %v", err)
+	}
+	defer tunneltest.CloseLogged(iresp.Body)
+	var ibody struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(iresp.Body).Decode(&ibody); err != nil {
+		t.Fatalf("the /api/v1/issue answer must be its JSON error: %v", err)
+	}
+	if iresp.ProtoMajor != 1 || iresp.StatusCode == http.StatusHTTPVersionNotSupported || ibody.Reason == "" {
+		t.Fatalf("HTTP/1.1 /api/v1/issue = HTTP/%d %d %q, want an HTTP/1 JSON error answer, not 505", iresp.ProtoMajor, iresp.StatusCode, ibody.Reason)
+	}
+}
+
+// TestIntegration_Registry exercises the durable name registry against REAL MinIO with the real enroll
+// service (no full server / ACME needed): rejected-enrollment evidence, and the concurrent
+// name-claim race (exactly one claimant wins a forced collision; the loser redraws to a distinct name).
+func TestIntegration_Registry(t *testing.T) {
+	redisURL := tunneltest.StartValkey(t)
+	s3URL, access, secret := tunneltest.StartMinIO(t)
+	const bucket = "tunneld-registry"
+	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, bucket)
+	st := newS3Store(t, s3URL, access, secret, bucket)
+
+	t.Run("rejected-enrollment-evidence", func(t *testing.T) {
+		rdb := newRedis(t, redisURL)
+		svc := enroll.NewService(enroll.Config{
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
+			Verifier: rejectVerifier{}, Issuer: stubIssuer{},
+			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
+		})
+		nonce, err := svc.Nonce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, chainPEM := dummyAttChain(t)
+		_, ee := svc.Enroll(context.Background(), "9.9.9.9", enroll.Request{
+			Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: chain, IdentityCSR: identityCSR(t),
+		})
+		if ee == nil || ee.Reason != "unauthorized" {
+			t.Fatalf("attestation-required enrollment must be rejected: %v", ee)
+		}
+		if !waitBool(10*time.Second, func() bool {
+			return len(tunneltest.S3ListKeys(t, s3URL, access, secret, bucket, "rejected-enroll/")) > 0
+		}) {
+			t.Error("rejected-enrollment evidence object not written to MinIO")
+		}
+	})
+
+	t.Run("concurrent-claim-one-winner", func(t *testing.T) {
+		const fixed = "collide23456"
+		rdb := newRedis(t, redisURL)
+		svc := enroll.NewService(enroll.Config{
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
+			Verifier: stubVerifier{}, Issuer: stubIssuer{}, AttestOptional: true,
+			TunnelDomain: itTunnelDomain, NameLength: 12, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000,
+			ClaimTimeout: 3 * time.Second, ClaimSettle: 5 * time.Second,
+		})
+		var mu sync.Mutex
+		calls := 0
+		// The first candidate of each racer is the SAME name (forced collision); a loser redraws random.
+		svc.SetNameGen(func() (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls++
+			if calls <= 2 {
+				return fixed, nil
+			}
+			return ca.GenerateName("", 12)
+		})
+
+		type result struct {
+			name string
+			err  *enroll.Error
+		}
+		csrs := []*x509.CertificateRequest{identityCSR(t), identityCSR(t)}
+		out := make(chan result, 2)
+		for i := 0; i < 2; i++ {
+			csr := csrs[i]
+			go func() {
+				nonce, nerr := svc.Nonce(context.Background())
+				if nerr != nil {
+					testLogger().Warn("nonce mint failed", "err", nerr)
+					out <- result{err: &enroll.Error{Reason: "nonce"}}
+					return
+				}
+				r, ee := svc.Enroll(context.Background(), "3.3.3.3", enroll.Request{Nonce: nonce, IdentityCSR: csr})
+				out <- result{name: r.Name, err: ee}
+			}()
+		}
+		a, b := <-out, <-out
+		if a.err != nil || b.err != nil {
+			t.Fatalf("both enrollments should succeed: %v / %v", a.err, b.err)
+		}
+		if a.name == b.name {
+			t.Fatalf("racers must end with distinct names, both got %q", a.name)
+		}
+		fixedWinners := 0
+		for _, n := range []string{a.name, b.name} {
+			if n == fixed {
+				fixedWinners++
+			}
+			if _, err := st.GetName(context.Background(), n); err != nil {
+				t.Errorf("claimed name %q missing its registry object: %v", n, err)
+			}
+		}
+		if fixedWinners != 1 {
+			t.Errorf("exactly one racer must win the collided name %q, got %d", fixed, fixedWinners)
+		}
+	})
+}
+
+func newRedis(t *testing.T, url string) *redis.Client {
+	t.Helper()
+	opts, err := redis.ParseURL(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := redis.NewClient(opts)
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, c) })
+	return c
+}
+
+func newS3Store(t *testing.T, url, access, secret, bucket string) *store.S3Store {
+	t.Helper()
+	st, err := store.NewS3Store(context.Background(), store.S3Config{
+		Endpoint: url, Region: "us-east-1", Bucket: bucket, AccessKey: access, SecretKey: secret, ForcePathStyle: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func loadCA(t *testing.T) *ca.CA {
+	t.Helper()
+	certPath, keyPath := writeCA(t)
+	c, err := ca.Load(certPath, keyPath, 4380*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func identityCSR(t *testing.T) *x509.CertificateRequest {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "phone"}}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csr
+}
+
+func dummyAttChain(t *testing.T) ([]*x509.Certificate, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "att"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []*x509.Certificate{c}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+type rejectVerifier struct{}
+
+func (rejectVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (attest.Result, error) {
+	return attest.Result{}, attest.ErrChainUntrusted
+}
+
+type stubVerifier struct{}
+
+func (stubVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (attest.Result, error) {
+	return attest.Result{}, nil
+}
+
+type stubIssuer struct{}
+
+func (stubIssuer) Obtain(context.Context, *x509.CertificateRequest, string) ([]byte, store.CertInfo, error) {
+	return []byte("cert"), store.CertInfo{CA: "letsencrypt"}, nil
+}
+
+func (stubIssuer) Renew(context.Context, *x509.CertificateRequest, string, store.CertInfo) ([]byte, store.CertInfo, error) {
+	return []byte("cert"), store.CertInfo{CA: "letsencrypt"}, nil
+}

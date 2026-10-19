@@ -1,0 +1,189 @@
+package store_test
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+)
+
+func TestNameRecordJSONRoundTrip(t *testing.T) {
+	in := store.NameRecord{
+		Schema:        1,
+		EnrolledAt:    time.Unix(1000, 0).UTC(),
+		LastRenewedAt: time.Unix(2000, 0).UTC(),
+		IdentityKeyFP: "sha256:abc",
+	}
+	in.SetCert(store.CertInfo{
+		CA: "letsencrypt", Serial: "01", NotBefore: time.Unix(1000, 0).UTC(),
+		NotAfter: time.Unix(9000, 0).UTC(), ARIID: "ari-1",
+	})
+	in.Device = store.DeviceInfo{OSVersion: 160000, OSPatch: 202607, SecurityLevel: "tee"}
+
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ca is TOP-LEVEL (a sibling of cert), and no cert-PEM/key/chain fields exist.
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["ca"]; !ok {
+		t.Error("ca must be a top-level field")
+	}
+	// The schema keeps the CA ONLY at the top level — the cert sub-object must not repeat it.
+	if certObj, ok := raw["cert"].(map[string]any); !ok {
+		t.Error("cert sub-object missing")
+	} else if _, dup := certObj["ca"]; dup {
+		t.Error("ca must NOT appear inside the cert sub-object")
+	}
+	dev, _ := raw["device"].(map[string]any)
+	if dev["os_version"] == nil {
+		t.Error("device.os_version must be present")
+	}
+	// The record stores only an identity-key FINGERPRINT — never PEM material, private keys, or chains.
+	for _, forbidden := range []string{"-----begin", "private_key", "cert_pem", "\"chain\"", "\"pem\""} {
+		if strings.Contains(strings.ToLower(string(b)), forbidden) {
+			t.Errorf("record JSON must not contain %q material: %s", forbidden, b)
+		}
+	}
+
+	var out store.NameRecord
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.CA != "letsencrypt" || out.Cert.NotBefore.IsZero() || out.IdentityKeyFP != in.IdentityKeyFP {
+		t.Errorf("round-trip mismatch: %+v", out)
+	}
+}
+
+func TestEventJSONOmitEmpty(t *testing.T) {
+	start := store.Event{Schema: 1, Event: "start", Conn: "aabbccdd", Type: "phone", Tunnel: "t"}
+	b, err := json.Marshal(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "ts_end") || strings.Contains(string(b), "bytes_in") ||
+		strings.Contains(string(b), "sni") {
+		t.Errorf("start/phone event leaked end-only or public-only fields: %s", b)
+	}
+	pub := store.Event{Schema: 1, Event: "end", Type: "public", SNI: "x.example.test",
+		TSEnd: time.Unix(1, 0), BytesIn: 5}
+	b, err = json.Marshal(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "sni") || !strings.Contains(string(b), "ts_end") {
+		t.Errorf("public end event should carry sni + ts_end: %s", b)
+	}
+}
+
+var connIDRe = regexp.MustCompile(`^[0-9a-f]{8}$`)
+
+func TestNewConnID_Format(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 8; i++ {
+		id, err := store.NewConnID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !connIDRe.MatchString(id) {
+			t.Errorf("conn id %q is not 8 lowercase hex", id)
+		}
+		if _, err := hex.DecodeString(id); err != nil {
+			t.Errorf("conn id %q is not hex-parseable: %v", id, err)
+		}
+		seen[id] = true
+	}
+	// Not a constant: a handful of mints must not all collapse to one value. (No large-sample
+	// distinctness assert — collisions are handled by design via re-roll.)
+	if len(seen) == 1 {
+		t.Error("NewConnID returned a constant across several mints")
+	}
+}
+
+func TestRejectedKeyLayout(t *testing.T) {
+	ev := store.RejectedEnrollment{TS: time.Date(2026, 8, 17, 1, 2, 3, 4, time.UTC)}
+	key := store.RejectedKey(ev)
+	if !strings.HasPrefix(key, "rejected-enroll/2026/08/17/") || !strings.HasSuffix(key, ".json") {
+		t.Errorf("RejectedKey layout wrong: %q", key)
+	}
+}
+
+func TestFakeGetPutDeleteRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := tunneltest.NewStore()
+	if _, err := s.GetName(ctx, "x"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("absent name should be ErrNotFound, got %v", err)
+	}
+	rec := store.NameRecord{Schema: 1, IdentityKeyFP: "n1"}
+	if err := s.PutName(ctx, "x", rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetName(ctx, "x")
+	if err != nil || got.IdentityKeyFP != "n1" {
+		t.Fatalf("get after put: %+v %v", got, err)
+	}
+	if err := s.DeleteName(ctx, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetName(ctx, "x"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("after delete should be ErrNotFound, got %v", err)
+	}
+}
+
+func TestFakeFailAndZombiePut(t *testing.T) {
+	ctx := context.Background()
+	s := tunneltest.NewStore()
+
+	s.FailNextPut = errors.New("clean fail")
+	if err := s.PutName(ctx, "a", store.NameRecord{}); err == nil {
+		t.Error("FailNextPut should error")
+	}
+	if _, err := s.GetName(ctx, "a"); !errors.Is(err, store.ErrNotFound) {
+		t.Error("clean fail must not write")
+	}
+
+	s.ZombieNextPut = errors.New("timeout but landed")
+	if err := s.PutName(ctx, "b", store.NameRecord{IdentityKeyFP: "z"}); err == nil {
+		t.Error("ZombieNextPut should error")
+	}
+	got, err := s.GetName(ctx, "b")
+	if err != nil || got.IdentityKeyFP != "z" {
+		t.Errorf("zombie put must land the record despite the error: %+v %v", got, err)
+	}
+}
+
+func TestFakePutRejectedEnrollment(t *testing.T) {
+	ctx := context.Background()
+	s := tunneltest.NewStore()
+	if err := s.PutRejectedEnrollment(ctx, store.RejectedEnrollment{Reason: "attest-signer"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Rejected) != 1 || s.Rejected[0].Reason != "attest-signer" {
+		t.Errorf("evidence not captured: %+v", s.Rejected)
+	}
+}
+
+// TestNewConnIDFallback_NonEmpty verifies MustConnID never returns an EMPTY id. The rand-failure fallback
+// is a fixed non-empty id.
+func TestNewConnIDFallback_NonEmpty(t *testing.T) {
+	id := store.MustConnID()
+	if id == "" {
+		t.Fatal("MustConnID must never return an empty id")
+	}
+	if len(id) != 8 {
+		t.Errorf("id = %q, want 8 lowercase hex chars", id)
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		t.Errorf("id %q must be hex: %v", id, err)
+	}
+}

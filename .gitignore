@@ -1,0 +1,38 @@
+/dist/
+/bin/
+/THIRD_PARTY_LICENSES.txt
+
+# Operator secrets & generated material — MUST never be committed.
+/deploy/ca/
+/deploy/.env
+/deploy/tunneld.env
+/deploy/logs/
+/deploy/acme/
+/deploy/conn-logs/
+/.deploy/
+/deploy/banfiles/
+/deploy/attest/
+
+# attest-probe Gradle build outputs & machine-specific SDK pointer (the built APK fixture under
+# fixtures/attest-probe/ IS committed — only these are ignored).
+/support/attest-probe/.gradle/
+/support/attest-probe/build/
+/support/attest-probe/app/build/
+/support/attest-probe/local.properties
+/support/attest-probe/.idea/
+/support/attest-probe/.kotlin/
+
+# tunnel-app Gradle build outputs & machine-specific SDK pointer (the built APK fixture under
+# fixtures/tunnel-app/ IS committed — only these are ignored).
+/support/tunnel-app/.gradle/
+/support/tunnel-app/build/
+/support/tunnel-app/app/build/
+/support/tunnel-app/local.properties
+/support/tunnel-app/.idea/
+/support/tunnel-app/.kotlin/
+/support/soak-app/.gradle/
+/support/soak-app/build/
+/support/soak-app/app/build/
+/support/soak-app/local.properties
+/support/soak-app/.idea/
+/support/soak-app/.kotlin/

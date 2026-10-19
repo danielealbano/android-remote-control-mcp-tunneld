@@ -1,0 +1,309 @@
+package ca
+
+import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+const testValidity = 10 * 365 * 24 * time.Hour
+
+func genCAMaterial(t *testing.T, isCA bool) ([]byte, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "tunneld-ca-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(testValidity),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
+		MaxPathLenZero:        isCA,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der, key
+}
+
+func writeCAFiles(t *testing.T, certDER []byte, key *ecdsa.PrivateKey) (certPath, keyPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	certPath = filepath.Join(dir, "ca.pem")
+	keyPath = filepath.Join(dir, "ca-key.pem")
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+func newTestCA(t *testing.T) *CA {
+	t.Helper()
+	der, key := genCAMaterial(t, true)
+	cp, kp := writeCAFiles(t, der, key)
+	ca, err := Load(cp, kp, testValidity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca
+}
+
+func p256Key(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// csrFor builds a parsed CSR (with an attacker-controlled subject/SAN, to prove the CA discards them).
+func csrFor(t *testing.T, key crypto.Signer) *x509.CertificateRequest {
+	t.Helper()
+	der := csrDER(t, key)
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return csr
+}
+
+func csrDER(t *testing.T, key crypto.Signer) []byte {
+	t.Helper()
+	tmpl := &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "attacker-controlled-cn"},
+		DNSNames: []string{"evil.example.test"},
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+func TestLoadRejectsBadCAMaterial(t *testing.T) {
+	if _, err := Load("/nope/ca.pem", "/nope/ca-key.pem", testValidity); err == nil {
+		t.Error("missing files must error")
+	}
+	dir := t.TempDir()
+	badCert := filepath.Join(dir, "bad.pem")
+	if err := os.WriteFile(badCert, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, key := genCAMaterial(t, true)
+	_, keyPath := writeCAFiles(t, mustDER(t, key, true), key)
+	if _, err := Load(badCert, keyPath, testValidity); err == nil {
+		t.Error("corrupt cert must error")
+	}
+	der, k := genCAMaterial(t, false)
+	cp, kp := writeCAFiles(t, der, k)
+	if _, err := Load(cp, kp, testValidity); err == nil {
+		t.Error("non-CA cert must error")
+	}
+}
+
+func mustDER(t *testing.T, key *ecdsa.PrivateKey, isCA bool) []byte {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "x"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(testValidity),
+		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: isCA,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return der
+}
+
+func TestSignIdentityRoundTripsAndChainsToCA(t *testing.T) {
+	ca := newTestCA(t)
+	leafPEM, err := ca.SignIdentity(csrFor(t, p256Key(t)), "abc2345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(leafPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.Subject.CommonName != "abc2345678" {
+		t.Errorf("CN = %q, want abc2345678", cert.Subject.CommonName)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: ca.Pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		t.Errorf("identity cert must chain to the CA: %v", err)
+	}
+}
+
+func TestSignIdentityRejectsBadCSRSignature(t *testing.T) {
+	ca := newTestCA(t)
+	der := csrDER(t, p256Key(t))
+	der[len(der)-1] ^= 0xff // tamper the signature tail
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		t.Fatal(err) // structurally still parses; the signature check is what must fail
+	}
+	if _, err := ca.SignIdentity(csr, "name123456"); err == nil {
+		t.Error("tampered CSR must be rejected")
+	}
+}
+
+func TestSignIdentityIgnoresCSRSubject(t *testing.T) {
+	ca := newTestCA(t)
+	leafPEM, err := ca.SignIdentity(csrFor(t, p256Key(t)), "servername")
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(leafPEM)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cert.Subject.CommonName != "servername" {
+		t.Errorf("CN = %q, want servername (CSR CN discarded)", cert.Subject.CommonName)
+	}
+	if len(cert.DNSNames) != 0 {
+		t.Errorf("SANs = %v, want none (CSR SAN discarded)", cert.DNSNames)
+	}
+}
+
+func TestSignIdentityRejectsNonP256Key(t *testing.T) {
+	ca := newTestCA(t)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.SignIdentity(csrFor(t, rsaKey), "n123456789"); err != ErrUnsupportedKeyType {
+		t.Errorf("RSA CSR: err = %v, want ErrUnsupportedKeyType", err)
+	}
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.SignIdentity(csrFor(t, p384), "n123456789"); err != ErrUnsupportedKeyType {
+		t.Errorf("P-384 CSR: err = %v, want ErrUnsupportedKeyType", err)
+	}
+}
+
+// constReader fills every read with a constant byte, so generateName produces the SAME name each
+// attempt — used to force reserved-label collisions and the attempt-exhaustion path deterministically.
+type constReader byte
+
+func (c constReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(c)
+	}
+	return len(p), nil
+}
+
+func TestGenerateName_ReservesEnrollLabel(t *testing.T) {
+	produced, err := generateName("", 10, constReader(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generateName("", 10, constReader(0), produced); err == nil {
+		t.Error("the extra-reserved (enroll host) label must never be produced")
+	}
+}
+
+func TestGenerateName_ReservedSkipAndExhaustion(t *testing.T) {
+	produced, err := generateName("", 10, constReader(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generateName("", 10, constReader(0), produced); err == nil {
+		t.Fatal("when the only producible name is reserved, all attempts collide → exhaustion error")
+	}
+	if _, err := generateName("", 10, constReader(0)); err != nil {
+		t.Errorf("a non-reserved deterministic name must succeed: %v", err)
+	}
+}
+
+func TestGenerateNameShapeAndReservedSkip(t *testing.T) {
+	re := regexp.MustCompile(`^[a-z2-7]{10}$`)
+	for range 200 {
+		name, err := GenerateName("", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !re.MatchString(name) {
+			t.Fatalf("name %q not 10 chars of [a-z2-7]", name)
+		}
+		if _, bad := reserved[name]; bad {
+			t.Fatalf("generated a reserved name %q", name)
+		}
+	}
+}
+
+// TestSignMeshRoleMarker covers the plan's "SignMesh role marker" row: SAN = nodeID, the mesh-role OU
+// marker, and the requested TTL validity.
+func TestSignMeshRoleMarker(t *testing.T) {
+	c := newTestCA(t)
+	certPEM, keyPEM, err := c.SignMesh("node-xyz", 48*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keyPEM) == 0 {
+		t.Fatal("mesh key PEM must be returned")
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("cert PEM malformed")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !HasMeshRole(cert) {
+		t.Fatal("mesh cert must carry the mesh-role OU marker")
+	}
+	found := slices.Contains(cert.DNSNames, "node-xyz")
+	if !found {
+		t.Fatalf("mesh cert SAN must carry the node id, got %v", cert.DNSNames)
+	}
+	if got := cert.NotAfter.Sub(cert.NotBefore); got < 47*time.Hour || got > 50*time.Hour {
+		t.Fatalf("mesh cert validity must be ~the requested TTL, got %s", got)
+	}
+}
+
+func TestKeyFingerprint(t *testing.T) {
+	fp, err := KeyFingerprint(&p256Key(t).PublicKey)
+	if err != nil || !strings.HasPrefix(fp, "sha256:") || len(fp) != len("sha256:")+64 {
+		t.Fatalf("KeyFingerprint(P-256) = (%q, %v), want a sha256: digest", fp, err)
+	}
+	if fp, err := KeyFingerprint(struct{}{}); err == nil || fp != "" {
+		t.Fatalf("KeyFingerprint(unsupported) = (%q, %v), want an error", fp, err)
+	}
+}
+
+func TestParsePrivateKeyPEM_ReportsBothEncodings(t *testing.T) {
+	_, err := parsePrivateKeyPEM(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("garbage")}))
+	if err == nil || !strings.Contains(err.Error(), "parse as SEC1") || !strings.Contains(err.Error(), "parse as PKCS#8") {
+		t.Fatalf("an unparseable key must report both decode attempts, got %v", err)
+	}
+}
