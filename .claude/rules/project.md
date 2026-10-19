@@ -1,7 +1,7 @@
 # tunneld — Self-Hosted Tunnel Server — Project Rules
 
 `tunneld` is a self-hosted, abuse-resistant **end-to-end-encrypted tunnel server** (Go) that gives the
-Android MCP app (`android-remote-control-mcp`) a stable public hostname. External clients establish TLS
+Android Remote Control MCP app (`android-remote-control-mcp`) a stable public hostname. External clients establish TLS
 **directly with the phone**, which holds a publicly-trusted (WebPKI) certificate for
 `<name>.<tunnel-domain>`. tunneld is the internet edge on **raw TCP `:443`** (there is NO reverse proxy):
 it peeks each ClientHello (SNI/ALPN/version/JA4), routes on SNI, and splices the **opaque encrypted byte
