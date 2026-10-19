@@ -170,7 +170,8 @@ The Go version is pinned in `go.mod`; the `Makefile` is the command surface:
 - `make test-scripts`, `make mermaid-check` and `make third-party-licenses` cover the shell scripts, the Mermaid
   charts and the third-party license bundle.
 
-The full list is in [`docs/PROJECT.md`](docs/PROJECT.md) §7.
+The full list is in [`docs/PROJECT.md`](docs/PROJECT.md) §7, and the contribution guidelines are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
