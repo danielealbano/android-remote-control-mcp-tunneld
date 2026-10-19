@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for your interest in contributing to the Android Remote Control MCP tunnel server (`tunneld`)!
+Thank you for your interest in contributing to Android Remote Control MCP Tunnel!
 
 ## Getting Started
 
@@ -98,6 +98,6 @@ for the system map and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the wire proto
 
 ## License
 
-tunneld is licensed under the GNU Affero General Public License, version 3 or (at your option) any later version
+Android Remote Control MCP Tunnel is licensed under the GNU Affero General Public License, version 3 or (at your option) any later version
 ([`LICENSE.md`](LICENSE.md)). Under GitHub's Terms of Service, contributions to this repository are licensed under
 the same terms.
