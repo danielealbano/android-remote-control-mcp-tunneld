@@ -1,7 +1,7 @@
 # tunneld — Project Reference
 
 `tunneld` is a self-hosted, abuse-resistant **end-to-end-encrypted tunnel server** that gives the
-Android MCP app (`android-remote-control-mcp`) a stable public hostname. The phone needs no inbound
+Android Remote Control MCP app (`android-remote-control-mcp`) a stable public hostname. The phone needs no inbound
 port, no static IP, and no paid tunnel service. External clients (Claude.ai, `mcp-remote`) establish
 TLS **directly with the phone**, which holds a publicly-trusted (WebPKI) certificate for its assigned
 hostname `<name>.<tunnel-domain>`. tunneld is the internet edge on raw TCP `:443`: it peeks each
@@ -27,7 +27,7 @@ rejected-enrollment evidence).
 
 ```mermaid
 flowchart LR
-  phone["Android phone (MCP app, holds WebPKI cert)"]
+  phone["Android phone (Android Remote Control MCP app, holds WebPKI cert)"]
   client["MCP client (Claude.ai / mcp-remote)"]
   ta["tunneld A (raw :443 SNI edge)"]
   tb["tunneld B (owns the phone)"]

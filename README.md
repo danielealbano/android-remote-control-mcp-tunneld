@@ -1,6 +1,7 @@
-# tunneld — self-hosted end-to-end-encrypted tunnel
+# Android Remote Control MCP — tunnel server (`tunneld`)
 
-`tunneld` gives the Android MCP app a stable public hostname. The phone terminates TLS itself with a
+`tunneld` is the self-hosted end-to-end-encrypted tunnel server that gives the
+[Android Remote Control MCP](https://github.com/danielealbano/android-remote-control-mcp) app a stable public hostname. The phone terminates TLS itself with a
 publicly-trusted (WebPKI) certificate for `<name>.<tunnel-domain>`, earned by **attested enrollment**;
 tunneld is the internet edge on raw TCP `:443`, peeks each ClientHello, routes on SNI, and splices the
 **opaque encrypted byte stream** to a connection the phone dials back to the node where the client
@@ -14,7 +15,7 @@ See [`docs/PROJECT.md`](docs/PROJECT.md) for the operational reference,
 
 ```mermaid
 flowchart LR
-  phone["Android phone (MCP app, holds WebPKI cert)"]
+  phone["Android phone (Android Remote Control MCP app, holds WebPKI cert)"]
   client["MCP client (Claude.ai / mcp-remote)"]
   ta["tunneld A (raw :443 SNI edge)"]
   tb["tunneld B (owns the phone)"]
@@ -27,6 +28,8 @@ flowchart LR
   tb -. "OPEN (control)" .-> phone
   phone -- "dial-back connection" --> ta
   ta <--> valkey
+  tb <--> valkey
+  ta <--> s3
   tb <--> s3
 ```
 
@@ -52,8 +55,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 3. **Configure**:
    ```sh
-   cp deploy/.env.example deploy/.env             # domains, S3 creds, DIALBACK_ADVERTISE (this host's public IP:443), DEPLOY_UID (= id -u), Grafana pw
-   cp deploy/tunneld.env.example deploy/tunneld.env # CA/S3/attest/ACME + the lego DNS-provider secret
+   cp deploy/.env.example deploy/.env               # DEPLOY_UID (= id -u), domains, DIALBACK_ADVERTISE (this host's public IP:443), S3 credentials + bucket
+   cp deploy/tunneld.env.example deploy/tunneld.env # CA, conn-log dir, signer allowlist, ACME (+ the lego DNS-provider secret), ban file, DB-IP CSV, log sinks
    ```
 4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host. tunneld
    issues the phone's public cert (and its own reserved-host certs) via ACME, validated per CA
@@ -69,8 +72,10 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ids in `TUNNELD_ACME_GTS_ACCOUNT`; tunneld only looks the accounts up and never creates them. ZeroSSL is used
    only when both `TUNNELD_ACME_EAB_ZEROSSL_*` values are set; Let's Encrypt unless `TUNNELD_ACME_DIR_LE` is empty.
 5. **S3**: for the local MinIO stand-in (the PGSTY Silo build — the official MinIO
-   images are no longer published) the compose creates the bucket automatically. For a real
-   provider, set the `S3_*` / `TUNNELD_S3_*` values and **run a pre-go-live read-after-write probe**
+   images are no longer published) the compose creates the bucket automatically; `S3_ACCESS_KEY`,
+   `S3_SECRET_KEY` and `S3_BUCKET` in `.env` feed both MinIO and tunneld. For a real provider, point
+   `TUNNELD_S3_ENDPOINT` in `deploy/docker-compose.yml` (set to the local MinIO, `http://minio:9000`) at its
+   endpoint, put its credentials and bucket in those three `.env` values, and **run a pre-go-live read-after-write probe**
    (PUT → GET → overwrite-PUT → GET returns the newest body; a GET of a missing key returns 404
    `NoSuchKey`) — the name-claim protocol relies on it. Also set the two retention rules on that bucket once
    (`tunnel-logs/` 90 days, `rejected-enroll/` 30 days); tunneld's credential needs only read, write and
@@ -82,9 +87,11 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
 (ACME HTTP-01 and, with `--dialback-https=false`, plain dial-backs) are public.
 
 **Prebuilt image (optional):** the Compose stack builds tunneld locally via `build:`. Multi-arch images
-(linux/amd64 + linux/arm64) are published to `ghcr.io/danielealbano/android-remote-control-mcp-tunneld` on `v*` tags — the image
-tag is the version **without** the leading `v` (git tag `v1.0.0` → `ghcr.io/danielealbano/android-remote-control-mcp-tunneld:1.0.0`).
-Swap the `build:` for `image: ghcr.io/danielealbano/android-remote-control-mcp-tunneld:1.0.0` to pull instead of build.
+(linux/amd64 + linux/arm64) are published to `ghcr.io/danielealbano/android-remote-control-mcp-tunneld` on `v*` tags
+([releases](https://github.com/danielealbano/android-remote-control-mcp-tunneld/releases)) — the image tag is the version
+**without** the leading `v` (git tag `v0.6.0` → `ghcr.io/danielealbano/android-remote-control-mcp-tunneld:0.6.0`), and
+`latest` is the newest release. Swap the `build:` for
+`image: ghcr.io/danielealbano/android-remote-control-mcp-tunneld:0.6.0` to pull instead of build.
 
 ## Identity + authentication
 
@@ -149,6 +156,21 @@ closes the phone control connection — ephemeral, the phone reconnects); reissu
 terminate is sent to every node over the mesh.
 `deploy/prometheus/` (scrape config + alert rules) and `deploy/grafana/provisioning/` (datasource +
 dashboards) are the configs for an operator-run Prometheus + Grafana; the compose stack does not run them.
+
+## Development
+
+The Go version is pinned in `go.mod`; the `Makefile` is the command surface:
+
+- `make build` builds `bin/tunneld`; `make lint` runs golangci-lint for every build-tag set, shellcheck and the
+  compose config check.
+- `make test-unit` runs the unit tests with the race detector.
+- `make test-integration` and `make test-e2e` run the real server against Valkey, MinIO and a test ACME CA in
+  containers, so they need Docker; the e2e device tests skip unless one Android device is attached over adb.
+- `make test-staging` validates against Let's Encrypt and GTS staging and skips without `TUNNELD_STAGING_SSH_KEY`.
+- `make test-scripts`, `make mermaid-check` and `make third-party-licenses` cover the shell scripts, the Mermaid
+  charts and the third-party license bundle.
+
+The full list is in [`docs/PROJECT.md`](docs/PROJECT.md) §7.
 
 ## License
 
