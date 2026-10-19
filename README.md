@@ -1,6 +1,6 @@
-# Android Remote Control MCP — tunnel server (`tunneld`)
+# Android Remote Control MCP Tunnel
 
-`tunneld` is the self-hosted end-to-end-encrypted tunnel server that gives the
+Android Remote Control MCP Tunnel is the self-hosted end-to-end-encrypted tunnel server that gives the
 [Android Remote Control MCP](https://github.com/danielealbano/android-remote-control-mcp) app a stable public hostname. The phone terminates TLS itself with a
 publicly-trusted (WebPKI) certificate for `<name>.<tunnel-domain>`, earned by **attested enrollment**;
 tunneld is the internet edge on raw TCP `:443`, peeks each ClientHello, routes on SNI, and splices the
@@ -170,13 +170,14 @@ The Go version is pinned in `go.mod`; the `Makefile` is the command surface:
 - `make test-scripts`, `make mermaid-check` and `make third-party-licenses` cover the shell scripts, the Mermaid
   charts and the third-party license bundle.
 
-The full list is in [`docs/PROJECT.md`](docs/PROJECT.md) §7.
+The full list is in [`docs/PROJECT.md`](docs/PROJECT.md) §7, and the contribution guidelines are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
 Copyright 2026 Daniele Salvatore Albano
 
-tunneld is free software: you can redistribute it and/or modify it under the terms of the GNU Affero
+Android Remote Control MCP Tunnel is free software: you can redistribute it and/or modify it under the terms of the GNU Affero
 General Public License as published by the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version. It is distributed WITHOUT ANY WARRANTY; without even the implied
 warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [`LICENSE.md`](LICENSE.md) for the
