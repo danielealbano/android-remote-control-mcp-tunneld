@@ -1,6 +1,6 @@
 module github.com/danielealbano/android-remote-control-mcp-tunneld
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/alecthomas/kong v1.16.1
@@ -16,7 +16,7 @@ require (
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.24.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
