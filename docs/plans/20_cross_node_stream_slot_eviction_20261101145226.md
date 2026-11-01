@@ -316,24 +316,24 @@ Tests:
 
 ## User Story 2: Free a stream slot on another node when the entry node has none
 
-- [ ] **US2** — On a full cap with nothing to evict locally, evict the cluster's most idle evictable stream
+- [x] **US2** — On a full cap with nothing to evict locally, evict the cluster's most idle evictable stream
       over the mesh and retry.
 
 Why: the issue #209 failure mode — every slot idle on other nodes, the new connection refused.
 
 ### Acceptance Criteria
 
-- [ ] With every slot of a tunnel held on other nodes and no evictable stream on the entry node, a new public
+- [x] With every slot of a tunnel held on other nodes and no evictable stream on the entry node, a new public
       connection is admitted after the most idle evictable stream among the other nodes is evicted
       (`close_reason=evicted` on that node).
-- [ ] The local eviction still runs first; the mesh is used only when it found nothing; an admission under the
+- [x] The local eviction still runs first; the mesh is used only when it found nothing; an admission under the
       cap or a fail-open acquire error never touches the mesh.
-- [ ] The `slot-candidate` query reaches every other live node in parallel.
-- [ ] When no other node has an evictable stream the connection is refused with `stream-cap` exactly as today; a
+- [x] The `slot-candidate` query reaches every other live node in parallel.
+- [x] When no other node has an evictable stream the connection is refused with `stream-cap` exactly as today; a
       `free-slot` that fails never leads to a second eviction; every mesh call is bounded (the query round 1 s,
       each `free-slot` 1 s); a node runs at most 32 remote-slot attempts at once and refuses beyond that without
       touching the mesh.
-- [ ] Pending (dial-back waiting) slots are never evicted.
+- [x] Pending (dial-back waiting) slots are never evicted.
 
 ### [x] Task 2.1: Server-side remote slot freeing
 
@@ -582,13 +582,13 @@ members via `te.e.lim.AcquireStream` = "held on another node", `te.rtr.ok = true
 - [x] `edge.New` has no other caller than `server.Run` and the harness (both updated).
 - [x] Every test of the table above is written.
 
-### [ ] Task 2.3: End-to-end regression
+### [x] Task 2.3: End-to-end regression
 
-- [ ] **Action 2.3.1** — `e2e/e2e_test.go` (modify, test code): move the `isEvicted` closure of `TestE2E_Eviction`
+- [x] **Action 2.3.1** — `e2e/e2e_test.go` (modify, test code): move the `isEvicted` closure of `TestE2E_Eviction`
       into a file-level helper `evictedByEdge(t *testing.T, c *tls.Conn) bool` whose first statement is
       `t.Helper()`; the closure's body moves unchanged with its trailing comments; the block comment above the
       closure stays in `TestE2E_Eviction`, which keeps its assertions through `evictedByEdge`.
-- [ ] **Action 2.3.2** — `e2e/e2e_test.go` (modify, test code): add `TestE2E_CrossNodeEviction` (below).
+- [x] **Action 2.3.2** — `e2e/e2e_test.go` (modify, test code): add `TestE2E_CrossNodeEviction` (below).
 
 | Test | Verifies |
 |---|---|
@@ -596,7 +596,7 @@ members via `te.e.lim.AcquireStream` = "held on another node", `te.rtr.ok = true
 
 #### Definition of Done
 
-- [ ] `TestE2E_Eviction` and `TestE2E_CrossNodeEviction` both use `evictedByEdge`.
+- [x] `TestE2E_Eviction` and `TestE2E_CrossNodeEviction` both use `evictedByEdge`.
 
 ---
 

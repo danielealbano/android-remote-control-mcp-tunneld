@@ -751,29 +751,124 @@ func TestE2E_Eviction(t *testing.T) {
 	// The over-cap admission must have EVICTED one of the two idle victims (not silently admitted a
 	// third): exactly one of c1/c2 must observe its socket closed by the edge. If the concurrency cap
 	// were unenforced, both would stay open and this assertion would fail.
-	isEvicted := func(c *tls.Conn) bool {
-		if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			t.Fatalf("set read deadline: %v", err)
-		}
-		_, rerr := c.Read(make([]byte, 1))
-		if rerr == nil {
-			return false // read data on an idle conn → not the evicted victim
-		}
-		var ne net.Error
-		if errors.As(rerr, &ne) && ne.Timeout() {
-			return false // read deadline hit on a still-open idle conn → not evicted
-		}
-		return true // EOF / reset → the edge closed this (evicted) victim
-	}
 	evicted := 0
-	if isEvicted(c1) {
+	if evictedByEdge(t, c1) {
 		evicted++
 	}
-	if isEvicted(c2) {
+	if evictedByEdge(t, c2) {
 		evicted++
 	}
 	if evicted != 1 {
 		t.Fatalf("exactly one of c1/c2 must be evicted by the over-cap admission, got %d", evicted)
+	}
+}
+
+func evictedByEdge(t *testing.T, c *tls.Conn) bool {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	_, rerr := c.Read(make([]byte, 1))
+	if rerr == nil {
+		return false // read data on an idle conn → not the evicted victim
+	}
+	var ne net.Error
+	if errors.As(rerr, &ne) && ne.Timeout() {
+		return false // read deadline hit on a still-open idle conn → not evicted
+	}
+	return true // EOF / reset → the edge closed this (evicted) victim
+}
+
+func tunnelConc(internalAddr, name string) (int64, error) {
+	body, err := json.Marshal(map[string][]string{"names": {name}})
+	if err != nil {
+		return 0, err
+	}
+	c := &http.Client{Timeout: 5 * time.Second}
+	resp, err := c.Post("http://"+internalAddr+"/api/v1/admin/tunnels/stats", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return 0, err
+	}
+	defer tunneltest.CloseLogged(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("stats status %d", resp.StatusCode)
+	}
+	var stats map[string]struct {
+		Conc int64 `json:"conc"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		return 0, err
+	}
+	s, ok := stats[name]
+	if !ok {
+		return 0, fmt.Errorf("tunnel %s missing from the stats", name)
+	}
+	return s.Conc, nil
+}
+
+func TestE2E_CrossNodeEviction(t *testing.T) {
+	inf := startE2EInfra(t)
+	edgeA := inf.startReplica(t, replicaOpts{concurrent: 2})
+	edgeB := inf.startReplica(t, replicaOpts{concurrent: 2})
+	_, ident := echoPhone(t, inf, edgeA, edgeA)
+	fqdn := ident.Name + "." + e2eTunnelDomain
+
+	var err error
+	if !waitBool(30*time.Second, func() bool {
+		err = frontendRoundtrip(edgeB, fqdn, inf.pebble.IssuingRoots)
+		return err == nil
+	}) {
+		t.Fatalf("the first roundtrip through B never succeeded: %v", err)
+	}
+	var conc int64
+	if !waitBool(15*time.Second, func() bool {
+		conc, err = tunnelConc(inf.internal[edgeB], ident.Name)
+		return err == nil && conc == 0
+	}) {
+		t.Fatalf("the first roundtrip's stream slot was never released: conc=%d err=%v", conc, err)
+	}
+
+	c1, err := dialTunnelTLS(edgeA, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("c1: %v", err)
+	}
+	defer tunneltest.CloseOrLog(t, c1)
+	c2, err := dialTunnelTLS(edgeA, fqdn, inf.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("c2: %v", err)
+	}
+	defer tunneltest.CloseOrLog(t, c2)
+	for i, c := range []*tls.Conn{c1, c2} {
+		if eerr := echoOn(c); eerr != nil {
+			t.Fatalf("c%d must be alive before the cross-node admission: %v", i+1, eerr)
+		}
+	}
+
+	var c3 *tls.Conn
+	if !waitBool(15*time.Second, func() bool {
+		c3, err = dialTunnelTLS(edgeB, fqdn, inf.pebble.IssuingRoots)
+		if err != nil {
+			return false
+		}
+		if eerr := echoOn(c3); eerr != nil {
+			tunneltest.CloseOrLog(t, c3)
+			err = eerr
+			return false
+		}
+		return true
+	}) {
+		t.Fatalf("the over-cap connection through B must evict an idle stream held on A and round-trip: %v", err)
+	}
+	tunneltest.CloseOrLog(t, c3)
+
+	evicted := 0
+	for _, c := range []*tls.Conn{c1, c2} {
+		if evictedByEdge(t, c) {
+			evicted++
+		}
+	}
+	if evicted != 1 {
+		t.Fatalf("exactly one of the two connections held on A must be evicted, got %d", evicted)
 	}
 }
 
