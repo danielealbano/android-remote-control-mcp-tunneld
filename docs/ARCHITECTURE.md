@@ -112,8 +112,9 @@ WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; t
 for the dial-back, so a connection still waiting for its dial-back counts and is never evicted. When the cap is
 full the entry node evicts one stream and retries; while the retried admission is still refused (for example
 because another admission took the freed slot first), it evicts again — at most 5 evictions for one connection.
-After 2 s no new round starts, and the node listing and mesh calls still running are cut; the retried acquire and
-the victim's slot release are bounded only by the Valkey client's own timeouts, like every other admission call.
+After 2 s no new round starts, and the mesh calls still running are cut; a Valkey call already sent (the node
+listing, the retried acquire, the victim's slot release) is bounded only by the Valkey client's own timeouts, like
+every other admission call.
 A stream is evictable when it has been idle (no byte
 either way) for at least `--limit-conn-evict-idle` or moved fewer than `--limit-conn-protect-rate` bytes over the
 last 60 s; the most idle one goes. The entry node evicts its own first; when it has none, it asks every other live
