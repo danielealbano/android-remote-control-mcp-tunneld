@@ -138,6 +138,7 @@ func TestLimiter_IssuanceEnd_ReturnsReleaseError(t *testing.T) {
 }
 
 func TestLimiter_IssuanceBegin_CountReadErrorLogsRelease(t *testing.T) {
+	t.Parallel()
 	l, _, rdb, buf := newLoggedLimiter(t)
 	rdb.AddHook(tunneltest.FailCommands(errInjected, "get"))
 	ok, orderID, _, err := l.IssuanceBegin(ctxT(t), "t", 3)
@@ -254,6 +255,7 @@ func TestLimiter_RefreshIssLock_ExtendsHeldLock(t *testing.T) {
 }
 
 func TestLimiter_RefreshIssLock_CancelledCallerIsSilent(t *testing.T) {
+	t.Parallel()
 	l, mr, rdb, buf := newLoggedLimiter(t)
 	if err := mr.Set(issLockKey("t"), "order"); err != nil {
 		t.Fatal(err)
