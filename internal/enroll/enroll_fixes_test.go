@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -421,6 +422,81 @@ type cancellingIssuer struct {
 func (c *cancellingIssuer) Obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
 	defer c.cancel()
 	return c.fakeIssuer.Obtain(ctx, csr, name)
+}
+
+type expiringCtx struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func newExpiringCtx() *expiringCtx {
+	return &expiringCtx{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringCtx) Done() <-chan struct{} { return c.done }
+
+func (c *expiringCtx) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *expiringCtx) expire() { c.once.Do(func() { close(c.done) }) }
+
+func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		end     func() (context.Context, context.CancelFunc)
+		wantCA  string
+		wantLog string
+	}{
+		{
+			name:    "phone gone after the issuance",
+			end:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			wantLog: `msg="issued certificate not recorded (requester gone)"`,
+		},
+		{
+			name: "request deadline passed after the issuance",
+			end: func() (context.Context, context.CancelFunc) {
+				c := newExpiringCtx()
+				return c, c.expire
+			},
+			wantCA: "letsencrypt",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			ctx, end := tc.end()
+			defer end()
+			logger, buf := captureLogger()
+			svc, _ := newService(t, Config{
+				CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test", Logger: logger,
+				Verifier: fakeVerifier{key: idPub}, Issuer: &cancellingIssuer{fakeIssuer: fakeIssuer{ca: "letsencrypt"}, cancel: end},
+				IssuePerWeek: 1,
+			})
+			name := doEnroll(t, svc, idCSR)
+			if _, ee := svc.Issue(ctx, name, "1.2.3.4", Request{
+				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test"),
+			}); ee != nil {
+				t.Fatalf("issuance failed: %v", ee)
+			}
+			rec, err := st.GetName(context.Background(), name)
+			if err != nil || rec.CA != tc.wantCA {
+				t.Fatalf("registry CA = %q (err %v), want %q", rec.CA, err, tc.wantCA)
+			}
+			if tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("the unrecorded issuance must be logged; log = %q", buf.String())
+			}
+		})
+	}
 }
 
 func TestIssue_CounterSurvivesCancelledRequest(t *testing.T) {

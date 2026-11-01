@@ -326,14 +326,18 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 
 	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer bcancel()
-	// Count this SUCCESSFUL issuance, then LWW-record the cert metadata.
+	// Count this SUCCESSFUL issuance.
 	if err := s.cfg.Limiter.IssuanceRecord(bctx, name); err != nil {
 		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
 		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
 	}
 	t = s.logStep("issue step", "issuance-record", t, "tunnel", name, "ip", ip)
-	s.recordCert(ctx, name, cur, req, info, att.Device)
-	s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		s.logger.Info("issued certificate not recorded (requester gone)", "tunnel", name, "ip", ip, "ca", info.CA)
+	} else {
+		s.recordCert(ctx, name, cur, req, info, att.Device)
+		s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
+	}
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
 }

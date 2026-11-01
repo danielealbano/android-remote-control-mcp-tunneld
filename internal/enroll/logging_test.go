@@ -327,14 +327,14 @@ func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 	tests := []struct {
 		name         string
 		names        func(st *tunneltest.Store) NameStore
-		cancelCaller bool
+		expireCaller bool
 		wantEnrolled time.Time
 		wantLog      string
 	}{
 		{
-			name:         "caller gone",
+			name:         "request deadline passed",
 			names:        func(st *tunneltest.Store) NameStore { return ctxStore{Store: st} },
-			cancelCaller: true,
+			expireCaller: true,
 			wantEnrolled: fresh,
 		},
 		{
@@ -354,10 +354,9 @@ func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 				t.Fatal(err)
 			}
 			svc, buf, idCSR := newLoggedService(t, tc.names(st), st)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.cancelCaller {
-				cancel()
+			ctx := newExpiringCtx()
+			if tc.expireCaller {
+				ctx.expire()
 			}
 			svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: earlier}, Request{IdentityCSR: idCSR},
 				store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})
