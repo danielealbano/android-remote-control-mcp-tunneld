@@ -168,7 +168,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		m.mu.Unlock()
 		// Bounded: a hung control plane / store must not pin the teardown (the route also TTL-expires).
-		tctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
 		defer cancel()
 		if err := m.router.Unbind(tctx, c.name, c.connID); err != nil { // owner-conditional
 			m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)
