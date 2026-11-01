@@ -23,6 +23,10 @@ var rollingWindow = time.Minute
 
 var routeCheckInterval = 10 * time.Second
 
+var slotRetryBudget = 2 * time.Second
+
+const slotRetries = 5
+
 // activeStream tracks a live public stream for the connection policy (idle timeout, min-rate, and
 // eviction-on-saturation ranking).
 type activeStream struct {
@@ -153,7 +157,7 @@ func (e *Edge) EvictConnStreams(name, connID, reason string) bool {
 	return len(victims) > 0
 }
 
-// handleTunnel resolves the route, enforces the global stream cap (with one evict-and-retry),
+// handleTunnel resolves the route, enforces the global stream cap,
 // opens the far side, and splices with accounting + policy + conn logs.
 func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHelloInfo) {
 	name, ok := e.tunnelName(info.SNI)
@@ -197,18 +201,14 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	token := rand.Text()
 
-	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
+	// Global per-tunnel stream cap. A control-plane ERROR fails open (like
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
 	acq, aerr := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 	if aerr != nil {
 		e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 		acq = true
-	} else if !acq && (e.evictLeastActive(name) || e.slots.FreeRemoteSlot(ctx, name)) {
-		acq, aerr = e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
-		if aerr != nil {
-			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
-			acq = true
-		}
+	} else if !acq {
+		acq = e.evictAndAcquire(ctx, name, token)
 	}
 	if !acq {
 		e.rec.Reject("stream-cap", name, peerAddr(client))
@@ -281,6 +281,25 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		e.logs.PutConnLogPublic(context.Background(), end)
 	}
 	closeLogged(e.cfg.Logger, "public client", client)
+}
+
+func (e *Edge) evictAndAcquire(ctx context.Context, name, token string) bool {
+	rctx, cancel := context.WithTimeout(ctx, slotRetryBudget)
+	defer cancel()
+	for range slotRetries {
+		if rctx.Err() != nil || !(e.evictLeastActive(name) || e.slots.FreeRemoteSlot(rctx, name)) {
+			return false
+		}
+		acq, err := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
+		if err != nil {
+			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", err)
+			return true
+		}
+		if acq {
+			return true
+		}
+	}
+	return false
 }
 
 // tunnelName derives the bare tunnel name (the phone identity-cert CN, under which the route is bound)

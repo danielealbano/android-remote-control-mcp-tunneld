@@ -381,11 +381,12 @@ func TestEdge_HandleTunnel_StreamCapFreesRemoteSlot(t *testing.T) {
 func TestEdge_HandleTunnel_StreamCapNothingToFree(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		free func(context.Context, string) bool
+		name      string
+		free      func(context.Context, string) bool
+		wantCalls int32
 	}{
-		{name: "no node has an evictable stream", free: func(context.Context, string) bool { return false }},
-		{name: "a slot may have been freed but was not", free: func(context.Context, string) bool { return true }},
+		{name: "no node has an evictable stream", free: func(context.Context, string) bool { return false }, wantCalls: 1},
+		{name: "a slot is reported freed every time but never is", free: func(context.Context, string) bool { return true }, wantCalls: slotRetries},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,10 +407,126 @@ func TestEdge_HandleTunnel_StreamCapNothingToFree(t *testing.T) {
 			if got := openCalls(te); got != 0 {
 				t.Fatalf("a refused connection must request no OPEN, got %d", got)
 			}
-			if got := te.slots.calls.Load(); got != 1 {
-				t.Fatalf("FreeRemoteSlot calls = %d, want 1", got)
+			if got := te.slots.calls.Load(); got != tc.wantCalls {
+				t.Fatalf("FreeRemoteSlot calls = %d, want %d", got, tc.wantCalls)
 			}
 		})
+	}
+}
+
+func TestEdge_HandleTunnel_RetriesWhenFreedSlotIsTaken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		setup         func(t *testing.T, te *testEdge, steal func(held string))
+		wantRemote    int32
+		wantEvictions int
+	}{
+		{
+			name: "remote slot taken once",
+			setup: func(t *testing.T, te *testEdge, steal func(held string)) {
+				var n atomic.Int32
+				te.slots.free = func(context.Context, string) bool {
+					if n.Add(1) == 1 {
+						steal("held-0")
+						return true
+					}
+					if err := te.e.lim.ReleaseStream(context.Background(), capTunnel, "held-1"); err != nil {
+						t.Errorf("release held-1: %v", err)
+					}
+					return true
+				}
+			},
+			wantRemote: 2,
+		},
+		{
+			name: "local slot taken once",
+			setup: func(t *testing.T, te *testEdge, steal func(held string)) {
+				first := &activeStream{tunnel: capTunnel, cancel: func() {}, release: func() { steal("held-0") }}
+				second := &activeStream{tunnel: capTunnel, cancel: func() {}, release: func() {
+					if err := te.e.lim.ReleaseStream(context.Background(), capTunnel, "held-1"); err != nil {
+						t.Errorf("release held-1: %v", err)
+					}
+				}}
+				first.lastAct.Store(1)
+				second.lastAct.Store(2)
+				te.e.trackStream(first)
+				te.e.trackStream(second)
+			},
+			wantEvictions: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := baseConfig()
+			cfg.Concurrent = 2
+			te := newTestEdge(t, cfg, nil)
+			te.rtr.set("node-a", "conn-1", true, nil)
+			fillSlots(t, te, cfg.Concurrent)
+			steal := func(held string) {
+				if err := te.e.lim.ReleaseStream(context.Background(), capTunnel, held); err != nil {
+					t.Errorf("release %s: %v", held, err)
+				}
+				if ok, err := te.e.lim.AcquireStream(context.Background(), capTunnel, "thief", cfg.Concurrent); err != nil || !ok {
+					t.Errorf("the other admission must take the freed slot: ok=%v err=%v", ok, err)
+				}
+			}
+			tc.setup(t, te, steal)
+
+			done := runTunnel(te, newScriptConn("198.51.100.85", nil), capSNI)
+			phone := waitPhone(t, te, 0)
+			tunneltest.CloseOrLog(t, phone)
+			waitDone(t, done, 5*time.Second)
+
+			if containsStr(te.rec.rejectReasons(), "stream-cap") {
+				t.Fatalf("a second eviction must admit the connection, rejects=%v", te.rec.rejectReasons())
+			}
+			if got := te.slots.calls.Load(); got != tc.wantRemote {
+				t.Fatalf("FreeRemoteSlot calls = %d, want %d", got, tc.wantRemote)
+			}
+			evicted := 0
+			te.e.smu.Lock()
+			for s := range te.e.streams {
+				if s.evicted.Load() {
+					evicted++
+				}
+			}
+			te.e.smu.Unlock()
+			if evicted != tc.wantEvictions {
+				t.Fatalf("local evictions = %d, want %d", evicted, tc.wantEvictions)
+			}
+		})
+	}
+}
+
+func TestEdge_HandleTunnel_EvictRetriesStopAtDeadline(t *testing.T) {
+	prev := slotRetryBudget
+	slotRetryBudget = 100 * time.Millisecond
+	t.Cleanup(func() { slotRetryBudget = prev })
+
+	cfg := baseConfig()
+	cfg.Concurrent = 2
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	fillSlots(t, te, cfg.Concurrent)
+	te.slots.free = func(ctx context.Context, _ string) bool {
+		<-ctx.Done()
+		return true
+	}
+
+	client := newScriptConn("198.51.100.86", nil)
+	start := time.Now()
+	waitDone(t, runTunnel(te, client, capSNI), 5*time.Second)
+
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("the retries took %v, want them bounded by the 100 ms budget", elapsed)
+	}
+	if got := countStr(te.rec.rejectReasons(), "stream-cap"); got != 1 || !client.isClosed() {
+		t.Fatalf("stream-cap rejects=%d closed=%v, want one rejection and the client closed", got, client.isClosed())
+	}
+	if got := te.slots.calls.Load(); got != 1 {
+		t.Fatalf("FreeRemoteSlot calls = %d, want 1 (the budget ends the retries)", got)
 	}
 }
 
