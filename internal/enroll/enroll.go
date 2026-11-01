@@ -189,7 +189,9 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
 		s.logSignError(name, ip, err)
-		if derr := s.cfg.Names.DeleteName(ctx, name); derr != nil {
+		dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer dcancel()
+		if derr := s.cfg.Names.DeleteName(dctx, name); derr != nil {
 			s.logger.Warn("claim rollback failed (name orphaned in the registry)", "tunnel", name, "err", derr)
 		}
 		return Result{}, signError(err)

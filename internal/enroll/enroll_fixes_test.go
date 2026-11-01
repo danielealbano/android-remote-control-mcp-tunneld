@@ -198,7 +198,7 @@ func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
 // TestSignFailureRollsBack: any SignIdentity failure after a
 // claim deletes the claimed name.
 func TestSignFailureRollsBack(t *testing.T) {
-	st := tunneltest.NewStore()
+	t.Parallel()
 	// A CSR whose signature verifies but whose key the CA refuses (RSA) forces the sign failure AFTER
 	// the claim; key binding is bypassed via a matching attested key.
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -213,16 +213,53 @@ func TestSignFailureRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
-	})
-	if _, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil {
-		t.Fatal("sign failure must surface an error")
+	tests := []struct {
+		name       string
+		callerGone bool
+	}{
+		{name: "caller still connected"},
+		{name: "caller gone after the claim", callerGone: true},
 	}
-	if st.NameCount() != 0 {
-		t.Fatal("DeleteName must roll the claim back")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var names NameStore = st
+			if tc.callerGone {
+				names = cancelOnClaimNames{Store: st, cancel: cancel}
+			}
+			svc, _ := newService(t, Config{
+				CA: testCA(t), Names: names, Evidence: st,
+				Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
+			})
+			if _, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil {
+				t.Fatal("sign failure must surface an error")
+			}
+			if st.NameCount() != 0 {
+				t.Fatal("DeleteName must roll the claim back")
+			}
+		})
 	}
+}
+
+type cancelOnClaimNames struct {
+	*tunneltest.Store
+	cancel context.CancelFunc
+}
+
+func (s cancelOnClaimNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	err := s.Store.PutName(ctx, name, rec)
+	s.cancel()
+	return err
+}
+
+func (s cancelOnClaimNames) DeleteName(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.DeleteName(ctx, name)
 }
 
 // TestClaimCollisionDrawsNewName: the plan's "claim collision → new name" row — an existing first
