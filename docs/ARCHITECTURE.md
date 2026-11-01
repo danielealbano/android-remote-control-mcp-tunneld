@@ -110,15 +110,17 @@ WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; t
 **Stream cap.** A tunnel holds at most `--limit-concurrent` public connections at once across all nodes
 (`conc:{name}`, §5; a Valkey error admits without a slot, fail-open). The entry node takes the slot before it asks
 for the dial-back, so a connection still waiting for its dial-back counts and is never evicted. When the cap is
-full the entry node evicts one stream and retries; when another admission takes the freed slot first, it evicts
-again, at most 5 times within 2 s for one connection. A stream is evictable when it has been idle (no byte
+full the entry node evicts one stream and retries; while the retried admission is still refused (for example
+because another admission took the freed slot first), it evicts again — at most 5 evictions for one connection,
+and no new round starts after 2 s (a round's Valkey calls are bounded by the Valkey client's own timeouts, like
+every other admission call). A stream is evictable when it has been idle (no byte
 either way) for at least `--limit-conn-evict-idle` or moved fewer than `--limit-conn-protect-rate` bytes over the
 last 60 s; the most idle one goes. The entry node evicts its own first; when it has none, it asks every other live
 node for its most idle evictable stream (mesh `slot-candidate`, 1 s) and has the node whose stream is the most idle
 evict it (mesh `free-slot`, 1 s; the next node only when that one answers that it has none left, while a failed
 call ends the attempt, since the node may have evicted already); a node runs at most 32 such attempts at once and
 refuses beyond that without asking. The victim ends with `close_reason=evicted`; when no stream is left to evict,
-or the 5 attempts or the 2 s are used up, the new connection is closed (`stream-cap`).
+or the 5 evictions or the 2 s are used up, the new connection is closed (`stream-cap`).
 
 **ACME validations.** A ClientHello whose first ALPN protocol is `acme-tls/1` is a TLS-ALPN-01 validation
 addressed to tunneld itself, not tunnel traffic: after the ban / conn-rate / `--max-clients` checks the edge
