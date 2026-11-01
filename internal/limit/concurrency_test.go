@@ -163,11 +163,11 @@ func TestLimiter_ReleaseStream_RemovesOnlyItsMember(t *testing.T) {
 func TestLimiter_ReleaseStream_DetachedAndBounded(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		cancelBefore bool
+		name            string
+		cancelledCaller bool
 	}{
 		{name: "caller without a deadline"},
-		{name: "caller cancelled before the release", cancelBefore: true},
+		{name: "caller already cancelled", cancelledCaller: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,8 +184,8 @@ func TestLimiter_ReleaseStream_DetachedAndBounded(t *testing.T) {
 			defer cancel()
 			rec := &deadlineRecorder{left: map[string]time.Duration{}}
 			rdb.AddHook(rec)
-			if tc.cancelBefore {
-				rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+			if tc.cancelledCaller {
+				cancel()
 			}
 			if err := lim.ReleaseStream(ctx, name, "a"); err != nil {
 				t.Fatalf("release: %v", err)
