@@ -126,7 +126,8 @@ attestation + key binding, claims a name (Valkey lock, then S3), and signs a boo
 2 (`/api/v1/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
 `<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
-The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
+The name registry record carries the cert metadata (an issuance whose requester disconnected before the answer
+is counted but not recorded, so the renewal watcher keeps nudging the phone); the reserved-host (`--enroll-host`/`--control-host`)
 certs are obtained by the server itself (`ObtainSelf`) after the listeners bind (a valid disk cache is served
 immediately), retried every minute while missing, and renewed on schedule. Reserved-host issuance is
 serialized across replicas by a per-host Valkey lock (`lock:acme-self:{host}`): a replica waits up to 5 min
