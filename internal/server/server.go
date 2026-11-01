@@ -228,6 +228,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	opener := &openAdapter{nodeID: nodeID, phones: phoneMgr, nodes: reg, mesh: meshClient,
 		open: wire.OpenPayload{Addr: cfg.DialBackAdvertise, UseHTTPS: cfg.DialBackHTTPS, UseMTLS: cfg.DialBackMTLS}}
+	slots := &remoteSlots{nodeID: nodeID, nodes: reg, mesh: meshClient, logger: logger,
+		queryTimeout: slotQueryTimeout, freeTimeout: slotFreeTimeout, inflight: make(chan struct{}, slotFreeConcurrency)}
 	ed := edge.New(edge.Config{
 		EnrollHost: cfg.EnrollHost, ControlHost: cfg.ControlHost, TunnelDomain: cfg.TunnelDomain,
 		MaxClients: cfg.MaxClients, ConnRate: cfg.LimitConnRate,
@@ -236,7 +238,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		MinRate: minRate, ProtectRate: protectRate,
 		Logger: logger,
 	}, banIP, rec,
-		reg, dialBacks, opener, dialBackReadiness{https: cfg.DialBackHTTPS, host: cfg.ControlHost, certs: reserved}, lim,
+		reg, dialBacks, opener, dialBackReadiness{https: cfg.DialBackHTTPS, host: cfg.ControlHost, certs: reserved}, lim, slots,
 		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 	evictor.local = ed.EvictConnStreams
 

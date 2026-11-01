@@ -488,9 +488,9 @@ channel (capacity 32 unless noted) set on the struct):
 - [x] Every goroutine of `offers` has returned before it returns (`wg.Wait`).
 - [x] Every test of the table above is written.
 
-### [ ] Task 2.2: Edge asks for a remote slot
+### [x] Task 2.2: Edge asks for a remote slot
 
-- [ ] **Action 2.2.1** — `internal/edge/edge.go` (modify):
+- [x] **Action 2.2.1** — `internal/edge/edge.go` (modify):
 
 ```diff
  type DialBackReadiness interface {
@@ -515,14 +515,14 @@ channel (capacity 32 unless noted) set on the struct):
 +		lim: lim, slots: slots, logs: logs, chal: chal,
 ```
 
-- [ ] **Action 2.2.2** — `internal/edge/bridge.go` (modify, `handleTunnel`):
+- [x] **Action 2.2.2** — `internal/edge/bridge.go` (modify, `handleTunnel`):
 
 ```diff
 -	} else if !acq && e.evictLeastActive(name) {
 +	} else if !acq && (e.evictLeastActive(name) || e.slots.FreeRemoteSlot(ctx, name)) {
 ```
 
-- [ ] **Action 2.2.3** — `internal/server/server.go` (modify): build `remoteSlots` before the edge and pass it to
+- [x] **Action 2.2.3** — `internal/server/server.go` (modify): build `remoteSlots` before the edge and pass it to
       `edge.New`.
 
 ```diff
@@ -538,7 +538,7 @@ channel (capacity 32 unless noted) set on the struct):
  		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 ```
 
-- [ ] **Action 2.2.4** — `internal/edge/harness_test.go` (modify, shared test fake): a `fakeRemoteSlots`, a
+- [x] **Action 2.2.4** — `internal/edge/harness_test.go` (modify, shared test fake): a `fakeRemoteSlots`, a
       `slots` field on `testEdge`, and `newTestEdge` passes it to `New` right after `lim`.
 
 ```go
@@ -579,8 +579,8 @@ members via `te.e.lim.AcquireStream` = "held on another node", `te.rtr.ok = true
 
 #### Definition of Done
 
-- [ ] `edge.New` has no other caller than `server.Run` and the harness (both updated).
-- [ ] Every test of the table above is written.
+- [x] `edge.New` has no other caller than `server.Run` and the harness (both updated).
+- [x] Every test of the table above is written.
 
 ### [ ] Task 2.3: End-to-end regression
 

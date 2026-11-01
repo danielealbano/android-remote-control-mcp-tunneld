@@ -321,3 +321,187 @@ func (r *sliceReader) Read(p []byte) (int, error) {
 	r.off += n
 	return n, nil
 }
+
+const capTunnel = "abcdef012345"
+
+const capSNI = capTunnel + ".example.test"
+
+func fillSlots(t *testing.T, te *testEdge, n int) {
+	t.Helper()
+	for i := range n {
+		ok, err := te.e.lim.AcquireStream(context.Background(), capTunnel, fmt.Sprintf("held-%d", i), n)
+		if err != nil || !ok {
+			t.Fatalf("hold slot %d: ok=%v err=%v", i, ok, err)
+		}
+	}
+}
+
+func openCalls(te *testEdge) int {
+	te.opener.mu.Lock()
+	defer te.opener.mu.Unlock()
+	return len(te.opener.calls)
+}
+
+func countStr(ss []string, want string) int {
+	n := 0
+	for _, s := range ss {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
+func TestEdge_HandleTunnel_StreamCapFreesRemoteSlot(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 2
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	fillSlots(t, te, cfg.Concurrent)
+	var asked string
+	te.slots.free = func(ctx context.Context, tunnel string) bool {
+		asked = tunnel
+		return te.e.lim.ReleaseStream(ctx, tunnel, "held-0") == nil
+	}
+
+	done := runTunnel(te, newScriptConn("198.51.100.80", nil), capSNI)
+	phone := waitPhone(t, te, 0)
+	tunneltest.CloseOrLog(t, phone)
+	waitDone(t, done, 5*time.Second)
+
+	if containsStr(te.rec.rejectReasons(), "stream-cap") {
+		t.Fatalf("a slot freed on another node must admit the connection, rejects=%v", te.rec.rejectReasons())
+	}
+	if got := te.slots.calls.Load(); got != 1 || asked != capTunnel {
+		t.Fatalf("FreeRemoteSlot calls=%d tunnel=%q, want 1 call for %q", got, asked, capTunnel)
+	}
+}
+
+func TestEdge_HandleTunnel_StreamCapNothingToFree(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		free func(context.Context, string) bool
+	}{
+		{name: "no node has an evictable stream", free: func(context.Context, string) bool { return false }},
+		{name: "a slot may have been freed but was not", free: func(context.Context, string) bool { return true }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := baseConfig()
+			cfg.Concurrent = 2
+			te := newTestEdge(t, cfg, nil)
+			te.rtr.set("node-a", "conn-1", true, nil)
+			fillSlots(t, te, cfg.Concurrent)
+			te.slots.free = tc.free
+
+			client := newScriptConn("198.51.100.81", nil)
+			waitDone(t, runTunnel(te, client, capSNI), 5*time.Second)
+
+			if got := countStr(te.rec.rejectReasons(), "stream-cap"); got != 1 || !client.isClosed() {
+				t.Fatalf("stream-cap rejects=%d closed=%v, want one rejection and the client closed", got, client.isClosed())
+			}
+			if got := openCalls(te); got != 0 {
+				t.Fatalf("a refused connection must request no OPEN, got %d", got)
+			}
+			if got := te.slots.calls.Load(); got != 1 {
+				t.Fatalf("FreeRemoteSlot calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestEdge_HandleTunnel_RemoteSlotOnlyWhenLocalHasNone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, te *testEdge)
+	}{
+		{name: "local eviction frees a slot", setup: func(t *testing.T, te *testEdge) {
+			fillSlots(t, te, 2)
+			te.e.trackStream(&activeStream{tunnel: capTunnel, cancel: func() {}, release: func() {
+				if err := te.e.lim.ReleaseStream(context.Background(), capTunnel, "held-0"); err != nil {
+					t.Errorf("release the local victim's slot: %v", err)
+				}
+			}})
+		}},
+		{name: "cap not reached", setup: func(*testing.T, *testEdge) {}},
+		{name: "acquire error fails open", setup: func(t *testing.T, te *testEdge) {
+			mr := miniredis.RunT(t)
+			rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+			t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+			te.e.lim = &countingLimiter{Limiter: limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour), acquireErr: errors.New("valkey down")}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := baseConfig()
+			cfg.Concurrent = 2
+			te := newTestEdge(t, cfg, nil)
+			te.rtr.set("node-a", "conn-1", true, nil)
+			tc.setup(t, te)
+
+			done := runTunnel(te, newScriptConn("198.51.100.82", nil), capSNI)
+			phone := waitPhone(t, te, 0)
+			tunneltest.CloseOrLog(t, phone)
+			waitDone(t, done, 5*time.Second)
+
+			if got := te.slots.calls.Load(); got != 0 {
+				t.Fatalf("FreeRemoteSlot calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestEdge_PendingSlotNeverEvicted(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 1
+	cfg.DialBackTimeout = time.Minute
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	te.dial.never = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(ctx, newScriptConn("198.51.100.83", nil), ClientHelloInfo{SNI: capSNI})
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for openCalls(te) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the first connection never asked for its dial-back")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if idle, ok := te.e.SlotCandidate(capTunnel); ok || idle != 0 {
+		t.Fatalf("SlotCandidate = (%v, %v), want (0, false) for a pending slot", idle, ok)
+	}
+	if te.e.FreeSlot(capTunnel) {
+		t.Fatal("a pending slot must never be evicted")
+	}
+	second := newScriptConn("198.51.100.84", nil)
+	waitDone(t, runTunnel(te, second, capSNI), 5*time.Second)
+	if got := countStr(te.rec.rejectReasons(), "stream-cap"); got != 1 || !second.isClosed() {
+		t.Fatalf("stream-cap rejects=%d closed=%v, want the second connection refused", got, second.isClosed())
+	}
+	if got := te.slots.calls.Load(); got != 1 {
+		t.Fatalf("FreeRemoteSlot calls = %d, want 1", got)
+	}
+	select {
+	case <-done:
+		t.Fatal("the pending connection must still be waiting for its dial-back")
+	default:
+	}
+	cancel()
+	waitDone(t, done, 5*time.Second)
+}

@@ -203,7 +203,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	if aerr != nil {
 		e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
 		acq = true
-	} else if !acq && e.evictLeastActive(name) {
+	} else if !acq && (e.evictLeastActive(name) || e.slots.FreeRemoteSlot(ctx, name)) {
 		acq, aerr = e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 		if aerr != nil {
 			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
