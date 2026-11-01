@@ -181,7 +181,8 @@ value (100 s, or 200 s for GTS); every attempt deadline is capped at 100 s; drop
 and keeps only the default one, which is the chain tunneld serves), and on a 429 resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 60 s, ZeroSSL 90 s); an order already
 finalized when its deadline passes gets 30 s more to fetch its certificate (lego's own certificate wait is set to the
 attempt deadline plus those 30 s), so a certificate the CA issued is not thrown away; an
-abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
+abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s, and an attempt still
+running when the cap passes ends the run without counting as a failure of its account. Otherwise, any unsuccessful attempt
 other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
 tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
 waits (a wait-until or a backoff in effect) adds no step to it, so concurrent attempts count once. GTS accounts are tried
