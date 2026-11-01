@@ -838,21 +838,73 @@ func TestChain_SkippedAccountReleasesReservationAfterCallerGone(t *testing.T) {
 type cancelBeforeKeyed struct {
 	name, key string
 	cancel    context.CancelFunc
+	armed     atomic.Bool
+}
+
+func (ac *accountChain) cancelBefore(name, key string, cancel context.CancelFunc, armed bool) *cancelBeforeKeyed {
+	h := &cancelBeforeKeyed{name: name, key: key, cancel: cancel}
+	h.armed.Store(armed)
+	ac.rdb.AddHook(h)
+	return h
+}
+
+func (h *cancelBeforeKeyed) fire(cmds ...redis.Cmder) {
+	for _, c := range cmds {
+		if (h.name == "" || c.Name() == h.name) && slices.Contains(c.Args(), any(h.key)) && h.armed.CompareAndSwap(true, false) {
+			h.cancel()
+			return
+		}
+	}
 }
 
 func (h *cancelBeforeKeyed) DialHook(next redis.DialHook) redis.DialHook { return next }
 
 func (h *cancelBeforeKeyed) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == h.name && slices.Contains(cmd.Args(), any(h.key)) {
-			h.cancel()
-		}
+		h.fire(cmd)
 		return next(ctx, cmd)
 	}
 }
 
 func (h *cancelBeforeKeyed) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
-	return next
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		h.fire(cmds...)
+		return next(ctx, cmds)
+	}
+}
+
+func TestChain_FailureBackoffSurvivesCallerGone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "cancelled before the streak bump", key: "acme-fail:le-1"},
+		{name: "cancelled before the wait-until is read and written", key: "acme-cooldown:le-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var h *cancelBeforeKeyed
+			le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("ca down")), onObtain: func(context.Context) { h.armed.Store(true) }}
+			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+			h = ac.cancelBefore("", tc.key, cancel, false)
+			if _, _, err := ac.ch.Obtain(ctx, nil, "p"); err == nil {
+				t.Fatal("a failed attempt must fail the run")
+			}
+			if h.armed.Load() {
+				t.Fatal("the caller must have been cancelled inside the failure bookkeeping")
+			}
+			if cool, err := ac.lim.CACooldown(context.Background(), "le-1"); err != nil || cool != time.Minute {
+				t.Fatalf("LE account wait-until = %s (%v), want the 1 m backoff although the caller was gone", cool, err)
+			}
+			if n, err := ac.lim.BumpCAFailures(context.Background(), "le-1", time.Hour); err != nil || n != 2 {
+				t.Fatalf("failure streak before this probe = %d (err %v), want 1", n-1, err)
+			}
+		})
+	}
 }
 
 func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
@@ -864,7 +916,7 @@ func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ac.rdb.AddHook(&cancelBeforeKeyed{name: "del", key: "acme-fail:le-1", cancel: cancel})
+	ac.cancelBefore("del", "acme-fail:le-1", cancel, true)
 	if _, info, err := ac.ch.Obtain(ctx, nil, "p"); err != nil || info.CA != CALetsEncrypt {
 		t.Fatalf("Obtain = %+v, %v; want LE", info, err)
 	}

@@ -201,7 +201,9 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 			}
 			c.cfg.Recorder.ACMEIssue(a.ca, "fail")
-			cool, permanent := c.handleFailure(ctx, a, err)
+			fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+			cool, permanent := c.handleFailure(fctx, a, err)
+			fcancel()
 			if permanent {
 				return nil, store.CertInfo{}, err // permanent (e.g. bad CSR) — stop
 			}
