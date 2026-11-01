@@ -135,7 +135,7 @@ func TestIntegration_MeshListenFailureClosesRawListener(t *testing.T) {
 	}
 	defer tunneltest.CloseOrLog(t, occupied)
 	meshAddr := occupied.Addr().String()
-	edgeAddr := freeAddr(t)
+	edgeAddr := tunneltest.FreeAddr(t)
 
 	// Unreachable ACME (port 1).
 	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, meshAddr,
@@ -177,7 +177,7 @@ func startPendingIssuanceServer(t *testing.T, mutate ...func(*config.ServeCmd)) 
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 
 	hang := newHangACMEListener(t)
-	cfg := itServeConfig(t, redisURL, s3URL, access, secret, freeAddr(t), freeAddr(t),
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, tunneltest.FreeAddr(t), tunneltest.FreeAddr(t),
 		hang.url(), hang.url(), hang.url(), nil)
 	for _, m := range mutate {
 		m(&cfg)
@@ -271,7 +271,7 @@ func TestIntegration_ReservedCacheServedWhileIssuancePending(t *testing.T) {
 
 func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 	t.Run("not bound without http-01 or plain dial-backs", func(t *testing.T) {
-		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = freeAddr(t) })
+		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) { c.ACMEHTTPListen = tunneltest.FreeAddr(t) })
 		if c, err := net.DialTimeout("tcp", cfg.ACMEHTTPListen, 2*time.Second); err == nil {
 			tunneltest.CloseOrLog(t, c)
 			t.Fatal("the HTTP-01 listener must not be bound when no CA uses http-01")
@@ -280,7 +280,7 @@ func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 	})
 	t.Run("bound for plain dial-backs", func(t *testing.T) {
 		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
-			c.ACMEHTTPListen = freeAddr(t)
+			c.ACMEHTTPListen = tunneltest.FreeAddr(t)
 			c.DialBackAdvertise = c.ACMEHTTPListen
 			c.DialBackHTTPS, c.DialBackMTLS = false, false
 		})

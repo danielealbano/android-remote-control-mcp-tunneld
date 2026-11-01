@@ -312,7 +312,8 @@ Replicas talk over an internal HTTP/2 mTLS mesh (mesh-role certs, SAN = node id)
 only — no tunnel data ever crosses nodes. The mesh is replica↔replica only — it is NOT part of the
 phone-client contract. Every call has a per-request deadline.
 
-`POST /api/v1/mesh/control`: a JSON request → response `{applied}` (mesh-role mTLS). The ops:
+`POST /api/v1/mesh/control`: a JSON request → response `{applied}` (`slot-candidate` adds `idle_ms`) (mesh-role
+mTLS). The ops:
 
 - `renew`: `{"op":"renew","tunnel":"<name>"}` — mint a fresh renewal nonce and enqueue a `RENEW_NUDGE` to the
   named tunnel's live phone connection.
@@ -326,6 +327,18 @@ phone-client contract. Every call has a per-request deadline.
   close reason>"}` → `{"applied":<any splice ended>}`. A node whose phone control connection closes sends it
   to every node; each ends the splices opened through that connection, keeping `ban-evict` /
   `admin-terminate` when that is the reason, else `phone-close`.
+- `slot-candidate`: `{"op":"slot-candidate","tunnel":"<name>"}` → `{"applied":<this node holds an evictable
+  stream of the tunnel>,"idle_ms":<idle time in whole ms of the stream free-slot would evict>}`; `idle_ms` is
+  omitted when it is 0 — always with `applied:false`, and for a candidate idle less than 1 ms (read as 0).
+- `free-slot`: `{"op":"free-slot","tunnel":"<name>"}` → `{"applied":<a stream was evicted>}` — evict this node's
+  least-active evictable stream of the tunnel (`close_reason=evicted`) and free its stream slot before answering.
+
+A node that finds a tunnel's stream cap full and has no evictable stream of its own sends `slot-candidate` to
+every other live node, then `free-slot` to the node whose stream is the most idle (to the next one only when it
+answers `applied:false`; a failed call ends the attempt), and retries its admission when a `free-slot`
+answered `applied:true` or failed. While the retried admission is still refused (for example because another
+admission took the freed slot first), it evicts again — at most 5 evictions for one connection, and no new round
+starts after 2 s (`ARCHITECTURE.md` §2).
 
 `renew` is the mechanism behind the internal `POST /api/v1/admin/tunnels/{name}/reissue` endpoint (sent to
 the owner). Unknown op → `400`, missing tunnel → `400`, `open`/`evict` without `conn_id` → `400`, `open`

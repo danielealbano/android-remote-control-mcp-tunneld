@@ -32,6 +32,10 @@ type DialBackReadiness interface {
 	DialBackReady() bool
 }
 
+type RemoteSlots interface {
+	FreeRemoteSlot(ctx context.Context, tunnel string) bool
+}
+
 // StreamLimiter is the data-plane limiting surface the edge depends on. It is defined at the consumer
 // (Go convention) so tests can substitute a fake; *limit.Limiter is the production implementation.
 type StreamLimiter interface {
@@ -89,6 +93,7 @@ type Edge struct {
 	opener    Opener
 	ready     DialBackReadiness
 	lim       StreamLimiter
+	slots     RemoteSlots
 	logs      PhoneEventSink
 	chal      ACMEChallenges
 
@@ -140,11 +145,11 @@ type PublicEvent struct {
 
 // New builds the Edge. enrollLn/controlLn are the reserved-SNI listeners the http servers accept from.
 func New(cfg Config, ban func(netip.Addr) bool,
-	rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, ready DialBackReadiness, lim StreamLimiter,
+	rec Recorder, r Router, dialBacks DialBackWaiter, opener Opener, ready DialBackReadiness, lim StreamLimiter, slots RemoteSlots,
 	logs PhoneEventSink, chal ACMEChallenges, addr net.Addr) *Edge {
 	return &Edge{
 		cfg: cfg, ban: ban, rec: rec, router: r, dialBacks: dialBacks, opener: opener, ready: ready,
-		lim: lim, logs: logs, chal: chal,
+		lim: lim, slots: slots, logs: logs, chal: chal,
 		enrollLn: newChanListener(addr, cfg.Logger), controlLn: newChanListener(addr, cfg.Logger), now: time.Now,
 	}
 }

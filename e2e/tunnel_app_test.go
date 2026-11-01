@@ -279,7 +279,7 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 				dialBackPlain:     mode.plain,
 			}
 			if mode.plain {
-				opts.acmeHTTPListen = freeAddr(t)
+				opts.acmeHTTPListen = tunneltest.FreeAddr(t)
 			}
 			edge := inf.startReplica(t, opts)
 			dialBackTarget := edge

@@ -327,19 +327,6 @@ func networkGateway(t *testing.T, nw *testcontainers.DockerNetwork) string {
 	return ""
 }
 
-func freePortOn(t *testing.T, ip string) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
-	if err != nil {
-		t.Fatalf("free port on %s: %v", ip, err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatalf("release port probe on %s: %v", ip, err)
-	}
-	return port
-}
-
 // StartPebble starts Pebble + pebble-challtestsrv on a shared network and returns a fully-wired
 // PebbleEnv. Pebble validates DNS-01 by querying challtestsrv (via the -dnsserver flag).
 func StartPebble(t *testing.T, opts ...PebbleOption) *PebbleEnv {
@@ -358,7 +345,7 @@ func StartPebble(t *testing.T, opts ...PebbleOption) *PebbleEnv {
 	var httpPort, tlsPort int
 	if setup.hostValidation {
 		hostIP = networkGateway(t, nw)
-		httpPort, tlsPort = freePortOn(t, hostIP), freePortOn(t, hostIP)
+		httpPort, tlsPort = FreePort(t, hostIP), FreePort(t, hostIP)
 		defaultIPv4 = hostIP
 		pebbleConfig = pebbleHostConfigPath
 		files = []testcontainers.ContainerFile{{

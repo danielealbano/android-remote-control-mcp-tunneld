@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,11 +339,18 @@ type meshCall struct {
 	req  mesh.ControlRequest
 }
 
+type fakeMeshResult struct {
+	resp  mesh.ControlResponse
+	err   error
+	block chan struct{}
+}
+
 type fakeMeshControl struct {
 	mu       sync.Mutex
 	calls    []meshCall
 	applied  map[string]bool
 	errs     map[string]error
+	byOp     map[string]fakeMeshResult
 	block    chan struct{}
 	inflight atomic.Int32
 	maxSeen  atomic.Int32
@@ -362,6 +370,7 @@ func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.Con
 	f.mu.Lock()
 	f.calls = append(f.calls, meshCall{peer: peer, req: req})
 	applied, err := f.applied[peer], f.errs[peer]
+	res, byOp := f.byOp[req.Op+"@"+peer]
 	f.mu.Unlock()
 	if f.block != nil {
 		select {
@@ -369,6 +378,16 @@ func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.Con
 		case <-ctx.Done():
 			return mesh.ControlResponse{}, ctx.Err()
 		}
+	}
+	if byOp {
+		if res.block != nil {
+			select {
+			case <-res.block:
+			case <-ctx.Done():
+				return mesh.ControlResponse{}, ctx.Err()
+			}
+		}
+		return res.resp, res.err
 	}
 	if err != nil {
 		return mesh.ControlResponse{}, err
@@ -677,5 +696,271 @@ func TestReservedCerts_Has(t *testing.T) {
 	rh.cur.Store(&tls.Certificate{})
 	if !rc.has(rh.host) || rc.has("unknown.example.test") {
 		t.Fatal("has must report a loaded certificate for its host only")
+	}
+}
+
+var slotTestNodes = map[string]router.NodeInfo{
+	"nodeA": {Advertise: "a:9443"}, "nodeB": {Advertise: "b:9443"}, "nodeC": {Advertise: "c:9443"}, "nodeD": {Advertise: "d:9443"},
+}
+
+func newTestRemoteSlots(nodes liveNodeLister, mc meshControl) *remoteSlots {
+	return &remoteSlots{nodeID: "nodeA", nodes: nodes, mesh: mc, logger: testLogger(),
+		queryTimeout: time.Second, freeTimeout: time.Second, inflight: make(chan struct{}, slotFreeConcurrency)}
+}
+
+func slotOfferResult(idleMS int64) fakeMeshResult {
+	return fakeMeshResult{resp: mesh.ControlResponse{Applied: true, IdleMS: idleMS}}
+}
+
+func callsTo(mc *fakeMeshControl, op string) []string {
+	var peers []string
+	for _, c := range mc.snapshot() {
+		if c.req.Op == op {
+			peers = append(peers, c.peer)
+		}
+	}
+	return peers
+}
+
+func TestRemoteSlots_FreesOnMostIdleNode(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{byOp: map[string]fakeMeshResult{
+		"slot-candidate@b:9443": slotOfferResult(5000),
+		"slot-candidate@c:9443": slotOfferResult(30000),
+		"slot-candidate@d:9443": {},
+		"free-slot@c:9443":      {resp: mesh.ControlResponse{Applied: true}},
+	}}
+	if !newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc).FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("the most idle node's eviction must be reported")
+	}
+	if got := callsTo(mc, "free-slot"); len(got) != 1 || got[0] != "c:9443" {
+		t.Fatalf("free-slot calls = %v, want exactly [c:9443]", got)
+	}
+	for _, c := range mc.snapshot() {
+		if c.peer == "a:9443" {
+			t.Fatal("this node must never be asked over the mesh")
+		}
+		if c.req.Tunnel != "t" {
+			t.Fatalf("every call must name the tunnel, got %+v", c.req)
+		}
+	}
+	if got := len(callsTo(mc, "slot-candidate")); got != 3 {
+		t.Fatalf("slot-candidate calls = %d, want 3", got)
+	}
+}
+
+func TestRemoteSlots_FallsBackOnlyOnExplicitRefusal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		freeC     fakeMeshResult
+		freeB     fakeMeshResult
+		want      bool
+		wantCalls []string
+	}{
+		{name: "most idle refuses, next frees", freeC: fakeMeshResult{}, freeB: fakeMeshResult{resp: mesh.ControlResponse{Applied: true}}, want: true, wantCalls: []string{"c:9443", "b:9443"}},
+		{name: "both refuse", freeC: fakeMeshResult{}, freeB: fakeMeshResult{}, want: false, wantCalls: []string{"c:9443", "b:9443"}},
+		{name: "most idle fails", freeC: fakeMeshResult{err: errors.New("stream reset")}, freeB: fakeMeshResult{resp: mesh.ControlResponse{Applied: true}}, want: true, wantCalls: []string{"c:9443"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc := &fakeMeshControl{byOp: map[string]fakeMeshResult{
+				"slot-candidate@b:9443": slotOfferResult(5000),
+				"slot-candidate@c:9443": slotOfferResult(30000),
+				"slot-candidate@d:9443": {},
+				"free-slot@c:9443":      tc.freeC,
+				"free-slot@b:9443":      tc.freeB,
+			}}
+			if got := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc).FreeRemoteSlot(context.Background(), "t"); got != tc.want {
+				t.Fatalf("FreeRemoteSlot = %v, want %v", got, tc.want)
+			}
+			if got := callsTo(mc, "free-slot"); !slices.Equal(got, tc.wantCalls) {
+				t.Fatalf("free-slot calls = %v, want %v", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestRemoteSlots_NoOfferSendsNoFree(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{}
+	if newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc).FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("no offer must mean no freed slot")
+	}
+	if got := callsTo(mc, "free-slot"); len(got) != 0 {
+		t.Fatalf("free-slot calls = %v, want none", got)
+	}
+}
+
+func TestRemoteSlots_FailedQuerySkipsNode(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{byOp: map[string]fakeMeshResult{
+		"slot-candidate@b:9443": {err: errors.New("peer unreachable")},
+		"slot-candidate@c:9443": slotOfferResult(1000),
+		"slot-candidate@d:9443": {},
+		"free-slot@c:9443":      {resp: mesh.ControlResponse{Applied: true}},
+	}}
+	if !newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc).FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("a failed query on one node must not stop the others")
+	}
+	if got := callsTo(mc, "free-slot"); len(got) != 1 || got[0] != "c:9443" {
+		t.Fatalf("free-slot calls = %v, want exactly [c:9443]", got)
+	}
+}
+
+func TestRemoteSlots_NodeListingFailure(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{}
+	if newTestRemoteSlots(fakeLiveNodes{err: errors.New("valkey down")}, mc).FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("a failed node listing must free nothing")
+	}
+	if got := len(mc.snapshot()); got != 0 {
+		t.Fatalf("mesh calls = %d, want 0", got)
+	}
+}
+
+func TestRemoteSlots_OnlySelfSendsNothing(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{}
+	nodes := fakeLiveNodes{nodes: map[string]router.NodeInfo{"nodeA": {Advertise: "a:9443"}}}
+	if newTestRemoteSlots(nodes, mc).FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("a single replica has no other node to free a slot on")
+	}
+	if got := len(mc.snapshot()); got != 0 {
+		t.Fatalf("mesh calls = %d, want 0", got)
+	}
+}
+
+func TestRemoteSlots_SkipsWhenAttemptsSaturated(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{}
+	r := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc)
+	r.inflight = make(chan struct{}, 1)
+	r.inflight <- struct{}{}
+	if r.FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("a saturated node must not free a slot")
+	}
+	if got := len(mc.snapshot()); got != 0 {
+		t.Fatalf("mesh calls while saturated = %d, want 0", got)
+	}
+	<-r.inflight
+	r.FreeRemoteSlot(context.Background(), "t")
+	if got := len(callsTo(mc, "slot-candidate")); got != 3 {
+		t.Fatalf("slot-candidate calls once a slot is free = %d, want 3", got)
+	}
+}
+
+func TestRemoteSlots_QueriesNodesInParallel(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{block: make(chan struct{})}
+	r := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc)
+	r.queryTimeout = 10 * time.Second
+	done := make(chan bool, 1)
+	go func() { done <- r.FreeRemoteSlot(context.Background(), "t") }()
+	deadline := time.Now().Add(5 * time.Second)
+	for mc.inflight.Load() < 3 {
+		if time.Now().After(deadline) {
+			close(mc.block)
+			<-done
+			t.Fatalf("only %d slot-candidate calls in flight at once, want all 3 in parallel", mc.inflight.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(mc.block)
+	<-done
+	if got := mc.maxSeen.Load(); got != 3 {
+		t.Fatalf("maxSeen = %d, want 3", got)
+	}
+}
+
+func TestRemoteSlots_QueryBoundedByTimeout(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{block: make(chan struct{})}
+	r := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc)
+	r.queryTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if r.FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("unanswered queries must free nothing")
+	}
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("the query round took %v, want it bounded by the 50 ms query timeout", elapsed)
+	}
+	if calls, returned := len(mc.snapshot()), int(mc.returned.Load()); returned != calls {
+		t.Fatalf("%d of %d mesh calls returned, want all", returned, calls)
+	}
+}
+
+func TestRemoteSlots_FreeBoundedByTimeout(t *testing.T) {
+	t.Parallel()
+	mc := &fakeMeshControl{byOp: map[string]fakeMeshResult{
+		"slot-candidate@b:9443": slotOfferResult(5000),
+		"slot-candidate@c:9443": slotOfferResult(30000),
+		"slot-candidate@d:9443": {},
+		"free-slot@c:9443":      {block: make(chan struct{})},
+		"free-slot@b:9443":      {resp: mesh.ControlResponse{Applied: true}},
+	}}
+	r := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc)
+	r.freeTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if !r.FreeRemoteSlot(context.Background(), "t") {
+		t.Fatal("an unanswered free-slot may have freed a slot and must be reported as such")
+	}
+	if elapsed := time.Since(start); elapsed >= time.Second {
+		t.Fatalf("the free-slot call took %v, want it bounded by the 50 ms free timeout", elapsed)
+	}
+	if got := callsTo(mc, "free-slot"); len(got) != 1 || got[0] != "c:9443" {
+		t.Fatalf("free-slot calls = %v, want exactly [c:9443]", got)
+	}
+	if calls, returned := len(mc.snapshot()), int(mc.returned.Load()); returned != calls {
+		t.Fatalf("%d of %d mesh calls returned, want all", returned, calls)
+	}
+}
+
+func TestRemoteSlots_ParentDeadlineCutsMeshCalls(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		mc   func() *fakeMeshControl
+		want bool
+	}{
+		{
+			name: "slot-candidate calls still running",
+			mc:   func() *fakeMeshControl { return &fakeMeshControl{block: make(chan struct{})} },
+			want: false,
+		},
+		{
+			name: "free-slot call still running",
+			mc: func() *fakeMeshControl {
+				return &fakeMeshControl{byOp: map[string]fakeMeshResult{
+					"slot-candidate@b:9443": slotOfferResult(5000),
+					"slot-candidate@c:9443": {},
+					"slot-candidate@d:9443": {},
+					"free-slot@b:9443":      {block: make(chan struct{})},
+				}}
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc := tc.mc()
+			r := newTestRemoteSlots(fakeLiveNodes{nodes: slotTestNodes}, mc)
+			r.queryTimeout = 10 * time.Second
+			r.freeTimeout = 10 * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			if got := r.FreeRemoteSlot(ctx, "t"); got != tc.want {
+				t.Fatalf("FreeRemoteSlot = %v, want %v", got, tc.want)
+			}
+			if elapsed := time.Since(start); elapsed >= 5*time.Second {
+				t.Fatalf("FreeRemoteSlot took %v, want it cut by the 50 ms parent deadline", elapsed)
+			}
+			if calls, returned := len(mc.snapshot()), int(mc.returned.Load()); returned != calls {
+				t.Fatalf("%d of %d mesh calls returned, want all", returned, calls)
+			}
+		})
 	}
 }

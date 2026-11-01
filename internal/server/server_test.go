@@ -242,24 +242,11 @@ func TestRun_InternalBindFailureIsFatal(t *testing.T) {
 	waitAsyncLogGoroutines(t, baseline)
 }
 
-// freeAddr binds an ephemeral loopback port, closes it, and returns the address for reuse (small race
-// window; acceptable for tests — server.Run rebinds it immediately).
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	tunneltest.CloseOrLog(t, ln)
-	return addr
-}
-
 func TestRun_HTTPServerErrorsGoThroughSlog(t *testing.T) {
 	mr := miniredis.RunT(t)
 	cfg := lifecycleConfig(t, mr.Addr())
-	cfg.Listen = freeAddr(t)
-	cfg.MeshListen = freeAddr(t)
+	cfg.Listen = tunneltest.FreeAddr(t)
+	cfg.MeshListen = tunneltest.FreeAddr(t)
 
 	var std syncBuffer
 	prev := log.Writer()
@@ -375,14 +362,7 @@ func TestRun_ACMEHTTPBindFailureIsFatal(t *testing.T) {
 	cfg := lifecycleConfig(t, mr.Addr())
 	cfg.ACMEChallengeZeroSSL = config.ChallengeHTTP01
 	cfg.ACMEEABZeroSSLKID, cfg.ACMEEABZeroSSLHMAC = "changeme", "changeme"
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.InternalListen = probe.Addr().String()
-	if err := probe.Close(); err != nil {
-		t.Fatal(err)
-	}
+	cfg.InternalListen = tunneltest.FreeAddr(t)
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
