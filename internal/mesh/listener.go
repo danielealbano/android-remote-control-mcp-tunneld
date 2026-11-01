@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
@@ -18,6 +19,7 @@ import (
 type Controller interface {
 	TunnelController
 	ConnController
+	SlotController
 }
 
 type TunnelController interface {
@@ -30,6 +32,11 @@ type ConnController interface {
 	Evict(ctx context.Context, tunnel, connID, reason string) (bool, error)
 }
 
+type SlotController interface {
+	SlotCandidate(tunnel string) (time.Duration, bool)
+	FreeSlot(ctx context.Context, tunnel string) bool
+}
+
 // ControlRequest / ControlResponse are the /api/v1/mesh/control JSON envelope (replica↔replica only).
 type ControlRequest struct {
 	Op     string            `json:"op"`
@@ -40,7 +47,8 @@ type ControlRequest struct {
 }
 
 type ControlResponse struct {
-	Applied bool `json:"applied"` // renew: a nudge was enqueued; terminate: a live phone conn was closed
+	Applied bool  `json:"applied"` // renew: a nudge was enqueued; terminate: a live phone conn was closed
+	IdleMS  int64 `json:"idle_ms,omitempty"`
 }
 
 // Handler is the mesh listener handler. It requires a mesh-role peer cert — the mTLS config verifies the
@@ -89,7 +97,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveControl handles the mesh control RPC (mesh-role mTLS already enforced by ServeHTTP): a JSON
-// {op, tunnel} → {applied} request/response. Unknown op / missing tunnel → 400; op failure → 502.
+// {op, tunnel} request/response. Unknown op / missing tunnel → 400; op failure → 502.
 func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -101,7 +109,8 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad control request", http.StatusBadRequest)
 		return
 	}
-	if req.Op != "renew" && req.Op != "terminate" && req.Op != "open" && req.Op != "evict" {
+	if req.Op != "renew" && req.Op != "terminate" && req.Op != "open" && req.Op != "evict" &&
+		req.Op != "slot-candidate" && req.Op != "free-slot" {
 		http.Error(w, "unknown op", http.StatusBadRequest)
 		return
 	}
@@ -117,17 +126,23 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad open request", http.StatusBadRequest)
 		return
 	}
-	var applied bool
+	var resp ControlResponse
 	var err error
 	switch req.Op {
 	case "renew":
-		applied, err = h.control.Renew(r.Context(), req.Tunnel)
+		resp.Applied, err = h.control.Renew(r.Context(), req.Tunnel)
 	case "terminate":
-		applied, err = h.control.Terminate(r.Context(), req.Tunnel)
+		resp.Applied, err = h.control.Terminate(r.Context(), req.Tunnel)
 	case "open":
-		applied, err = h.control.Open(r.Context(), req.Tunnel, req.ConnID, *req.Open)
+		resp.Applied, err = h.control.Open(r.Context(), req.Tunnel, req.ConnID, *req.Open)
 	case "evict":
-		applied, err = h.control.Evict(r.Context(), req.Tunnel, req.ConnID, req.Reason)
+		resp.Applied, err = h.control.Evict(r.Context(), req.Tunnel, req.ConnID, req.Reason)
+	case "slot-candidate":
+		var idle time.Duration
+		idle, resp.Applied = h.control.SlotCandidate(req.Tunnel)
+		resp.IdleMS = idle.Milliseconds()
+	case "free-slot":
+		resp.Applied = h.control.FreeSlot(r.Context(), req.Tunnel)
 	}
 	if err != nil {
 		h.logger.Warn("mesh control op failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
@@ -135,7 +150,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(ControlResponse{Applied: applied}); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		h.logger.Debug("mesh control response write failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
 	}
 }

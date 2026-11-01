@@ -164,6 +164,16 @@ type fakeReadiness struct{ notReady atomic.Bool }
 
 func (f *fakeReadiness) DialBackReady() bool { return !f.notReady.Load() }
 
+type fakeRemoteSlots struct {
+	calls atomic.Int32
+	free  func(ctx context.Context, tunnel string) bool
+}
+
+func (f *fakeRemoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) bool {
+	f.calls.Add(1)
+	return f.free != nil && f.free(ctx, tunnel)
+}
+
 type openCall struct{ nodeID, name, connID, token string }
 
 type fakeOpener struct {
@@ -274,6 +284,7 @@ type testEdge struct {
 	opener *fakeOpener
 	ready  *fakeReadiness
 	chal   *fakeACMEChallenges
+	slots  *fakeRemoteSlots
 }
 
 func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool) *testEdge {
@@ -290,12 +301,13 @@ func newTestEdge(t *testing.T, cfg Config, banIP func(netip.Addr) bool) *testEdg
 	opener := &fakeOpener{errByNode: map[string]error{}}
 	ready := &fakeReadiness{}
 	chal := &fakeACMEChallenges{}
+	slots := &fakeRemoteSlots{}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	addr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 443}
-	e := New(cfg, banIP, rec, rtr, dial, opener, ready, lim, sink, chal, addr)
-	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, dial: dial, opener: opener, ready: ready, chal: chal}
+	e := New(cfg, banIP, rec, rtr, dial, opener, ready, lim, slots, sink, chal, addr)
+	return &testEdge{e: e, rec: rec, sink: sink, rtr: rtr, dial: dial, opener: opener, ready: ready, chal: chal, slots: slots}
 }
 
 func containsStr(ss []string, want string) bool {

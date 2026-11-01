@@ -38,8 +38,8 @@ You MUST ALWAYS read these documents before ANY work, in this order:
    detail is disputed — except the dial-back/data path, whose decision record is
    **`docs/plans/16_entry_node_dial_back_20261014192454.md`**, and the name claim: the user replaced Plan 3's
    write-verify claim with the Valkey claim lock on 2026-10-16 (described in `docs/ARCHITECTURE.md` §6).
-   Route ownership and the ban model are described by `docs/ARCHITECTURE.md` and `docs/PROTOCOL.md`, which
-   are canonical for them.
+   Route ownership, the ban model and the stream-cap eviction are described by `docs/ARCHITECTURE.md` and
+   `docs/PROTOCOL.md`, which are canonical for them.
 
 You MUST ALSO follow `go.md`, `github.md`, `agent.md`, and `development_pipeline.md`. It is
 ABSOLUTELY MANDATORY to pass ALL quality gates before any work is considered done.
@@ -160,7 +160,7 @@ MUST NOT be relaxed without explicit user direction.
   values are frozen); `OPEN{token, addr, use_https, use_mtls}`; the phone answers with a NEW connection to
   `addr` carrying a `GET /api/v1/data` HTTP/1.1 upgrade with the token (`101`, then an OPAQUE unframed splice;
   `wire.ChunkSize` = 16384 is the pacing slice). The mesh carries control RPCs only (`renew`, `terminate`,
-  `open`, `evict` — replica↔replica, not part of the phone contract). ANY wire change MUST update
+  `open`, `evict`, `slot-candidate`, `free-slot` — replica↔replica, not part of the phone contract). ANY wire change MUST update
   `docs/PROTOCOL.md` and the Go client in `client/` together (the future Kotlin client conforms to the
   spec, not to the Go source).
 

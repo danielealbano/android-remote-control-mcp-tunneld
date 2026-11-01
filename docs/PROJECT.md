@@ -108,7 +108,7 @@ own routes. Client-supplied `X-Forwarded-*` are irrelevant (opaque relay).
 | Reads/packets per second (per tunnel, per direction) | `--limit-packets` | `100` |
 | Traffic / tunnel / 24h window (UTC-aligned, per direction) | `--limit-traffic-day` | `1gb` |
 | Traffic / tunnel / 7d window (epoch-aligned, per direction) | `--limit-traffic-week` | `4gb` |
-| Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
+| Concurrent data streams / tunnel, all nodes together (a full cap evicts the entry node's least-active evictable stream, else the most idle one on another node — [`ARCHITECTURE.md`](ARCHITECTURE.md) §2) | `--limit-concurrent` | `4` |
 | New public TCP connections / source IP | `--limit-conn-rate` | `10`/s |
 | Enrollments / source IP | `--limit-enroll-hour` + `--limit-enroll-minute` | `20`/h AND `2`/min |
 | Pre-bind control handshakes / node | `--limit-stream-pending` | `64` |
