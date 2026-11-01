@@ -734,3 +734,13 @@ Why: catch any drift between this plan and what was built before the pull reques
       `make vet`, `make govulncheck`, `make tidy` (then `git diff --exit-code go.mod go.sum`), `make test-scripts`,
       `make third-party-licenses`, `make test-unit`, `make test-integration`, `make test-e2e`, `make test-staging`
       (skips without `TUNNELD_STAGING_SSH_KEY`).
+
+## Deviations
+
+- **Tasks 3.1–3.3 (commit grouping — code review):** the three documentation tasks were committed together in
+  3e21881 (`docs(tunneld): document cluster-wide stream eviction`) instead of one commit per task as the Context
+  section states; the content of each task is unchanged. The pushed history is kept as published (splitting it
+  would need a force-push).
+- **Task 1.2 tests (code review):** `TestControlFreeSlotDispatches` and
+  `TestAdminController_SlotOps` were first written as loops over `true`/`false`; they are now named tables with
+  `t.Run` subtests (go.md §3 table-driven tests). What they verify is unchanged.
