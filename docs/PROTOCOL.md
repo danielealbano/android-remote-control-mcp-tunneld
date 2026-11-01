@@ -335,8 +335,9 @@ mTLS). The ops:
 
 A node that finds a tunnel's stream cap full and has no evictable stream of its own sends `slot-candidate` to
 every other live node, then `free-slot` to the node whose stream is the most idle (to the next one only when it
-answers `applied:false`; a failed call ends the attempt), and retries its admission once when a `free-slot`
-answered `applied:true` or failed (`ARCHITECTURE.md` §2).
+answers `applied:false`; a failed call ends the attempt), and retries its admission when a `free-slot`
+answered `applied:true` or failed. When another admission takes the freed slot first, it evicts again, at most 5
+times within 2 s for one connection (`ARCHITECTURE.md` §2).
 
 `renew` is the mechanism behind the internal `POST /api/v1/admin/tunnels/{name}/reissue` endpoint (sent to
 the owner). Unknown op → `400`, missing tunnel → `400`, `open`/`evict` without `conn_id` → `400`, `open`
