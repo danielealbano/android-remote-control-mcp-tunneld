@@ -280,9 +280,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	}
 	defer func() {
 		ut := s.now()
-		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.cfg.Limiter.IssuanceEnd(ectx, name, orderID); err != nil {
+		if err := s.cfg.Limiter.IssuanceEnd(ctx, name, orderID); err != nil {
 			s.logger.Warn("issuance lock release failed (lock self-expires)", "tunnel", name, "err", err)
 		}
 		s.logStep("issue step", "issuance-unlock", ut, "tunnel", name, "ip", ip)
