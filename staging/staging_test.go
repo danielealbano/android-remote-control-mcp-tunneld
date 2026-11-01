@@ -167,19 +167,6 @@ func redirectOutput(t *testing.T, env *stagingEnv) *redactingWriter {
 	return out
 }
 
-func freeLocalPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
-}
-
 type tunnelOutcome int
 
 const (
@@ -423,11 +410,11 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 	enrollHost := randomLabel(t, "e") + "." + env.domain
 	controlHost := randomLabel(t, "c") + "." + env.domain
 	edgeAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(edgePort))
-	meshAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freeLocalPort(t)))
+	meshAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(tunneltest.FreePort(t, "127.0.0.1")))
 
 	cfg := config.ServeCmd{
 		RedisURL: redisURL, Listen: edgeAddr, MeshListen: meshAddr,
-		InternalListen: net.JoinHostPort("127.0.0.1", strconv.Itoa(freeLocalPort(t))),
+		InternalListen: net.JoinHostPort("127.0.0.1", strconv.Itoa(tunneltest.FreePort(t, "127.0.0.1"))),
 		MeshAdvertise:  meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
 		TunnelDomain: env.domain, EnrollHost: enrollHost, ControlHost: controlHost, NameLength: 10,
 		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
@@ -600,7 +587,7 @@ func TestStaging_ACMEValidation(t *testing.T) {
 	redisURL := tunneltest.StartValkey(t)
 	s3URL, access, secret := tunneltest.StartMinIO(t)
 	tunneltest.EnsureS3Bucket(t, s3URL, access, secret, stagingBucket)
-	edgePort, httpPort := freeLocalPort(t), freeLocalPort(t)
+	edgePort, httpPort := tunneltest.FreePort(t, "127.0.0.1"), tunneltest.FreePort(t, "127.0.0.1")
 	openTunnel(t, env, out, edgePort, httpPort)
 
 	cases := []stagingCase{
