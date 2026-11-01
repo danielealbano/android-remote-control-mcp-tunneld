@@ -92,9 +92,9 @@ Why: the entry node needs to learn, and act on, the most idle evictable stream a
       less than 1 ms) / `{"applied":false}`; mesh `free-slot` answers `{"applied":<evicted>}`; both require `tunnel`
       (`400` otherwise) and need no `conn_id`.
 
-### [ ] Task 1.1: Edge victim choice
+### [x] Task 1.1: Edge victim choice
 
-- [ ] **Action 1.1.1** — `internal/edge/bridge.go` (modify): split the victim selection out of
+- [x] **Action 1.1.1** — `internal/edge/bridge.go` (modify): split the victim selection out of
       `evictLeastActive`, skip already-evicted streams, claim the victim with `CompareAndSwap`, and add the two
       exported methods (the existing doc comment of `evictLeastActive` and the inline `release()` comment stay).
 
@@ -166,8 +166,8 @@ Tests (`internal/edge/policy_test.go`; the existing `evictLeastActive` tests kee
 
 #### Definition of Done
 
-- [ ] The selection logic exists once (`leastActive`), used by `evictLeastActive` and `SlotCandidate`.
-- [ ] Every test of the table above is written.
+- [x] The selection logic exists once (`leastActive`), used by `evictLeastActive` and `SlotCandidate`.
+- [x] Every test of the table above is written.
 
 ### [ ] Task 1.2: Mesh `slot-candidate` / `free-slot` ops
 

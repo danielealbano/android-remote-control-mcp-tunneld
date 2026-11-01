@@ -61,12 +61,30 @@ func (e *Edge) untrackStream(s *activeStream) {
 // evictLeastActive closes the least-active EVICTABLE local stream of a tunnel (idle ≥ EvictIdle OR
 // rolling rate < ProtectRate; never a protected stream). Returns true if one was evicted.
 func (e *Edge) evictLeastActive(tunnel string) bool {
+	for {
+		victim, _ := e.leastActive(tunnel)
+		if victim == nil {
+			return false
+		}
+		if !victim.evicted.CompareAndSwap(false, true) {
+			continue
+		}
+		victim.cancel()
+		if victim.release != nil {
+			victim.release() // free the Valkey slot NOW; the victim's own deferred release becomes a no-op
+		}
+		return true
+	}
+}
+
+func (e *Edge) leastActive(tunnel string) (*activeStream, time.Duration) {
 	now := e.now().UnixNano()
 	e.smu.Lock()
+	defer e.smu.Unlock()
 	var victim *activeStream
 	var victimIdle int64 = -1
 	for s := range e.streams {
-		if s.tunnel != tunnel {
+		if s.tunnel != tunnel || s.evicted.Load() {
 			continue
 		}
 		idle := now - s.lastAct.Load()
@@ -80,16 +98,19 @@ func (e *Edge) evictLeastActive(tunnel string) bool {
 			victimIdle = idle
 		}
 	}
-	e.smu.Unlock()
-	if victim != nil {
-		victim.evicted.Store(true)
-		victim.cancel()
-		if victim.release != nil {
-			victim.release() // free the Valkey slot NOW; the victim's own deferred release becomes a no-op
-		}
-		return true
+	return victim, time.Duration(victimIdle)
+}
+
+func (e *Edge) SlotCandidate(tunnel string) (time.Duration, bool) {
+	victim, idle := e.leastActive(tunnel)
+	if victim == nil {
+		return 0, false
 	}
-	return false
+	return idle, true
+}
+
+func (e *Edge) FreeSlot(tunnel string) bool {
+	return e.evictLeastActive(tunnel)
 }
 
 // EvictTunnelStreams cancels every ACTIVE public splice for the named tunnel (admin terminate) on THIS
