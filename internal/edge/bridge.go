@@ -287,7 +287,7 @@ func (e *Edge) evictAndAcquire(ctx context.Context, name, token string) bool {
 	rctx, cancel := context.WithTimeout(ctx, slotRetryBudget)
 	defer cancel()
 	for range slotRetries {
-		if rctx.Err() != nil || !(e.evictLeastActive(name) || e.slots.FreeRemoteSlot(rctx, name)) {
+		if rctx.Err() != nil || (!e.evictLeastActive(name) && !e.slots.FreeRemoteSlot(rctx, name)) {
 			return false
 		}
 		acq, err := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
