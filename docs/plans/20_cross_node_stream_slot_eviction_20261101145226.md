@@ -19,8 +19,18 @@ idle evictable stream evict it over the mesh, then retry.
 - **Victim choice (user, 2026-11-01):** the entry node evicts its own least-active evictable stream FIRST,
   exactly as today. ONLY when it has none, it asks every other live node IN PARALLEL for its least-active
   evictable stream and has the node whose stream is MOST IDLE evict it ("most idle cluster-wide"), then
-  retries the acquire once. Evictability and the per-node ranking are unchanged: idle ≥
+  retries the acquire (bounded retries, below). Evictability and the per-node ranking are unchanged: idle ≥
   `--limit-conn-evict-idle` OR rolling 60 s bytes < `--limit-conn-protect-rate`; the longest-idle one goes.
+- **Bounded retries (user, 2026-11-01, after the code review):** while the retried acquire is still refused (for
+  example because another admission took the freed slot first), the admission evicts again and retries — at most 5
+  evictions for one connection (`slotRetries`), and no new round starts after 2 s (`slotRetryBudget`). Each round
+  evicts locally first and asks the other nodes only when the local node has nothing. The user chose this over a
+  per-tunnel `SETNX` lock. The 2 s cuts the mesh calls still running (`FreeRemoteSlot` runs under it); a Valkey call
+  already sent (the node listing, the retried acquire, the victim's slot release) is bounded only by the Valkey
+  client's own timeouts, because tunneld does not enable go-redis `ContextTimeoutEnabled` (v9.23.0 `redis.go`
+  `baseClient.context` returns `context.Background()` for the socket I/O). The retried acquire runs on the
+  admission's own context, never on the budget: an acquire cut by the budget would surface as an error, and acquire
+  errors fail open (admit).
 - **Pending slots stay non-evictable (user, 2026-11-01):** a slot taken for a connection still waiting for
   its dial-back is a request in progress (not tracked as an `activeStream`); it keeps counting toward the cap
   and is never offered or evicted.
@@ -31,13 +41,13 @@ idle evictable stream evict it over the mesh, then retry.
   `applied:false` (its stream became active or ended meanwhile), the next most idle offer is tried. A `free-slot`
   call that FAILS (error, timeout, lost answer) ends the attempt and is reported as "may have freed a slot":
   `free-slot` is not idempotent — the remote evicts before answering and ignores the caller's cancellation — so
-  asking another node could evict a second stream for one admission. `handleTunnel`'s single retry-acquire then
-  decides: when no slot was freed it refuses with `stream-cap`. When every `free-slot` answers `applied:false`
-  there is no retry and the connection is refused at once.
+  asking another node could evict a second stream for one admission. The retried acquire then decides: when no
+  slot was freed it is refused and the next round evicts again (bounded retries). When the local node has nothing
+  and every `free-slot` answers `applied:false`, there is no retry and the connection is refused at once.
 - **A victim already being evicted is never picked again:** the selection skips streams whose `evicted` flag
   is set and the eviction claims the victim with `CompareAndSwap`, so `applied:true` means a stream not already
   being evicted was evicted and its slot release was attempted (a victim admitted fail-open holds no slot, and a
-  failed `ReleaseStream` leaves its slot taken; the single retry-acquire decides). Without it, concurrent refusals
+  failed `ReleaseStream` leaves its slot taken; the retried acquire decides). Without it, concurrent refusals
   re-pick a victim that stays tracked until its splice unwinds and free nothing. This also changes the LOCAL path
   when two admissions on one node race: today the second one usually re-picks the same victim and is refused; with
   this plan it evicts the next least-active stream and is admitted.
@@ -49,12 +59,14 @@ idle evictable stream evict it over the mesh, then retry.
   release then no-ops (`sync.Once`). That single `ZREM` is bounded by the Valkey client's socket timeouts: tunneld
   sets none, so go-redis v9.23.0's defaults apply (`ReadTimeout` 5 s, `WriteTimeout` = `ReadTimeout`, `options.go`).
   The local eviction path already calls the same closure the same way.
-- **Bounds:** the parallel `slot-candidate` round (including the node listing) runs under one 1 s deadline;
+- **Bounds:** the parallel `slot-candidate` mesh calls run under one 1 s deadline (the node listing before them is a
+  Valkey call, bounded by the client's own timeouts);
   each `free-slot` call under its own 1 s deadline (the mesh is the private WireGuard network, a call takes
   milliseconds); at most one `slot-candidate` and one `free-slot` per other live node, and only the last
   `free-slot` can go unanswered. Refusals are driven by public traffic, so a node runs at most
   `slotFreeConcurrency` = 32 remote-slot attempts at once (the same bound as `evictBroadcastConcurrency`); an attempt
-  that finds them all busy skips the mesh and is refused with `stream-cap` exactly as today (non-blocking).
+  that finds them all busy skips the mesh and is refused with `stream-cap` exactly as today (non-blocking). One
+  admission runs at most 5 rounds (bounded retries).
 - **Logging:** a failed node listing or mesh call on this path is logged at Debug with `tunnel` + `peer` (the
   other node's id; the server logger already carries this node's own id as `node`) — it
   runs on every refused admission of a saturated tunnel (public-traffic driven), like the bridge's other
@@ -62,8 +74,9 @@ idle evictable stream evict it over the mesh, then retry.
   already counted as `PublicConnClose("evicted")` and the refusal as `stream-cap`.
 - **No Valkey, wire-frame, config or metric change.** No Mermaid chart is added or modified.
 - **No new code comments** (user rule): no comment line is added to any code. The `serveControl` doc comment's
-  "→ {applied}" becomes partly wrong (`slot-candidate` also answers `idle_ms`) and is removed; every other
-  touched comment stays correct and is kept.
+  "→ {applied}" becomes partly wrong (`slot-candidate` also answers `idle_ms`) and is removed; the bounded retries
+  make "(with one evict-and-retry)" in the `handleTunnel` doc comment and "with one evict-and-retry" in the
+  stream-cap comment wrong, and only those parts are removed; every other touched comment stays correct and is kept.
 - **Decision-record precedence:** `.claude/rules/project.md` makes the Plan 3 record canonical in a dispute, and
   Plan 3 records the LOCAL-only eviction; the stream-cap eviction joins the carve-outs that `docs/ARCHITECTURE.md`
   and `docs/PROTOCOL.md` are canonical for (Action 3.3.3).
@@ -330,9 +343,11 @@ Why: the issue #209 failure mode — every slot idle on other nodes, the new con
       cap or a fail-open acquire error never touches the mesh.
 - [x] The `slot-candidate` query reaches every other live node in parallel.
 - [x] When no other node has an evictable stream the connection is refused with `stream-cap` exactly as today; a
-      `free-slot` that fails never leads to a second eviction; every mesh call is bounded (the query round 1 s,
-      each `free-slot` 1 s); a node runs at most 32 remote-slot attempts at once and refuses beyond that without
-      touching the mesh.
+      failed `free-slot` ends that remote attempt (no other node is asked in it); every mesh call is bounded (the
+      `slot-candidate` calls 1 s, each `free-slot` 1 s); a node runs at most 32 remote-slot attempts at once and
+      refuses beyond that without touching the mesh.
+- [x] While the retried acquire is still refused, the admission evicts again: at most 5 evictions for one
+      connection, no new round after 2 s, the mesh calls cut at 2 s; a Valkey error on a retried acquire fails open.
 - [x] Pending (dial-back waiting) slots are never evicted.
 
 ### [x] Task 2.1: Server-side remote slot freeing
@@ -482,6 +497,7 @@ channel (capacity 32 unless noted) set on the struct):
 | `TestRemoteSlots_QueriesNodesInParallel` | Global `block`; wait until `inflight` reaches 3 (B, C, D) before closing it, as `TestBroadcastControl` does, and fail if it never does; then `maxSeen` = 3. |
 | `TestRemoteSlots_QueryBoundedByTimeout` | Global `block` never closed, `queryTimeout` 50 ms → returns `false` well within 1 s and every call has returned (`returned` = number of calls). |
 | `TestRemoteSlots_FreeBoundedByTimeout` | Offers answer at once; C's `free-slot` blocks (per-op `block` never closed), `freeTimeout` 50 ms → returns `true` well within 1 s, exactly one `free-slot` sent, every call has returned. |
+| `TestRemoteSlots_ParentDeadlineCutsMeshCalls` | Table, `queryTimeout` / `freeTimeout` 10 s, caller deadline 50 ms: the `slot-candidate` calls still running → `false`; a `free-slot` still running → `true`; both well within 5 s, every call has returned. |
 
 #### Definition of Done
 
@@ -515,11 +531,50 @@ channel (capacity 32 unless noted) set on the struct):
 +		lim: lim, slots: slots, logs: logs, chal: chal,
 ```
 
-- [x] **Action 2.2.2** — `internal/edge/bridge.go` (modify, `handleTunnel`):
+- [x] **Action 2.2.2** — `internal/edge/bridge.go` (modify, `handleTunnel`; bounded retries per the Context
+      section — the two existing comments lose only their "one evict-and-retry" part):
 
 ```diff
+-// handleTunnel resolves the route, enforces the global stream cap (with one evict-and-retry),
++// handleTunnel resolves the route, enforces the global stream cap,
+@@
+-	// Global per-tunnel stream cap with one evict-and-retry. A control-plane ERROR fails open (like
++	// Global per-tunnel stream cap. A control-plane ERROR fails open (like
+@@
 -	} else if !acq && e.evictLeastActive(name) {
-+	} else if !acq && (e.evictLeastActive(name) || e.slots.FreeRemoteSlot(ctx, name)) {
+-		acq, aerr = e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
+-		if aerr != nil {
+-			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
+-			acq = true
+-		}
++	} else if !acq {
++		acq = e.evictAndAcquire(ctx, name, token)
+ 	}
+```
+
+```go
+var slotRetryBudget = 2 * time.Second
+
+const slotRetries = 5
+
+func (e *Edge) evictAndAcquire(ctx context.Context, name, token string) bool {
+	rctx, cancel := context.WithTimeout(ctx, slotRetryBudget)
+	defer cancel()
+	for range slotRetries {
+		if rctx.Err() != nil || (!e.evictLeastActive(name) && !e.slots.FreeRemoteSlot(rctx, name)) {
+			return false
+		}
+		acq, err := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
+		if err != nil {
+			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", err)
+			return true
+		}
+		if acq {
+			return true
+		}
+	}
+	return false
+}
 ```
 
 - [x] **Action 2.2.3** — `internal/server/server.go` (modify): build `remoteSlots` before the edge and pass it to
@@ -573,7 +628,11 @@ members via `te.e.lim.AcquireStream` = "held on another node", `te.rtr.ok = true
 | Test | Verifies |
 |---|---|
 | `TestEdge_HandleTunnel_StreamCapFreesRemoteSlot` | `te.slots.free` releases one probe member and returns `true` → the connection proceeds to the dial-back (`waitPhone(t, te, 0)`), no `stream-cap` rejection, `FreeRemoteSlot` called once with the tunnel name. |
-| `TestEdge_HandleTunnel_StreamCapNothingToFree` | Table: `te.slots.free` returns `false`; `te.slots.free` returns `true` without releasing a probe (a failed `free-slot`, or the freed slot taken by another admission) → in both, one `stream-cap` rejection after the single retry, no `OPEN` requested (`te.opener.calls` empty), client closed, `FreeRemoteSlot` called once. |
+| `TestEdge_HandleTunnel_StreamCapNothingToFree` | Table: `te.slots.free` returns `false` → `FreeRemoteSlot` called once; `te.slots.free` returns `true` without releasing a probe → called 5 times (the bound); in both, one `stream-cap` rejection, no `OPEN` requested (`te.opener.calls` empty), client closed. |
+| `TestEdge_HandleTunnel_RetriesWhenFreedSlotIsTaken` | Table: the freed slot is taken by another admission once (remote: the first `free` frees `held-0` and a thief takes it, the second frees `held-1`; local: two tracked streams, the first victim's slot is stolen) → admitted in round 2 (remote: 2 `FreeRemoteSlot` calls; local: 2 local evictions, 0 remote calls). |
+| `TestEdge_HandleTunnel_EvictionsBoundedPerAdmission` | Six evictable local streams whose releases free nothing → exactly 5 are evicted, one `stream-cap`, client closed, 0 `FreeRemoteSlot` calls. |
+| `TestEdge_HandleTunnel_RetryAcquireErrorFailsOpen` | A limiter that refuses the first acquire (real, at the cap) and errors on the retry; `free` returns `true` → admitted (fail-open), 1 `FreeRemoteSlot` call, the same member on both acquires and released exactly once. |
+| `TestEdge_HandleTunnel_EvictRetriesStopAtDeadline` | Not parallel (it sets `slotRetryBudget` = 100 ms, restored in `t.Cleanup`); `free` blocks until its context ends → refused with `stream-cap` well within 1 s after exactly 1 `FreeRemoteSlot` call. |
 | `TestEdge_HandleTunnel_RemoteSlotOnlyWhenLocalHasNone` | Table: a tracked local idle stream whose `release` frees a probe → local eviction admits, `FreeRemoteSlot` NOT called; a free slot (cap not reached) → NOT called; `AcquireStream` errors (the existing `countingLimiter{acquireErr}` set as `te.e.lim`) → fail-open admission, NOT called. |
 | `TestEdge_PendingSlotNeverEvicted` | `cfg.Concurrent = 1`, `cfg.DialBackTimeout = time.Minute`, `te.dial.never = true`, no probes: a first `handleTunnel` runs in a goroutine on a cancellable context, takes the slot and waits for its dial-back (its `OPEN` is recorded); then `SlotCandidate` → `(0, false)`, `FreeSlot` → `false`, and a second `handleTunnel` gets `stream-cap` after one `FreeRemoteSlot` call (`free` returns `false`) while the first one is still waiting (its done channel still open); finally the context is cancelled and the first goroutine's done channel is awaited. |
 
@@ -632,8 +691,10 @@ Why: the mesh ops are part of the documented replica contract and the cap's beha
 +
 +A node that finds a tunnel's stream cap full and has no evictable stream of its own sends `slot-candidate` to
 +every other live node, then `free-slot` to the node whose stream is the most idle (to the next one only when it
-+answers `applied:false`; a failed call ends the attempt), and retries its admission once when a `free-slot`
-+answered `applied:true` or failed (`ARCHITECTURE.md` §2).
++answers `applied:false`; a failed call ends the attempt), and retries its admission when a `free-slot`
++answered `applied:true` or failed. While the retried admission is still refused (for example because another
++admission took the freed slot first), it evicts again — at most 5 evictions for one connection, and no new round
++starts after 2 s (`ARCHITECTURE.md` §2).
 ```
 
 #### Definition of Done
@@ -656,14 +717,20 @@ Why: the mesh ops are part of the documented replica contract and the cap's beha
 **Stream cap.** A tunnel holds at most `--limit-concurrent` public connections at once across all nodes
 (`conc:{name}`, §5; a Valkey error admits without a slot, fail-open). The entry node takes the slot before it asks
 for the dial-back, so a connection still waiting for its dial-back counts and is never evicted. When the cap is
-full the entry node evicts one stream and retries once. A stream is evictable when it has been idle (no byte
+full the entry node evicts one stream and retries; while the retried admission is still refused (for example
+because another admission took the freed slot first), it evicts again — at most 5 evictions for one connection.
+After 2 s no new round starts, and the mesh calls still running are cut; a Valkey call already sent (the node
+listing, the retried acquire, the victim's slot release) is bounded only by the Valkey client's own timeouts, like
+every other admission call.
+A stream is evictable when it has been idle (no byte
 either way) for at least `--limit-conn-evict-idle` or moved fewer than `--limit-conn-protect-rate` bytes over the
 last 60 s; the most idle one goes. The entry node evicts its own first; when it has none, it asks every other live
 node for its most idle evictable stream (mesh `slot-candidate`, 1 s) and has the node whose stream is the most idle
 evict it (mesh `free-slot`, 1 s; the next node only when that one answers that it has none left, while a failed
 call ends the attempt, since the node may have evicted already); a node runs at most 32 such attempts at once and
-refuses beyond that without asking. The victim ends with `close_reason=evicted`; when no slot was freed the new
-connection is closed (`stream-cap`).
+refuses beyond that without asking. The victim ends with `close_reason=evicted`. The new connection is closed
+(`stream-cap`) when no stream could be evicted (none is evictable, or none was found because the node listing
+failed or no node answered in time), or when the 5 evictions or the 2 s are used up.
 ```
 
 #### Definition of Done
@@ -744,3 +811,14 @@ Why: catch any drift between this plan and what was built before the pull reques
 - **Task 1.2 tests (code review):** `TestControlFreeSlotDispatches` and
   `TestAdminController_SlotOps` were first written as loops over `true`/`false`; they are now named tables with
   `t.Run` subtests (go.md §3 table-driven tests). What they verify is unchanged.
+- **Bounded retries (user request after the code review; Context, US2, Action 2.2.2, the Task 2.1 and 2.2 test
+  tables, Actions 3.1.1 and 3.2.2):** the single retry left an admission refused when another admission took the
+  freed slot first. At the user's request the admission now evicts again and retries, at most 5 evictions within
+  2 s (commits 1a7e0a4, a94efba); the user chose this over a per-tunnel `SETNX` lock and had it added to the PR
+  directly. 5ca2115 rewrites the loop condition with De Morgan's law for staticcheck QF1001 (same short-circuit
+  order). The follow-up review added `TestEdge_HandleTunnel_RetryAcquireErrorFailsOpen` (5a4b5d6),
+  `TestEdge_HandleTunnel_EvictionsBoundedPerAdmission` with the literal 5 in the bound check (37fb0b1),
+  `TestRemoteSlots_ParentDeadlineCutsMeshCalls` (c03bae9) and `t.Helper()` in the `steal` closure (43b4c66), and
+  corrected the docs (4d48e41, 754b5d1, 05f68f0): what triggers another eviction, the full list of refusal cases,
+  and that the 2 s cuts the mesh calls but not a Valkey call already sent (tunneld does not enable go-redis
+  `ContextTimeoutEnabled`). This plan was updated afterwards, at the user's request, to match what was built.
