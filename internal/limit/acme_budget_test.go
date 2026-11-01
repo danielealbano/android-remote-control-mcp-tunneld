@@ -13,6 +13,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 type budgetHarness struct {
@@ -347,6 +349,77 @@ func TestBudgetLock_Contended(t *testing.T) {
 	}
 	if v, err := h.rdb.Get(ctxT(t), budgetLockKey("letsencrypt")).Result(); err != nil || v != "someone-else" {
 		t.Fatalf("another holder's lock must be left alone: %q %v", v, err)
+	}
+}
+
+func TestBudgetLock_ReleasedWhenHolderCtxEnds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		ctx     func() (context.Context, context.CancelFunc)
+		fn      func(ctx context.Context, cancel context.CancelFunc) error
+		wantErr error
+	}{
+		{
+			name: "cancelled inside the section",
+			ctx:  func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			fn:   func(_ context.Context, cancel context.CancelFunc) error { cancel(); return nil },
+		},
+		{
+			name: "deadline passed inside the section",
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 20*time.Millisecond)
+			},
+			fn:      func(ctx context.Context, _ context.CancelFunc) error { <-ctx.Done(); return ctx.Err() },
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newBudgetHarness(t)
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			if err := h.l.withBudgetLock(ctx, "letsencrypt", func() error { return tc.fn(ctx, cancel) }); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("withBudgetLock = %v, want %v", err, tc.wantErr)
+			}
+			if h.mr.Exists(budgetLockKey("letsencrypt")) {
+				t.Fatal("the lock must be released when the holder's ctx ends inside the section")
+			}
+			if err := h.l.withBudgetLock(ctxT(t), "letsencrypt", func() error { return nil }); err != nil {
+				t.Fatalf("the next holder must get the lock: %v", err)
+			}
+			if h.log.Len() != 0 {
+				t.Fatalf("a clean release must not log: %q", h.log.String())
+			}
+		})
+	}
+}
+
+func TestBudgetLock_ReleaseFailureLogged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fail string
+		want string
+	}{
+		{name: "ownership check fails", fail: "get", want: `msg="acme budget lock release check failed (lock expires by TTL)" ca=letsencrypt`},
+		{name: "delete fails", fail: "del", want: `msg="acme budget lock release failed (lock expires by TTL)" ca=letsencrypt`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newBudgetHarness(t)
+			h.rdb.AddHook(tunneltest.FailCommands(errInjected, tc.fail))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := h.l.withBudgetLock(ctx, "letsencrypt", func() error { cancel(); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(h.log.String(), tc.want) {
+				t.Fatalf("the failed release must be logged even after the holder's ctx ended; log = %q", h.log.String())
+			}
+		})
 	}
 }
 

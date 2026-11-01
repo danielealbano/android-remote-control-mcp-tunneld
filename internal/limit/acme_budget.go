@@ -98,9 +98,11 @@ func (l *Limiter) withBudgetLock(ctx context.Context, ca string, fn func() error
 }
 
 func (l *Limiter) releaseBudgetLock(ctx context.Context, ca, token string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budgetLockTTL)
+	defer cancel()
 	v, err := l.rdb.Get(ctx, budgetLockKey(ca)).Result()
 	if err != nil {
-		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+		if !errors.Is(err, redis.Nil) {
 			l.logger.Warn("acme budget lock release check failed (lock expires by TTL)", "ca", ca, "err", err)
 		}
 		return
@@ -108,7 +110,7 @@ func (l *Limiter) releaseBudgetLock(ctx context.Context, ca, token string) {
 	if v != token {
 		return
 	}
-	if err := l.rdb.Del(ctx, budgetLockKey(ca)).Err(); err != nil && ctx.Err() == nil {
+	if err := l.rdb.Del(ctx, budgetLockKey(ca)).Err(); err != nil {
 		l.logger.Warn("acme budget lock release failed (lock expires by TTL)", "ca", ca, "err", err)
 	}
 }
