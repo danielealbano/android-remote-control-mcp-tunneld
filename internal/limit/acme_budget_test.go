@@ -396,6 +396,44 @@ func TestBudgetLock_ReleasedWhenHolderCtxEnds(t *testing.T) {
 	}
 }
 
+func TestBudgetLock_LateReleaseLeavesOthersAlone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		replace func(mr *miniredis.Miniredis, key string) error
+		want    string
+	}{
+		{name: "lock already expired", replace: func(mr *miniredis.Miniredis, key string) error { mr.Del(key); return nil }},
+		{name: "another holder took the lock", replace: func(mr *miniredis.Miniredis, key string) error { return mr.Set(key, "someone-else") }, want: "someone-else"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newBudgetHarness(t)
+			key := budgetLockKey("letsencrypt")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := h.l.withBudgetLock(ctx, "letsencrypt", func() error { cancel(); return tc.replace(h.mr, key) }); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if h.mr.Exists(key) {
+				v, err := h.mr.Get(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = v
+			}
+			if got != tc.want {
+				t.Fatalf("lock after the late release = %q, want %q", got, tc.want)
+			}
+			if h.log.Len() != 0 {
+				t.Fatalf("a late release must not log: %q", h.log.String())
+			}
+		})
+	}
+}
+
 func TestBudgetLock_ReleaseFailureLogged(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
