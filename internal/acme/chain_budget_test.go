@@ -907,6 +907,27 @@ func TestChain_FailureBackoffSurvivesCallerGone(t *testing.T) {
 	}
 }
 
+func TestChain_FailureBeforeCallerGoneDuringSettleBacksOff(t *testing.T) {
+	t.Parallel()
+	le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("ca down"))}
+	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+	if _, _, err := ac.ch.Obtain(ctx, nil, "p"); err == nil {
+		t.Fatal("a failed attempt must fail the run")
+	}
+	if cool, err := ac.lim.CACooldown(context.Background(), "le-1"); err != nil || cool != time.Minute {
+		t.Fatalf("LE account wait-until = %s (%v), want the 1 m backoff: the CA failed before the caller went away", cool, err)
+	}
+	if !slices.Contains(ac.rec.issues, "letsencrypt fail") {
+		t.Fatalf("issues = %v, want the CA failure recorded", ac.rec.issues)
+	}
+	if !strings.Contains(ac.log.String(), `msg="acme CA order failed" ca=letsencrypt`) {
+		t.Fatalf("the CA failure must be logged; log = %q", ac.log.String())
+	}
+}
+
 func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
 	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
