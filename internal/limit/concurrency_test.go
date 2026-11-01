@@ -1,11 +1,14 @@
 package limit
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
 func TestLimiter_AcquireStream_CapNeverBreached(t *testing.T) {
@@ -153,5 +156,31 @@ func TestLimiter_ReleaseStream_RemovesOnlyItsMember(t *testing.T) {
 	}
 	if len(members) != 1 || members[0] != "b" {
 		t.Fatalf("set = %v, want only b", members)
+	}
+}
+
+func TestLimiter_AcquireStream_RollbackSurvivesCancelledCaller(t *testing.T) {
+	t.Parallel()
+	rdb, mr := newTestRedis(t)
+	lim := NewLimiter(rdb, 0, 0, 0, time.Hour)
+	const name = "tunnel-rb"
+	for _, m := range []string{"a", "b"} {
+		if ok, err := lim.AcquireStream(ctxT(t), name, m, 2); err != nil || !ok {
+			t.Fatalf("acquire %s: ok=%v err=%v", m, ok, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+	if ok, err := lim.AcquireStream(ctx, name, "c", 2); err != nil || ok {
+		t.Fatalf("acquire over the cap = (%v, %v), want a plain refusal", ok, err)
+	}
+	members, err := mr.ZMembers(concKey(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(members)
+	if len(members) != 2 || members[0] != "a" || members[1] != "b" {
+		t.Fatalf("set = %v, want only a and b: the refused member must be rolled back although the caller was cancelled", members)
 	}
 }
