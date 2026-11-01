@@ -161,23 +161,33 @@ func TestAdminController_Evict(t *testing.T) {
 
 func TestAdminController_SlotOps(t *testing.T) {
 	t.Parallel()
-	for _, want := range []bool{true, false} {
-		var candidateFor, freeFor string
-		c := &adminController{
-			slotCandidate: func(tunnel string) (time.Duration, bool) {
-				candidateFor = tunnel
-				return 7 * time.Second, want
-			},
-			freeSlot: func(tunnel string) bool {
-				freeFor = tunnel
-				return want
-			},
-		}
-		if idle, ok := c.SlotCandidate("t"); idle != 7*time.Second || ok != want || candidateFor != "t" {
-			t.Fatalf("SlotCandidate = (%v, %v) for %q, want (7s, %v) for %q", idle, ok, candidateFor, want, "t")
-		}
-		if got := c.FreeSlot(context.Background(), "t"); got != want || freeFor != "t" {
-			t.Fatalf("FreeSlot = %v for %q, want %v for %q", got, freeFor, want, "t")
-		}
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "the edge has a victim", want: true},
+		{name: "the edge has nothing to evict", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var candidateFor, freeFor string
+			c := &adminController{
+				slotCandidate: func(tunnel string) (time.Duration, bool) {
+					candidateFor = tunnel
+					return 7 * time.Second, tc.want
+				},
+				freeSlot: func(tunnel string) bool {
+					freeFor = tunnel
+					return tc.want
+				},
+			}
+			if idle, ok := c.SlotCandidate("t"); idle != 7*time.Second || ok != tc.want || candidateFor != "t" {
+				t.Fatalf("SlotCandidate = (%v, %v) for %q, want (7s, %v) for %q", idle, ok, candidateFor, tc.want, "t")
+			}
+			if got := c.FreeSlot(context.Background(), "t"); got != tc.want || freeFor != "t" {
+				t.Fatalf("FreeSlot = %v for %q, want %v for %q", got, freeFor, tc.want, "t")
+			}
+		})
 	}
 }

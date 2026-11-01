@@ -331,19 +331,29 @@ func TestControlSlotCandidateDispatches(t *testing.T) {
 
 func TestControlFreeSlotDispatches(t *testing.T) {
 	t.Parallel()
-	for _, freed := range []bool{true, false} {
-		fc := &fakeController{freed: freed}
-		w := postControl(t, fc, ControlRequest{Op: "free-slot", Tunnel: "t"})
-		if w.Code != http.StatusOK {
-			t.Fatalf("free-slot must be 200, got %d", w.Code)
-		}
-		var resp ControlResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if resp.Applied != freed || !fc.called || fc.tunnel != "t" {
-			t.Errorf("applied=%v (want %v) controller called=%v tunnel=%q", resp.Applied, freed, fc.called, fc.tunnel)
-		}
+	tests := []struct {
+		name  string
+		freed bool
+	}{
+		{name: "a stream was evicted", freed: true},
+		{name: "nothing to evict", freed: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fc := &fakeController{freed: tc.freed}
+			w := postControl(t, fc, ControlRequest{Op: "free-slot", Tunnel: "t"})
+			if w.Code != http.StatusOK {
+				t.Fatalf("free-slot must be 200, got %d", w.Code)
+			}
+			var resp ControlResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Applied != tc.freed || !fc.called || fc.tunnel != "t" {
+				t.Errorf("applied=%v (want %v) controller called=%v tunnel=%q", resp.Applied, tc.freed, fc.called, fc.tunnel)
+			}
+		})
 	}
 }
 
