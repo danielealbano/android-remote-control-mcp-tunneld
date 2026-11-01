@@ -64,6 +64,9 @@ type fakeController struct {
 	opened     bool
 	evicted    bool
 	err        error
+	idle       time.Duration
+	candidate  bool
+	freed      bool
 }
 
 func (f *fakeController) Renew(_ context.Context, tunnel string) (bool, error) {
@@ -88,6 +91,18 @@ func (f *fakeController) Evict(_ context.Context, tunnel, connID, reason string)
 	f.called = true
 	f.tunnel, f.connID, f.reason = tunnel, connID, reason
 	return f.evicted, f.err
+}
+
+func (f *fakeController) SlotCandidate(tunnel string) (time.Duration, bool) {
+	f.called = true
+	f.tunnel = tunnel
+	return f.idle, f.candidate
+}
+
+func (f *fakeController) FreeSlot(_ context.Context, tunnel string) bool {
+	f.called = true
+	f.tunnel = tunnel
+	return f.freed
 }
 
 // meshRoleReq builds a mesh-role-authenticated request to https://node/<path> with an optional JSON body.
@@ -260,6 +275,92 @@ func TestControlConnIDValidation(t *testing.T) {
 			}
 			if fc.called {
 				t.Fatal("the controller must not be called for an invalid request")
+			}
+		})
+	}
+}
+
+func postControl(t *testing.T, fc *fakeController, req ControlRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	h := newTestHandler(t, fc)
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+	return w
+}
+
+func TestControlSlotCandidateDispatches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		fc          *fakeController
+		wantApplied bool
+		wantIdleMS  int64
+		wantIdleKey bool
+	}{
+		{name: "candidate idle 2500 ms", fc: &fakeController{candidate: true, idle: 2500 * time.Millisecond}, wantApplied: true, wantIdleMS: 2500, wantIdleKey: true},
+		{name: "candidate idle under 1 ms", fc: &fakeController{candidate: true, idle: 500 * time.Microsecond}, wantApplied: true},
+		{name: "no candidate", fc: &fakeController{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := postControl(t, tc.fc, ControlRequest{Op: "slot-candidate", Tunnel: "t"})
+			if w.Code != http.StatusOK {
+				t.Fatalf("slot-candidate must be 200, got %d", w.Code)
+			}
+			var resp ControlResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.Applied != tc.wantApplied || resp.IdleMS != tc.wantIdleMS {
+				t.Errorf("response = %+v, want applied=%v idle_ms=%d", resp, tc.wantApplied, tc.wantIdleMS)
+			}
+			if got := bytes.Contains(w.Body.Bytes(), []byte(`"idle_ms"`)); got != tc.wantIdleKey {
+				t.Errorf("idle_ms key present = %v, want %v (body %s)", got, tc.wantIdleKey, w.Body.Bytes())
+			}
+			if !tc.fc.called || tc.fc.tunnel != "t" {
+				t.Errorf("controller called=%v tunnel=%q, want called=true tunnel=%q", tc.fc.called, tc.fc.tunnel, "t")
+			}
+		})
+	}
+}
+
+func TestControlFreeSlotDispatches(t *testing.T) {
+	t.Parallel()
+	for _, freed := range []bool{true, false} {
+		fc := &fakeController{freed: freed}
+		w := postControl(t, fc, ControlRequest{Op: "free-slot", Tunnel: "t"})
+		if w.Code != http.StatusOK {
+			t.Fatalf("free-slot must be 200, got %d", w.Code)
+		}
+		var resp ControlResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if resp.Applied != freed || !fc.called || fc.tunnel != "t" {
+			t.Errorf("applied=%v (want %v) controller called=%v tunnel=%q", resp.Applied, freed, fc.called, fc.tunnel)
+		}
+	}
+}
+
+func TestControlSlotOpsRequireTunnel(t *testing.T) {
+	t.Parallel()
+	for _, op := range []string{"slot-candidate", "free-slot"} {
+		t.Run(op, func(t *testing.T) {
+			t.Parallel()
+			fc := &fakeController{}
+			if w := postControl(t, fc, ControlRequest{Op: op}); w.Code != http.StatusBadRequest {
+				t.Fatalf("%s without a tunnel must be 400, got %d", op, w.Code)
+			}
+			if fc.called {
+				t.Fatalf("the controller must not be called for %s without a tunnel", op)
+			}
+			if w := postControl(t, fc, ControlRequest{Op: op, Tunnel: "t"}); w.Code != http.StatusOK {
+				t.Fatalf("%s without a conn_id must be accepted, got %d", op, w.Code)
 			}
 		})
 	}

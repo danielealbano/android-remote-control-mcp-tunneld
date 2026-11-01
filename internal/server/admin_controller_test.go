@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -154,6 +155,29 @@ func TestAdminController_Evict(t *testing.T) {
 		}
 		if got != [3]string{"t", "conn-1", store.CloseBanEvict} {
 			t.Fatalf("evictConn got %v", got)
+		}
+	}
+}
+
+func TestAdminController_SlotOps(t *testing.T) {
+	t.Parallel()
+	for _, want := range []bool{true, false} {
+		var candidateFor, freeFor string
+		c := &adminController{
+			slotCandidate: func(tunnel string) (time.Duration, bool) {
+				candidateFor = tunnel
+				return 7 * time.Second, want
+			},
+			freeSlot: func(tunnel string) bool {
+				freeFor = tunnel
+				return want
+			},
+		}
+		if idle, ok := c.SlotCandidate("t"); idle != 7*time.Second || ok != want || candidateFor != "t" {
+			t.Fatalf("SlotCandidate = (%v, %v) for %q, want (7s, %v) for %q", idle, ok, candidateFor, want, "t")
+		}
+		if got := c.FreeSlot(context.Background(), "t"); got != want || freeFor != "t" {
+			t.Fatalf("FreeSlot = %v for %q, want %v for %q", got, freeFor, want, "t")
 		}
 	}
 }

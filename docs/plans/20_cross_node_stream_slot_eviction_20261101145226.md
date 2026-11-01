@@ -77,18 +77,18 @@ idle evictable stream evict it over the mesh, then retry.
 
 ## User Story 1: Let any node evict a tunnel's least-active stream on request
 
-- [ ] **US1** — Expose the per-node victim choice and serve it over the mesh.
+- [x] **US1** — Expose the per-node victim choice and serve it over the mesh.
 
 Why: the entry node needs to learn, and act on, the most idle evictable stream another node holds.
 
 ### Acceptance Criteria
 
-- [ ] `Edge.SlotCandidate(tunnel)` reports the idle time of the stream `Edge.FreeSlot(tunnel)` would evict, and
+- [x] `Edge.SlotCandidate(tunnel)` reports the idle time of the stream `Edge.FreeSlot(tunnel)` would evict, and
       `false` when the tunnel has no evictable stream on the node (protected, other tunnels' and already-evicted
       streams never count).
-- [ ] `Edge.FreeSlot(tunnel)` evicts exactly that stream (`close_reason=evicted`, slot released once) and returns
+- [x] `Edge.FreeSlot(tunnel)` evicts exactly that stream (`close_reason=evicted`, slot released once) and returns
       `false` when there is none; two concurrent calls never both report the same victim.
-- [ ] Mesh `slot-candidate` answers `{"applied":true,"idle_ms":<n>}` (`idle_ms` absent when the candidate is idle
+- [x] Mesh `slot-candidate` answers `{"applied":true,"idle_ms":<n>}` (`idle_ms` absent when the candidate is idle
       less than 1 ms) / `{"applied":false}`; mesh `free-slot` answers `{"applied":<evicted>}`; both require `tunnel`
       (`400` otherwise) and need no `conn_id`.
 
@@ -169,9 +169,9 @@ Tests (`internal/edge/policy_test.go`; the existing `evictLeastActive` tests kee
 - [x] The selection logic exists once (`leastActive`), used by `evictLeastActive` and `SlotCandidate`.
 - [x] Every test of the table above is written.
 
-### [ ] Task 1.2: Mesh `slot-candidate` / `free-slot` ops
+### [x] Task 1.2: Mesh `slot-candidate` / `free-slot` ops
 
-- [ ] **Action 1.2.1** — `internal/mesh/listener.go` (modify; add the `time` import):
+- [x] **Action 1.2.1** — `internal/mesh/listener.go` (modify; add the `time` import):
 
 ```diff
  type Controller interface {
@@ -237,7 +237,7 @@ Tests (`internal/edge/policy_test.go`; the existing `evictLeastActive` tests kee
 +	if err := json.NewEncoder(w).Encode(resp); err != nil {
 ```
 
-- [ ] **Action 1.2.2** — `internal/server/serve.go` (modify): `adminController` serves the two ops from the edge.
+- [x] **Action 1.2.2** — `internal/server/serve.go` (modify): `adminController` serves the two ops from the edge.
 
 ```diff
  type adminController struct {
@@ -267,7 +267,7 @@ func (c *adminController) FreeSlot(_ context.Context, tunnel string) bool {
 (placed right after `func (c *adminController) Evict`; the field block above is the gofmt realignment of the
 existing fields plus the two new ones.)
 
-- [ ] **Action 1.2.3** — `internal/server/server.go` (modify):
+- [x] **Action 1.2.3** — `internal/server/server.go` (modify):
 
 ```diff
 -	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams}
@@ -275,7 +275,7 @@ existing fields plus the two new ones.)
 +		slotCandidate: ed.SlotCandidate, freeSlot: ed.FreeSlot}
 ```
 
-- [ ] **Action 1.2.4** — `internal/mesh/mesh_test.go` (modify, shared test fake): `fakeController` gains three
+- [x] **Action 1.2.4** — `internal/mesh/mesh_test.go` (modify, shared test fake): `fakeController` gains three
       fields and two methods.
 
 ```go
@@ -309,8 +309,8 @@ Tests:
 
 #### Definition of Done
 
-- [ ] `adminController` has a method for every method of `mesh.Controller`.
-- [ ] Every test of the table above is written.
+- [x] `adminController` has a method for every method of `mesh.Controller`.
+- [x] Every test of the table above is written.
 
 ---
 

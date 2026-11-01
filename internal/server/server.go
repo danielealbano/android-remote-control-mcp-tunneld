@@ -240,7 +240,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		&edgeLogSink{st: connLogs, logger: logger, nodeHost: nodeHost, nodeStart: nodeStart}, chal, edgeAddr)
 	evictor.local = ed.EvictConnStreams
 
-	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams}
+	adminCtl := &adminController{mgr: phoneMgr, nonce: challengeFunc(enrollSvc), evictStreams: ed.EvictTunnelStreams, evictConn: ed.EvictConnStreams,
+		slotCandidate: ed.SlotCandidate, freeSlot: ed.FreeSlot}
 	meshHandler, err := mesh.NewHandler(adminCtl, mesh.WithHandlerLogger(logger))
 	if err != nil {
 		return fmt.Errorf("mesh handler: %w", err)

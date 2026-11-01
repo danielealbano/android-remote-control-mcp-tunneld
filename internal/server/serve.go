@@ -166,10 +166,12 @@ type phoneControl interface {
 // connection; Terminate evicts this node's in-flight public splices then closes that phone connection. Used
 // both by the local admin path and by the mesh /api/v1/mesh/control handler.
 type adminController struct {
-	mgr          phoneControl
-	nonce        func(ctx context.Context) (string, error) // mints the single-use renewal challenge nonce
-	evictStreams func(name string)                         // edge.EvictTunnelStreams on this node
-	evictConn    func(name, connID, reason string) bool
+	mgr           phoneControl
+	nonce         func(ctx context.Context) (string, error) // mints the single-use renewal challenge nonce
+	evictStreams  func(name string)                         // edge.EvictTunnelStreams on this node
+	evictConn     func(name, connID, reason string) bool
+	slotCandidate func(tunnel string) (time.Duration, bool)
+	freeSlot      func(tunnel string) bool
 }
 
 func (c *adminController) Renew(ctx context.Context, tunnel string) (bool, error) {
@@ -381,6 +383,14 @@ func (c *adminController) Open(ctx context.Context, tunnel, connID string, open 
 
 func (c *adminController) Evict(_ context.Context, tunnel, connID, reason string) (bool, error) {
 	return c.evictConn(tunnel, connID, reason), nil
+}
+
+func (c *adminController) SlotCandidate(tunnel string) (time.Duration, bool) {
+	return c.slotCandidate(tunnel)
+}
+
+func (c *adminController) FreeSlot(_ context.Context, tunnel string) bool {
+	return c.freeSlot(tunnel)
 }
 
 // challengeFunc mints a fresh single-use challenge nonce (a real enroll nonce, Valkey-stored) for the
