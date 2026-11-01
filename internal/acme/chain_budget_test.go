@@ -907,6 +907,52 @@ func TestChain_FailureBackoffSurvivesCallerGone(t *testing.T) {
 	}
 }
 
+type preparingFake struct {
+	trackingFake
+	onPrepare func()
+}
+
+func (f *preparingFake) prepare(ctx context.Context) error {
+	f.onPrepare()
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
+func TestChain_RunEndedWhilePreparingIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cancel bool
+		want   error
+	}{
+		{name: "caller gone while the client is built", cancel: true, want: context.Canceled},
+		{name: "deadline passed while the client is built", want: context.DeadlineExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pending := newPendingCancelCtx(time.Now().Add(time.Minute))
+			ctx, cancel := context.WithCancel(pending)
+			defer cancel()
+			le := &preparingFake{trackingFake: trackingFake{caID: CALetsEncrypt}, onPrepare: pending.passDeadline}
+			if tc.cancel {
+				le.onPrepare = cancel
+			}
+			ac := newAccountChain(t, ChainConfig{}, &account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: 50 * time.Millisecond, issuer: le})
+			if _, _, err := ac.ch.Obtain(ctx, nil, "p"); !errors.Is(err, tc.want) {
+				t.Fatalf("Obtain = %v, want the run's %v", err, tc.want)
+			}
+			if le.calls.Load() != 0 {
+				t.Fatal("a run that ended while the client was built must not reach the CA")
+			}
+			if len(ac.rec.issues) != 0 || len(ac.rec.cooldowns) != 0 {
+				t.Fatalf("a run that ended while the client was built must record no CA failure, got issues=%v cooldowns=%v", ac.rec.issues, ac.rec.cooldowns)
+			}
+			assertNoCAFailureState(t, ac.lim, "le-1")
+		})
+	}
+}
+
 func TestChain_FailureBeforeCallerGoneDuringSettleBacksOff(t *testing.T) {
 	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("ca down"))}
