@@ -108,9 +108,9 @@ type replicaOpts struct {
 }
 
 // startReplica runs a real server.Run on loopback against the shared infra and returns its public edge
-// address. It waits until the replica is serving. freeAddr probes-and-closes
-// ports, so server.Run's bind can lose a race to another process — and the internal-listener bind is now
-// fatal — so a boot that exits before serving is retried with fresh ports (bounded).
+// address. It waits until the replica is serving. server.Run's bind can lose a race to another process —
+// and the internal-listener bind is now fatal — so a boot that exits before serving is retried with fresh
+// ports (bounded).
 func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 	t.Helper()
 	for range 5 {
@@ -123,17 +123,17 @@ func (inf *e2eInfra) startReplica(t *testing.T, opts replicaOpts) string {
 }
 
 // runReplicaOnce attempts one replica boot. It returns (edgeAddr, true) once the
-// replica is serving, or ("", false) when server.Run exits before becoming ready (a freeAddr port race —
+// replica is serving, or ("", false) when server.Run exits before becoming ready (a port race —
 // the caller retries with fresh ports).
 func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, bool) {
 	t.Helper()
-	edgeAddr := freeAddr(t)
+	edgeAddr := tunneltest.FreeAddr(t)
 	if opts.edgeAddr != "" {
 		edgeAddr = opts.edgeAddr
 	}
-	meshAddr := freeAddr(t)
-	internalAddr := freeAddr(t)
-	acmeHTTPListen := freeAddr(t)
+	meshAddr := tunneltest.FreeAddr(t)
+	internalAddr := tunneltest.FreeAddr(t)
+	acmeHTTPListen := tunneltest.FreeAddr(t)
 	if opts.acmeHTTPListen != "" {
 		acmeHTTPListen = opts.acmeHTTPListen
 	}
@@ -256,8 +256,8 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		select {
 		case runErr := <-done:
 			cancel()
-			// Run exited before serving. Usually a freeAddr port race (retry with fresh ports), but log
-			// the actual error so a NON-port failure (e.g. a fatal config/ACME error) is diagnosable.
+			// Run exited before serving. Log the actual error so a NON-port failure (e.g. a fatal
+			// config/ACME error) is diagnosable.
 			t.Logf("replica boot attempt exited before serving: %v", runErr)
 			return "", false
 		default:
@@ -852,17 +852,6 @@ func echoOn(conn *tls.Conn) error {
 		return fmt.Errorf("echo mismatch: %q", buf)
 	}
 	return nil
-}
-
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	tunneltest.CloseOrLog(t, ln)
-	return addr
 }
 
 func emptyFile(t *testing.T) string {
