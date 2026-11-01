@@ -705,32 +705,32 @@ connection is closed (`stream-cap`).
 
 ## User Story 4: Ground-up double check
 
-- [ ] **US4** — Verify EVERYTHING implemented by this plan from the ground up.
+- [x] **US4** — Verify EVERYTHING implemented by this plan from the ground up.
 
 Why: catch any drift between this plan and what was built before the pull request.
 
 ### Acceptance Criteria
 
-- [ ] Every checkbox of US1–US3 is ticked against the files on disk (re-read each touched file).
+- [x] Every checkbox of US1–US3 is ticked against the files on disk (re-read each touched file).
 
-### [ ] Task 4.1: Re-read and verify every change
+### [x] Task 4.1: Re-read and verify every change
 
-- [ ] **Action 4.1.1** — Re-read `internal/edge/bridge.go`, `internal/edge/edge.go`, `internal/mesh/listener.go`,
+- [x] **Action 4.1.1** — Re-read `internal/edge/bridge.go`, `internal/edge/edge.go`, `internal/mesh/listener.go`,
       `internal/server/serve.go`, `internal/server/server.go`, every touched test file (every test named in the
       plan's tables exists), `docs/PROTOCOL.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT.md` and
       `.claude/rules/project.md` against their actions; `git diff --name-only main...HEAD` together with
       `git status --porcelain` lists exactly those files plus this plan and nothing else.
-- [ ] **Action 4.1.2** — `git diff main...HEAD -- '*.go' | grep -nE '^\+.*//'`, then review every hit by hand: the
+- [x] **Action 4.1.2** — `git diff main...HEAD -- '*.go' | grep -nE '^\+.*//'`, then review every hit by hand: the
       only hits are existing comments re-added unchanged (the `victim.release()` trailing comment, the realigned
       `adminController` field comments, the realigned `ControlResponse.Applied` comment, the `serveControl` doc
       comment minus "→ {applied}"), the trailing comments moved unchanged into `evictedByEdge`, and `//` inside
       strings or URLs; every existing comment of the touched code is still present and correct.
-- [ ] **Action 4.1.3** — Before `make test-e2e`, run `adb devices`, state which device-gated tests will run (they run
+- [x] **Action 4.1.3** — Before `make test-e2e`, run `adb devices`, state which device-gated tests will run (they run
       only with exactly one device in state `device`) and what they install on it.
 
 #### Definition of Done
 
-- [ ] Quality gates, each captured with `tee` to `/tmp/<descriptive>.log`, all exit 0: `make lint`, `make build`,
+- [x] Quality gates, each captured with `tee` to `/tmp/<descriptive>.log`, all exit 0: `make lint`, `make build`,
       `make vet`, `make govulncheck`, `make tidy` (then `git diff --exit-code go.mod go.sum`), `make test-scripts`,
       `make third-party-licenses`, `make test-unit`, `make test-integration`, `make test-e2e`, `make test-staging`
       (skips without `TUNNELD_STAGING_SSH_KEY`).
