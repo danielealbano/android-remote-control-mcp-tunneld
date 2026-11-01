@@ -31,6 +31,7 @@ func newLoggedReg(t *testing.T) (*Registry, *miniredis.Miniredis, *redis.Client,
 }
 
 func TestRegistry_Release_LogsFailures(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		fail      string
@@ -44,6 +45,7 @@ func TestRegistry_Release_LogsFailures(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			reg, mr, rdb, buf := newLoggedReg(t)
 			if err := mr.Set(lockKey("n"), "tok"); err != nil {
 				t.Fatal(err)
