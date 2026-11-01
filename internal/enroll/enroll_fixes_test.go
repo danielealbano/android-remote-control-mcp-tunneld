@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,9 +217,13 @@ func TestSignFailureRollsBack(t *testing.T) {
 	tests := []struct {
 		name       string
 		callerGone bool
+		deleteErr  error
+		wantNames  int
+		wantLog    string
 	}{
 		{name: "caller still connected"},
 		{name: "caller gone after the claim", callerGone: true},
+		{name: "rollback fails", deleteErr: errInjected, wantNames: 1, wantLog: `msg="claim rollback failed (name orphaned in the registry)" tunnel=`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,36 +231,50 @@ func TestSignFailureRollsBack(t *testing.T) {
 			st := tunneltest.NewStore()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			var names NameStore = st
+			names := rollbackNames{Store: st, deleteErr: tc.deleteErr}
 			if tc.callerGone {
-				names = cancelOnClaimNames{Store: st, cancel: cancel}
+				names.cancelOnClaim = cancel
 			}
+			logger, buf := captureLogger()
 			svc, _ := newService(t, Config{
 				CA: testCA(t), Names: names, Evidence: st,
-				Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
+				Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{}, Logger: logger,
 			})
-			if _, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil {
-				t.Fatal("sign failure must surface an error")
+			if _, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil || ee.Reason != "unsupported_key_type" {
+				t.Fatalf("Enroll error = %v, want the sign error (unsupported_key_type)", ee)
 			}
-			if st.NameCount() != 0 {
-				t.Fatal("DeleteName must roll the claim back")
+			if got := st.NameCount(); got != tc.wantNames {
+				t.Fatalf("registry holds %d names after the sign failure, want %d", got, tc.wantNames)
+			}
+			logs := buf.String()
+			switch {
+			case tc.wantLog == "" && strings.Contains(logs, "claim rollback failed"):
+				t.Fatalf("a successful rollback must not log a failure; log = %q", logs)
+			case tc.wantLog != "" && (!strings.Contains(logs, tc.wantLog) || !strings.Contains(logs, errInjected.Error())):
+				t.Fatalf("the failed rollback must be logged with the tunnel and its cause; log = %q", logs)
 			}
 		})
 	}
 }
 
-type cancelOnClaimNames struct {
+type rollbackNames struct {
 	*tunneltest.Store
-	cancel context.CancelFunc
+	cancelOnClaim context.CancelFunc
+	deleteErr     error
 }
 
-func (s cancelOnClaimNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+func (s rollbackNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
 	err := s.Store.PutName(ctx, name, rec)
-	s.cancel()
+	if s.cancelOnClaim != nil {
+		s.cancelOnClaim()
+	}
 	return err
 }
 
-func (s cancelOnClaimNames) DeleteName(ctx context.Context, name string) error {
+func (s rollbackNames) DeleteName(ctx context.Context, name string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
