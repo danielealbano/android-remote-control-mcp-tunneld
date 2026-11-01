@@ -83,7 +83,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		RedisURL:       redisURL,
 		Listen:         edgeAddr,
 		MeshListen:     meshAddr,
-		InternalListen: freeAddr(t),
+		InternalListen: tunneltest.FreeAddr(t),
 		MeshAdvertise:  "127.0.0.1:19443",
 		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
 
@@ -136,8 +136,8 @@ func startIntegrationServer(t *testing.T, mutate ...func(*config.ServeCmd)) *itE
 	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 
-	edgeAddr := freeAddr(t)
-	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, freeAddr(t),
+	edgeAddr := tunneltest.FreeAddr(t)
+	cfg := itServeConfig(t, redisURL, s3URL, access, secret, edgeAddr, tunneltest.FreeAddr(t),
 		pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, []string{pebble.DNSResolver})
 	tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
 	for _, m := range mutate {
@@ -164,7 +164,7 @@ func startChallengeServer(t *testing.T, method string, mutate ...func(*config.Se
 		pebble := tunneltest.StartPebble(t, tunneltest.WithHostValidation())
 		t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
 		cfg := itServeConfig(t, redisURL, s3URL, access, secret,
-			net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.TLSPort)), freeAddr(t),
+			net.JoinHostPort(pebble.HostIP, strconv.Itoa(pebble.TLSPort)), tunneltest.FreeAddr(t),
 			pebble.DirectoryURL, pebble.DirectoryURL, pebble.DirectoryURL, nil)
 		tunneltest.RegisterACMEAccountKey(t, cfg.ACMEAccountDir, "gts", pebble.DirectoryURL)
 		cfg.ACMEDNSProvider = ""
