@@ -487,28 +487,43 @@ func TestChain_RunBudget(t *testing.T) {
 
 type pendingCancelCtx struct {
 	context.Context
-	deadline time.Time
+	deadline *atomic.Pointer[time.Time]
 }
 
-func (c pendingCancelCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+func newPendingCancelCtx(d time.Time) pendingCancelCtx {
+	c := pendingCancelCtx{Context: context.Background(), deadline: &atomic.Pointer[time.Time]{}}
+	c.deadline.Store(&d)
+	return c
+}
+
+func (c pendingCancelCtx) Deadline() (time.Time, bool) { return *c.deadline.Load(), true }
+
+func (c pendingCancelCtx) passDeadline() {
+	d := time.Now().Add(-time.Millisecond)
+	c.deadline.Store(&d)
+}
 
 func TestChain_RunDeadlinePassedBeforeCancel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		in     time.Duration
-		wantLE int32
+		name          string
+		deadline      time.Duration
+		passInAttempt bool
+		wantLE        int32
 	}{
-		{name: "deadline passes during an attempt", in: 50 * time.Millisecond, wantLE: 1},
-		{name: "deadline already passed", in: -time.Millisecond, wantLE: 0},
+		{name: "deadline passes during an attempt", deadline: time.Minute, passInAttempt: true, wantLE: 1},
+		{name: "deadline already passed", deadline: -time.Millisecond, wantLE: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := newPendingCancelCtx(time.Now().Add(tc.deadline))
 			le := &trackingFake{caID: CALetsEncrypt, block: true}
+			if tc.passInAttempt {
+				le.onObtain = func(context.Context) { ctx.passDeadline() }
+			}
 			gts := &trackingFake{caID: CAGTS, block: true}
-			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Second), acct(gts, "gts-1", time.Second))
-			ctx := pendingCancelCtx{Context: context.Background(), deadline: time.Now().Add(tc.in)}
+			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", 50*time.Millisecond), acct(gts, "gts-1", time.Second))
 			_, _, err := ac.ch.Obtain(ctx, nil, "p")
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Obtain = %v, want the run deadline", err)
