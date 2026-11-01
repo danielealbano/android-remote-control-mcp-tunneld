@@ -208,11 +208,6 @@ func TestLimiter_IssuanceLock_CancelledCallerIsSilent(t *testing.T) {
 		lock bool
 		run  func(ctx context.Context, l *Limiter)
 	}{
-		{name: "over-cap release", fail: "del", run: func(ctx context.Context, l *Limiter) {
-			if ok, _, _, err := l.IssuanceBegin(ctx, "t", 3); ok || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "issuance window read") {
-				t.Errorf("IssuanceBegin over the cap with a cancelled caller = (%v, %v), want a refusal carrying the cancelled window read", ok, err)
-			}
-		}},
 		{name: "ttl refresh", fail: "pexpire", lock: true, run: func(ctx context.Context, l *Limiter) {
 			l.refreshIssLock(ctx, "t", "order")
 		}},
@@ -235,6 +230,75 @@ func TestLimiter_IssuanceLock_CancelledCallerIsSilent(t *testing.T) {
 			tc.run(ctx, l)
 			if buf.Len() != 0 {
 				t.Fatalf("a lock failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestLimiter_IssuanceBegin_CancelledCallerStillReleases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		count     string
+		cancelOn  string
+		fail      string
+		replace   func(mr *miniredis.Miniredis) error
+		wantErr   string
+		wantHeld  bool
+		wantValue string
+		wantLog   string
+	}{
+		{name: "count read cancelled", cancelOn: "set", wantErr: "issuance count read"},
+		{name: "over the cap", count: "3", cancelOn: "get", wantErr: "issuance window read"},
+		{name: "over the cap, release fails", count: "3", cancelOn: "get", fail: "del", wantErr: "issuance window read", wantHeld: true, wantLog: `msg="issuance lock release failed (lock expires by TTL)" tunnel=t`},
+		{
+			name: "over the cap, lock already expired", count: "3", cancelOn: "get", wantErr: "issuance window read",
+			replace: func(mr *miniredis.Miniredis) error { mr.Del(issLockKey("t")); return nil },
+		},
+		{
+			name: "over the cap, another holder took the lock", count: "3", cancelOn: "get", wantErr: "issuance window read", wantHeld: true, wantValue: "someone-else",
+			replace: func(mr *miniredis.Miniredis) error { return mr.Set(issLockKey("t"), "someone-else") },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l, mr, rdb, buf := newLoggedLimiter(t)
+			if tc.count != "" {
+				if err := mr.Set(issuanceKey("t"), tc.count); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rdb.AddHook(tunneltest.CancelAfter(tc.cancelOn, func() {
+				if ctx.Err() == nil && tc.replace != nil {
+					if err := tc.replace(mr); err != nil {
+						t.Error(err)
+					}
+				}
+				cancel()
+			}))
+			if tc.fail != "" {
+				rdb.AddHook(tunneltest.FailCommands(errInjected, tc.fail))
+			}
+			ok, _, _, err := l.IssuanceBegin(ctx, "t", 3)
+			if ok || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("IssuanceBegin = (%v, %v), want a refusal carrying the cancelled %q", ok, err, tc.wantErr)
+			}
+			if held := mr.Exists(issLockKey("t")); held != tc.wantHeld {
+				t.Fatalf("issuance lock held after the cancelled begin = %v, want %v", held, tc.wantHeld)
+			}
+			if tc.wantValue != "" {
+				if v, err := mr.Get(issLockKey("t")); err != nil || v != tc.wantValue {
+					t.Fatalf("another holder's lock must be left alone: %q %v", v, err)
+				}
+			}
+			switch {
+			case tc.wantLog == "" && buf.Len() != 0:
+				t.Fatalf("a clean release must not log; log = %q", buf.String())
+			case tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog):
+				t.Fatalf("the failed release must be logged even after the caller was cancelled; log = %q", buf.String())
 			}
 		})
 	}

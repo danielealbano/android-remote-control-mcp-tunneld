@@ -42,7 +42,7 @@ func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok 
 		return false, "", 0, errors.Join(fmt.Errorf("issuance count read: %w", err), l.releaseIssLock(ctx, name, token))
 	}
 	if n >= maxN {
-		if rerr := l.releaseIssLock(ctx, name, token); rerr != nil && ctx.Err() == nil { // over cap — release and refuse
+		if rerr := l.releaseIssLock(ctx, name, token); rerr != nil { // over cap — release and refuse
 			l.logger.Warn("issuance lock release failed (lock expires by TTL)", "tunnel", name, "err", rerr)
 		}
 		left, werr := l.issuanceWindowLeft(ctx, name)
@@ -114,6 +114,8 @@ func (l *Limiter) IssuanceEnd(ctx context.Context, name, orderID string) error {
 }
 
 func (l *Limiter) releaseIssLock(ctx context.Context, name, token string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), issLockTTL)
+	defer cancel()
 	v, err := l.rdb.Get(ctx, issLockKey(name)).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
