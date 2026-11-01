@@ -810,6 +810,31 @@ func TestChain_SkipsAccountWithoutRequestBudget(t *testing.T) {
 	}
 }
 
+func TestChain_SkippedAccountReleasesReservationAfterCallerGone(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	ac.spend(t, CAGTS, smallBudgets().gtsRequests(a), 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+	_, _, err := ac.ch.Obtain(ctx, nil, "p.example.test")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
+		t.Fatalf("err = %v, want rate-limited (the only account was skipped)", err)
+	}
+	if gts.calls.Load() != 0 {
+		t.Fatal("an account without request budget for a whole order must not be asked")
+	}
+	if got := ac.level(t, smallBudgets().gtsOrders(a)); got != 1 {
+		t.Fatalf("GTS order budget level = %v, want 1 (the reservation released although the caller was gone)", got)
+	}
+	if strings.Contains(ac.log.String(), `msg="acme budget release failed`) {
+		t.Fatalf("the release must not fail; log = %q", ac.log.String())
+	}
+}
+
 func TestChain_ReservationCoversTheFinalizeGrace(t *testing.T) {
 	t.Parallel()
 	var ac *accountChain

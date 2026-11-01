@@ -265,7 +265,9 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	case perr != nil:
 		c.cfg.Logger.Warn("acme request budget prepay failed (trying the account)", "ca", a.ca, "name", name, "err", perr, "account", a.label)
 	case pwait > 0:
-		if rerr := c.cfg.Limiter.ReleaseACME(ctx, reserved, c.cfg.NodeID, member); rerr != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+		defer cancel()
+		if rerr := c.cfg.Limiter.ReleaseACME(rctx, reserved, c.cfg.NodeID, member); rerr != nil {
 			c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", rerr, "account", a.label)
 		}
 		c.cfg.Logger.Debug("acme account out of request budget (skipped)", "ca", a.ca, "name", name, "retry_after", pwait, "account", a.label)
