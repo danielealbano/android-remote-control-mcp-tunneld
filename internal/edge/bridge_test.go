@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -497,6 +498,63 @@ func TestEdge_HandleTunnel_RetriesWhenFreedSlotIsTaken(t *testing.T) {
 				t.Fatalf("local evictions = %d, want %d", evicted, tc.wantEvictions)
 			}
 		})
+	}
+}
+
+type retryErrLimiter struct {
+	StreamLimiter
+	mu       sync.Mutex
+	acquired []string
+	released []string
+}
+
+func (l *retryErrLimiter) AcquireStream(ctx context.Context, name, member string, maxN int) (bool, error) {
+	l.mu.Lock()
+	l.acquired = append(l.acquired, member)
+	n := len(l.acquired)
+	l.mu.Unlock()
+	if n > 1 {
+		return false, errors.New("valkey down")
+	}
+	return l.StreamLimiter.AcquireStream(ctx, name, member, maxN)
+}
+
+func (l *retryErrLimiter) ReleaseStream(ctx context.Context, name, member string) error {
+	l.mu.Lock()
+	l.released = append(l.released, member)
+	l.mu.Unlock()
+	return l.StreamLimiter.ReleaseStream(ctx, name, member)
+}
+
+func TestEdge_HandleTunnel_RetryAcquireErrorFailsOpen(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 2
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	fillSlots(t, te, cfg.Concurrent)
+	lim := &retryErrLimiter{StreamLimiter: te.e.lim}
+	te.e.lim = lim
+	te.slots.free = func(context.Context, string) bool { return true }
+
+	done := runTunnel(te, newScriptConn("198.51.100.87", nil), capSNI)
+	phone := waitPhone(t, te, 0)
+	tunneltest.CloseOrLog(t, phone)
+	waitDone(t, done, 5*time.Second)
+
+	if containsStr(te.rec.rejectReasons(), "stream-cap") {
+		t.Fatalf("a Valkey error on the retried acquire must admit (fail-open), rejects=%v", te.rec.rejectReasons())
+	}
+	if got := te.slots.calls.Load(); got != 1 {
+		t.Fatalf("FreeRemoteSlot calls = %d, want 1 before the retried acquire", got)
+	}
+	lim.mu.Lock()
+	defer lim.mu.Unlock()
+	if len(lim.acquired) != 2 || lim.acquired[0] != lim.acquired[1] {
+		t.Fatalf("acquired = %v, want the first acquire and one retry with the same member", lim.acquired)
+	}
+	if len(lim.released) != 1 || lim.released[0] != lim.acquired[0] {
+		t.Fatalf("released = %v, want the admitted member %q released exactly once", lim.released, lim.acquired[0])
 	}
 }
 
