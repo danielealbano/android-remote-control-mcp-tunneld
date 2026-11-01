@@ -179,7 +179,9 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				continue
 			}
 			if err == nil {
-				if rerr := c.cfg.Limiter.ResetCAFailures(ctx, a.id); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
+				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+				defer cancel()
+				if rerr := c.cfg.Limiter.ResetCAFailures(rctx, a.id); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
 					c.cfg.Logger.Warn("acme CA failure-streak reset failed", "ca", a.ca, "name", name, "err", rerr, "account", a.label)
 				}
 				c.cfg.Recorder.ACMEIssue(a.ca, "ok")

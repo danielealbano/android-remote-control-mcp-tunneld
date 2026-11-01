@@ -835,6 +835,45 @@ func TestChain_SkippedAccountReleasesReservationAfterCallerGone(t *testing.T) {
 	}
 }
 
+type cancelBeforeKeyed struct {
+	name, key string
+	cancel    context.CancelFunc
+}
+
+func (h *cancelBeforeKeyed) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *cancelBeforeKeyed) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == h.name && slices.Contains(cmd.Args(), any(h.key)) {
+			h.cancel()
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *cancelBeforeKeyed) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
+	t.Parallel()
+	le := &trackingFake{caID: CALetsEncrypt}
+	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	if _, err := ac.lim.BumpCAFailures(context.Background(), "le-1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.rdb.AddHook(&cancelBeforeKeyed{name: "del", key: "acme-fail:le-1", cancel: cancel})
+	if _, info, err := ac.ch.Obtain(ctx, nil, "p"); err != nil || info.CA != CALetsEncrypt {
+		t.Fatalf("Obtain = %+v, %v; want LE", info, err)
+	}
+	if strings.Contains(ac.log.String(), "acme CA failure-streak reset failed") {
+		t.Fatalf("the streak reset must not fail; log = %q", ac.log.String())
+	}
+	assertNoCAFailureState(t, ac.lim, "le-1")
+}
+
 func TestChain_ReservationCoversTheFinalizeGrace(t *testing.T) {
 	t.Parallel()
 	var ac *accountChain
