@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -12,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -295,6 +297,86 @@ func (a *openAdapter) Open(ctx context.Context, nodeID, name, connID, token stri
 		return fmt.Errorf("mesh open on node %s: %w", nodeID, errOpenNotApplied)
 	}
 	return nil
+}
+
+const (
+	slotQueryTimeout    = time.Second
+	slotFreeTimeout     = time.Second
+	slotFreeConcurrency = 32
+)
+
+type remoteSlots struct {
+	nodeID       string
+	nodes        liveNodeLister
+	mesh         meshControl
+	logger       *slog.Logger
+	queryTimeout time.Duration
+	freeTimeout  time.Duration
+	inflight     chan struct{}
+}
+
+type slotOffer struct {
+	node, addr string
+	idle       time.Duration
+}
+
+func (r *remoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) bool {
+	select {
+	case r.inflight <- struct{}{}:
+	default:
+		r.logger.Debug("remote slot freeing skipped: too many attempts in flight", "tunnel", tunnel)
+		return false
+	}
+	defer func() { <-r.inflight }()
+	for _, o := range r.offers(ctx, tunnel) {
+		fctx, cancel := context.WithTimeout(ctx, r.freeTimeout)
+		res, err := r.mesh.Control(fctx, o.addr, mesh.ControlRequest{Op: "free-slot", Tunnel: tunnel})
+		cancel()
+		if err != nil {
+			r.logger.Debug("free-slot failed on a node", "tunnel", tunnel, "peer", o.node, "err", err)
+			return true
+		}
+		if res.Applied {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *remoteSlots) offers(ctx context.Context, tunnel string) []slotOffer {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+	nodes, err := r.nodes.LiveNodes(ctx)
+	if err != nil {
+		r.logger.Debug("slot-candidate: node listing failed", "tunnel", tunnel, "err", err)
+		return nil
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var out []slotOffer
+	for id, info := range nodes {
+		if id == r.nodeID {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := r.mesh.Control(ctx, info.Advertise, mesh.ControlRequest{Op: "slot-candidate", Tunnel: tunnel})
+			if err != nil {
+				r.logger.Debug("slot-candidate failed on a node", "tunnel", tunnel, "peer", id, "err", err)
+				return
+			}
+			if !res.Applied {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			out = append(out, slotOffer{node: id, addr: info.Advertise, idle: time.Duration(res.IdleMS) * time.Millisecond})
+		}()
+	}
+	wg.Wait()
+	slices.SortFunc(out, func(a, b slotOffer) int { return cmp.Compare(b.idle, a.idle) })
+	return out
 }
 
 const (

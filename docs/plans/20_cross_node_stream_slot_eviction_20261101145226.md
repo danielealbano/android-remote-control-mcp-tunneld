@@ -335,9 +335,9 @@ Why: the issue #209 failure mode — every slot idle on other nodes, the new con
       touching the mesh.
 - [ ] Pending (dial-back waiting) slots are never evicted.
 
-### [ ] Task 2.1: Server-side remote slot freeing
+### [x] Task 2.1: Server-side remote slot freeing
 
-- [ ] **Action 2.1.1** — `internal/server/serve.go` (modify; add the `cmp` and `slices` imports), after
+- [x] **Action 2.1.1** — `internal/server/serve.go` (modify; add the `cmp` and `slices` imports), after
       `func (a *openAdapter) Open`:
 
 ```go
@@ -422,7 +422,7 @@ func (r *remoteSlots) offers(ctx context.Context, tunnel string) []slotOffer {
 }
 ```
 
-- [ ] **Action 2.1.2** — `internal/server/serve_test.go` (modify, shared test fake): `fakeMeshControl` gains
+- [x] **Action 2.1.2** — `internal/server/serve_test.go` (modify, shared test fake): `fakeMeshControl` gains
       per-(op, peer) results that take precedence over `applied` / `errs`, each optionally blocking until its
       channel closes or the call's context ends.
 
@@ -485,8 +485,8 @@ channel (capacity 32 unless noted) set on the struct):
 
 #### Definition of Done
 
-- [ ] Every goroutine of `offers` has returned before it returns (`wg.Wait`).
-- [ ] Every test of the table above is written.
+- [x] Every goroutine of `offers` has returned before it returns (`wg.Wait`).
+- [x] Every test of the table above is written.
 
 ### [ ] Task 2.2: Edge asks for a remote slot
 
