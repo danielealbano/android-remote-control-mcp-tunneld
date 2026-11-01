@@ -44,7 +44,7 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 		t.Fatal(err)
 	}
 
-	fams, err := m.Registry().Gather()
+	fams, err := m.Gatherer(context.Background()).Gather()
 	if err != nil {
 		t.Fatal(err)
 	}

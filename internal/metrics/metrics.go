@@ -20,7 +20,8 @@ const perConnMemEstimateBytes = 2 * wire.ChunkSize
 
 // Metrics holds the registered families and their custom registry.
 type Metrics struct {
-	reg *prometheus.Registry
+	reg     *prometheus.Registry
+	budgets *acmeBudgetSource
 
 	enrollments *prometheus.CounterVec // {result}
 	rejections  *prometheus.CounterVec // {reason} — labels pre-registered from observ.RejectReasons

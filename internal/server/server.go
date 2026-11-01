@@ -281,7 +281,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		adminActionHandler(nodeID, reg, meshClient, logger, "renew", "reissued", adminCtl.Renew))
 	internalMux.Handle("/api/v1/admin/tunnels/{name}/terminate",
 		adminTerminateHandler(nodeID, reg, meshClient, logger, adminCtl.Terminate))
-	internalMux.Handle("/", metrics.Handler(m.Registry(), rdb, adminTunnels, reg, logger))
+	internalMux.Handle("/", metrics.Handler(m.Gatherer, rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
 		Handler: internalMux, ErrorLog: internalErrLog}
 

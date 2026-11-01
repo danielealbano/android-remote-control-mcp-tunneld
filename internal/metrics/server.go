@@ -35,9 +35,11 @@ const (
 // Handler builds the internal listener mux: /metrics (custom registry), /healthz (Redis PING),
 // /api/v1/admin/tunnels/list (paginated names) + /api/v1/admin/tunnels/stats (batch stats), and
 // /api/v1/admin/nodes (node registry JSON). This listener is NEVER proxied.
-func Handler(reg *prometheus.Registry, rdb redis.UniversalClient, tunnelSrc TunnelSource, nodeSrc NodeSource, log *slog.Logger) http.Handler {
+func Handler(gather func(context.Context) prometheus.Gatherer, rdb redis.UniversalClient, tunnelSrc TunnelSource, nodeSrc NodeSource, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		promhttp.HandlerFor(gather(r.Context()), promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := rdb.Ping(r.Context()).Err(); err != nil {
 			http.Error(w, "redis unavailable: "+err.Error(), http.StatusServiceUnavailable)
