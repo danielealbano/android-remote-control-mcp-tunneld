@@ -470,13 +470,13 @@ func claimLockKey(name string) string { return "lock:claim:" + name }
 // the freshly-attested device scalars. A failure here is non-fatal (the
 // certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
 func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	// Re-read for the freshest record; on a transient read failure fall back to `cur` (the record Issue
 	// already read this call) so the enrolled_at is PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
-		if ctx.Err() == nil {
-			s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
-		}
+		s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
 		rec = cur
 	}
 	rec.Schema = 1
@@ -518,7 +518,9 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 		NonceHex:        hex.EncodeToString(req.Nonce),
 	}
 	if s.cfg.Evidence != nil {
-		if err := s.cfg.Evidence.PutRejectedEnrollment(ctx, ev); err != nil {
+		ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := s.cfg.Evidence.PutRejectedEnrollment(ectx, ev); err != nil {
 			s.logger.Warn("rejected-enrollment evidence write failed", "reason", reason, "src_ip", ip, "err", err)
 		}
 	}
