@@ -113,8 +113,8 @@ for the dial-back, so a connection still waiting for its dial-back counts and is
 full the entry node evicts one stream and retries; while the retried admission is still refused (for example
 because another admission took the freed slot first), it evicts again — at most 5 evictions for one connection.
 After 2 s no new round starts, and the mesh calls still running are cut; a Valkey call already sent (the node
-listing, the retried acquire) is bounded only by the Valkey client's own timeouts, like every other admission
-call, and the victim's slot release by its own 5 s bound.
+listing, the retried acquire, the victim's slot release) is bounded only by the Valkey client's own timeouts, like
+every other admission call; the slot release's own 5 s bound cuts only its pool wait and retries.
 A stream is evictable when it has been idle (no byte
 either way) for at least `--limit-conn-evict-idle` or moved fewer than `--limit-conn-protect-rate` bytes over the
 last 60 s; the most idle one goes. The entry node evicts its own first; when it has none, it asks every other live
