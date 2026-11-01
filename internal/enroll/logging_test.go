@@ -354,9 +354,9 @@ func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 				t.Fatal(err)
 			}
 			svc, buf, idCSR := newLoggedService(t, tc.names(st), st)
-			ctx := newExpiringCtx()
+			ctx := tunneltest.NewExpiringCtx()
 			if tc.expireCaller {
-				ctx.expire()
+				ctx.Expire()
 			}
 			svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: earlier}, Request{IdentityCSR: idCSR},
 				store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})

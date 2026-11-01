@@ -11,7 +11,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -424,29 +423,6 @@ func (c *cancellingIssuer) Obtain(ctx context.Context, csr *x509.CertificateRequ
 	return c.fakeIssuer.Obtain(ctx, csr, name)
 }
 
-type expiringCtx struct {
-	context.Context
-	done chan struct{}
-	once sync.Once
-}
-
-func newExpiringCtx() *expiringCtx {
-	return &expiringCtx{Context: context.Background(), done: make(chan struct{})}
-}
-
-func (c *expiringCtx) Done() <-chan struct{} { return c.done }
-
-func (c *expiringCtx) Err() error {
-	select {
-	case <-c.done:
-		return context.DeadlineExceeded
-	default:
-		return nil
-	}
-}
-
-func (c *expiringCtx) expire() { c.once.Do(func() { close(c.done) }) }
-
 func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -463,8 +439,8 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 		{
 			name: "request deadline passed after the issuance",
 			end: func() (context.Context, context.CancelFunc) {
-				c := newExpiringCtx()
-				return c, c.expire
+				c := tunneltest.NewExpiringCtx()
+				return c, c.Expire
 			},
 			wantCA: "letsencrypt",
 		},
