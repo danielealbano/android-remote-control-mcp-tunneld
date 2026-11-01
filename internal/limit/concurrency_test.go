@@ -160,6 +160,53 @@ func TestLimiter_ReleaseStream_RemovesOnlyItsMember(t *testing.T) {
 	}
 }
 
+func TestLimiter_ReleaseStream_DetachedAndBounded(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		cancelBefore bool
+	}{
+		{name: "caller without a deadline"},
+		{name: "caller cancelled before the release", cancelBefore: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rdb, mr := newTestRedis(t)
+			lim := NewLimiter(rdb, 0, 0, 0, time.Hour)
+			const name = "tunnel-rel"
+			for _, m := range []string{"a", "b"} {
+				if ok, err := lim.AcquireStream(ctxT(t), name, m, 2); err != nil || !ok {
+					t.Fatalf("acquire %s: ok=%v err=%v", m, ok, err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rec := &deadlineRecorder{left: map[string]time.Duration{}}
+			rdb.AddHook(rec)
+			if tc.cancelBefore {
+				rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+			}
+			if err := lim.ReleaseStream(ctx, name, "a"); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			members, err := mr.ZMembers(concKey(name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(members) != 1 || members[0] != "b" {
+				t.Fatalf("set = %v, want only b", members)
+			}
+			rec.mu.Lock()
+			left, ok := rec.left["zrem"]
+			rec.mu.Unlock()
+			if !ok || left <= 0 || left > streamReleaseTimeout {
+				t.Fatalf("the release ran with %s left (deadline set: %v), want its own (0, %s] bound", left, ok, streamReleaseTimeout)
+			}
+		})
+	}
+}
+
 func TestLimiter_AcquireStream_RollbackSurvivesCancelledCaller(t *testing.T) {
 	t.Parallel()
 	rdb, mr := newTestRedis(t)
