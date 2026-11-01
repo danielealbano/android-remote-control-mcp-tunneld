@@ -387,7 +387,7 @@ func TestEdge_HandleTunnel_StreamCapNothingToFree(t *testing.T) {
 		wantCalls int32
 	}{
 		{name: "no node has an evictable stream", free: func(context.Context, string) bool { return false }, wantCalls: 1},
-		{name: "a slot is reported freed every time but never is", free: func(context.Context, string) bool { return true }, wantCalls: slotRetries},
+		{name: "a slot is reported freed every time but never is", free: func(context.Context, string) bool { return true }, wantCalls: 5},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -498,6 +498,40 @@ func TestEdge_HandleTunnel_RetriesWhenFreedSlotIsTaken(t *testing.T) {
 				t.Fatalf("local evictions = %d, want %d", evicted, tc.wantEvictions)
 			}
 		})
+	}
+}
+
+func TestEdge_HandleTunnel_EvictionsBoundedPerAdmission(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 2
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	fillSlots(t, te, cfg.Concurrent)
+	streams := make([]*activeStream, 6)
+	for i := range streams {
+		streams[i] = &activeStream{tunnel: capTunnel, cancel: func() {}, release: func() {}}
+		streams[i].lastAct.Store(int64(i + 1))
+		te.e.trackStream(streams[i])
+	}
+
+	client := newScriptConn("198.51.100.88", nil)
+	waitDone(t, runTunnel(te, client, capSNI), 5*time.Second)
+
+	evicted := 0
+	for _, s := range streams {
+		if s.evicted.Load() {
+			evicted++
+		}
+	}
+	if evicted != 5 {
+		t.Fatalf("local evictions = %d, want exactly 5 for one admission", evicted)
+	}
+	if got := countStr(te.rec.rejectReasons(), "stream-cap"); got != 1 || !client.isClosed() {
+		t.Fatalf("stream-cap rejects=%d closed=%v, want one rejection and the client closed", got, client.isClosed())
+	}
+	if got := te.slots.calls.Load(); got != 0 {
+		t.Fatalf("FreeRemoteSlot calls = %d, want 0 while the local node has streams to evict", got)
 	}
 }
 
