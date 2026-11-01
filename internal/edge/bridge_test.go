@@ -715,3 +715,40 @@ func TestEdge_PendingSlotNeverEvicted(t *testing.T) {
 	cancel()
 	waitDone(t, done, 5*time.Second)
 }
+
+type drainCtxKey struct{}
+
+func TestEdge_DrainReleasesTheSlotAndLogsTheEnd(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 1
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), drainCtxKey{}, "connection"))
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(ctx, newScriptConn("198.51.100.85", nil), ClientHelloInfo{SNI: capSNI})
+		close(done)
+	}()
+	phone := waitPhone(t, te, 0)
+	defer tunneltest.CloseOrLog(t, phone)
+	if got := freeSlots(t, te, capTunnel, cfg.Concurrent); got != 0 {
+		t.Fatalf("free slots during the splice = %d, want 0: the live connection holds its slot", got)
+	}
+
+	cancel()
+	waitDone(t, done, 5*time.Second)
+
+	if got := freeSlots(t, te, capTunnel, cfg.Concurrent); got != cfg.Concurrent {
+		t.Fatalf("free slots after the drain = %d, want %d: the drained connection must release its slot", got, cfg.Concurrent)
+	}
+	ends := te.sink.endContexts()
+	if len(ends) != 1 {
+		t.Fatalf("end events = %d, want 1", len(ends))
+	}
+	if ends[0].Value(drainCtxKey{}) != "connection" || ends[0].Err() != nil {
+		t.Fatalf("the end event must be logged on the connection's context without its cancellation: value=%v err=%v", ends[0].Value(drainCtxKey{}), ends[0].Err())
+	}
+}

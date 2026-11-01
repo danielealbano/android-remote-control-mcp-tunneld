@@ -278,7 +278,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		end.EndedAt = e.now()
 		end.BytesIn = atomic.LoadInt64(&as.bytesIn)
 		end.BytesOut = atomic.LoadInt64(&as.bytesOut)
-		e.logs.PutConnLogPublic(context.Background(), end)
+		e.logs.PutConnLogPublic(context.WithoutCancel(ctx), end)
 	}
 	closeLogged(e.cfg.Logger, "public client", client)
 }

@@ -241,14 +241,24 @@ func (r *recRecorder) rejectReasons() []string {
 
 // fakeSink captures PublicEvent connection-log writes.
 type fakeSink struct {
-	mu     sync.Mutex
-	events []PublicEvent
+	mu      sync.Mutex
+	events  []PublicEvent
+	endCtxs []context.Context
 }
 
-func (s *fakeSink) PutConnLogPublic(_ context.Context, ev PublicEvent) {
+func (s *fakeSink) PutConnLogPublic(ctx context.Context, ev PublicEvent) {
 	s.mu.Lock()
 	s.events = append(s.events, ev)
+	if ev.Event == "end" {
+		s.endCtxs = append(s.endCtxs, ctx)
+	}
 	s.mu.Unlock()
+}
+
+func (s *fakeSink) endContexts() []context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]context.Context(nil), s.endCtxs...)
 }
 
 type fakeACMEChallenges struct {
