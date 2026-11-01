@@ -66,7 +66,7 @@ flowchart TD
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, optional CAs, several GTS accounts looked up by key, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
-| `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools |
+| `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict, slot-candidate, free-slot), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME issuance budgets + wait-until |
 | `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence |
@@ -106,6 +106,18 @@ connection closes, its node sends `evict` to every node and each ends the splice
 nothing, so such splices end within 10 s after the route expires (`--route-ttl`) or is re-bound, through the
 entry node's per-splice route check (every 10 s each splice re-reads its route). The phone terminates TLS with its
 WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; the staging tier uses Let's Encrypt staging + GTS staging) — tunneld never sees plaintext.
+
+**Stream cap.** A tunnel holds at most `--limit-concurrent` public connections at once across all nodes
+(`conc:{name}`, §5; a Valkey error admits without a slot, fail-open). The entry node takes the slot before it asks
+for the dial-back, so a connection still waiting for its dial-back counts and is never evicted. When the cap is
+full the entry node evicts one stream and retries once. A stream is evictable when it has been idle (no byte
+either way) for at least `--limit-conn-evict-idle` or moved fewer than `--limit-conn-protect-rate` bytes over the
+last 60 s; the most idle one goes. The entry node evicts its own first; when it has none, it asks every other live
+node for its most idle evictable stream (mesh `slot-candidate`, 1 s) and has the node whose stream is the most idle
+evict it (mesh `free-slot`, 1 s; the next node only when that one answers that it has none left, while a failed
+call ends the attempt, since the node may have evicted already); a node runs at most 32 such attempts at once and
+refuses beyond that without asking. The victim ends with `close_reason=evicted`; when no slot was freed the new
+connection is closed (`stream-cap`).
 
 **ACME validations.** A ClientHello whose first ALPN protocol is `acme-tls/1` is a TLS-ALPN-01 validation
 addressed to tunneld itself, not tunnel traffic: after the ban / conn-rate / `--max-clients` checks the edge

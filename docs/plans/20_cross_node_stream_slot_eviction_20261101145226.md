@@ -602,20 +602,20 @@ members via `te.e.lim.AcquireStream` = "held on another node", `te.rtr.ok = true
 
 ## User Story 3: Document cluster-wide stream eviction
 
-- [ ] **US3** — Keep the canonical docs and `project.md` accurate.
+- [x] **US3** — Keep the canonical docs and `project.md` accurate.
 
 Why: the mesh ops are part of the documented replica contract and the cap's behavior changed.
 
 ### Acceptance Criteria
 
-- [ ] `docs/PROTOCOL.md` §5 documents both ops and when they are sent; `docs/ARCHITECTURE.md` describes the stream
+- [x] `docs/PROTOCOL.md` §5 documents both ops and when they are sent; `docs/ARCHITECTURE.md` describes the stream
       cap's eviction (local first, then the most idle stream on another node, pending slots never) and lists the
       ops in the package map; `docs/PROJECT.md` and `.claude/rules/project.md` stay accurate. No plan number is
       added to any of them.
 
-### [ ] Task 3.1: `docs/PROTOCOL.md` §5
+### [x] Task 3.1: `docs/PROTOCOL.md` §5
 
-- [ ] **Action 3.1.1** — `docs/PROTOCOL.md` §5 (modify):
+- [x] **Action 3.1.1** — `docs/PROTOCOL.md` §5 (modify):
 
 ```diff
 -`POST /api/v1/mesh/control`: a JSON request → response `{applied}` (mesh-role mTLS). The ops:
@@ -638,18 +638,18 @@ Why: the mesh ops are part of the documented replica contract and the cap's beha
 
 #### Definition of Done
 
-- [ ] The `400` rules line still matches the handler (unknown op, missing tunnel; neither new op needs `conn_id`).
+- [x] The `400` rules line still matches the handler (unknown op, missing tunnel; neither new op needs `conn_id`).
 
-### [ ] Task 3.2: `docs/ARCHITECTURE.md`
+### [x] Task 3.2: `docs/ARCHITECTURE.md`
 
-- [ ] **Action 3.2.1** — `docs/ARCHITECTURE.md` §1 package map (modify):
+- [x] **Action 3.2.1** — `docs/ARCHITECTURE.md` §1 package map (modify):
 
 ```diff
 -| `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict), per-pair pools |
 +| `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict, slot-candidate, free-slot), per-pair pools |
 ```
 
-- [ ] **Action 3.2.2** — `docs/ARCHITECTURE.md` §2, new paragraph right after the one ending "tunneld never sees
+- [x] **Action 3.2.2** — `docs/ARCHITECTURE.md` §2, new paragraph right after the one ending "tunneld never sees
       plaintext." (modify):
 
 ```markdown
@@ -668,18 +668,18 @@ connection is closed (`stream-cap`).
 
 #### Definition of Done
 
-- [ ] No Mermaid block of `ARCHITECTURE.md` changed.
+- [x] No Mermaid block of `ARCHITECTURE.md` changed.
 
-### [ ] Task 3.3: `docs/PROJECT.md` and `.claude/rules/project.md`
+### [x] Task 3.3: `docs/PROJECT.md` and `.claude/rules/project.md`
 
-- [ ] **Action 3.3.1** — `docs/PROJECT.md` §4 caps table (modify):
+- [x] **Action 3.3.1** — `docs/PROJECT.md` §4 caps table (modify):
 
 ```diff
 -| Concurrent data streams / tunnel | `--limit-concurrent` | `4` |
 +| Concurrent data streams / tunnel, all nodes together (a full cap evicts the entry node's least-active evictable stream, else the most idle one on another node — [`ARCHITECTURE.md`](ARCHITECTURE.md) §2) | `--limit-concurrent` | `4` |
 ```
 
-- [ ] **Action 3.3.2** — `.claude/rules/project.md` "Wire protocol" (modify):
+- [x] **Action 3.3.2** — `.claude/rules/project.md` "Wire protocol" (modify):
 
 ```diff
 -  `wire.ChunkSize` = 16384 is the pacing slice). The mesh carries control RPCs only (`renew`, `terminate`,
@@ -688,7 +688,7 @@ connection is closed (`stream-cap`).
 +  `open`, `evict`, `slot-candidate`, `free-slot` — replica↔replica, not part of the phone contract). ANY wire change MUST update
 ```
 
-- [ ] **Action 3.3.3** — `.claude/rules/project.md` "MANDATORY: Read These First" item 4 (modify):
+- [x] **Action 3.3.3** — `.claude/rules/project.md` "MANDATORY: Read These First" item 4 (modify):
 
 ```diff
 -   Route ownership and the ban model are described by `docs/ARCHITECTURE.md` and `docs/PROTOCOL.md`, which
@@ -699,7 +699,7 @@ connection is closed (`stream-cap`).
 
 #### Definition of Done
 
-- [ ] The `.claude/` changes are committed on the branch.
+- [x] The `.claude/` changes are committed on the branch.
 
 ---
 
