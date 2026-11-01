@@ -718,12 +718,33 @@ func TestEdge_PendingSlotNeverEvicted(t *testing.T) {
 
 type drainCtxKey struct{}
 
+type releaseCtxLimiter struct {
+	StreamLimiter
+	mu     sync.Mutex
+	values []any
+}
+
+func (l *releaseCtxLimiter) ReleaseStream(ctx context.Context, name, member string) error {
+	l.mu.Lock()
+	l.values = append(l.values, ctx.Value(drainCtxKey{}))
+	l.mu.Unlock()
+	return l.StreamLimiter.ReleaseStream(ctx, name, member)
+}
+
+func (l *releaseCtxLimiter) releasedWith() []any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]any(nil), l.values...)
+}
+
 func TestEdge_DrainReleasesTheSlotAndLogsTheEnd(t *testing.T) {
 	t.Parallel()
 	cfg := baseConfig()
 	cfg.Concurrent = 1
 	te := newTestEdge(t, cfg, nil)
 	te.rtr.set("node-a", "conn-1", true, nil)
+	lim := &releaseCtxLimiter{StreamLimiter: te.e.lim}
+	te.e.lim = lim
 
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), drainCtxKey{}, "connection"))
 	defer cancel()
@@ -743,6 +764,9 @@ func TestEdge_DrainReleasesTheSlotAndLogsTheEnd(t *testing.T) {
 
 	if got := freeSlots(t, te, capTunnel, cfg.Concurrent); got != cfg.Concurrent {
 		t.Fatalf("free slots after the drain = %d, want %d: the drained connection must release its slot", got, cfg.Concurrent)
+	}
+	if got := lim.releasedWith(); len(got) != 1 || got[0] != "connection" {
+		t.Fatalf("stream-slot releases = %v, want one on the connection's context", got)
 	}
 	ends := te.sink.endContexts()
 	if len(ends) != 1 {
