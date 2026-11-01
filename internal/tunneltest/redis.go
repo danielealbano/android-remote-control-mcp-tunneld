@@ -66,3 +66,32 @@ func (h *cancelAfter) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 func (h *cancelAfter) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
 }
+
+type cancelBefore struct {
+	name   string
+	cancel context.CancelFunc
+}
+
+func CancelBefore(name string, cancel context.CancelFunc) redis.Hook {
+	return &cancelBefore{name: name, cancel: cancel}
+}
+
+func (h *cancelBefore) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *cancelBefore) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == h.name {
+			h.cancel()
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *cancelBefore) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if slices.ContainsFunc(cmds, func(c redis.Cmder) bool { return c.Name() == h.name }) {
+			h.cancel()
+		}
+		return next(ctx, cmds)
+	}
+}
