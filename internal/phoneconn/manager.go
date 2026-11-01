@@ -58,8 +58,8 @@ type conn struct {
 	reason string
 }
 
-// teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (they run on
-// context.Background — a hung control plane or store must never pin a teardown goroutine).
+// teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (a hung control
+// plane or store must never pin a teardown goroutine).
 const teardownTimeout = 10 * time.Second
 
 // Manager tracks live phone control connections, binds routes, writes conn-log events, and drives
