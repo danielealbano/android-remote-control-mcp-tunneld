@@ -144,7 +144,8 @@ attestation + key binding, claims a name (Valkey lock, then S3), and signs a boo
 2 (`/api/v1/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
 `<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
-The name registry record carries the cert metadata; the reserved-host (`--enroll-host`/`--control-host`)
+The name registry record carries the cert metadata (an issuance whose requester disconnected before the answer
+is counted but not recorded, so the renewal watcher keeps nudging the phone); the reserved-host (`--enroll-host`/`--control-host`)
 certs are obtained by the server itself (`ObtainSelf`) after the listeners bind (a valid disk cache is served
 immediately), retried every minute while missing, and renewed on schedule. Reserved-host issuance is
 serialized across replicas by a per-host Valkey lock (`lock:acme-self:{host}`): a replica waits up to 5 min
@@ -199,7 +200,9 @@ value (100 s, or 200 s for GTS); every attempt deadline is capped at 100 s; drop
 and keeps only the default one, which is the chain tunneld serves), and on a 429 resyncs only the bucket the CA named. Each attempt has a deadline (LE 20 s, GTS 60 s, ZeroSSL 90 s); an order already
 finalized when its deadline passes gets 30 s more to fetch its certificate (lego's own certificate wait is set to the
 attempt deadline plus those 30 s), so a certificate the CA issued is not thrown away; an
-abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s. Any unsuccessful attempt
+abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s, and an attempt still
+running when the run ends (the cap passes or the caller goes away) ends the run without counting as a failure of
+its account. Otherwise, any unsuccessful attempt
 other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
 tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
 waits (a wait-until or a backoff in effect) adds no step to it, so concurrent attempts count once. GTS accounts are tried

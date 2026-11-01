@@ -37,9 +37,11 @@ func (r *Registry) acquire(ctx context.Context, name string) (token string, ok b
 // release drops the lock only if we still hold it. Best-effort: a GET+DEL race is negligible because the
 // section is microseconds and the TTL is seconds, and the lock self-expires regardless (posture: no Lua).
 func (r *Registry) release(ctx context.Context, name, token string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lockTTL)
+	defer cancel()
 	v, err := r.rdb.Get(ctx, lockKey(name)).Result()
 	if err != nil {
-		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
+		if !errors.Is(err, redis.Nil) {
 			r.logger.Warn("route lock release check failed (lock expires by TTL)", "tunnel", name, "err", err)
 		}
 		return
@@ -47,7 +49,7 @@ func (r *Registry) release(ctx context.Context, name, token string) {
 	if v != token {
 		return
 	}
-	if err := r.rdb.Del(ctx, lockKey(name)).Err(); err != nil && ctx.Err() == nil {
+	if err := r.rdb.Del(ctx, lockKey(name)).Err(); err != nil {
 		r.logger.Warn("route lock release failed (lock expires by TTL)", "tunnel", name, "err", err)
 	}
 }

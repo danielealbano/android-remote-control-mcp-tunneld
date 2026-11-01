@@ -31,6 +31,7 @@ func newLoggedReg(t *testing.T) (*Registry, *miniredis.Miniredis, *redis.Client,
 }
 
 func TestRegistry_Release_LogsFailures(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		fail      string
@@ -39,11 +40,12 @@ func TestRegistry_Release_LogsFailures(t *testing.T) {
 	}{
 		{name: "ownership check fails", fail: "get", want: `msg="route lock release check failed (lock expires by TTL)" tunnel=n`},
 		{name: "delete fails", fail: "del", want: `msg="route lock release failed (lock expires by TTL)" tunnel=n`},
-		{name: "cancelled caller check is silent", fail: "get", cancelled: true},
-		{name: "cancelled caller delete is silent", fail: "del", cancelled: true},
+		{name: "ownership check fails after the caller was cancelled", fail: "get", cancelled: true, want: `msg="route lock release check failed (lock expires by TTL)" tunnel=n`},
+		{name: "delete fails after the caller was cancelled", fail: "del", cancelled: true, want: `msg="route lock release failed (lock expires by TTL)" tunnel=n`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			reg, mr, rdb, buf := newLoggedReg(t)
 			if err := mr.Set(lockKey("n"), "tok"); err != nil {
 				t.Fatal(err)
@@ -55,14 +57,46 @@ func TestRegistry_Release_LogsFailures(t *testing.T) {
 				cancel()
 			}
 			reg.release(ctx, "n", "tok")
-			if tc.want == "" {
-				if buf.Len() != 0 {
-					t.Fatalf("a release failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
-				}
-				return
-			}
 			if !strings.Contains(buf.String(), tc.want) || !strings.Contains(buf.String(), errInjected.Error()) {
 				t.Fatalf("the release failure must be logged with its cause; log = %q", buf.String())
+			}
+		})
+	}
+}
+
+func TestRegistry_WithLock_CancelledHolderReleases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		replace func(mr *miniredis.Miniredis) error
+		want    string
+	}{
+		{name: "lock still held", replace: func(*miniredis.Miniredis) error { return nil }},
+		{name: "lock already expired", replace: func(mr *miniredis.Miniredis) error { mr.Del(lockKey("n")); return nil }},
+		{name: "another holder took the lock", replace: func(mr *miniredis.Miniredis) error { return mr.Set(lockKey("n"), "someone-else") }, want: "someone-else"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, mr, _, buf := newLoggedReg(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := reg.withLock(ctx, "n", func() error { cancel(); return tc.replace(mr) }); err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if mr.Exists(lockKey("n")) {
+				v, err := mr.Get(lockKey("n"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = v
+			}
+			if got != tc.want {
+				t.Fatalf("lock after the holder's ctx was cancelled = %q, want %q", got, tc.want)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("a release after the holder's ctx was cancelled must not log; log = %q", buf.String())
 			}
 		})
 	}

@@ -160,7 +160,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	}
 	for _, group := range c.groups {
 		for _, a := range c.ordered(ctx, group, live) {
-			if err := ctx.Err(); err != nil {
+			if err := runEnded(ctx); err != nil {
 				return nil, store.CertInfo{}, transient(err)
 			}
 			// Cooldown bookkeeping is best-effort: a Valkey error reads as "not cooling" (fail-open — try
@@ -173,21 +173,23 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				note(cool)
 				continue
 			}
-			pemChain, info, wait, err := c.attempt(ctx, a, csr, name, fqdn, curCA == CALetsEncrypt && a.ca == CALetsEncrypt, live)
+			pemChain, info, wait, ended, err := c.attempt(ctx, a, csr, name, fqdn, curCA == CALetsEncrypt && a.ca == CALetsEncrypt, live)
 			if wait > 0 {
 				note(wait)
 				continue
 			}
 			if err == nil {
-				if rerr := c.cfg.Limiter.ResetCAFailures(ctx, a.id); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
+				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+				defer cancel()
+				if rerr := c.cfg.Limiter.ResetCAFailures(rctx, a.id); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
 					c.cfg.Logger.Warn("acme CA failure-streak reset failed", "ca", a.ca, "name", name, "err", rerr, "account", a.label)
 				}
 				c.cfg.Recorder.ACMEIssue(a.ca, "ok")
 				c.cfg.Logger.Info("acme certificate issued", "ca", a.ca, "name", name, "serial", info.Serial, "not_after", info.NotAfter, "account", a.label)
 				return pemChain, info, nil
 			}
-			if ctx.Err() != nil {
-				return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", ctx.Err(), err))
+			if ended {
+				return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", runEnded(ctx), err))
 			}
 			class := ClassTransient
 			var ie *IssuerError
@@ -199,7 +201,9 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 			}
 			c.cfg.Recorder.ACMEIssue(a.ca, "fail")
-			cool, permanent := c.handleFailure(ctx, a, err)
+			fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+			cool, permanent := c.handleFailure(fctx, a, err)
+			fcancel()
 			if permanent {
 				return nil, store.CertInfo{}, err // permanent (e.g. bad CSR) — stop
 			}
@@ -217,13 +221,23 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	return nil, store.CertInfo{}, rateLimited(shortest+jitter, fmt.Errorf("all issuance CAs are rate-limited; quota exhausted, retry later"))
 }
 
-func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.CertificateRequest, name, fqdn string, leRenewal bool, live []string) ([]byte, store.CertInfo, time.Duration, error) {
+func runEnded(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.CertificateRequest, name, fqdn string, leRenewal bool, live []string) ([]byte, store.CertInfo, time.Duration, bool, error) {
 	if p, ok := a.issuer.(preparer); ok {
 		pctx, cancel := context.WithTimeout(ctx, a.timeout)
 		err := p.prepare(pctx)
 		cancel()
 		if err != nil {
-			return nil, store.CertInfo{}, 0, err
+			return nil, store.CertInfo{}, 0, runEnded(ctx) != nil, err
 		}
 	}
 	onCreate, onSuccess := c.cfg.Budgets.orderBuckets(a, fqdn, leRenewal)
@@ -239,7 +253,7 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 		c.cfg.Logger.Warn("acme budget reservation failed (trying the account)", "ca", a.ca, "name", name, "err", err, "account", a.label)
 	case !ok:
 		c.cfg.Logger.Debug("acme account out of budget (skipped)", "ca", a.ca, "name", name, "retry_after", wait, "account", a.label)
-		return nil, store.CertInfo{}, wait, nil
+		return nil, store.CertInfo{}, wait, false, nil
 	}
 	prepayBucket, perOrder := c.cfg.Budgets.prepayBucket(a)
 	var mark string
@@ -255,11 +269,13 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	case perr != nil:
 		c.cfg.Logger.Warn("acme request budget prepay failed (trying the account)", "ca", a.ca, "name", name, "err", perr, "account", a.label)
 	case pwait > 0:
-		if rerr := c.cfg.Limiter.ReleaseACME(ctx, reserved, c.cfg.NodeID, member); rerr != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+		defer cancel()
+		if rerr := c.cfg.Limiter.ReleaseACME(rctx, reserved, c.cfg.NodeID, member); rerr != nil {
 			c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", rerr, "account", a.label)
 		}
 		c.cfg.Logger.Debug("acme account out of request budget (skipped)", "ca", a.ca, "name", name, "retry_after", pwait, "account", a.label)
-		return nil, store.CertInfo{}, pwait, nil
+		return nil, store.CertInfo{}, pwait, false, nil
 	}
 	var nameBucket, domainBucket limit.Bucket
 	if a.ca == CALetsEncrypt {
@@ -269,11 +285,12 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	tr.setPrepaid(prepayBucket.Key, prepaid, mark)
 	actx, cancel := attemptContext(withTrack(ctx, tr), tr, timeout, c.cfg.FinalizeGrace)
 	pemChain, info, oerr := a.issuer.obtain(actx, csr, name)
+	ended := runEnded(ctx) != nil
 	cancel()
 	out := tr.outcome()
 	tr.abandon()
 	c.settle(ctx, a, member, onCreate, onSuccess, tr, out, oerr == nil)
-	return pemChain, info, 0, oerr
+	return pemChain, info, 0, ended, oerr
 }
 
 func (c *chainIssuer) settle(ctx context.Context, a *account, member string, onCreate, onSuccess []limit.Bucket, tr *orderTrack, out orderOutcome, ok bool) {

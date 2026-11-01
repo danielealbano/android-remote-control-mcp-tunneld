@@ -189,7 +189,9 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
 	if err != nil {
 		s.logSignError(name, ip, err)
-		if derr := s.cfg.Names.DeleteName(ctx, name); derr != nil {
+		dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer dcancel()
+		if derr := s.cfg.Names.DeleteName(dctx, name); derr != nil {
 			s.logger.Warn("claim rollback failed (name orphaned in the registry)", "tunnel", name, "err", derr)
 		}
 		return Result{}, signError(err)
@@ -280,9 +282,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	}
 	defer func() {
 		ut := s.now()
-		ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.cfg.Limiter.IssuanceEnd(ectx, name, orderID); err != nil {
+		if err := s.cfg.Limiter.IssuanceEnd(ctx, name, orderID); err != nil {
 			s.logger.Warn("issuance lock release failed (lock self-expires)", "tunnel", name, "err", err)
 		}
 		s.logStep("issue step", "issuance-unlock", ut, "tunnel", name, "ip", ip)
@@ -326,14 +326,18 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 
 	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer bcancel()
-	// Count this SUCCESSFUL issuance, then LWW-record the cert metadata.
+	// Count this SUCCESSFUL issuance.
 	if err := s.cfg.Limiter.IssuanceRecord(bctx, name); err != nil {
 		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
 		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
 	}
 	t = s.logStep("issue step", "issuance-record", t, "tunnel", name, "ip", ip)
-	s.recordCert(ctx, name, cur, req, info, att.Device)
-	s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		s.logger.Info("issued certificate not recorded (requester gone)", "tunnel", name, "ip", ip, "ca", info.CA)
+	} else {
+		s.recordCert(ctx, name, cur, req, info, att.Device)
+		s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
+	}
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
 }
@@ -470,13 +474,13 @@ func claimLockKey(name string) string { return "lock:claim:" + name }
 // the freshly-attested device scalars. A failure here is non-fatal (the
 // certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
 func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 	// Re-read for the freshest record; on a transient read failure fall back to `cur` (the record Issue
 	// already read this call) so the enrolled_at is PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
-		if ctx.Err() == nil {
-			s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
-		}
+		s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
 		rec = cur
 	}
 	rec.Schema = 1
@@ -518,7 +522,9 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 		NonceHex:        hex.EncodeToString(req.Nonce),
 	}
 	if s.cfg.Evidence != nil {
-		if err := s.cfg.Evidence.PutRejectedEnrollment(ctx, ev); err != nil {
+		ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := s.cfg.Evidence.PutRejectedEnrollment(ectx, ev); err != nil {
 			s.logger.Warn("rejected-enrollment evidence write failed", "reason", reason, "src_ip", ip, "err", err)
 		}
 	}

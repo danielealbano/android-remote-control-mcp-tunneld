@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
 // TestSignFailureRollsBack: any SignIdentity failure after a
 // claim deletes the claimed name.
 func TestSignFailureRollsBack(t *testing.T) {
-	st := tunneltest.NewStore()
+	t.Parallel()
 	// A CSR whose signature verifies but whose key the CA refuses (RSA) forces the sign failure AFTER
 	// the claim; key binding is bypassed via a matching attested key.
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -213,16 +214,71 @@ func TestSignFailureRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, _ := newService(t, Config{
-		CA: testCA(t), Names: st, Evidence: st,
-		Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{},
-	})
-	if _, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil {
-		t.Fatal("sign failure must surface an error")
+	tests := []struct {
+		name       string
+		callerGone bool
+		deleteErr  error
+		wantNames  int
+		wantLog    string
+	}{
+		{name: "caller still connected"},
+		{name: "caller gone after the claim", callerGone: true},
+		{name: "rollback fails", deleteErr: errInjected, wantNames: 1, wantLog: `msg="claim rollback failed (name orphaned in the registry)" tunnel=`},
 	}
-	if st.NameCount() != 0 {
-		t.Fatal("DeleteName must roll the claim back")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			names := rollbackNames{Store: st, deleteErr: tc.deleteErr}
+			if tc.callerGone {
+				names.cancelOnClaim = cancel
+			}
+			logger, buf := captureLogger()
+			svc, _ := newService(t, Config{
+				CA: testCA(t), Names: names, Evidence: st,
+				Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{}, Logger: logger,
+			})
+			if _, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil || ee.Reason != "unsupported_key_type" {
+				t.Fatalf("Enroll error = %v, want the sign error (unsupported_key_type)", ee)
+			}
+			if got := st.NameCount(); got != tc.wantNames {
+				t.Fatalf("registry holds %d names after the sign failure, want %d", got, tc.wantNames)
+			}
+			logs := buf.String()
+			switch {
+			case tc.wantLog == "" && strings.Contains(logs, "claim rollback failed"):
+				t.Fatalf("a successful rollback must not log a failure; log = %q", logs)
+			case tc.wantLog != "" && (!strings.Contains(logs, tc.wantLog) || !strings.Contains(logs, errInjected.Error())):
+				t.Fatalf("the failed rollback must be logged with the tunnel and its cause; log = %q", logs)
+			}
+		})
 	}
+}
+
+type rollbackNames struct {
+	*tunneltest.Store
+	cancelOnClaim context.CancelFunc
+	deleteErr     error
+}
+
+func (s rollbackNames) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	err := s.Store.PutName(ctx, name, rec)
+	if s.cancelOnClaim != nil {
+		s.cancelOnClaim()
+	}
+	return err
+}
+
+func (s rollbackNames) DeleteName(ctx context.Context, name string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.DeleteName(ctx, name)
 }
 
 // TestClaimCollisionDrawsNewName: the plan's "claim collision → new name" row — an existing first
@@ -365,6 +421,58 @@ type cancellingIssuer struct {
 func (c *cancellingIssuer) Obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
 	defer c.cancel()
 	return c.fakeIssuer.Obtain(ctx, csr, name)
+}
+
+func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		end     func() (context.Context, context.CancelFunc)
+		wantCA  string
+		wantLog string
+	}{
+		{
+			name:    "phone gone after the issuance",
+			end:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			wantLog: `msg="issued certificate not recorded (requester gone)"`,
+		},
+		{
+			name: "request deadline passed after the issuance",
+			end: func() (context.Context, context.CancelFunc) {
+				c := tunneltest.NewExpiringCtx()
+				return c, c.Expire
+			},
+			wantCA: "letsencrypt",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			ctx, end := tc.end()
+			defer end()
+			logger, buf := captureLogger()
+			svc, _ := newService(t, Config{
+				CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test", Logger: logger,
+				Verifier: fakeVerifier{key: idPub}, Issuer: &cancellingIssuer{fakeIssuer: fakeIssuer{ca: "letsencrypt"}, cancel: end},
+				IssuePerWeek: 1,
+			})
+			name := doEnroll(t, svc, idCSR)
+			if _, ee := svc.Issue(ctx, name, "1.2.3.4", Request{
+				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test"),
+			}); ee != nil {
+				t.Fatalf("issuance failed: %v", ee)
+			}
+			rec, err := st.GetName(context.Background(), name)
+			if err != nil || rec.CA != tc.wantCA {
+				t.Fatalf("registry CA = %q (err %v), want %q", rec.CA, err, tc.wantCA)
+			}
+			if tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog) {
+				t.Fatalf("the unrecorded issuance must be logged; log = %q", buf.String())
+			}
+		})
+	}
 }
 
 func TestIssue_CounterSurvivesCancelledRequest(t *testing.T) {

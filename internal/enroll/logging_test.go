@@ -20,6 +20,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
@@ -295,20 +296,114 @@ func TestEnrollIssue_CancelledCallerIsSilent(t *testing.T) {
 	}
 }
 
-func TestRecordCert_CancelledReReadIsSilent(t *testing.T) {
-	names := &faultyNames{Store: tunneltest.NewStore(), getErr: func(int64) error { return context.Canceled }}
-	svc, buf, idCSR := newLoggedService(t, names, names.Store)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	enrolled := time.Unix(1000, 0).UTC()
-	svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: enrolled}, Request{IdentityCSR: idCSR},
-		store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})
-	if strings.Contains(buf.String(), "name record re-read failed") {
-		t.Fatalf("a re-read failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
+type ctxStore struct {
+	*tunneltest.Store
+}
+
+func (s ctxStore) GetName(ctx context.Context, name string) (store.NameRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return store.NameRecord{}, err
 	}
-	rec, err := names.Store.GetName(context.Background(), "n")
-	if err != nil || !rec.EnrolledAt.Equal(enrolled) || rec.CA != "letsencrypt" {
-		t.Fatalf("the record must still be written from the earlier read: %+v %v", rec, err)
+	return s.Store.GetName(ctx, name)
+}
+
+func (s ctxStore) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.PutName(ctx, name, rec)
+}
+
+func (s ctxStore) PutRejectedEnrollment(ctx context.Context, ev store.RejectedEnrollment) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.PutRejectedEnrollment(ctx, ev)
+}
+
+func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
+	t.Parallel()
+	earlier, fresh := time.Unix(1000, 0).UTC(), time.Unix(2000, 0).UTC()
+	tests := []struct {
+		name         string
+		names        func(st *tunneltest.Store) NameStore
+		expireCaller bool
+		wantEnrolled time.Time
+		wantLog      string
+	}{
+		{
+			name:         "request deadline passed",
+			names:        func(st *tunneltest.Store) NameStore { return ctxStore{Store: st} },
+			expireCaller: true,
+			wantEnrolled: fresh,
+		},
+		{
+			name: "re-read fails",
+			names: func(st *tunneltest.Store) NameStore {
+				return &faultyNames{Store: st, getErr: func(int64) error { return errInjected }}
+			},
+			wantEnrolled: earlier,
+			wantLog:      `msg="name record re-read failed (using the record read earlier)" tunnel=n`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			if err := st.PutName(context.Background(), "n", store.NameRecord{Schema: 1, EnrolledAt: fresh}); err != nil {
+				t.Fatal(err)
+			}
+			svc, buf, idCSR := newLoggedService(t, tc.names(st), st)
+			ctx := tunneltest.NewExpiringCtx()
+			if tc.expireCaller {
+				ctx.Expire()
+			}
+			svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: earlier}, Request{IdentityCSR: idCSR},
+				store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})
+			rec, err := st.GetName(context.Background(), "n")
+			if err != nil || !rec.EnrolledAt.Equal(tc.wantEnrolled) || rec.CA != "letsencrypt" {
+				t.Fatalf("recorded = %+v (err %v), want the issued cert with enrolled_at %s", rec, err, tc.wantEnrolled)
+			}
+			logs := buf.String()
+			switch {
+			case tc.wantLog == "" && strings.Contains(logs, "level=WARN"):
+				t.Fatalf("a clean record must not warn; log = %q", logs)
+			case tc.wantLog != "" && !strings.Contains(logs, tc.wantLog):
+				t.Fatalf("the failed re-read must be logged; log = %q", logs)
+			}
+		})
+	}
+}
+
+type cancelingVerifier struct {
+	cancel context.CancelFunc
+	err    error
+}
+
+func (v cancelingVerifier) Verify(_ []*x509.Certificate, _ []byte, _ time.Time) (attest.Result, error) {
+	v.cancel()
+	return attest.Result{}, v.err
+}
+
+func TestRecordRejection_CallerGoneStillRecordsEvidence(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, _ := newCSR(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, buf := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: ctxStore{Store: st}, Logger: logger,
+		Verifier: cancelingVerifier{cancel: cancel, err: attest.ErrSignerNotAllowed}, Issuer: &fakeIssuer{},
+	})
+	if _, ee := svc.Enroll(ctx, "9.9.9.9", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR}); ee == nil || ee.Reason != "unauthorized" {
+		t.Fatalf("Enroll error = %v, want unauthorized", ee)
+	}
+	if len(st.Rejected) != 1 || st.Rejected[0].Reason != "attest-signer" {
+		t.Fatalf("evidence = %+v, want one attest-signer record although the caller had gone", st.Rejected)
+	}
+	if strings.Contains(buf.String(), "rejected-enrollment evidence write failed") {
+		t.Fatalf("the evidence write must not fail; log = %q", buf.String())
 	}
 }
 

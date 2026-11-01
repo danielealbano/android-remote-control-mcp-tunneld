@@ -485,6 +485,61 @@ func TestChain_RunBudget(t *testing.T) {
 	}
 }
 
+type pendingCancelCtx struct {
+	context.Context
+	deadline *atomic.Pointer[time.Time]
+}
+
+func newPendingCancelCtx(d time.Time) pendingCancelCtx {
+	c := pendingCancelCtx{Context: context.Background(), deadline: &atomic.Pointer[time.Time]{}}
+	c.deadline.Store(&d)
+	return c
+}
+
+func (c pendingCancelCtx) Deadline() (time.Time, bool) { return *c.deadline.Load(), true }
+
+func (c pendingCancelCtx) passDeadline() {
+	d := time.Now().Add(-time.Millisecond)
+	c.deadline.Store(&d)
+}
+
+func TestChain_RunDeadlinePassedBeforeCancel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		deadline      time.Duration
+		passInAttempt bool
+		wantLE        int32
+	}{
+		{name: "deadline passes during an attempt", deadline: time.Minute, passInAttempt: true, wantLE: 1},
+		{name: "deadline already passed", deadline: -time.Millisecond, wantLE: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := newPendingCancelCtx(time.Now().Add(tc.deadline))
+			le := &trackingFake{caID: CALetsEncrypt, block: true}
+			if tc.passInAttempt {
+				le.onObtain = func(context.Context) { ctx.passDeadline() }
+			}
+			gts := &trackingFake{caID: CAGTS, block: true}
+			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", 50*time.Millisecond), acct(gts, "gts-1", time.Second))
+			_, _, err := ac.ch.Obtain(ctx, nil, "p")
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Obtain = %v, want the run deadline", err)
+			}
+			if le.calls.Load() != tc.wantLE || gts.calls.Load() != 0 {
+				t.Fatalf("LE calls = %d (want %d), GTS calls = %d (want 0)", le.calls.Load(), tc.wantLE, gts.calls.Load())
+			}
+			if len(ac.rec.issues) != 0 || len(ac.rec.cooldowns) != 0 {
+				t.Fatalf("an attempt the run deadline cut short must record no CA failure, got issues=%v cooldowns=%v", ac.rec.issues, ac.rec.cooldowns)
+			}
+			assertNoCAFailureState(t, ac.lim, "le-1")
+			assertNoCAFailureState(t, ac.lim, "gts-1")
+		})
+	}
+}
+
 func TestChain_MissingCAsSkipped(t *testing.T) {
 	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
@@ -753,6 +808,189 @@ func TestChain_SkipsAccountWithoutRequestBudget(t *testing.T) {
 	if !strings.Contains(ac.log.String(), `msg="acme account out of request budget (skipped)"`) {
 		t.Fatalf("the skip must be logged; log = %q", ac.log.String())
 	}
+}
+
+func TestChain_SkippedAccountReleasesReservationAfterCallerGone(t *testing.T) {
+	t.Parallel()
+	gts := &trackingFake{caID: CAGTS, label: "gts-1"}
+	a := acct(gts, "gts-1", time.Minute)
+	ac := newAccountChain(t, ChainConfig{}, a)
+	ac.spend(t, CAGTS, smallBudgets().gtsRequests(a), 2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+	_, _, err := ac.ch.Obtain(ctx, nil, "p.example.test")
+	var ie *IssuerError
+	if !asIssuerError(err, &ie) || ie.Class != ClassRateLimited {
+		t.Fatalf("err = %v, want rate-limited (the only account was skipped)", err)
+	}
+	if gts.calls.Load() != 0 {
+		t.Fatal("an account without request budget for a whole order must not be asked")
+	}
+	if got := ac.level(t, smallBudgets().gtsOrders(a)); got != 1 {
+		t.Fatalf("GTS order budget level = %v, want 1 (the reservation released although the caller was gone)", got)
+	}
+	if strings.Contains(ac.log.String(), `msg="acme budget release failed`) {
+		t.Fatalf("the release must not fail; log = %q", ac.log.String())
+	}
+}
+
+type cancelBeforeKeyed struct {
+	name, key string
+	cancel    context.CancelFunc
+	armed     atomic.Bool
+}
+
+func (ac *accountChain) cancelBefore(name, key string, cancel context.CancelFunc, armed bool) *cancelBeforeKeyed {
+	h := &cancelBeforeKeyed{name: name, key: key, cancel: cancel}
+	h.armed.Store(armed)
+	ac.rdb.AddHook(h)
+	return h
+}
+
+func (h *cancelBeforeKeyed) fire(cmds ...redis.Cmder) {
+	for _, c := range cmds {
+		if (h.name == "" || c.Name() == h.name) && slices.Contains(c.Args(), any(h.key)) && h.armed.CompareAndSwap(true, false) {
+			h.cancel()
+			return
+		}
+	}
+}
+
+func (h *cancelBeforeKeyed) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *cancelBeforeKeyed) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.fire(cmd)
+		return next(ctx, cmd)
+	}
+}
+
+func (h *cancelBeforeKeyed) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		h.fire(cmds...)
+		return next(ctx, cmds)
+	}
+}
+
+func TestChain_FailureBackoffSurvivesCallerGone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "cancelled before the streak bump", key: "acme-fail:le-1"},
+		{name: "cancelled before the wait-until is read and written", key: "acme-cooldown:le-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var h *cancelBeforeKeyed
+			le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("ca down")), onObtain: func(context.Context) { h.armed.Store(true) }}
+			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+			h = ac.cancelBefore("", tc.key, cancel, false)
+			if _, _, err := ac.ch.Obtain(ctx, nil, "p"); err == nil {
+				t.Fatal("a failed attempt must fail the run")
+			}
+			if h.armed.Load() {
+				t.Fatal("the caller must have been cancelled inside the failure bookkeeping")
+			}
+			if cool, err := ac.lim.CACooldown(context.Background(), "le-1"); err != nil || cool != time.Minute {
+				t.Fatalf("LE account wait-until = %s (%v), want the 1 m backoff although the caller was gone", cool, err)
+			}
+			if n, err := ac.lim.BumpCAFailures(context.Background(), "le-1", time.Hour); err != nil || n != 2 {
+				t.Fatalf("failure streak before this probe = %d (err %v), want 1", n-1, err)
+			}
+		})
+	}
+}
+
+type preparingFake struct {
+	trackingFake
+	onPrepare func()
+}
+
+func (f *preparingFake) prepare(ctx context.Context) error {
+	f.onPrepare()
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
+func TestChain_RunEndedWhilePreparingIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cancel bool
+		want   error
+	}{
+		{name: "caller gone while the client is built", cancel: true, want: context.Canceled},
+		{name: "deadline passed while the client is built", want: context.DeadlineExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pending := newPendingCancelCtx(time.Now().Add(time.Minute))
+			ctx, cancel := context.WithCancel(pending)
+			defer cancel()
+			le := &preparingFake{trackingFake: trackingFake{caID: CALetsEncrypt}, onPrepare: pending.passDeadline}
+			if tc.cancel {
+				le.onPrepare = cancel
+			}
+			ac := newAccountChain(t, ChainConfig{}, &account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: 50 * time.Millisecond, issuer: le})
+			if _, _, err := ac.ch.Obtain(ctx, nil, "p"); !errors.Is(err, tc.want) {
+				t.Fatalf("Obtain = %v, want the run's %v", err, tc.want)
+			}
+			if le.calls.Load() != 0 {
+				t.Fatal("a run that ended while the client was built must not reach the CA")
+			}
+			if len(ac.rec.issues) != 0 || len(ac.rec.cooldowns) != 0 {
+				t.Fatalf("a run that ended while the client was built must record no CA failure, got issues=%v cooldowns=%v", ac.rec.issues, ac.rec.cooldowns)
+			}
+			assertNoCAFailureState(t, ac.lim, "le-1")
+		})
+	}
+}
+
+func TestChain_FailureBeforeCallerGoneDuringSettleBacksOff(t *testing.T) {
+	t.Parallel()
+	le := &trackingFake{caID: CALetsEncrypt, err: transient(errors.New("ca down"))}
+	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.rdb.AddHook(tunneltest.CancelBefore("zrem", cancel))
+	if _, _, err := ac.ch.Obtain(ctx, nil, "p"); err == nil {
+		t.Fatal("a failed attempt must fail the run")
+	}
+	if cool, err := ac.lim.CACooldown(context.Background(), "le-1"); err != nil || cool != time.Minute {
+		t.Fatalf("LE account wait-until = %s (%v), want the 1 m backoff: the CA failed before the caller went away", cool, err)
+	}
+	if !slices.Contains(ac.rec.issues, "letsencrypt fail") {
+		t.Fatalf("issues = %v, want the CA failure recorded", ac.rec.issues)
+	}
+	if !strings.Contains(ac.log.String(), `msg="acme CA order failed" ca=letsencrypt`) {
+		t.Fatalf("the CA failure must be logged; log = %q", ac.log.String())
+	}
+}
+
+func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
+	t.Parallel()
+	le := &trackingFake{caID: CALetsEncrypt}
+	ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Minute))
+	if _, err := ac.lim.BumpCAFailures(context.Background(), "le-1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ac.cancelBefore("del", "acme-fail:le-1", cancel, true)
+	if _, info, err := ac.ch.Obtain(ctx, nil, "p"); err != nil || info.CA != CALetsEncrypt {
+		t.Fatalf("Obtain = %+v, %v; want LE", info, err)
+	}
+	if strings.Contains(ac.log.String(), "acme CA failure-streak reset failed") {
+		t.Fatalf("the streak reset must not fail; log = %q", ac.log.String())
+	}
+	assertNoCAFailureState(t, ac.lim, "le-1")
 }
 
 func TestChain_ReservationCoversTheFinalizeGrace(t *testing.T) {
