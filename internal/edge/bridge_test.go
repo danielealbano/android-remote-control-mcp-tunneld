@@ -466,6 +466,7 @@ func TestEdge_HandleTunnel_RetriesWhenFreedSlotIsTaken(t *testing.T) {
 			te.rtr.set("node-a", "conn-1", true, nil)
 			fillSlots(t, te, cfg.Concurrent)
 			steal := func(held string) {
+				t.Helper()
 				if err := te.e.lim.ReleaseStream(context.Background(), capTunnel, held); err != nil {
 					t.Errorf("release %s: %v", held, err)
 				}
