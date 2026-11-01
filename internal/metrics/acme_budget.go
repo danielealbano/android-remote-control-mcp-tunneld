@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -97,7 +98,7 @@ func (m *Metrics) RegisterACMEBudgets(levels func(context.Context) ([]ACMEBudget
 		logger: logger,
 	}
 	if err := m.reg.Register(acmeBudgetDescriber{desc: src.desc}); err != nil {
-		return err
+		return fmt.Errorf("metrics: register the acme budget descriptor: %w", err)
 	}
 	m.budgets = src
 	return nil
