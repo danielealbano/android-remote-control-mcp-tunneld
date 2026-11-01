@@ -160,7 +160,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	}
 	for _, group := range c.groups {
 		for _, a := range c.ordered(ctx, group, live) {
-			if err := ctx.Err(); err != nil {
+			if err := runEnded(ctx); err != nil {
 				return nil, store.CertInfo{}, transient(err)
 			}
 			// Cooldown bookkeeping is best-effort: a Valkey error reads as "not cooling" (fail-open — try
@@ -186,8 +186,8 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				c.cfg.Logger.Info("acme certificate issued", "ca", a.ca, "name", name, "serial", info.Serial, "not_after", info.NotAfter, "account", a.label)
 				return pemChain, info, nil
 			}
-			if ctx.Err() != nil {
-				return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", ctx.Err(), err))
+			if rerr := runEnded(ctx); rerr != nil {
+				return nil, store.CertInfo{}, transient(fmt.Errorf("%w (CA order: %v)", rerr, err))
 			}
 			class := ClassTransient
 			var ie *IssuerError
@@ -215,6 +215,16 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 	}
 	jitter := time.Duration(1+c.cfg.Rand(10)) * time.Second
 	return nil, store.CertInfo{}, rateLimited(shortest+jitter, fmt.Errorf("all issuance CAs are rate-limited; quota exhausted, retry later"))
+}
+
+func runEnded(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d, ok := ctx.Deadline(); ok && !time.Now().Before(d) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.CertificateRequest, name, fqdn string, leRenewal bool, live []string) ([]byte, store.CertInfo, time.Duration, error) {

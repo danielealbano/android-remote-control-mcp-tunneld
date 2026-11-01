@@ -485,6 +485,46 @@ func TestChain_RunBudget(t *testing.T) {
 	}
 }
 
+type pendingCancelCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c pendingCancelCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+func TestChain_RunDeadlinePassedBeforeCancel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		in     time.Duration
+		wantLE int32
+	}{
+		{name: "deadline passes during an attempt", in: 50 * time.Millisecond, wantLE: 1},
+		{name: "deadline already passed", in: -time.Millisecond, wantLE: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			le := &trackingFake{caID: CALetsEncrypt, block: true}
+			gts := &trackingFake{caID: CAGTS, block: true}
+			ac := newAccountChain(t, ChainConfig{}, acct(le, "le-1", time.Second), acct(gts, "gts-1", time.Second))
+			ctx := pendingCancelCtx{Context: context.Background(), deadline: time.Now().Add(tc.in)}
+			_, _, err := ac.ch.Obtain(ctx, nil, "p")
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Obtain = %v, want the run deadline", err)
+			}
+			if le.calls.Load() != tc.wantLE || gts.calls.Load() != 0 {
+				t.Fatalf("LE calls = %d (want %d), GTS calls = %d (want 0)", le.calls.Load(), tc.wantLE, gts.calls.Load())
+			}
+			if len(ac.rec.issues) != 0 || len(ac.rec.cooldowns) != 0 {
+				t.Fatalf("an attempt the run deadline cut short must record no CA failure, got issues=%v cooldowns=%v", ac.rec.issues, ac.rec.cooldowns)
+			}
+			assertNoCAFailureState(t, ac.lim, "le-1")
+			assertNoCAFailureState(t, ac.lim, "gts-1")
+		})
+	}
+}
+
 func TestChain_MissingCAsSkipped(t *testing.T) {
 	t.Parallel()
 	le := &trackingFake{caID: CALetsEncrypt}
