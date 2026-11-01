@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,7 +39,7 @@ func registeredFamilies(t *testing.T) map[string]struct{} {
 	}
 	if err := m.RegisterACMEBudgets(func(context.Context) ([]ACMEBudgetLevel, error) {
 		return []ACMEBudgetLevel{{CA: "letsencrypt", Account: "local", Budget: "orders", Ratio: 1}}, nil
-	}, slog.New(slog.DiscardHandler)); err != nil {
+	}, testLog()); err != nil {
 		t.Fatal(err)
 	}
 

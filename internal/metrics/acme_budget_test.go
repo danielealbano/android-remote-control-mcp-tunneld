@@ -59,7 +59,7 @@ func TestACMEBudgetCollector_Emits(t *testing.T) {
 		{CA: "letsencrypt", Account: "local", Budget: "orders", Ratio: 0.5},
 		{CA: "gts", Account: "gts-1", Budget: "cert-polls", Ratio: 1},
 	}
-	if err := m.RegisterACMEBudgets(func(context.Context) ([]ACMEBudgetLevel, error) { return levels, nil }, slog.New(slog.DiscardHandler)); err != nil {
+	if err := m.RegisterACMEBudgets(func(context.Context) ([]ACMEBudgetLevel, error) { return levels, nil }, testLog()); err != nil {
 		t.Fatal(err)
 	}
 	fams, err := m.Gatherer(context.Background()).Gather()
@@ -148,7 +148,7 @@ func TestACMEBudgetCollector_ErrorKeepsScrape(t *testing.T) {
 func TestRegisterACMEBudgets_RejectsNil(t *testing.T) {
 	t.Parallel()
 	levels := func(context.Context) ([]ACMEBudgetLevel, error) { return nil, nil }
-	if err := NewMetrics().RegisterACMEBudgets(nil, slog.New(slog.DiscardHandler)); err == nil {
+	if err := NewMetrics().RegisterACMEBudgets(nil, testLog()); err == nil {
 		t.Fatal("a nil levels func must be refused")
 	}
 	if err := NewMetrics().RegisterACMEBudgets(levels, nil); err == nil {
@@ -156,16 +156,50 @@ func TestRegisterACMEBudgets_RejectsNil(t *testing.T) {
 	}
 }
 
-func TestRegisterACMEBudgets_RejectsASecondRegistration(t *testing.T) {
+func TestRegisterACMEBudgets_RejectsConflicts(t *testing.T) {
 	t.Parallel()
-	m := NewMetrics()
 	levels := func(context.Context) ([]ACMEBudgetLevel, error) { return nil, nil }
-	logger := slog.New(slog.NewTextHandler(&syncBuffer{}, nil))
-	if err := m.RegisterACMEBudgets(levels, logger); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name  string
+		first func(m *Metrics) error
+	}{
+		{name: "a second registration", first: func(m *Metrics) error { return m.RegisterACMEBudgets(levels, testLog()) }},
+		{name: "another family with the same name", first: func(m *Metrics) error {
+			return m.reg.Register(prometheus.NewGauge(prometheus.GaugeOpts{Name: "tunneld_acme_budget_ratio", Help: "other"}))
+		}},
 	}
-	if err := m.RegisterACMEBudgets(levels, logger); err == nil {
-		t.Fatal("a second registration must be refused")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := NewMetrics()
+			if err := tc.first(m); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.RegisterACMEBudgets(levels, testLog()); err == nil {
+				t.Fatal("a conflicting registration must be refused at startup")
+			}
+		})
+	}
+}
+
+func TestMetrics_Gatherer_BudgetCollectorRegistrationFailure(t *testing.T) {
+	t.Parallel()
+	logs := &syncBuffer{}
+	m := NewMetrics()
+	m.budgets = &acmeBudgetSource{
+		desc: prometheus.NewDesc("tunneld_acme_budget_ratio", "test", []string{"ca", "ca"}, nil),
+		levels: func(context.Context) ([]ACMEBudgetLevel, error) {
+			t.Error("a collector that failed to register must not read the budgets")
+			return nil, nil
+		},
+		logger: slog.New(slog.NewTextHandler(logs, nil)),
+	}
+	fams := gatherFamilies(t, m.Gatherer(context.Background()))
+	if _, ok := fams["tunneld_acme_issue_total"]; !ok {
+		t.Fatal("a failed budget collector registration must keep the other families")
+	}
+	if n := strings.Count(logs.String(), `msg="acme budget metrics unavailable for this scrape"`); n != 1 {
+		t.Fatalf("a failed budget collector registration must log one Warn; log = %q", logs.String())
 	}
 }
 

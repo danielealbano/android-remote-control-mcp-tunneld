@@ -78,19 +78,28 @@ func (s *acmeBudgetSource) reportSuppressed() {
 	s.warned, s.suppressed = time.Now(), 0
 }
 
+type acmeBudgetDescriber struct {
+	desc *prometheus.Desc
+}
+
+func (d acmeBudgetDescriber) Describe(ch chan<- *prometheus.Desc) { ch <- d.desc }
+
+func (acmeBudgetDescriber) Collect(chan<- prometheus.Metric) {}
+
 func (m *Metrics) RegisterACMEBudgets(levels func(context.Context) ([]ACMEBudgetLevel, error), logger *slog.Logger) error {
 	if levels == nil || logger == nil {
 		return errors.New("metrics: acme budget levels and logger are required")
 	}
-	if m.budgets != nil {
-		return errors.New("metrics: acme budgets are already registered")
-	}
-	m.budgets = &acmeBudgetSource{
+	src := &acmeBudgetSource{
 		desc: prometheus.NewDesc("tunneld_acme_budget_ratio",
 			"Remaining ACME issuance budget (0-1) by CA, account and budget.", []string{"ca", "account", "budget"}, nil),
 		levels: levels,
 		logger: logger,
 	}
+	if err := m.reg.Register(acmeBudgetDescriber{desc: src.desc}); err != nil {
+		return err
+	}
+	m.budgets = src
 	return nil
 }
 
