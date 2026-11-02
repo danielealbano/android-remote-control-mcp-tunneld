@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"regexp"
 	"strconv"
@@ -49,9 +50,9 @@ type ServeCmd struct {
 	NamePrefix   string `name:"name-prefix" default:"" help:"Optional prefix on generated tunnel names."`
 	NameLength   int    `name:"name-length" default:"10" help:"Random base32 chars in a generated name."`
 
-	DialBackAdvertise string `name:"dialback-advertise" help:"host:port the phone dials back to on THIS node for a public connection that entered here (this node's own public address, never a round-robin name): its TLS edge (--listen) with --dialback-https, its plain listener (--acme-http-listen) without. Required for serve."`
-	DialBackHTTPS     bool   `name:"dialback-https" default:"true" help:"Phones dial back over TLS (SNI --control-host). false: plain TCP to the --acme-http-listen listener, authorised by the one-time token only."`
-	DialBackMTLS      bool   `name:"dialback-mtls" default:"true" help:"Phones present their identity client certificate on every dial-back. Requires --dialback-https."`
+	PublicIP      string `name:"public-ip" help:"THIS node's own public IP address (never a shared or round-robin one). The phones reach this node at it on the --listen port (dial-backs with --dialback-https, and the control connection a MOVE points them to) and on the --acme-http-listen port (dial-backs without --dialback-https); each public port must equal its listen port. Required for serve."`
+	DialBackHTTPS bool   `name:"dialback-https" default:"true" help:"Phones dial back over TLS (SNI --control-host). false: plain TCP to the --acme-http-listen listener, authorised by the one-time token only."`
+	DialBackMTLS  bool   `name:"dialback-mtls" default:"true" help:"Phones present their identity client certificate on every dial-back. Requires --dialback-https."`
 
 	// --- Mesh (replica↔replica) ---
 	MeshListen    string        `name:"mesh-listen" default:":9443" help:"Replica↔replica HTTP/2 mesh listener (internal network only)."`
@@ -163,7 +164,8 @@ type ServeCmd struct {
 	LimitEnrollMinute int    `name:"limit-enroll-minute" default:"2" help:"Enrollments/minute per source IP."`
 	LimitEnrollBody   string `name:"limit-enroll-body" default:"16kb" help:"Max enrollment (CSR) request body."`
 
-	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Graceful-drain deadline on ctx cancel."`
+	PredrainWait  time.Duration `name:"predrain-wait" default:"0s" help:"On a stop signal, how long GET /api/v1/health answers 503 while everything else is still served, before the drain starts (lets a health-checking DNS load balancer drop this node first; 0 = no wait)."`
+	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Deadline of the final shutdown after the drain (servers, public handlers, conn-log upload)."`
 
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
 }
@@ -182,6 +184,27 @@ func (c ServeCmd) UsesChallenge(method string) bool {
 
 func (c ServeCmd) ServesPlainHTTP() bool {
 	return c.UsesChallenge(ChallengeHTTP01) || !c.DialBackHTTPS
+}
+
+const drainGraceMargin = 5 * time.Second
+
+func (c ServeCmd) DrainGrace() time.Duration { return c.LimitConnIdle + drainGraceMargin }
+
+func (c ServeCmd) EdgePublicAddr() (string, error) { return publicAddr(c.PublicIP, c.Listen) }
+
+func (c ServeCmd) DialBackAddr() (string, error) {
+	if c.DialBackHTTPS {
+		return c.EdgePublicAddr()
+	}
+	return publicAddr(c.PublicIP, c.ACMEHTTPListen)
+}
+
+func publicAddr(ip, listen string) (string, error) {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", fmt.Errorf("public address from the listen address %q: %w", listen, err)
+	}
+	return net.JoinHostPort(ip, port), nil
 }
 
 // Validate is invoked automatically by kong for the selected `serve` command. It enforces every
@@ -243,23 +266,29 @@ func (c ServeCmd) Validate() error {
 		{"--acme-email", c.ACMEEmail},
 		{"--acme-account-dir", c.ACMEAccountDir},
 		{"--conn-log-dir", c.ConnLogDir},
-		{"--dialback-advertise", c.DialBackAdvertise},
+		{"--public-ip", c.PublicIP},
 	} {
 		if req.v == "" {
 			return fmt.Errorf("%s is required for serve", req.name)
 		}
 	}
-	host, port, err := net.SplitHostPort(c.DialBackAdvertise)
+	ip, err := netip.ParseAddr(c.PublicIP)
 	if err != nil {
-		return fmt.Errorf("--dialback-advertise must be host:port, got %q: %w", c.DialBackAdvertise, err)
+		return fmt.Errorf("--public-ip must be an IP address (this node's own public address), got %q: %w", c.PublicIP, err)
 	}
-	if host == "" {
-		return fmt.Errorf("--dialback-advertise needs a host (this node's own public address), got %q", c.DialBackAdvertise)
+	if ip.IsUnspecified() || ip.Zone() != "" {
+		return fmt.Errorf("--public-ip must be a routable address without a zone, got %q", c.PublicIP)
 	}
-	if p, perr := strconv.Atoi(port); perr != nil {
-		return fmt.Errorf("--dialback-advertise port %q: %w", port, perr)
-	} else if p < 1 || p > 65535 {
-		return fmt.Errorf("--dialback-advertise port must be 1-65535, got %d", p)
+	if err := numericPort("--listen", c.Listen); err != nil {
+		return err
+	}
+	if !c.DialBackHTTPS {
+		if err := numericPort("--acme-http-listen", c.ACMEHTTPListen); err != nil {
+			return err
+		}
+	}
+	if c.PredrainWait < 0 {
+		return fmt.Errorf("--predrain-wait must be ≥ 0, got %s", c.PredrainWait)
 	}
 	if c.DialBackMTLS && !c.DialBackHTTPS {
 		return errors.New("--dialback-mtls requires --dialback-https: a plain dial-back carries no client certificate")
@@ -461,6 +490,17 @@ func (c ServeCmd) Validate() error {
 	}
 	if err := logging.ParseSpecs(c.Log); err != nil {
 		return fmt.Errorf("--log: %w", err)
+	}
+	return nil
+}
+
+func numericPort(flag, listen string) error {
+	_, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("%s must be host:port or :port, got %q: %w", flag, listen, err)
+	}
+	if p, perr := strconv.Atoi(port); perr != nil || p < 1 || p > 65535 {
+		return fmt.Errorf("%s needs a numeric port 1-65535 (the phones reach this node at --public-ip on it), got %q", flag, listen)
 	}
 	return nil
 }

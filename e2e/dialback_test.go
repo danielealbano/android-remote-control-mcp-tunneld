@@ -23,10 +23,8 @@ import (
 )
 
 const (
-	dialBackRequests    = 6
-	dialBackTimeout     = 3 * time.Second
-	dialBackDevicePortA = 18451
-	dialBackDevicePortB = 18452
+	dialBackRequests = 6
+	dialBackTimeout  = 3 * time.Second
 )
 
 func TestE2E_DialBackAcrossReplicas(t *testing.T) {
@@ -54,22 +52,10 @@ func TestE2E_DialBackAcrossReplicas(t *testing.T) {
 		attestSignerFile: signersPath,
 		dialBack:         dialBackTimeout,
 	}
-	optsA, optsB := opts, opts
-	optsA.dialBackAdvertise = "127.0.0.1:" + strconv.Itoa(dialBackDevicePortA)
-	optsB.dialBackAdvertise = "127.0.0.1:" + strconv.Itoa(dialBackDevicePortB)
-	owner := inf.startReplica(t, optsA)
-	other := inf.startReplica(t, optsB)
-	for _, r := range []struct {
-		devicePort int
-		edge       string
-	}{{dialBackDevicePortA, owner}, {dialBackDevicePortB, other}} {
-		_, port, err := net.SplitHostPort(r.edge)
-		if err != nil {
-			t.Fatalf("split edge addr %q: %v", r.edge, err)
-		}
-		adb(t, serial, "reverse", "tcp:"+strconv.Itoa(r.devicePort), "tcp:"+port)
-		t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(r.devicePort)) })
-	}
+	owner := inf.startReplica(t, opts)
+	other := inf.startReplica(t, opts)
+	adbReverseSame(t, serial, owner)
+	adbReverseSame(t, serial, other)
 	fwd := startRoundRobinForwarder(t, owner, other)
 	t.Logf("replica A %s (phone control), replica B %s, phone forwarder %s", owner, other, fwd.addr())
 	_, fwdPort, err := net.SplitHostPort(fwd.addr())

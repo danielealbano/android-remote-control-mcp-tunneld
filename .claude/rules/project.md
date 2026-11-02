@@ -156,7 +156,7 @@ MUST NOT be relaxed without explicit user direction.
   (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
-- Control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE — the type
+- Control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE/MOVE — the type
   values are frozen); `OPEN{token, addr, use_https, use_mtls}`; the phone answers with a NEW connection to
   `addr` carrying a `GET /api/v1/data` HTTP/1.1 upgrade with the token (`101`, then an OPAQUE unframed splice;
   `wire.ChunkSize` = 16384 is the pacing slice). The mesh carries control RPCs only (`renew`, `terminate`,
@@ -258,7 +258,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, several GTS accounts looked up by key) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
 | `wire` | `internal/wire`: control-frame codec + dial-back constants |
-| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back upgrade, renewal, eviction) |
+| `phoneconn` | `internal/phoneconn`: phone control plane (HTTP/2 + mTLS, bind, dial-back upgrade, renewal, eviction, drain + MOVE) |
 | `edge` | `internal/edge`: raw :443 SNI edge (ClientHello peek + JA4), bridge, connection policy |
 | `mesh` | `internal/mesh`: replica↔replica mTLS HTTP/2 control RPCs (per-pair pools) |
 | `server` | `internal/server`: assembly (`Run`), SNI-edge + listener wiring, lifecycle |
@@ -268,7 +268,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `observ` | `internal/observ`: the Recorder interface |
 | `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
 | `client` | `client/`: the Go tunnel client library |
-| `e2e` | `e2e/`: testcontainers harness + scenarios |
+| `e2e` | `e2e/`: testcontainers harness + scenarios; the `support/` test apps + `fixtures/` they drive |
 | `staging` | `staging/`: real-CA staging tier (LE / GTS staging through the reverse SSH tunnel) |
 | `deploy` | `deploy/`: compose, MinIO/Valkey, observability provisioning, fetcher |
 | `scripts` | `deploy/scripts/` + `scripts/`: fetch/gen-ca/dev-tooling scripts |
@@ -322,8 +322,9 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   DI (all wiring happens in `server.Run` — no package globals), `context.Context` first on any
   I/O, `errgroup` for the process's goroutine groups.
 - **Every goroutine has a shutdown path**: conn read-pump/heartbeat/keepalive tied to the conn
-  ctx; the mesh/edge/flusher goroutines on the drain ctx; shutdown order is raw-`:443` listener close →
-  server drains → schedulers/watchers unwind (see `docs/ARCHITECTURE.md`).
+  ctx; the mesh/edge/flusher goroutines on the serving ctx; a stop runs the pre-drain → the drain (MOVE) →
+  the serving-ctx cancel → raw-`:443` listener close → server shutdowns → schedulers/watchers unwind (see
+  `docs/ARCHITECTURE.md` §9).
 - **Config via kong flags + `TUNNELD_*` env twins** (`config.EnvTwins`), validated fail-fast in
   `Validate()`. NO hardcoded secrets or environment-specific values; byte sizes are BINARY
   (`1mb` = 1048576), bitrates are DECIMAL bits (`1mbit` = 125000 B/s) — two distinct parsers.

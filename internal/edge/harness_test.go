@@ -99,9 +99,29 @@ type fakeRouter struct {
 	ok             bool
 	err            error
 
-	mu      sync.Mutex
-	queue   []fakeRoute
-	lookups int
+	mu        sync.Mutex
+	queue     []fakeRoute
+	lookups   int
+	liveNodes map[string]bool
+	nodeErr   error
+}
+
+func (r *fakeRouter) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.nodeErr != nil {
+		return "", false, r.nodeErr
+	}
+	if r.liveNodes[nodeID] {
+		return nodeID + ":9443", true, nil
+	}
+	return "", false, nil
+}
+
+func (r *fakeRouter) setNodes(live map[string]bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveNodes, r.nodeErr = live, err
 }
 
 func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, bool, error) {

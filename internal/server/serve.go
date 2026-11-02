@@ -42,7 +42,7 @@ func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 // TLS servers (enroll/control/mesh), or the plain
 // listener. A non-shutdown Serve error is returned so the errgroup
 // cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
-// normal drain signals and stay non-fatal (the drain's srv.Shutdown bounds in-flight requests).
+// normal signals and stay non-fatal (srv.Shutdown bounds in-flight requests).
 func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger, which string) error {
 	go func() { <-ctx.Done(); closeLogged(logger, which+" listener", ln) }()
 	err := srv.Serve(ln)
@@ -410,7 +410,7 @@ func (s *spliceEvictor) PhoneConnClosed(_ context.Context, name, connID, reason 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.draining {
-		s.logger.Warn("splice eviction broadcast skipped: the node is draining", "tunnel", name, "conn", connID)
+		s.logger.Warn("splice eviction broadcast skipped: the node is shutting down", "tunnel", name, "conn", connID)
 		return
 	}
 	s.wg.Add(1)
@@ -446,7 +446,7 @@ func (s *spliceEvictor) Drain(ctx context.Context) {
 		select {
 		case <-done:
 		default:
-			s.logger.Warn("drain deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+			s.logger.Warn("shutdown deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
 		}
 	}
 	s.cancel()

@@ -91,7 +91,7 @@ func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		if err := heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", "host-t", "v-test", "2026-08-21T00:00:00Z", 30*time.Millisecond, logger); err != nil && ctx.Err() == nil {
+		if err := heartbeatNode(ctx, reg, "node-t", "10.0.0.1:9443", "203.0.113.10:443", "host-t", "v-test", "2026-08-21T00:00:00Z", 30*time.Millisecond, logger); err != nil && ctx.Err() == nil {
 			logger.Warn("heartbeat loop failed", "err", err)
 		}
 		close(done)
@@ -124,6 +124,40 @@ func TestHeartbeatNodeSurvivesTransientError(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestHeartbeatNode_PublishesPublicEdge(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
+	reg, err := router.NewRegistry(rdb, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := heartbeatNode(ctx, reg, "node-p", "10.0.0.1:9443", "203.0.113.10:443", "host-p", "v-test", "2026-08-21T00:00:00Z", time.Minute, testLogger()); err != nil && ctx.Err() == nil {
+			t.Errorf("heartbeat loop: %v", err)
+		}
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		nodes, err := reg.LiveNodes(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, ok := nodes["node-p"]; ok {
+			if n.Public != "203.0.113.10:443" || n.Advertise != "10.0.0.1:9443" {
+				t.Fatalf("node record = %+v, want the public edge 203.0.113.10:443 and the mesh address 10.0.0.1:9443", n)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the node never registered")
 }
 
 // TestValidNameFunc: the CN validator accepts EXACTLY the generator's shape (prefix + --name-length

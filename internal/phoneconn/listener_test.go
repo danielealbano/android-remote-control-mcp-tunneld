@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -776,5 +777,162 @@ func TestServeControl_BindFailureLogging(t *testing.T) {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
 			}
 		})
+	}
+}
+
+func TestServeControl_DrainingAnswersMoveWithoutBinding(t *testing.T) {
+	h, m := newTestHandler(t, 4, time.Hour)
+	m.StartDrain([]string{"203.0.113.2:443", "203.0.113.3:443"})
+	fr := m.router.(*fakeRouter)
+	rec := newFlushRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.serveControl(rec, httptest.NewRequest("POST", "/api/v1/control", newBlockedReader()), phoneIdentity{name: "phonea"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a control connection on a draining node must end right after the MOVE")
+	}
+	if rec.code() != http.StatusOK {
+		t.Fatalf("status = %d, want 200 + MOVE", rec.code())
+	}
+	if rec.Header().Get("Connection") != "close" {
+		t.Fatalf("Connection = %q, want close", rec.Header().Get("Connection"))
+	}
+	rec.mu.Lock()
+	frame := rec.rr.Body.Bytes()
+	rec.mu.Unlock()
+	got := decodeMove(t, frame)
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"203.0.113.2:443", "203.0.113.3:443"}) {
+		t.Fatalf("MOVE addrs = %v", got)
+	}
+	if _, bound := fr.boundConnID("phonea"); bound || m.HasConn("phonea") {
+		t.Fatal("a draining node must not bind the route")
+	}
+}
+
+func TestServeControl_DrainingWithoutTargetRefuses(t *testing.T) {
+	h, m := newTestHandler(t, 4, time.Hour)
+	m.StartDrain(nil)
+	rec := newFlushRecorder()
+	h.serveControl(rec, httptest.NewRequest("POST", "/api/v1/control", newBlockedReader()), phoneIdentity{name: "phonea"})
+	if rec.code() != http.StatusServiceUnavailable || rec.Header().Get("Connection") != "close" {
+		t.Fatalf("status = %d Connection = %q, want 503 + close", rec.code(), rec.Header().Get("Connection"))
+	}
+	if m.HasConn("phonea") {
+		t.Fatal("a draining node must not bind the route")
+	}
+}
+
+func TestServeIssue_DrainingRefusesRetryably(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	called := false
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		OnIssue: func(context.Context, string, string, IssueRequest) (IssueResponse, *IssueError) {
+			called = true
+			return IssueResponse{}, nil
+		}})
+	m.StartDrain([]string{"203.0.113.2:443"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, issuePost(t, "{}"))
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusServiceUnavailable || body["reason"] != "draining" || body["retryable"] != true || body["retry_after_seconds"] != float64(1) {
+		t.Fatalf("issue while draining = %d %v, want 503 draining, retryable, retry_after_seconds 1", rec.Code, body)
+	}
+	if rec.Header().Get("Connection") != "close" {
+		t.Fatalf("Connection = %q, want close", rec.Header().Get("Connection"))
+	}
+	if called {
+		t.Fatal("a draining node must not run an issuance")
+	}
+}
+
+func TestServeControl_BindRacingTheDrainStartGetsMove(t *testing.T) {
+	h, m := newTestHandler(t, 4, time.Hour)
+	fr := m.router.(*fakeRouter)
+	fr.bindEntered, fr.bindRelease = make(chan struct{}, 1), make(chan struct{})
+	rec := newFlushRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		h.serveControl(rec, httptest.NewRequest("POST", "/api/v1/control", newBlockedReader()).WithContext(ctx), phoneIdentity{name: "phonea"})
+		close(done)
+	}()
+	select {
+	case <-fr.bindEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the bind never started")
+	}
+	m.StartDrain([]string{"203.0.113.2:443"})
+	close(fr.bindRelease)
+	waitCond(t, func() bool {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return rec.rr.Body.Len() > 0
+	})
+	rec.mu.Lock()
+	frame := slices.Clone(rec.rr.Body.Bytes())
+	rec.mu.Unlock()
+	if got := decodeMove(t, frame); !slices.Equal(got, []string{"203.0.113.2:443"}) {
+		t.Fatalf("MOVE addrs = %v", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestServeIssue_CountsIssuancesInFlight(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		OnIssue: func(context.Context, string, string, IssueRequest) (IssueResponse, *IssueError) {
+			close(entered)
+			<-release
+			return IssueResponse{}, nil
+		}})
+	if n := h.InFlightIssues(); n != 0 {
+		t.Fatalf("InFlightIssues before any request = %d", n)
+	}
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), issuePost(t, "{}"))
+		close(done)
+	}()
+	<-entered
+	if n := h.InFlightIssues(); n != 1 {
+		t.Fatalf("InFlightIssues during an issuance = %d, want 1", n)
+	}
+	close(release)
+	<-done
+	if n := h.InFlightIssues(); n != 0 {
+		t.Fatalf("InFlightIssues after the issuance = %d, want 0", n)
+	}
+}
+
+func TestServeIssue_CountsARequestWhileItsBodyIsRead(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
+		OnIssue: func(context.Context, string, string, IssueRequest) (IssueResponse, *IssueError) {
+			return IssueResponse{}, nil
+		}})
+	body := newBlockedReader()
+	req := issuePost(t, "")
+	req.Body = io.NopCloser(body)
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	waitCond(t, func() bool { return h.InFlightIssues() == 1 })
+	body.close()
+	<-done
+	if n := h.InFlightIssues(); n != 0 {
+		t.Fatalf("InFlightIssues after the request = %d, want 0", n)
 	}
 }

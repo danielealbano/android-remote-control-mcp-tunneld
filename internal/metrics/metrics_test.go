@@ -418,8 +418,8 @@ func TestPromRecorder_FlushErrorRequeuesDelta(t *testing.T) {
 	}
 }
 
-// TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the ordered
-// server drain owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
+// TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the
+// server owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
 func TestRunFlusher_NoFlushOnCancel(t *testing.T) {
 	_, rec, _, _, _ := setup(t)
 	rec.Bytes("tunA", "in", 100)

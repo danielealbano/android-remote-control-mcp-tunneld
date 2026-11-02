@@ -126,8 +126,10 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 		}
 		delay = 0
 		e.wg.Add(1)
+		e.handling.Add(1)
 		go func() {
 			defer e.wg.Done()
+			defer e.handling.Add(-1)
 			e.handleConn(ctx, conn)
 		}()
 	}

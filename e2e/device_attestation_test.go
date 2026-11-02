@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -189,6 +190,16 @@ func adbCtx(t *testing.T, serial string, timeout time.Duration, args ...string) 
 func adbRunAs(t *testing.T, serial, pkg, script string) []byte {
 	t.Helper()
 	return adb(t, serial, "exec-out", "run-as "+pkg+" sh -c '"+script+"'")
+}
+
+func adbReverseSame(t *testing.T, serial, addr string) {
+	t.Helper()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr %q: %v", addr, err)
+	}
+	adb(t, serial, "reverse", "tcp:"+port, "tcp:"+port)
+	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+port) })
 }
 
 func adbCleanup(t *testing.T, serial string, args ...string) {

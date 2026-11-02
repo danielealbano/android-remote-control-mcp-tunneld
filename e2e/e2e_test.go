@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -60,6 +61,7 @@ type e2eInfra struct {
 	caCert   string
 	caKey    string
 	internal map[string]string // edge address → that replica's internal (metrics/healthz) address
+	stop     map[string]func() error
 }
 
 func startE2EInfra(t *testing.T) *e2eInfra {
@@ -73,7 +75,7 @@ func startE2EInfra(t *testing.T) *e2eInfra {
 	t.Setenv("LEGO_CA_CERTIFICATES", pebble.MinicaFile)
 	t.Setenv("TUNNELD_ALLOW_ATTESTATION_OPTIONAL", "1")
 	caCert, caKey := writeCA(t)
-	return &e2eInfra{redisURL: redisURL, s3URL: s3URL, access: access, secret: secret, pebble: pebble, caCert: caCert, caKey: caKey, internal: map[string]string{}}
+	return &e2eInfra{redisURL: redisURL, s3URL: s3URL, access: access, secret: secret, pebble: pebble, caCert: caCert, caKey: caKey, internal: map[string]string{}, stop: map[string]func() error{}}
 }
 
 // replicaOpts tweaks a replica's config for a specific scenario.
@@ -83,6 +85,7 @@ type replicaOpts struct {
 	concurrent int    // override --limit-concurrent; 0 = 8
 	bandwidth  string // override --limit-bandwidth; empty = 10mbit
 	dialBack   time.Duration
+	connIdle   time.Duration
 	banFile    string
 
 	acmeDirGTS     string
@@ -90,9 +93,8 @@ type replicaOpts struct {
 	backoffInitial time.Duration
 	backoffMax     time.Duration
 
-	dialBackAdvertise string
-	dialBackPlain     bool
-	dialBackNoMTLS    bool
+	dialBackPlain  bool
+	dialBackNoMTLS bool
 	// Real attestation (NOT optional): when attestRootURL is set, the replica runs the full seven-point
 	// attestation gate against these live root/status URLs + signer allowlist (empty = dummy + optional).
 	attestRootURL    string
@@ -159,12 +161,9 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	if opts.dialBack != 0 {
 		dialBack = opts.dialBack
 	}
-	advertise := edgeAddr
-	if opts.dialBackPlain {
-		advertise = acmeHTTPListen
-	}
-	if opts.dialBackAdvertise != "" {
-		advertise = opts.dialBackAdvertise
+	publicIP, _, err := net.SplitHostPort(edgeAddr)
+	if err != nil {
+		t.Fatalf("split the edge address %q: %v", edgeAddr, err)
 	}
 
 	challengeLE, challengeGTS, challengeZeroSSL := config.ChallengeDNS01, config.ChallengeDNS01, config.ChallengeDNS01
@@ -199,7 +198,7 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		RedisURL: inf.redisURL, Listen: edgeAddr, MeshListen: meshAddr, InternalListen: internalAddr,
 		MeshAdvertise: meshAddr, MeshPoolSize: 4, MeshCertTTL: 24 * time.Hour,
 		TunnelDomain: e2eTunnelDomain, EnrollHost: e2eEnrollHost, ControlHost: e2eControlHost, NameLength: 10,
-		DialBackAdvertise: advertise, DialBackHTTPS: !opts.dialBackPlain, DialBackMTLS: !opts.dialBackPlain && !opts.dialBackNoMTLS,
+		PublicIP: publicIP, DialBackHTTPS: !opts.dialBackPlain, DialBackMTLS: !opts.dialBackPlain && !opts.dialBackNoMTLS,
 		CACert: inf.caCert, CAKey: inf.caKey, CertValidity: 4380 * time.Hour,
 		S3Endpoint: inf.s3URL, S3Region: "us-east-1", S3Bucket: e2eBucket,
 		S3AccessKey: inf.access, S3SecretKey: inf.secret, S3ForcePathStyle: true,
@@ -236,6 +235,9 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 	if opts.banFile != "" {
 		cfg.BanFile = []string{opts.banFile}
 	}
+	if opts.connIdle != 0 {
+		cfg.LimitConnIdle = opts.connIdle
+	}
 	if opts.acmeDirGTS != "" {
 		cfg.ACMEDirGTS = opts.acmeDirGTS
 		tunneltest.WriteACMEAccountKey(t, cfg.ACMEAccountDir, "gts")
@@ -264,17 +266,26 @@ func (inf *e2eInfra) runReplicaOnce(t *testing.T, opts replicaOpts) (string, boo
 		}
 		var ok bool
 		if ok, healthErr = healthOK(internalAddr); ok {
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case runErr := <-done:
-					if runErr != nil {
-						t.Errorf("replica run: %v", runErr)
+			stopWithin := cfg.PredrainWait + cfg.DrainGrace() + cfg.ShutdownGrace + 10*time.Second
+			var stopOnce sync.Once
+			var stopErr error
+			stop := func() error {
+				stopOnce.Do(func() {
+					cancel()
+					select {
+					case stopErr = <-done:
+					case <-time.After(stopWithin):
+						stopErr = fmt.Errorf("replica did not stop within %s", stopWithin)
 					}
-				case <-time.After(20 * time.Second):
-					t.Error("replica did not drain within 20s")
+				})
+				return stopErr
+			}
+			t.Cleanup(func() {
+				if err := stop(); err != nil {
+					t.Errorf("replica run: %v", err)
 				}
 			})
+			inf.stop[edgeAddr] = stop
 			tunneltest.WaitReservedHosts(t, edgeAddr, []string{e2eEnrollHost, e2eControlHost}, 120*time.Second)
 			inf.internal[edgeAddr] = internalAddr
 			return edgeAddr, true

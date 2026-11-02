@@ -10,6 +10,7 @@ object Frames {
     const val PING = 2
     const val PONG = 3
     const val RENEW_NUDGE = 4
+    const val MOVE = 5
     private const val MAX = 1 shl 20
 
     val PONG_FRAME = byteArrayOf(PONG.toByte(), 0, 0, 0, 0)

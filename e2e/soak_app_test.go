@@ -23,9 +23,8 @@ const (
 	soakAppPkg        = "com.example.soakapp"
 	soakAppDevicePort = 18444
 
-	soakAppClientDevicePort = 18445
-	soakFirstPhones         = 3
-	soakPhones              = 4
+	soakFirstPhones = 3
+	soakPhones      = 4
 )
 
 func TestE2E_SoakApp(t *testing.T) {
@@ -52,24 +51,17 @@ func TestE2E_SoakApp(t *testing.T) {
 		attestStatusURL:  googleAttestStatusURL,
 		attestSignerFile: signersPath,
 	}
-	phoneOpts, clientOpts := attested, attested
-	phoneOpts.dialBackAdvertise = "127.0.0.1:" + strconv.Itoa(soakAppDevicePort)
-	clientOpts.dialBackAdvertise = "127.0.0.1:" + strconv.Itoa(soakAppClientDevicePort)
-	phoneEdge := inf.startReplica(t, phoneOpts)
-	clientEdge := inf.startReplica(t, clientOpts)
+	phoneEdge := inf.startReplica(t, attested)
+	clientEdge := inf.startReplica(t, attested)
 	_, edgePort, err := net.SplitHostPort(phoneEdge)
 	if err != nil {
 		t.Fatalf("split edge addr %q: %v", phoneEdge, err)
 	}
-	_, clientEdgePort, err := net.SplitHostPort(clientEdge)
-	if err != nil {
-		t.Fatalf("split edge addr %q: %v", clientEdge, err)
-	}
 
 	adb(t, serial, "reverse", "tcp:"+strconv.Itoa(soakAppDevicePort), "tcp:"+edgePort)
 	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(soakAppDevicePort)) })
-	adb(t, serial, "reverse", "tcp:"+strconv.Itoa(soakAppClientDevicePort), "tcp:"+clientEdgePort)
-	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(soakAppClientDevicePort)) })
+	adbReverseSame(t, serial, phoneEdge)
+	adbReverseSame(t, serial, clientEdge)
 	adb(t, serial, "shell", "input", "keyevent", "KEYCODE_WAKEUP")
 	adbCtx(t, serial, adbInstallTimeout, "install", "-r", apkPath)
 	adbRunAs(t, serial, soakAppPkg, "rm -f files/ready files/error files/names.txt files/forgotten")

@@ -174,10 +174,11 @@ func (h *meshCertHolder) rotateLoop(ctx context.Context) {
 // route-entry TTL), until ctx is cancelled. It stamps the NodeInfo (incl. a fresh last_heartbeat) on every
 // write. A refresh error is transient (the next tick re-registers): log and
 // keep going — exiting would let node:{id} expire and break cross-node routing to this node until restart.
-func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise, nodeHost, version, startedAt string, routeTTL time.Duration, logger *slog.Logger) error {
+func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise, public, nodeHost, version, startedAt string, routeTTL time.Duration, logger *slog.Logger) error {
 	info := func() router.NodeInfo {
 		return router.NodeInfo{
 			Advertise:     advertise,
+			Public:        public,
 			Hostname:      nodeHost,
 			Version:       version,
 			StartedAt:     startedAt,

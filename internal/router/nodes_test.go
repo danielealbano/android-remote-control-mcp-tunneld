@@ -54,7 +54,7 @@ func TestRefreshNodeExtendsTTL(t *testing.T) {
 func TestRegistry_RegisterAndListNodes_JSON(t *testing.T) {
 	reg, _ := newReg(t)
 	ctx := context.Background()
-	a := NodeInfo{Advertise: "10.0.0.1:9443", Hostname: "host-a", Version: "v1", StartedAt: "2026-08-21T00:00:00Z", LastHeartbeat: "2026-08-21T00:00:10Z"}
+	a := NodeInfo{Advertise: "10.0.0.1:9443", Public: "203.0.113.10:443", Hostname: "host-a", Version: "v1", StartedAt: "2026-08-21T00:00:00Z", LastHeartbeat: "2026-08-21T00:00:10Z"}
 	if err := reg.RegisterNode(ctx, "a", a, time.Minute); err != nil {
 		t.Fatal(err)
 	}
