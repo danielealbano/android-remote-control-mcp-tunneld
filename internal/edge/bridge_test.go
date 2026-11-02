@@ -204,7 +204,15 @@ func TestEdge_Splice_RouteCheckEndsOrphanedSplice(t *testing.T) {
 		wantEnd bool
 	}{
 		{name: "route gone", mutate: func(r *fakeRouter) { r.set("", "", false, nil) }, wantEnd: true},
-		{name: "route re-bound to another connection", mutate: func(r *fakeRouter) { r.set("node-a", "conn-2", true, nil) }, wantEnd: true},
+		{name: "route re-bound while the parent's node is gone", mutate: func(r *fakeRouter) { r.set("node-b", "conn-2", true, nil) }, wantEnd: true},
+		{name: "route re-bound while the parent's node lives keeps the splice", mutate: func(r *fakeRouter) {
+			r.setNodes(map[string]bool{"node-a": true}, nil)
+			r.set("node-b", "conn-2", true, nil)
+		}},
+		{name: "node lookup error keeps the re-bound splice", mutate: func(r *fakeRouter) {
+			r.setNodes(nil, errors.New("valkey down"))
+			r.set("node-b", "conn-2", true, nil)
+		}},
 		{name: "lookup error keeps the splice", mutate: func(r *fakeRouter) { r.set("", "", false, errors.New("valkey down")) }},
 		{name: "unchanged route keeps the splice", mutate: func(*fakeRouter) {}},
 	}
