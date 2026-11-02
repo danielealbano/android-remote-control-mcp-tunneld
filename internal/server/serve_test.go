@@ -129,7 +129,7 @@ func TestServeTLS_PropagatesNonShutdownError(t *testing.T) {
 
 // TestServeInternal_DrainsGracefully verifies an in-flight request survives ctx cancellation: serveTLS
 // closes the listener (stops accepting) but does NOT hard-Close the server, so the in-flight handler
-// completes (the ordered drain's Shutdown is what bounds it).
+// completes (Shutdown is what bounds it).
 func TestServeInternal_DrainsGracefully(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -548,7 +548,7 @@ func TestSpliceEvictor_AfterDrainOnlyEvictsLocally(t *testing.T) {
 	if len(mc.snapshot()) != 0 {
 		t.Fatal("a close after the drain started must not broadcast")
 	}
-	if !strings.Contains(buf.String(), "node is draining") {
+	if !strings.Contains(buf.String(), "node is shutting down") {
 		t.Fatalf("the skipped broadcast must be logged; log = %q", buf.String())
 	}
 }

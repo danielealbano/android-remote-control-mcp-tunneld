@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,13 +37,14 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
 // TestIntegration_DrainWritesShutdownEndEvents holds a LIVE public splice open across a server drain and
-// asserts its close_reason=server-shutdown end event lands in MinIO — the ordered drain (join public
-// handlers → flush the async conn-log queue) must not lose it.
+// asserts its close_reason=server-shutdown end event lands in MinIO — joining the public handlers
+// and flushing the async conn-log queue must not lose it.
 func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
-	env := startIntegrationServer(t)
+	env := startIntegrationServer(t, func(c *config.ServeCmd) { c.LimitConnIdle = 3 * time.Second })
 	ctx := context.Background()
 
 	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
@@ -91,8 +94,9 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
 		t.Fatalf("live echo: %v", err)
 	}
+	defer keepSpliceBusy(live).close()
 
-	// Drain: cancel Run and wait for it to return. The ordered drain must enqueue the public splice's
+	// Drain: cancel Run and wait for it to return. It must enqueue the public splice's
 	// server-shutdown end event AND flush the async conn-log queue before Run returns.
 	if err := env.drain(); err != nil {
 		t.Fatalf("drain: %v", err)
@@ -281,7 +285,6 @@ func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 	t.Run("bound for plain dial-backs", func(t *testing.T) {
 		cfg, _, stop := startPendingIssuanceServer(t, func(c *config.ServeCmd) {
 			c.ACMEHTTPListen = tunneltest.FreeAddr(t)
-			c.DialBackAdvertise = c.ACMEHTTPListen
 			c.DialBackHTTPS, c.DialBackMTLS = false, false
 		})
 		hc := &http.Client{Timeout: 5 * time.Second}
@@ -315,8 +318,11 @@ func TestIntegration_ACMEHTTPListenerOnlyWhenUsed(t *testing.T) {
 }
 
 func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
-	var grace time.Duration
-	env := startIntegrationServer(t, func(c *config.ServeCmd) { grace = c.ShutdownGrace })
+	var grace, drainGrace time.Duration
+	env := startIntegrationServer(t, func(c *config.ServeCmd) {
+		c.LimitConnIdle = 3 * time.Second
+		grace, drainGrace = c.ShutdownGrace, c.DrainGrace()
+	})
 	ctx := context.Background()
 
 	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
@@ -361,6 +367,7 @@ func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
 	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
 		t.Fatalf("live echo: %v", err)
 	}
+	defer keepSpliceBusy(live).close()
 
 	blackHole, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -394,7 +401,7 @@ func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.RegisterNode(ctx, "unreachable-peer", router.NodeInfo{Advertise: blackHole.Addr().String()}, time.Minute); err != nil {
+	if err := reg.RegisterNode(ctx, "unreachable-peer", router.NodeInfo{Advertise: blackHole.Addr().String(), Public: blackHole.Addr().String()}, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	nodes, err := reg.LiveNodes(ctx)
@@ -415,8 +422,8 @@ func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
 	if err := env.drain(); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > grace+2*time.Second {
-		t.Fatalf("Run returned %s after cancel, want within ShutdownGrace (%s) + 2s", elapsed, grace)
+	if elapsed := time.Since(start); elapsed > drainGrace+grace+2*time.Second {
+		t.Fatalf("Run returned %s after cancel, want within the drain grace (%s) + ShutdownGrace (%s) + 2s", elapsed, drainGrace, grace)
 	}
 	if _, ok, err := reg.LookupNode(ctx, self); err != nil || ok {
 		t.Fatalf("the drained node must be deregistered (ok=%v err=%v)", ok, err)
@@ -531,6 +538,324 @@ func waitMetric(d time.Duration, internalAddr, series string, cond func(float64)
 		return err == nil && cond(v)
 	})
 	return v, met, err
+}
+
+type busySplice struct {
+	failed atomic.Pointer[error]
+	stop   chan struct{}
+	done   chan struct{}
+	conn   *tls.Conn
+}
+
+func keepSpliceBusy(conn *tls.Conn) *busySplice {
+	b := &busySplice{stop: make(chan struct{}), done: make(chan struct{}), conn: conn}
+	go func() {
+		defer close(b.done)
+		buf := make([]byte, 1)
+		for {
+			select {
+			case <-b.stop:
+				return
+			case <-time.After(300 * time.Millisecond):
+			}
+			_, err := conn.Write([]byte("k"))
+			if err == nil {
+				_, err = io.ReadFull(conn, buf)
+			}
+			if err != nil {
+				b.failed.Store(&err)
+				testLogger().Info("busy splice ended", "err", err)
+				return
+			}
+		}
+	}()
+	return b
+}
+
+func (b *busySplice) failure() error {
+	if p := b.failed.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (b *busySplice) close() {
+	close(b.stop)
+	tunneltest.CloseLogged(b.conn)
+	<-b.done
+}
+
+func enrollHostGet(t *testing.T, edgeAddr, path string, roots *x509.CertPool) (int, []byte, bool) {
+	t.Helper()
+	tr := &http.Transport{DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		d := &tls.Dialer{Config: &tls.Config{ServerName: itEnrollHost, RootCAs: roots, MinVersion: tls.VersionTLS12}}
+		return d.DialContext(ctx, network, edgeAddr)
+	}}
+	defer tr.CloseIdleConnections()
+	resp, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get("https://" + itEnrollHost + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer tunneltest.CloseOrLog(t, resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return resp.StatusCode, body, resp.Close
+}
+
+func TestIntegration_StopRunsThePredrainAndTheDrain(t *testing.T) {
+	const predrain = 6 * time.Second
+	var grace, drainGrace time.Duration
+	env := startIntegrationServer(t, func(c *config.ServeCmd) {
+		c.PredrainWait = predrain
+		c.LimitConnIdle = 3 * time.Second
+		grace, drainGrace = c.ShutdownGrace, c.DrainGrace()
+	})
+	ctx := context.Background()
+	if code, body, _ := enrollHostGet(t, env.edgeAddr, "/api/v1/health", env.pebble.IssuingRoots); code != http.StatusOK || string(body) != "ok\n" {
+		t.Fatalf("health while serving = %d %q, want 200 ok", code, body)
+	}
+
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	fqdn := ident.Name + "." + itTunnelDomain
+	phoneTLS := phoneServerTLS(t, ident)
+	echo := func(s io.ReadWriteCloser) {
+		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
+		defer tunneltest.CloseLogged(conn)
+		if err := conn.Handshake(); err != nil {
+			testLogger().Warn("echo phone handshake failed", "err", err)
+			return
+		}
+		if _, err := io.Copy(conn, conn); err != nil {
+			testLogger().Debug("echo phone stream ended with an error", "err", err)
+		}
+	}
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, echo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		if err := c.Run(runCtx); err != nil && runCtx.Err() == nil {
+			testLogger().Warn("tunnel client run failed", "err", err)
+		}
+	}()
+	var rtErr error
+	if !waitBool(30*time.Second, func() bool {
+		rtErr = frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+		return rtErr == nil
+	}) {
+		t.Fatalf("frontend roundtrip never succeeded (phone never bound): %v", rtErr)
+	}
+	live := dialFrontend(t, env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	if _, err := live.Write([]byte("live")); err != nil {
+		t.Fatalf("live write: %v", err)
+	}
+	if _, err := io.ReadFull(live, make([]byte, 4)); err != nil {
+		t.Fatalf("live echo: %v", err)
+	}
+	busy := keepSpliceBusy(live)
+	defer busy.close()
+
+	start := time.Now()
+	drained := make(chan error, 1)
+	go func() { drained <- env.drain() }()
+
+	if !waitBool(2*time.Second, func() bool {
+		code, _, _ := enrollHostGet(t, env.edgeAddr, "/api/v1/health", env.pebble.IssuingRoots)
+		return code == http.StatusServiceUnavailable
+	}) {
+		t.Fatal("the health check must answer 503 as soon as the node is told to stop")
+	}
+	if code, _, _ := enrollHostGet(t, env.edgeAddr, "/api/v1/enroll/nonce", env.pebble.IssuingRoots); code != http.StatusOK {
+		t.Fatalf("the nonce route during the pre-drain = %d, want 200 (everything else is still served)", code)
+	}
+	if err := frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots); err != nil {
+		t.Fatalf("a new public connection during the pre-drain must still work: %v", err)
+	}
+
+	if !waitBool(predrain+2*time.Second, func() bool {
+		code, _, _ := enrollHostGet(t, env.edgeAddr, "/api/v1/enroll/nonce", env.pebble.IssuingRoots)
+		return code == http.StatusServiceUnavailable
+	}) {
+		t.Fatal("the nonce route must be refused once the drain starts")
+	}
+	if elapsed := time.Since(start); elapsed < predrain-500*time.Millisecond {
+		t.Fatalf("the drain started %s after the stop, before the %s pre-drain wait", elapsed, predrain)
+	}
+	code, body, closed := enrollHostGet(t, env.edgeAddr, "/api/v1/enroll/nonce", env.pebble.IssuingRoots)
+	var refusal map[string]any
+	if err := json.Unmarshal(body, &refusal); err != nil {
+		t.Fatalf("draining refusal body %q: %v", body, err)
+	}
+	if code != http.StatusServiceUnavailable || refusal["reason"] != "draining" || refusal["retryable"] != true ||
+		refusal["retry_after_seconds"] != float64(1) || !closed {
+		t.Fatalf("draining refusal = %d %v close=%v, want 503 draining, retryable, retry_after_seconds 1, Connection: close", code, refusal, closed)
+	}
+	second, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, echo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+	defer scancel()
+	if err := second.Run(sctx); err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("a new control connection while draining with no other node = %v, want a 503 refusal", err)
+	}
+	second.Close()
+	if err := frontendRoundtrip(env.edgeAddr, fqdn, env.pebble.IssuingRoots); err != nil {
+		t.Fatalf("a new public connection during the drain must still reach the bound phone: %v", err)
+	}
+	if err := busy.failure(); err != nil {
+		t.Fatalf("the public connection in flight since before the stop must survive the pre-drain and the drain: %v", err)
+	}
+
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	case <-time.After(predrain + drainGrace + grace + 5*time.Second):
+		t.Fatal("Run did not return after the pre-drain, the drain grace and the shutdown grace")
+	}
+	if elapsed := time.Since(start); elapsed < predrain+drainGrace-time.Second {
+		t.Fatalf("Run returned %s after the stop; a bound phone must hold the drain for its grace (%s + %s)", elapsed, predrain, drainGrace)
+	}
+}
+
+func TestIntegration_IssueRefusalKeepsTheOpenControlStream(t *testing.T) {
+	env := startIntegrationServer(t, func(c *config.ServeCmd) {
+		c.LimitConnIdle = 5 * time.Second
+		c.ControlPingInterval = time.Second
+	})
+	ctx := context.Background()
+	ident, err := client.Enroll(ctx, env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(ident.IdentityKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(ident.IdentityCertPEM, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dials atomic.Int64
+	var protocols http.Protocols
+	protocols.SetHTTP2(true)
+	tr := &http.Transport{Protocols: &protocols, MaxConnsPerHost: 1,
+		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			dials.Add(1)
+			d := &tls.Dialer{Config: &tls.Config{ServerName: itControlHost, RootCAs: env.pebble.IssuingRoots,
+				MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, Certificates: []tls.Certificate{cert}}}
+			return d.DialContext(ctx, network, env.edgeAddr)
+		}}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	pr, pw := io.Pipe()
+	defer tunneltest.CloseOrLog(t, pw)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodPost, "https://"+itControlHost+"/api/v1/control", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("open the control stream: %v", err)
+	}
+	defer tunneltest.CloseOrLog(t, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("control stream = %d, want 200", resp.StatusCode)
+	}
+	pong, err := wire.EncodeControl(wire.CtrlPong, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pings atomic.Int64
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		var hdr [5]byte
+		for {
+			if _, err := io.ReadFull(resp.Body, hdr[:]); err != nil {
+				testLogger().Info("control stream ended", "err", err)
+				return
+			}
+			if _, err := io.CopyN(io.Discard, resp.Body, int64(binary.BigEndian.Uint32(hdr[1:]))); err != nil {
+				testLogger().Info("control stream ended", "err", err)
+				return
+			}
+			if wire.ControlType(hdr[0]) == wire.CtrlPing {
+				pings.Add(1)
+				if _, err := pw.Write(pong); err != nil {
+					testLogger().Info("control stream write ended", "err", err)
+					return
+				}
+			}
+		}
+	}()
+	if !waitBool(10*time.Second, func() bool { return pings.Load() > 0 }) {
+		t.Fatal("no PING on the control stream")
+	}
+
+	drained := make(chan error, 1)
+	go func() { drained <- env.drain() }()
+	if !waitBool(5*time.Second, func() bool {
+		code, _, _ := enrollHostGet(t, env.edgeAddr, "/api/v1/enroll/nonce", env.pebble.IssuingRoots)
+		return code == http.StatusServiceUnavailable
+	}) {
+		t.Fatal("the drain never started")
+	}
+	issue := func() (int, map[string]any) {
+		t.Helper()
+		resp, err := hc.Post("https://"+itControlHost+"/api/v1/issue", "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatalf("POST /api/v1/issue: %v", err)
+		}
+		defer tunneltest.CloseOrLog(t, resp.Body)
+		var body map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode the issue answer: %v", err)
+		}
+		return resp.StatusCode, body
+	}
+	code, body := issue()
+	if code != http.StatusServiceUnavailable || body["reason"] != "draining" || body["retryable"] != true {
+		t.Fatalf("issue while draining = %d %v, want a retryable 503 draining", code, body)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("the issue request must share the control stream's connection, dials = %d", n)
+	}
+	before := pings.Load()
+	if !waitBool(5*time.Second, func() bool { return pings.Load() >= before+2 }) {
+		t.Fatal("the open control stream must keep running after the issue refusal's GOAWAY")
+	}
+	if code, _ := issue(); code != http.StatusServiceUnavailable {
+		t.Fatalf("second issue while draining = %d, want 503", code)
+	}
+	if n := dials.Load(); n != 2 {
+		t.Fatalf("after the GOAWAY the next request must open a new connection, dials = %d", n)
+	}
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run did not return after the drain")
+	}
+	select {
+	case <-streamDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the control stream must end at the shutdown")
+	}
 }
 
 // dialFrontend opens a frontend TLS connection to the edge for fqdn (verified against roots) and returns

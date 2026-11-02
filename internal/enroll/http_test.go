@@ -14,7 +14,17 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
+type fakeLifecycle struct{ stopping, draining bool }
+
+func (f fakeLifecycle) Stopping() bool { return f.stopping }
+func (f fakeLifecycle) Draining() bool { return f.draining }
+
 func newTestHandler(t *testing.T, svc *Service, ban BanFunc) *Handler {
+	t.Helper()
+	return newTestHandlerLife(t, svc, ban, fakeLifecycle{})
+}
+
+func newTestHandlerLife(t *testing.T, svc *Service, ban BanFunc, life Lifecycle) *Handler {
 	t.Helper()
 	rec := &tunneltest.Recorder{}
 	t.Cleanup(func() {
@@ -28,7 +38,7 @@ func newTestHandler(t *testing.T, svc *Service, ban BanFunc) *Handler {
 			}
 		}
 	})
-	return NewHandler(svc, ban, rec, 64*1024)
+	return NewHandler(svc, ban, rec, 64*1024, life)
 }
 
 func csrPEM(t *testing.T, csr *x509.CertificateRequest) string {
@@ -296,5 +306,111 @@ func TestHandlerOverLimitDoesNotMintNonce(t *testing.T) {
 	}
 	if got := len(mr.Keys()); got != keysBefore {
 		t.Fatalf("an over-limit enroll must NOT mint Valkey keys (%d -> %d)", keysBefore, got)
+	}
+}
+
+func TestHandler_Health(t *testing.T) {
+	st := tunneltest.NewStore()
+	_, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	banned := netip.MustParseAddr("203.0.113.13")
+	tests := []struct {
+		name     string
+		life     fakeLifecycle
+		remote   string
+		wantCode int
+		wantBody string
+	}{
+		{name: "serving", remote: "203.0.113.20:5000", wantCode: 200, wantBody: "ok\n"},
+		{name: "stopping", life: fakeLifecycle{stopping: true}, remote: "203.0.113.20:5000", wantCode: 503, wantBody: "stopping\n"},
+		{name: "draining", life: fakeLifecycle{stopping: true, draining: true}, remote: "203.0.113.20:5000", wantCode: 503, wantBody: "stopping\n"},
+		{name: "banned peer", remote: "203.0.113.13:5000", wantCode: 403},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandlerLife(t, svc, func(a netip.Addr) bool { return a == banned }, tc.life)
+			req := httptest.NewRequest("GET", "/api/v1/health", nil)
+			req.RemoteAddr = tc.remote
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != tc.wantCode {
+				t.Fatalf("GET /api/v1/health = %d, want %d", rr.Code, tc.wantCode)
+			}
+			if tc.wantBody != "" && rr.Body.String() != tc.wantBody {
+				t.Fatalf("body = %q, want %q", rr.Body.String(), tc.wantBody)
+			}
+		})
+	}
+	h := newTestHandlerLife(t, svc, nil, fakeLifecycle{})
+	req := httptest.NewRequest("POST", "/api/v1/health", nil)
+	req.RemoteAddr = "203.0.113.20:5000"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 404 {
+		t.Fatalf("POST /api/v1/health = %d, want 404", rr.Code)
+	}
+}
+
+func TestHandler_DrainingRefusesEnrollment(t *testing.T) {
+	st := tunneltest.NewStore()
+	_, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	banned := netip.MustParseAddr("203.0.113.13")
+	h := newTestHandlerLife(t, svc, func(a netip.Addr) bool { return a == banned }, fakeLifecycle{stopping: true, draining: true})
+	for _, r := range []struct{ method, path string }{
+		{"GET", "/api/v1/enroll/nonce"}, {"POST", "/api/v1/enroll"},
+	} {
+		t.Run(r.method+" "+r.path, func(t *testing.T) {
+			req := httptest.NewRequest(r.method, r.path, bytes.NewReader([]byte("{}")))
+			req.RemoteAddr = "203.0.113.20:5000"
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+			if rr.Code != 503 {
+				t.Fatalf("%s %s while draining = %d, want 503", r.method, r.path, rr.Code)
+			}
+			if rr.Header().Get("Connection") != "close" {
+				t.Fatalf("Connection = %q, want close", rr.Header().Get("Connection"))
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body["reason"] != "draining" || body["retryable"] != true || body["retry_after_seconds"] != float64(1) {
+				t.Fatalf("body = %v, want draining, retryable, retry_after_seconds 1", body)
+			}
+		})
+	}
+	req := httptest.NewRequest("GET", "/api/v1/enroll/nonce", nil)
+	req.RemoteAddr = "203.0.113.13:5000"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 403 {
+		t.Fatalf("a banned peer while draining = %d, want 403 (the ban check stays first)", rr.Code)
+	}
+	for _, r := range []struct{ method, path string }{{"GET", "/nope"}, {"GET", "/api/v1/enroll"}} {
+		req := httptest.NewRequest(r.method, r.path, nil)
+		req.RemoteAddr = "203.0.113.20:5000"
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != 404 {
+			t.Fatalf("%s %s while draining = %d, want the usual 404", r.method, r.path, rr.Code)
+		}
+	}
+}
+
+func TestHandler_StoppingStillServesEnrollment(t *testing.T) {
+	st := tunneltest.NewStore()
+	_, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	h := newTestHandlerLife(t, svc, nil, fakeLifecycle{stopping: true})
+	req := httptest.NewRequest("GET", "/api/v1/enroll/nonce", nil)
+	req.RemoteAddr = "203.0.113.20:5000"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("the nonce route during the pre-drain = %d, want 200", rr.Code)
 	}
 }

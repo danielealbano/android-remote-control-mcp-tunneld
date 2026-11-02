@@ -33,10 +33,9 @@ const (
 
 func attestedOpts(fixture string) replicaOpts {
 	return replicaOpts{
-		attestRootURL:     googleAttestRootURL,
-		attestStatusURL:   googleAttestStatusURL,
-		attestSignerFile:  filepath.Join("..", "fixtures", fixture, "signers.allow"),
-		dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(appRulesDevicePort),
+		attestRootURL:    googleAttestRootURL,
+		attestStatusURL:  googleAttestStatusURL,
+		attestSignerFile: filepath.Join("..", "fixtures", fixture, "signers.allow"),
 	}
 }
 
@@ -57,6 +56,7 @@ func reverseVia(t *testing.T, serial, edge string) *tunneltest.BlackholeProxy {
 	}
 	adb(t, serial, "reverse", "tcp:"+strconv.Itoa(appRulesDevicePort), "tcp:"+port)
 	t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(appRulesDevicePort)) })
+	adbReverseSame(t, serial, edge)
 	return p
 }
 

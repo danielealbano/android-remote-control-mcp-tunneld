@@ -75,12 +75,11 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// the committed debug signer allowlist. Generous bandwidth/concurrency so the /wait pacing does not
 	// throttle the concurrent ~1 MiB/s streams.
 	edge := inf.startReplica(t, replicaOpts{
-		attestRootURL:     googleAttestRootURL,
-		attestStatusURL:   googleAttestStatusURL,
-		attestSignerFile:  signersPath,
-		bandwidth:         "100mbit",
-		concurrent:        32,
-		dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppDevicePort),
+		attestRootURL:    googleAttestRootURL,
+		attestStatusURL:  googleAttestStatusURL,
+		attestSignerFile: signersPath,
+		bandwidth:        "100mbit",
+		concurrent:       32,
 	})
 	_, edgePort, err := net.SplitHostPort(edge)
 	if err != nil {
@@ -89,6 +88,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 
 	// Bridge device→host: the app's 127.0.0.1:tunnelAppDevicePort reaches the host replica's edge.
 	adb(t, serial, "reverse", "tcp:"+strconv.Itoa(tunnelAppDevicePort), "tcp:"+edgePort)
+	adbReverseSame(t, serial, edge)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -240,8 +240,6 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	amCommand(t, serial, tunnelAppPkg, "stop")
 }
 
-const tunnelAppModesDevicePort = 18461
-
 func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	serial, ok := attestDeviceSerial(t)
 	if !ok {
@@ -271,12 +269,11 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			opts := replicaOpts{
-				attestRootURL:     googleAttestRootURL,
-				attestStatusURL:   googleAttestStatusURL,
-				attestSignerFile:  signersPath,
-				dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppModesDevicePort),
-				dialBackNoMTLS:    !mode.plain,
-				dialBackPlain:     mode.plain,
+				attestRootURL:    googleAttestRootURL,
+				attestStatusURL:  googleAttestStatusURL,
+				attestSignerFile: signersPath,
+				dialBackNoMTLS:   !mode.plain,
+				dialBackPlain:    mode.plain,
 			}
 			if mode.plain {
 				opts.acmeHTTPListen = tunneltest.FreeAddr(t)
@@ -286,17 +283,13 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 			if mode.plain {
 				dialBackTarget = opts.acmeHTTPListen
 			}
-			for _, r := range []struct {
-				devicePort int
-				addr       string
-			}{{tunnelAppDevicePort, edge}, {tunnelAppModesDevicePort, dialBackTarget}} {
-				_, port, err := net.SplitHostPort(r.addr)
-				if err != nil {
-					t.Fatalf("split addr %q: %v", r.addr, err)
-				}
-				adb(t, serial, "reverse", "tcp:"+strconv.Itoa(r.devicePort), "tcp:"+port)
-				t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(r.devicePort)) })
+			_, edgePort, err := net.SplitHostPort(edge)
+			if err != nil {
+				t.Fatalf("split addr %q: %v", edge, err)
 			}
+			adb(t, serial, "reverse", "tcp:"+strconv.Itoa(tunnelAppDevicePort), "tcp:"+edgePort)
+			t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(tunnelAppDevicePort)) })
+			adbReverseSame(t, serial, dialBackTarget)
 			adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
 			caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
 			adbRunAs(t, serial, tunnelAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")

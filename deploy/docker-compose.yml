@@ -13,6 +13,7 @@ services:
     build: { context: .., args: { VERSION: "${TUNNELD_VERSION:-dev}" } }
     image: tunneld:local
     restart: unless-stopped
+    stop_grace_period: 150s
     depends_on:
       valkey: { condition: service_started }
       createbuckets: { condition: service_completed_successfully }
@@ -31,7 +32,7 @@ services:
       TUNNELD_TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:?TUNNEL_DOMAIN required (see deploy/.env.example)}
       TUNNELD_ENROLL_HOST: ${ENROLL_HOST:?ENROLL_HOST required}
       TUNNELD_CONTROL_HOST: ${CONTROL_HOST:?CONTROL_HOST required}
-      TUNNELD_DIALBACK_ADVERTISE: ${DIALBACK_ADVERTISE:?DIALBACK_ADVERTISE required (this host public address:443)}
+      TUNNELD_PUBLIC_IP: ${PUBLIC_IP:?PUBLIC_IP required (this host public IP address)}
       TUNNELD_MESH_ADVERTISE: tunneld:9443   # this host's mesh dial address (self on a single-replica host)
       # Durable store. SINGLE source in .env, shared with the MinIO stand-in; production points the
       # endpoint at any plain-S3 provider.

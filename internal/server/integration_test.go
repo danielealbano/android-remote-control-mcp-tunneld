@@ -79,6 +79,10 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 	acmeDirLE, acmeDirGTS, acmeDirZeroSSL string, dnsResolvers []string) config.ServeCmd {
 	t.Helper()
 	caCert, caKey := writeCA(t)
+	publicIP, _, err := net.SplitHostPort(edgeAddr)
+	if err != nil {
+		t.Fatalf("split the edge address %q: %v", edgeAddr, err)
+	}
 	cfg := config.ServeCmd{
 		RedisURL:       redisURL,
 		Listen:         edgeAddr,
@@ -88,7 +92,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
 
 		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
-		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
+		PublicIP: publicIP, DialBackHTTPS: true, DialBackMTLS: true,
 		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
 
 		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
@@ -221,10 +225,11 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 	drain := func() error {
 		drainOnce.Do(func() {
 			cancel()
+			within := cfg.PredrainWait + cfg.DrainGrace() + cfg.ShutdownGrace + 5*time.Second
 			select {
 			case drainErr = <-done:
-			case <-time.After(20 * time.Second):
-				drainErr = fmt.Errorf("server did not drain within 20s of cancellation")
+			case <-time.After(within):
+				drainErr = fmt.Errorf("server did not stop within %s of cancellation", within)
 			}
 		})
 		return drainErr

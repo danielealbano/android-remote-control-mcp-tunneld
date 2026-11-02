@@ -32,7 +32,7 @@ func validCfg(t *testing.T) ServeCmd {
 		EnrollHost:                "enroll.example.test",
 		ControlHost:               "connect.example.test",
 		NameLength:                10,
-		DialBackAdvertise:         "203.0.113.10:443",
+		PublicIP:                  "203.0.113.10",
 		DialBackHTTPS:             true,
 		DialBackMTLS:              true,
 		MeshListen:                ":9443",
@@ -520,7 +520,7 @@ func TestEnvTwinOverridesFlag(t *testing.T) {
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
 	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
-	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+	t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
 	// Overrides under test (one per kong type category):
 	t.Setenv("TUNNELD_MAX_CLIENTS", "42")            // int twin
 	t.Setenv("TUNNELD_S3_BUCKET", "envbucket")       // plain string twin
@@ -729,7 +729,7 @@ func TestKongDefaults_ACMEChallenge(t *testing.T) {
 	t.Setenv("TUNNELD_ACME_EMAIL", "ops@example.test")
 	t.Setenv("TUNNELD_ACME_ACCOUNT_DIR", dir)
 	t.Setenv("TUNNELD_CONN_LOG_DIR", t.TempDir())
-	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+	t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
 
 	newParser := func(cli any) *kong.Kong {
 		t.Helper()
@@ -793,26 +793,27 @@ func TestValidate_ConnLogDir(t *testing.T) {
 	}
 }
 
-func TestValidate_DialBackAdvertise(t *testing.T) {
+func TestValidate_PublicIP(t *testing.T) {
 	tests := []struct {
 		name      string
-		advertise string
+		ip        string
 		wantErr   string
 		wantCause bool
 	}{
-		{name: "missing", advertise: "", wantErr: "--dialback-advertise is required"},
-		{name: "no host", advertise: ":443", wantErr: "needs a host"},
-		{name: "no port", advertise: "node-a.example.test", wantErr: "must be host:port", wantCause: true},
-		{name: "port zero", advertise: "node-a.example.test:0", wantErr: "must be 1-65535"},
-		{name: "port too high", advertise: "node-a.example.test:65536", wantErr: "must be 1-65535"},
-		{name: "port not a number", advertise: "node-a.example.test:x", wantErr: `port "x"`, wantCause: true},
-		{name: "hostname", advertise: "node-a.example.test:443"},
-		{name: "ipv6", advertise: "[2001:db8::1]:443"},
+		{name: "missing", ip: "", wantErr: "--public-ip is required"},
+		{name: "hostname", ip: "node-a.example.test", wantErr: "must be an IP address", wantCause: true},
+		{name: "with a port", ip: "203.0.113.10:443", wantErr: "must be an IP address", wantCause: true},
+		{name: "unspecified v4", ip: "0.0.0.0", wantErr: "routable address"},
+		{name: "unspecified v6", ip: "::", wantErr: "routable address"},
+		{name: "zone", ip: "fe80::1%eth0", wantErr: "without a zone"},
+		{name: "ipv4", ip: "203.0.113.10"},
+		{name: "ipv6", ip: "2001:db8::1"},
+		{name: "loopback", ip: "127.0.0.1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := validCfg(t)
-			c.DialBackAdvertise = tc.advertise
+			c.PublicIP = tc.ip
 			err := c.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
@@ -827,6 +828,100 @@ func TestValidate_DialBackAdvertise(t *testing.T) {
 				t.Errorf("Validate() = %v, want it to wrap the parse cause", err)
 			}
 		})
+	}
+}
+
+func TestValidate_PublicPortsAreNumeric(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*ServeCmd)
+		wantErr string
+	}{
+		{name: "listen port zero", mutate: func(c *ServeCmd) { c.Listen = ":0" }, wantErr: "--listen needs a numeric port"},
+		{name: "listen named port", mutate: func(c *ServeCmd) { c.Listen = ":https" }, wantErr: "--listen needs a numeric port"},
+		{name: "listen port too high", mutate: func(c *ServeCmd) { c.Listen = ":65536" }, wantErr: "--listen needs a numeric port"},
+		{name: "plain listener port zero", mutate: func(c *ServeCmd) {
+			c.DialBackHTTPS, c.DialBackMTLS = false, false
+			c.ACMEHTTPListen = ":0"
+		}, wantErr: "--acme-http-listen needs a numeric port"},
+		{name: "plain listener port ignored with HTTPS dial-backs", mutate: func(c *ServeCmd) {
+			c.ACMEChallengeZeroSSL = ChallengeDNS01
+			c.ACMEHTTPListen = ":0"
+		}},
+		{name: "listen with a host", mutate: func(c *ServeCmd) { c.Listen = "0.0.0.0:8443" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validCfg(t)
+			tc.mutate(&c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidate_PredrainWait(t *testing.T) {
+	c := validCfg(t)
+	c.PredrainWait = -time.Second
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--predrain-wait must be ≥ 0") {
+		t.Fatalf("Validate() = %v, want the --predrain-wait error", err)
+	}
+	for _, d := range []time.Duration{0, 90 * time.Second} {
+		c.PredrainWait = d
+		if err := c.Validate(); err != nil {
+			t.Fatalf("--predrain-wait %s must validate: %v", d, err)
+		}
+	}
+}
+
+func TestServeCmd_PublicAddresses(t *testing.T) {
+	tests := []struct {
+		name                   string
+		ip, listen, plain      string
+		https                  bool
+		wantEdge, wantDialBack string
+	}{
+		{name: "https dial-backs", ip: "203.0.113.10", listen: ":443", plain: ":80", https: true,
+			wantEdge: "203.0.113.10:443", wantDialBack: "203.0.113.10:443"},
+		{name: "plain dial-backs", ip: "203.0.113.10", listen: ":443", plain: ":80",
+			wantEdge: "203.0.113.10:443", wantDialBack: "203.0.113.10:80"},
+		{name: "listen with a host", ip: "203.0.113.10", listen: "10.0.0.5:8443", plain: "10.0.0.5:8080", https: true,
+			wantEdge: "203.0.113.10:8443", wantDialBack: "203.0.113.10:8443"},
+		{name: "ipv6", ip: "2001:db8::1", listen: ":443", plain: ":80",
+			wantEdge: "[2001:db8::1]:443", wantDialBack: "[2001:db8::1]:80"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ServeCmd{PublicIP: tc.ip, Listen: tc.listen, ACMEHTTPListen: tc.plain, DialBackHTTPS: tc.https}
+			if got, err := c.EdgePublicAddr(); err != nil || got != tc.wantEdge {
+				t.Errorf("EdgePublicAddr() = %q, %v, want %q", got, err, tc.wantEdge)
+			}
+			if got, err := c.DialBackAddr(); err != nil || got != tc.wantDialBack {
+				t.Errorf("DialBackAddr() = %q, %v, want %q", got, err, tc.wantDialBack)
+			}
+		})
+	}
+	bad := ServeCmd{PublicIP: "203.0.113.10", Listen: "no-port", ACMEHTTPListen: "no-port"}
+	if _, err := bad.EdgePublicAddr(); err == nil {
+		t.Error("EdgePublicAddr() must fail on a listen address without a port")
+	}
+	if _, err := bad.DialBackAddr(); err == nil {
+		t.Error("DialBackAddr() must fail on a listen address without a port")
+	}
+}
+
+func TestServeCmd_DrainGrace(t *testing.T) {
+	c := ServeCmd{LimitConnIdle: 32 * time.Second}
+	if got := c.DrainGrace(); got != 37*time.Second {
+		t.Fatalf("DrainGrace() = %s, want --limit-conn-idle + 5s = 37s", got)
 	}
 }
 
@@ -921,20 +1016,21 @@ func TestDialBackEnvTwins(t *testing.T) {
 	}
 	t.Run("defaults", func(t *testing.T) {
 		setRequiredServeEnv(t)
-		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+		t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
 		c := parse(t)
-		if c.DialBackAdvertise != "203.0.113.10:443" || !c.DialBackHTTPS || !c.DialBackMTLS {
-			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags true", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		if c.PublicIP != "203.0.113.10" || !c.DialBackHTTPS || !c.DialBackMTLS || c.PredrainWait != 0 {
+			t.Errorf("public-ip = %q https=%v mtls=%v predrain-wait=%s, want the public-ip twin, both flags true and no pre-drain wait", c.PublicIP, c.DialBackHTTPS, c.DialBackMTLS, c.PredrainWait)
 		}
 	})
 	t.Run("plain", func(t *testing.T) {
 		setRequiredServeEnv(t)
-		t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:80")
+		t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
 		t.Setenv("TUNNELD_DIALBACK_HTTPS", "false")
 		t.Setenv("TUNNELD_DIALBACK_MTLS", "false")
+		t.Setenv("TUNNELD_PREDRAIN_WAIT", "90s")
 		c := parse(t)
-		if c.DialBackAdvertise != "203.0.113.10:80" || c.DialBackHTTPS || c.DialBackMTLS {
-			t.Errorf("dial-back = %q https=%v mtls=%v, want the advertise twin and both flags false", c.DialBackAdvertise, c.DialBackHTTPS, c.DialBackMTLS)
+		if c.PublicIP != "203.0.113.10" || c.DialBackHTTPS || c.DialBackMTLS || c.PredrainWait != 90*time.Second {
+			t.Errorf("public-ip = %q https=%v mtls=%v predrain-wait=%s, want the public-ip twin, both flags false and a 90s pre-drain wait", c.PublicIP, c.DialBackHTTPS, c.DialBackMTLS, c.PredrainWait)
 		}
 	})
 }
@@ -1085,7 +1181,7 @@ func TestUsesChallenge_OnlyEnabledCAs(t *testing.T) {
 
 func TestServeCmd_ACMEDefaults(t *testing.T) {
 	setRequiredServeEnv(t)
-	t.Setenv("TUNNELD_DIALBACK_ADVERTISE", "203.0.113.10:443")
+	t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
 	var cli struct {
 		Serve ServeCmd `cmd:""`
 	}

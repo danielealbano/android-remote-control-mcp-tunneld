@@ -145,7 +145,7 @@ func (l *guardedListener) Wait(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		l.logger.Warn("acme-http drain deadline reached before every accept check returned", "err", ctx.Err())
+		l.logger.Warn("acme-http shutdown deadline reached before every accept check returned", "err", ctx.Err())
 	}
 }
 

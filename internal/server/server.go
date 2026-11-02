@@ -188,7 +188,8 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		AttestOptional: cfg.AttestationOptional,
 		Recorder:       rec, Logger: logger,
 	})
-	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody)
+	life := &lifecycle{}
+	enrollHandler := enroll.NewHandler(enrollSvc, banIP, rec, enrollBody, life)
 
 	// Mesh cert (hot-swappable) + client + listener. A failed initial mint is fatal — :9443 must never
 	// bind without a servable cert.
@@ -226,8 +227,16 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		chain.ObtainSelf, chain.ShouldRenew, chal, chal, logger)
 	reserved.loadCache(ctx)
 
+	dialBackAddr, err := cfg.DialBackAddr()
+	if err != nil {
+		return fmt.Errorf("dial-back address: %w", err)
+	}
+	edgePublicAddr, err := cfg.EdgePublicAddr()
+	if err != nil {
+		return fmt.Errorf("public edge address: %w", err)
+	}
 	opener := &openAdapter{nodeID: nodeID, phones: phoneMgr, nodes: reg, mesh: meshClient,
-		open: wire.OpenPayload{Addr: cfg.DialBackAdvertise, UseHTTPS: cfg.DialBackHTTPS, UseMTLS: cfg.DialBackMTLS}}
+		open: wire.OpenPayload{Addr: dialBackAddr, UseHTTPS: cfg.DialBackHTTPS, UseMTLS: cfg.DialBackMTLS}}
 	slots := &remoteSlots{nodeID: nodeID, nodes: reg, mesh: meshClient, logger: logger,
 		queryTimeout: slotQueryTimeout, freeTimeout: slotFreeTimeout, inflight: make(chan struct{}, slotFreeConcurrency)}
 	ed := edge.New(edge.Config{
@@ -338,7 +347,9 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		}
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
+	serveCtx, stopServing := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopServing()
+	g, gctx := errgroup.WithContext(serveCtx)
 
 	// Reserved-host + mesh + internal servers.
 	g.Go(func() error {
@@ -375,7 +386,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
 	g.Go(func() error {
-		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
+		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, edgePublicAddr, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
 	})
 	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
 	g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })
@@ -392,8 +403,15 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		return nil
 	})
 
+	select {
+	case <-ctx.Done():
+		(&drainer{life: life, phones: phoneMgr, edge: ed, issues: phoneHandler, nodes: reg, nodeID: nodeID,
+			predrain: cfg.PredrainWait, grace: cfg.DrainGrace(), poll: drainPoll, logger: logger}).run(gctx)
+	case <-gctx.Done():
+	}
+	stopServing()
 	<-gctx.Done()
-	// Ordered drain: stop accepting new public connections (close the raw listener) → actively close the
+	// Stop accepting new public connections (close the raw listener) → actively close the
 	// live phone control connections (each /api/v1/control handler returns, running its teardown: owner-conditional
 	// route unbind + the durable end event — a never-idle control stream would otherwise pin Shutdown for
 	// the full grace and skip both) → drain the HTTP servers → join every in-flight public splice handler
