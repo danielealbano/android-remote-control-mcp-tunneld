@@ -9,7 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const streamRollbackTimeout = 5 * time.Second
+const streamReleaseTimeout = 5 * time.Second
 
 func concKey(name string) string { return "conc:" + name }
 
@@ -27,7 +27,7 @@ func (l *Limiter) AcquireStream(ctx context.Context, name, member string, maxN i
 	if card.Val() <= int64(maxN) {
 		return true, nil
 	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamRollbackTimeout)
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamReleaseTimeout)
 	defer cancel()
 	if err := l.rdb.ZRem(rctx, key, member).Err(); err != nil {
 		l.logger.Debug("stream-cap rollback failed (the member expires with its score)", "tunnel", name, "err", err)
@@ -36,6 +36,8 @@ func (l *Limiter) AcquireStream(ctx context.Context, name, member string, maxN i
 }
 
 func (l *Limiter) ReleaseStream(ctx context.Context, name, member string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamReleaseTimeout)
+	defer cancel()
 	if err := l.rdb.ZRem(ctx, concKey(name), member).Err(); err != nil {
 		return fmt.Errorf("stream-cap release for %s: %w", name, err)
 	}

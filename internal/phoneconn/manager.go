@@ -58,8 +58,8 @@ type conn struct {
 	reason string
 }
 
-// teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (they run on
-// context.Background — a hung control plane or store must never pin a teardown goroutine).
+// teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (a hung control
+// plane or store must never pin a teardown goroutine).
 const teardownTimeout = 10 * time.Second
 
 // Manager tracks live phone control connections, binds routes, writes conn-log events, and drives
@@ -168,7 +168,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		m.mu.Unlock()
 		// Bounded: a hung control plane / store must not pin the teardown (the route also TTL-expires).
-		tctx, cancel := context.WithTimeout(context.Background(), teardownTimeout)
+		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
 		defer cancel()
 		if err := m.router.Unbind(tctx, c.name, c.connID); err != nil { // owner-conditional
 			m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)

@@ -212,6 +212,47 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	}
 }
 
+type teardownCtxKey struct{}
+
+type closedCtxState struct {
+	value       any
+	err         error
+	hasDeadline bool
+}
+
+type ctxClosedHook struct{ got chan closedCtxState }
+
+func (h ctxClosedHook) PhoneConnClosed(ctx context.Context, _, _, _ string) {
+	_, hasDeadline := ctx.Deadline()
+	h.got <- closedCtxState{value: ctx.Value(teardownCtxKey{}), err: ctx.Err(), hasDeadline: hasDeadline}
+}
+
+func TestManager_TeardownRunsOnTheRequestContext(t *testing.T) {
+	t.Parallel()
+	hook := ctxClosedHook{got: make(chan closedCtxState, 1)}
+	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook,
+		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), teardownCtxKey{}, "control request"))
+	c.cancel = cancel
+	teardown, err := m.register(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go m.heartbeatLoop(ctx, c)
+	teardown()
+	got := <-hook.got
+	if got.value != "control request" {
+		t.Fatal("the teardown must run on the control request's context, not a new background one")
+	}
+	if got.err != nil {
+		t.Fatalf("the teardown context must not carry the request's cancellation: %v", got.err)
+	}
+	if !got.hasDeadline {
+		t.Fatal("the teardown context must keep its own bound")
+	}
+}
+
 // TestManager_Register_RerollsOnCollision covers the connID-collision re-roll: BindRoute returning
 // ErrConnIDCollision makes register re-mint and retry (bounded); three collisions in a row give up.
 func TestManager_Register_RerollsOnCollision(t *testing.T) {

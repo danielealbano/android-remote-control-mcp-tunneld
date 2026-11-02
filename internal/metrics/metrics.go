@@ -20,7 +20,8 @@ const perConnMemEstimateBytes = 2 * wire.ChunkSize
 
 // Metrics holds the registered families and their custom registry.
 type Metrics struct {
-	reg *prometheus.Registry
+	reg     *prometheus.Registry
+	budgets *acmeBudgetSource
 
 	enrollments *prometheus.CounterVec // {result}
 	rejections  *prometheus.CounterVec // {reason} — labels pre-registered from observ.RejectReasons
@@ -129,8 +130,7 @@ func NewMetrics() *Metrics {
 	return m
 }
 
-// Registry returns the custom registry (mounted at /metrics; the default registry exposes none of
-// these families).
+// Registry returns the custom registry (the default registry exposes none of these families).
 func (m *Metrics) Registry() *prometheus.Registry { return m.reg }
 
 func (m *Metrics) RegisterLogSinkErrors(count func() float64) error {
