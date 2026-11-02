@@ -10,13 +10,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// The node registry maps a node id to its NodeInfo (mesh dial address + ops metadata). node:{id} → JSON
+// The node registry maps a node id to its NodeInfo. node:{id} → JSON
 // value, TTL'd, heartbeat-refreshed at route-ttl/3. Nodes() is an ops/admin SCAN, never on the data path.
 
-// NodeInfo is the node-registry value (JSON in node:{id}). Advertise is the mesh dial address; the rest
-// is ops metadata for /api/v1/admin/nodes.
+// NodeInfo is the node-registry value (JSON in node:{id}). Advertise is the mesh dial address.
 type NodeInfo struct {
 	Advertise     string `json:"advertise"`
+	Public        string `json:"public"`
 	Hostname      string `json:"hostname"`
 	Version       string `json:"version"`
 	StartedAt     string `json:"started_at"`     // RFC3339
@@ -48,7 +48,7 @@ func (r *Registry) RefreshNode(ctx context.Context, nodeID string, info NodeInfo
 	return r.RegisterNode(ctx, nodeID, info, ttl)
 }
 
-// DeregisterNode removes node:{id} at drain time so peers stop mesh-dialing a drained node
+// DeregisterNode removes node:{id} so peers stop mesh-dialing a drained node
 // immediately (the TTL remains the crash backstop).
 func (r *Registry) DeregisterNode(ctx context.Context, nodeID string) error {
 	pipe := r.rdb.Pipeline()
