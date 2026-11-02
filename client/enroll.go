@@ -125,7 +125,7 @@ func enroll(ctx context.Context, sleep func(context.Context, time.Duration) erro
 	if err != nil {
 		return nil, err
 	}
-	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, func() *tls.Certificate { return &bootCert }, func(net.Conn) {})
+	mtlsTr := newMTLSTransport(dialAddr, controlHost, caPool, defaultControlDialTimeout, func() *tls.Certificate { return &bootCert }, func(net.Conn) {})
 	defer mtlsTr.CloseIdleConnections()
 	mtls := &http.Client{Transport: mtlsTr}
 	id, err := issueWithRetries(ctx, sleep, er.IssueNonce,
