@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,12 +77,19 @@ type fakeRouter struct {
 	collide  int      // upcoming BindRoute calls that return router.ErrConnIDCollision
 	bindErr  error    // when set (and not colliding), BindRoute returns it
 	calls    []string // ordered router-method call log (teardown-ordering assertions)
+
+	bindEntered chan struct{}
+	bindRelease chan struct{}
 }
 
 func newFakeRouter() *fakeRouter {
 	return &fakeRouter{bound: map[string]string{}, unbound: map[string]bool{}}
 }
 func (f *fakeRouter) BindRoute(_ context.Context, name, _, connID string) error {
+	if f.bindRelease != nil {
+		f.bindEntered <- struct{}{}
+		<-f.bindRelease
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "BindRoute")
@@ -323,7 +331,7 @@ func TestEvictBanned(t *testing.T) {
 	}
 }
 
-// TestCloseAll covers the server-drain path: every live connection is closed with the given reason, so
+// TestCloseAll: every live connection is closed with the given reason, so
 // each handler's teardown runs the owner-conditional unbind and writes the end event with that reason.
 func TestCloseAll(t *testing.T) {
 	m, fr, st, _ := newMgr(t)
@@ -352,7 +360,7 @@ func TestCloseAll(t *testing.T) {
 		t.Errorf("close reasons = %q, %q, want %q", c1.closeReason(), c2.closeReason(), store.CloseServerShutdown)
 	}
 
-	// The handlers' deferred teardowns then unbind and write the end events with the drain reason.
+	// The handlers' deferred teardowns then unbind and write the end events with the reason.
 	td1()
 	td2()
 	if !fr.wasUnbound("abc") || !fr.wasUnbound("xyz") {
@@ -706,5 +714,194 @@ func TestManager_Teardown_NotifiesClosedHook(t *testing.T) {
 				t.Fatalf("the hook must run after Unbind; calls=%v", fr.calls)
 			}
 		})
+	}
+}
+
+func decodeMove(t *testing.T, frame []byte) []string {
+	t.Helper()
+	typ, payload, err := wire.DecodeControl(frame)
+	if err != nil || typ != wire.CtrlMove {
+		t.Fatalf("frame = type %d err %v, want MOVE", typ, err)
+	}
+	var mp wire.MovePayload
+	if err := json.Unmarshal(payload, &mp); err != nil {
+		t.Fatal(err)
+	}
+	return mp.Addrs
+}
+
+func TestManager_StartDrain_SendsMoveToEveryLiveConnection(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	targets := []string{"203.0.113.2:443", "203.0.113.3:443", "203.0.113.4:443"}
+	var conns []*conn
+	for _, name := range []string{"phonea", "phoneb", "phonec"} {
+		c := newConn(name)
+		c.connID = name
+		if _, err := m.register(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	conns[2].close("phone-close")
+	m.StartDrain(targets)
+	if !m.Draining() {
+		t.Fatal("StartDrain must put the manager in drain mode")
+	}
+	for _, c := range conns[:2] {
+		select {
+		case frame := <-c.send:
+			got := decodeMove(t, frame)
+			sorted := slices.Clone(got)
+			slices.Sort(sorted)
+			if !slices.Equal(sorted, targets) {
+				t.Fatalf("%s MOVE addrs = %v, want every target %v", c.name, got, targets)
+			}
+		default:
+			t.Fatalf("%s got no MOVE", c.name)
+		}
+	}
+	select {
+	case <-conns[2].send:
+		t.Fatal("a closed connection must not get a MOVE")
+	default:
+	}
+}
+
+func TestManager_MoveFrame_ShufflesThePerPhoneOrder(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	m.StartDrain([]string{"a:1", "b:1", "c:1", "d:1", "e:1"})
+	seen := map[string]bool{}
+	for range 200 {
+		frame, err := m.moveFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[strings.Join(decodeMove(t, frame), ",")] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("200 MOVE frames carried %d distinct orders, want them shuffled", len(seen))
+	}
+}
+
+func TestManager_StartDrain_NoTargetSendsNoMove(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("phonea")
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	m.StartDrain(nil)
+	if !m.Draining() {
+		t.Fatal("StartDrain without targets must still drain")
+	}
+	select {
+	case <-c.send:
+		t.Fatal("no MOVE may be sent without a target")
+	default:
+	}
+	if _, err := m.moveFrame(); !errors.Is(err, errNoMoveTarget) {
+		t.Fatalf("moveFrame() = %v, want errNoMoveTarget", err)
+	}
+}
+
+func TestManager_StartDrain_FullSendBufferIsLogged(t *testing.T) {
+	buf := &syncBuf{}
+	m, _, _, _ := newMgr(t)
+	m.logger = slog.New(slog.NewTextHandler(buf, nil))
+	c := newConn("phonea")
+	c.send = make(chan []byte)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	m.StartDrain([]string{"203.0.113.2:443"})
+	if !strings.Contains(buf.String(), "MOVE not queued") {
+		t.Fatalf("a MOVE that cannot be queued must be logged, got %q", buf.String())
+	}
+}
+
+func TestHeartbeatNotOwnerWhileDrainingKeepsTheConnection(t *testing.T) {
+	m, fr, _, _ := newMgr(t)
+	fr.hbResult = router.HeartbeatNotOwner
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.cancel = cancel
+	if _, err := m.register(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	m.StartDrain([]string{"203.0.113.2:443"})
+	m.routeTTL = 3 * time.Millisecond
+	go m.heartbeatLoop(ctx, c)
+	select {
+	case <-c.hbDone:
+	case <-time.After(time.Second):
+		t.Fatal("the heartbeat loop must stop once another connection owns the route")
+	}
+	if c.isClosed() {
+		t.Fatal("a replaced connection must stay open while the node drains")
+	}
+	if m.LiveConns() != 1 {
+		t.Fatalf("LiveConns() = %d, want the replaced connection still counted", m.LiveConns())
+	}
+}
+
+func TestManager_LiveConns(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	if m.LiveConns() != 0 {
+		t.Fatalf("LiveConns() = %d, want 0", m.LiveConns())
+	}
+	a, b := newConn("phonea"), newConn("phoneb")
+	b.connID = "bbbbbbbb"
+	for _, c := range []*conn{a, b} {
+		if _, err := m.register(context.Background(), c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.close("phone-close")
+	if m.LiveConns() != 1 {
+		t.Fatalf("LiveConns() = %d, want 1 (a closed connection does not count)", m.LiveConns())
+	}
+}
+
+func TestCloseAll_ClosesAConnectionThatBindsAfterIt(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	m.CloseAll(store.CloseServerShutdown)
+	c := newConn("phonea")
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.isClosed() || c.closeReason() != store.CloseServerShutdown {
+		t.Fatalf("a connection bound after CloseAll = closed %v reason %q, want closed with %q", c.isClosed(), c.closeReason(), store.CloseServerShutdown)
+	}
+}
+
+func TestManager_RetryMoves_DeliversAMoveThatCouldNotBeQueued(t *testing.T) {
+	m, _, _, _ := newMgr(t)
+	c := newConn("phonea")
+	c.send = make(chan []byte)
+	if _, err := m.register(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	m.StartDrain([]string{"203.0.113.2:443"})
+	if !c.moveDue.Load() {
+		t.Fatal("a MOVE that could not be queued must stay due")
+	}
+	got := make(chan []byte, 1)
+	go func() { got <- <-c.send }()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.moveDue.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("RetryMoves never delivered the due MOVE")
+		}
+		m.RetryMoves()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if addrs := decodeMove(t, <-got); !slices.Equal(addrs, []string{"203.0.113.2:443"}) {
+		t.Fatalf("retried MOVE addrs = %v", addrs)
+	}
+	m.RetryMoves()
+	select {
+	case <-c.send:
+		t.Fatal("a delivered MOVE must not be sent again")
+	case <-time.After(50 * time.Millisecond):
 	}
 }

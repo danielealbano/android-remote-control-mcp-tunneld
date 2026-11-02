@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
@@ -41,7 +42,8 @@ type Handler struct {
 	dialBacks     *DialBacks
 	dialBackMTLS  bool
 
-	sem chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
+	sem     chan struct{} // bounds concurrent pre-bind handshakes (--limit-stream-pending)
+	issuing atomic.Int64
 }
 
 // BanIP reports whether the phone's peer IP is banned.
@@ -215,6 +217,13 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name string
 		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
 		return
 	}
+	h.issuing.Add(1)
+	defer h.issuing.Add(-1)
+	if h.mgr.Draining() {
+		w.Header().Set("Connection", "close")
+		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "draining", "retryable": true, "retry_after_seconds": drainingRetryAfterSeconds})
+		return
+	}
 	if h.onIssue == nil {
 		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
 		return
@@ -254,6 +263,8 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name string
 	h.writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) InFlightIssues() int64 { return h.issuing.Load() }
+
 // peerIP returns the connecting phone's IP (host part of RemoteAddr).
 func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -281,6 +292,10 @@ const livenessMissedPings = 3
 // semaphore (--limit-stream-pending) is held ONLY until the route bind completes — it bounds
 // concurrent pre-bind handshakes, never the number of bound phones.
 func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneIdentity) {
+	if h.mgr.Draining() {
+		h.refuseDraining(w, id.name)
+		return
+	}
 	select {
 	case h.sem <- struct{}{}:
 	default:
@@ -322,6 +337,9 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 	}
 	defer teardown()
 	releaseSem() // bound — the pre-bind slot frees for the next handshake
+	if h.mgr.Draining() {
+		h.mgr.sendMove(c)
+	}
 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -362,6 +380,30 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+const drainingRetryAfterSeconds = 1
+
+func (h *Handler) refuseDraining(w http.ResponseWriter, name string) {
+	w.Header().Set("Connection", "close")
+	frame, err := h.mgr.moveFrame()
+	if err != nil {
+		if errors.Is(err, errNoMoveTarget) {
+			h.mgr.logger.Debug("phone control refused: the node is draining", "tunnel", name)
+		} else {
+			h.mgr.logger.Warn("phone control refused: the MOVE frame failed", "tunnel", name, "err", err)
+		}
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(frame); err != nil {
+		h.mgr.logger.Debug("phone control MOVE write failed", "tunnel", name, "err", err)
+		return
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 }
 
