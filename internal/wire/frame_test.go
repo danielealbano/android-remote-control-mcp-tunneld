@@ -16,6 +16,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		{CtrlPing, nil},
 		{CtrlPong, nil},
 		{CtrlRenewNudge, RenewNudgePayload{Nonce: "00112233", ARIWindow: "2026-08-20T00:00:00Z"}},
+		{CtrlMove, MovePayload{Addrs: []string{"203.0.113.11:443", "[2001:db8::1]:443"}}},
 	}
 	for _, tc := range cases {
 		enc, err := EncodeControl(tc.ct, tc.payload)
@@ -73,6 +74,16 @@ func TestOpenPayload_JSONFieldNames(t *testing.T) {
 	}
 }
 
+func TestMovePayload_JSONFieldNames(t *testing.T) {
+	b, err := json.Marshal(MovePayload{Addrs: []string{"203.0.113.11:443"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"addrs":["203.0.113.11:443"]}` {
+		t.Fatalf("MOVE JSON = %s", b)
+	}
+}
+
 func TestDialBackConstantsFrozen(t *testing.T) {
 	if DialBackPath != "/api/v1/data" {
 		t.Errorf("DialBackPath = %q", DialBackPath)
@@ -88,7 +99,7 @@ func TestDialBackConstantsFrozen(t *testing.T) {
 // TestControlTypeValuesFrozen pins the numeric wire values of the frame set — docs/PROTOCOL.md §3
 // is the canonical contract the Kotlin client conforms to, so these bytes must never drift.
 func TestControlTypeValuesFrozen(t *testing.T) {
-	want := map[ControlType]byte{CtrlOpen: 1, CtrlPing: 2, CtrlPong: 3, CtrlRenewNudge: 4}
+	want := map[ControlType]byte{CtrlOpen: 1, CtrlPing: 2, CtrlPong: 3, CtrlRenewNudge: 4, CtrlMove: 5}
 	for ct, v := range want {
 		if byte(ct) != v {
 			t.Errorf("frame type value drifted: %d != %d", byte(ct), v)
