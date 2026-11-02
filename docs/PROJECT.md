@@ -223,9 +223,20 @@ Secrets, key material, and tunnel payloads are NEVER logged.
 - **Deployment quickstart** (CA generation, `.env`, S3, ACME/DNS): [README](../README.md).
 - **Connection-log spool**: give every node its own persistent `--conn-log-dir` (two processes on one
   directory are refused at startup); files left after a crash or an S3 outage are uploaded on the next start.
-- **Dial-back address**: `--dialback-advertise` is this node's own public `IP:443` (plain mode,
-  `--dialback-https=false`: `IP:80`), never the round-robin hostname — the phone must reach exactly the node
-  the public connection entered.
+- **Public IP**: `--public-ip` is this node's own public IP address, never a shared or round-robin one. The phones
+  dial back to it on the `--listen` port (plain mode, `--dialback-https=false`: the `--acme-http-listen` port) —
+  they must reach exactly the node the public connection entered — and a `MOVE` sends them to it on the
+  `--listen` port, so every public port must equal its listen port (no port-changing NAT or port mapping).
+- **Stopping a node**: a stop signal runs a pre-drain (`--predrain-wait`, default 0: the node's
+  `GET https://<enroll-host>/api/v1/health` answers `503`, everything else is served), then a drain of at most
+  `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, in-flight connections finish), then the
+  shutdown (`--shutdown-grace`) — see `docs/PROTOCOL.md` §7. The service manager's stop timeout (podman
+  `StopTimeout`, compose `stop_grace_period`) must exceed their sum, with a margin, or the process is killed
+  mid-drain. Behind a DNS load balancer that health-checks every node on that endpoint (through its IP, with the
+  enroll host as the HTTPS host), set `--predrain-wait` to at least the time the balancer needs to drop a node —
+  its failure count × its check interval — plus the record TTL and a margin; the balancer's check addresses must
+  never be banned. Roll nodes one at a time and wait until a restarted node is back in the DNS answer before
+  stopping the next.
 - **Connection budget**: each public connection holds two `--max-clients` slots on its entry node (the client
   and its dial-back), and its dial-back counts against `--limit-conn-rate` for the phone's IP — raise it for
   many tunnels behind one IP.
@@ -294,8 +305,8 @@ Secrets, key material, and tunnel payloads are NEVER logged.
   3 emulated phones with real attestation enrolling in parallel on one replica, scaled to 4 and resumed after
   a reinstall, the client entering through a second replica,
   60 s at 1 op/s with a reconnect every 20 s, zero failed operations required. The device gates reach each
-  replica through its own `adb reverse` port (`--dialback-advertise 127.0.0.1:<device port>`), so the phone's
-  dial-back lands on the replica the request entered.
+  replica's dial-back port through an `adb reverse` of the same port number (`--public-ip 127.0.0.1`), so the
+  phone's dial-back lands on the replica the request entered.
 - **License**: tunneld is licensed under the GNU Affero General Public License, version 3 or (at your
   option) any later version (`LICENSE.md` is the verbatim license text; the program notice is in the
   README). Country data is DB-IP Country Lite — © db-ip.com, CC BY 4.0 (the README carries the

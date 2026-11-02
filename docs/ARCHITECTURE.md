@@ -59,10 +59,10 @@ flowchart TD
 
 | Package | Role |
 |---|---|
-| `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, graceful shutdown |
+| `internal/server` | assembly (`Run`), SNI-edge + listener wiring, schedulers, the stop sequence (pre-drain, drain, shutdown) |
 | `internal/edge` | raw `:443` SNI edge: ClientHello peek + JA4, reserved-SNI local termination, `acme-tls/1` TLS-ALPN-01 answering, dial-back wait + splice on the entry node, connection policy (idle/min-rate/eviction) |
-| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (HTTP/2 only, HTTP/1.x → 505; OPEN dial-back, PING, RENEW_NUDGE; the newest connection for a name replaces the previous one), `/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`), `/api/v1/issue` cert generation (390 s handler deadline) |
-| `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, Valkey-locked name claim, issuance cap |
+| `internal/phoneconn` | phone control plane (HTTP/2 + mTLS): `/api/v1/control` stream (HTTP/2 only, HTTP/1.x → 505; OPEN dial-back, PING, RENEW_NUDGE, MOVE; the newest connection for a name replaces the previous one), `/api/v1/data` dial-back upgrade (HTTP/1.1, on `:443` and, in plain mode, `:80`), `/api/v1/issue` cert generation (390 s handler deadline), the drain refusals |
+| `internal/enroll` | attested enrollment (Phase 1) + issuance (Phase 2 / renewal): nonce, seven-point gate, key binding, Valkey-locked name claim, issuance cap; `GET /api/v1/health` on `--enroll-host` |
 | `internal/attest` | Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `internal/acme` | LE→GTS→ZeroSSL issuance chain (lego; DNS-01 / HTTP-01 / TLS-ALPN-01 per CA, Valkey-shared challenge store + TLS-ALPN-01 challenge certificate, spillover, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, optional CAs, several GTS accounts looked up by key, self-heal) |
 | `internal/ca` | internal CA: identity certs (CN = tunnel name) + short-lived mesh-role certs (SAN = node id) |
@@ -103,8 +103,10 @@ The entry node accounts bytes (day/week traffic), paces bandwidth against the pe
 windows, and enforces the connection policy on both sockets; no data crosses nodes. When the phone's control
 connection closes, its node sends `evict` to every node and each ends the splices opened through it (keeping
 `ban-evict` / `admin-terminate` when that is the close reason, else `phone-close`); a crashed owner sends
-nothing, so such splices end within 10 s after the route expires (`--route-ttl`) or is re-bound, through the
-entry node's per-splice route check (every 10 s each splice re-reads its route). The phone terminates TLS with its
+nothing, so such splices end through the entry node's per-splice route check (every 10 s each splice re-reads its
+route): within 10 s after the route expires (`--route-ttl`), or, once the route is bound to another connection,
+within 10 s after the node that held the splice's connection has left the node registry. While that node is still
+registered a re-bound route does not end the splice (a draining node keeps the replaced connection open, §9). The phone terminates TLS with its
 WebPKI cert (a hermetic Pebble CA stands in for the integration and e2e tiers; the staging tier uses Let's Encrypt staging + GTS staging) — tunneld never sees plaintext.
 
 **Stream cap.** A tunnel holds at most `--limit-concurrent` public connections at once across all nodes
@@ -233,7 +235,7 @@ per-second overshoot is bounded by `byteCap + N_concurrent × 16 KiB` / `pktCap 
 ## 5. Valkey state (all transient — every key TTL'd in the same round-trip: SET EX / a SETNX lock / a pipelined EXPIRE NX / a pipelined PEXPIRE / a pipelined EXPIRE GT; NO Lua/WATCH/MULTI-EXEC)
 
 Routing (`tunnel:{name}` → owner/connID + merged byte counters, create/delete serialized by the per-name `lock:{name}`, owner-conditional teardown on `connID`), node registry
-(`node:{id}` → JSON `{advertise, hostname, version, started_at, last_heartbeat}`, exposed via `/api/v1/admin/nodes`; plus the
+(`node:{id}` → JSON `{advertise, public, hostname, version, started_at, last_heartbeat}` — `advertise` is the mesh address, `public` the node's public TLS edge (`--public-ip` + the `--listen` port, the `MOVE` target) — exposed via `/api/v1/admin/nodes`; plus the
 `nodes` id set — TTL 3 × `--route-ttl`, refreshed by every heartbeat, expired ids pruned on read — used to reach
 every live node), rate-limit windows, the per-direction day/week traffic windows
 (`traf:{name}:{dir}:day/week:{n}`, written via the same pipelined `EXPIRE NX` as the `bw:`/`pkt:` windows),
@@ -289,7 +291,7 @@ The internal listener serves `/metrics` (custom registry, aggregate families onl
 process collectors: open/max file descriptors, RSS, CPU), `/healthz`,
 `/api/v1/admin/tunnels/list?cursor=&count=` (a paginated tunnel-name list — ONE SCAN step, no ranking) +
 `/api/v1/admin/tunnels/stats` (POST names → per-tunnel node/bytes/conc/bw/day/week, live tunnels only),
-`/api/v1/admin/nodes` (the node registry: id → `{advertise, hostname, version, started_at, last_heartbeat}`), and
+`/api/v1/admin/nodes` (the node registry: id → `{advertise, public, hostname, version, started_at, last_heartbeat}`), and
 the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
 `POST /api/v1/admin/tunnels/{name}/terminate` (a bound route required, 404 otherwise: applied on every node —
 each evicts its in-flight public splices, `close_reason=admin-terminate`, and the owner closes the phone
@@ -371,27 +373,51 @@ first failure — then at most one summary per minute carrying the suppressed co
 a pending count is still reported once the failures stop (on the next record after the minute) and when
 the sinks are closed at shutdown.
 
-## 9. Shutdown
+## 9. Stopping a node: pre-drain, drain, shutdown
+
+A stop signal does not cut traffic at once: `Run` keeps every server, listener and scheduler running through a
+pre-drain and a drain on a serving context of its own, then cancels it and shuts down. The phone-visible behaviour
+of each phase is specified in [`PROTOCOL.md`](PROTOCOL.md) §7.
 
 ```mermaid
 flowchart LR
-  cancel["ctx cancel"] --> close["close raw :443 + plain :80 listeners (stop new public conns)"]
+  signal["stop signal"] --> predrain["pre-drain (--predrain-wait): GET /api/v1/health answers 503, all else served"]
+  predrain --> drain["drain (up to --limit-conn-idle + 5 s): MOVE to every phone, new control / enroll / issue refused"]
+  drain --> cancel["serving ctx cancel"]
+  cancel --> close["close raw :443 + plain :80 listeners (stop new public conns)"]
   close --> phones["close live phone conns (server-shutdown): teardown unbinds routes + enqueues end events"]
-  phones --> drain["Shutdown enroll / control / mesh / internal / acme-http servers"]
-  drain --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
-  join --> group["errgroup unwinds: schedulers + watchers on the drain ctx"]
+  phones --> servers["Shutdown enroll / control / mesh / internal / acme-http servers"]
+  servers --> join["join public handlers (Edge.Wait + HTTP-01 guard Wait): splice + end-event enqueue + slot release returned"]
+  join --> group["errgroup unwinds: schedulers + watchers on the serving ctx"]
   group --> queue["rotate + upload the conn-log spool: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
   flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
   dereg --> evictjoin["join, then cancel, the splice-eviction broadcasts"]
 ```
 
-Live public splices are cancelled by the drain context and record `close_reason=server-shutdown`
+**Pre-drain.** The node answers its health check with `503` for `--predrain-wait` (default 0) and serves
+everything else, so a DNS load balancer that health-checks the nodes stops handing this one out before the drain.
+
+**Drain.** The node reads the node registry and sends every phone control connection it holds a `MOVE` listing
+the `public` address of every other registered node, shuffled per phone; it sends none when the listing fails or
+finds no other node. A connection that binds while the drain starts gets its `MOVE` right after the bind. A heartbeat that finds another connection owning the route no longer closes
+the replaced connection: it stays open until the shutdown, so the splices opened through it can finish, on this
+node and on the others (their per-splice route check keeps them while this node is registered, §2). New control
+connections get `MOVE` without a bind, or `503` without a target; the two enroll routes and `/api/v1/issue` answer `503`
+`draining`; dial-backs and public connections are served. The drain lasts `--limit-conn-idle` + 5 s at most, and
+ends as soon as the node holds no phone control connection and no public connection and runs no issuance
+(`POST /api/v1/issue`, an ACME order); a replaced connection counts until the drain ends, because the node cannot
+see the splices opened through it on the other nodes, so a node that held a phone drains for the full time. A
+`MOVE` that cannot be queued (the connection's send buffer is full) is retried at every drain poll. An errgroup failure during
+the pre-drain or the drain cancels the serving context at once.
+
+**Shutdown.** Live public splices are cancelled with the serving context and record `close_reason=server-shutdown`
 (`evicted` is reserved for saturation eviction, `ban-evict` for a ban reload, `admin-terminate` for an admin
 terminate). The ordering is load-bearing:
 the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the conn-log spool is
 rotated and uploaded (what does not upload within `--shutdown-grace` stays on disk for the next start), and
-only then the admin/cap-log final flush runs — so no end event or counter delta is lost.
+only then the admin/cap-log final flush runs — so no end event or counter delta is lost. A service manager must
+allow `--predrain-wait` + `--limit-conn-idle` + 5 s + `--shutdown-grace` (plus a margin) before it kills the process.
 
 ## 10. Configuration
 
@@ -400,7 +426,10 @@ fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are
 (`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. `--conn-log-dir` (required) is the
 connection-log spool directory; `Validate()` rejects a path that exists but is not a directory, and startup
 creates and locks it. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected; the go-redis pool options such as `pool_size` and `conn_max_idle_time` pass through — the pool size is a ceiling, connections open on demand and idle ones close after `conn_max_idle_time`), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a `net/url` / go-redis parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) AND every delimiter character (space, quote, `:`, `,`, brackets, parentheses) that occurs in the URL replaced by `[redacted]`, adjacent replacements merged into one — so no part of a credential, not even its punctuation, can reach the log, at the cost of also hiding non-secret URL parts and some message punctuation; tunneld's own Sentinel-option errors are emitted verbatim. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01` or `--dialback-https=false`). The
-dial-back flags are `--dialback-advertise` (required: this node's own public `host:port` the phones dial back to
-— its `:443` edge, or its plain listener when `--dialback-https=false` — never the round-robin hostname),
-`--dialback-https` (default `true`) and `--dialback-mtls` (default `true`; requires `--dialback-https`; the
-control-host TLS then requires a client certificate, otherwise it only verifies one when given).
+public-address and dial-back flags are `--public-ip` (required: this node's own public IP address, never a shared
+or round-robin one; the phones dial back to it on the `--listen` port, or on the `--acme-http-listen` port when
+`--dialback-https=false`, and a `MOVE` points them to it on the `--listen` port, so each public port must equal its
+listen port; both ports must be numeric), `--dialback-https` (default `true`) and `--dialback-mtls` (default
+`true`; requires `--dialback-https`; the control-host TLS then requires a client certificate, otherwise it only
+verifies one when given). The stop flags are `--predrain-wait` (default `0s`) and `--shutdown-grace` (default
+`15s`); the drain's bound is `--limit-conn-idle` + 5 s.
