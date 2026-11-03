@@ -292,6 +292,12 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if ident.Name == "" || len(ident.PublicCertPEM) == 0 {
 		t.Fatalf("enrollment must yield a name + public cert: name=%q pubcert=%d", ident.Name, len(ident.PublicCertPEM))
 	}
+	if n := bytes.Count(ident.PublicCertPEM, []byte("-----BEGIN CERTIFICATE-----")); n < 2 {
+		t.Fatalf("public_cert holds %d certificate(s), want the whole chain", n)
+	}
+	if bytes.Contains(ident.PublicCertPEM, []byte("\n\n")) {
+		t.Fatal("public_cert holds a blank line, its certificates must be adjacent")
+	}
 	fqdn := ident.Name + "." + itTunnelDomain
 
 	// The phone TLS-terminates each dial-back data stream with its Pebble-issued public cert and echoes.
