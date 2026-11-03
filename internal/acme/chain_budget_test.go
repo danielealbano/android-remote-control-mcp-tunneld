@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	legoacme "github.com/go-acme/lego/v5/acme"
+	"github.com/go-acme/lego/v5/certificate"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
@@ -1309,5 +1311,62 @@ func TestChain_BuildsTheClientBeforeTakingBudget(t *testing.T) {
 	}
 	if reqLevel != 1 || orderLevel != 1 {
 		t.Fatalf("request/order budget levels during the build = %v/%v, want 1/1 (nothing prepaid or reserved yet)", reqLevel, orderLevel)
+	}
+}
+
+func TestChain_TheChainDoesNotChangeTheCounting(t *testing.T) {
+	t.Parallel()
+	leaf, inter, root := testCertChain(t)
+	whole := bytes.Join([][]byte{leaf, inter, root}, nil)
+	withBlankLines := bytes.Join([][]byte{leaf, inter, root}, []byte("\n"))
+	const phone, host = "p.example.test", "enroll.example.test"
+	issuePhone := func(ctx context.Context, ch *chainIssuer) ([]byte, error) {
+		got, _, err := ch.Obtain(ctx, nil, phone)
+		return got, err
+	}
+	issueHost := func(ctx context.Context, ch *chainIssuer) ([]byte, error) {
+		got, _, _, err := ch.ObtainSelf(ctx, host, store.CertInfo{})
+		return got, err
+	}
+	tests := []struct {
+		name   string
+		issued []byte
+		want   []byte
+		fqdn   string
+		issue  func(context.Context, *chainIssuer) ([]byte, error)
+	}{
+		{name: "a phone's whole chain", issued: whole, want: whole, fqdn: phone, issue: issuePhone},
+		{name: "a phone's chain with blank lines", issued: withBlankLines, want: whole, fqdn: phone, issue: issuePhone},
+		{name: "a phone's leaf-only chain", issued: leaf, want: leaf, fqdn: phone, issue: issuePhone},
+		{name: "a reserved host's whole chain", issued: whole, want: whole, fqdn: host, issue: issueHost},
+		{name: "a reserved host's chain with blank lines", issued: withBlankLines, want: whole, fqdn: host, issue: issueHost},
+		{name: "a reserved host's leaf-only chain", issued: leaf, want: leaf, fqdn: host, issue: issueHost},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var orders atomic.Int32
+			le := &legoClient{
+				cfg: LegoConfig{CAID: CALetsEncrypt, Logger: testLogger()},
+				obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+					orders.Add(1)
+					return &certificate.Resource{Certificate: tc.issued}, nil
+				},
+			}
+			a := &account{ca: CALetsEncrypt, id: "le-1", label: "local", timeout: time.Minute, issuer: le}
+			ac := newAccountChain(t, ChainConfig{}, a)
+			got, err := tc.issue(context.Background(), ac.ch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, tc.want) || orders.Load() != 1 {
+				t.Fatalf("issued %d bytes after %d orders, want %d bytes after 1", len(got), orders.Load(), len(tc.want))
+			}
+			ordersBucket, name, domain := leBuckets(a, tc.fqdn)
+			want := [3]float64{0.9, 0.9, 0.9}
+			if got := [3]float64{ac.level(t, ordersBucket), ac.level(t, name), ac.level(t, domain)}; got != want {
+				t.Fatalf("orders/name/domain levels = %v, want %v: the CA counted one certificate", got, want)
+			}
+		})
 	}
 }

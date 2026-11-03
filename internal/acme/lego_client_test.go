@@ -7,18 +7,21 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -471,5 +474,210 @@ func TestNewChain_CertificateWaitCoversTheAttemptAndTheGrace(t *testing.T) {
 	}
 	if got := built.(*legoClient).cfg.CertificateWait; got != time.Minute+7*time.Second {
 		t.Fatalf("certificate wait = %s, want the attempt timeout plus the grace (1m7s)", got)
+	}
+}
+
+func testCertChain(t *testing.T) (leaf, intermediate, root []byte) {
+	t.Helper()
+	issue := func(cn string, isCA bool, parent *x509.Certificate, parentKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: cn},
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+			BasicConstraintsValid: true, IsCA: isCA,
+		}
+		if isCA {
+			tmpl.KeyUsage = x509.KeyUsageCertSign
+		}
+		if parent == nil {
+			parent, parentKey = tmpl, key
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cert, key
+	}
+	encode := func(c *x509.Certificate) []byte {
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+	}
+	rootCert, rootKey := issue("root", true, nil, nil)
+	interCert, interKey := issue("intermediate", true, rootCert, rootKey)
+	leafCert, _ := issue("leaf", false, interCert, interKey)
+	return encode(leafCert), encode(interCert), encode(rootCert)
+}
+
+func TestAdjacentChain_Variants(t *testing.T) {
+	t.Parallel()
+	leaf, inter, root := testCertChain(t)
+	adjacent := bytes.Join([][]byte{leaf, inter, root}, nil)
+	key := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1}})
+	garbled := append(bytes.Clone(leaf), []byte("-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n")...)
+	tests := []struct {
+		name   string
+		issued []byte
+		want   []byte
+	}{
+		{name: "already adjacent", issued: adjacent, want: adjacent},
+		{name: "blank lines between the certificates", issued: bytes.Join([][]byte{leaf, inter, root}, []byte("\n")), want: adjacent},
+		{name: "text between the certificates", issued: bytes.Join([][]byte{leaf, inter, root}, []byte("a comment\n")), want: adjacent},
+		{name: "leaf only is kept", issued: leaf, want: leaf},
+		{name: "a bundle holding another block type is kept as sent", issued: append(bytes.Clone(leaf), key...), want: append(bytes.Clone(leaf), key...)},
+		{name: "a bundle holding a garbled block is kept as sent", issued: garbled, want: garbled},
+		{name: "nothing", issued: nil, want: nil},
+		{name: "not PEM", issued: []byte("not a certificate"), want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := adjacentChain(tc.issued); !bytes.Equal(got, tc.want) {
+				t.Fatalf("adjacentChain = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestChainIssue_Variants(t *testing.T) {
+	t.Parallel()
+	leaf, inter, root := testCertChain(t)
+	otherLeaf, _, _ := testCertChain(t)
+	tests := []struct {
+		name   string
+		issued []byte
+		want   string
+	}{
+		{name: "whole chain", issued: bytes.Join([][]byte{leaf, inter, root}, nil)},
+		{name: "blank lines between the certificates", issued: bytes.Join([][]byte{leaf, inter, root}, []byte("\n"))},
+		{name: "leaf only", issued: leaf, want: "holds 1 certificate(s)"},
+		{name: "wrong order", issued: bytes.Join([][]byte{inter, leaf, root}, nil), want: "certificate 0 of the chain is not signed by the next"},
+		{name: "unrelated issuer", issued: bytes.Join([][]byte{otherLeaf, inter}, nil), want: "certificate 0 of the chain is not signed by the next"},
+		{name: "unparseable certificate", issued: append(bytes.Clone(leaf), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1}})...), want: "certificate 1 of the chain"},
+		{name: "another block type", issued: append(bytes.Clone(leaf), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1}})...), want: `holds a "EC PRIVATE KEY" block`},
+		{name: "garbled block", issued: append(bytes.Clone(leaf), []byte("-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n")...), want: "holds 2 PEM blocks, 1 parsed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := chainIssue(tc.issued)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("chainIssue = %v, want none", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("chainIssue = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestChainCertCount_Variants(t *testing.T) {
+	t.Parallel()
+	leaf, inter, root := testCertChain(t)
+	tests := []struct {
+		name string
+		pem  []byte
+		want int
+	}{
+		{name: "nothing", pem: nil, want: 0},
+		{name: "one", pem: leaf, want: 1},
+		{name: "three", pem: bytes.Join([][]byte{leaf, inter, root}, nil), want: 3},
+		{name: "three with blank lines", pem: bytes.Join([][]byte{leaf, inter, root}, []byte("\n")), want: 3},
+		{name: "a garbled block is not a certificate", pem: append(bytes.Clone(leaf), []byte("-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n")...), want: 1},
+		{name: "another block type is not a certificate", pem: append(bytes.Clone(leaf), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1}})...), want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := chainCertCount(tc.pem); got != tc.want {
+				t.Fatalf("chainCertCount = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func (h *recordingHandler) loggedAt(level slog.Level, msg string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.ContainsFunc(h.records, func(r slog.Record) bool { return r.Level == level && r.Message == msg })
+}
+
+func TestLegoObtain_IssuedBundle(t *testing.T) {
+	t.Parallel()
+	leaf, inter, root := testCertChain(t)
+	const incomplete = "acme issued an incomplete chain"
+	tests := []struct {
+		name     string
+		issued   []byte
+		want     []byte
+		wantWarn bool
+	}{
+		{name: "blank lines are removed", issued: bytes.Join([][]byte{leaf, inter, root}, []byte("\n")), want: bytes.Join([][]byte{leaf, inter, root}, nil)},
+		{name: "a leaf-only chain is returned and logged", issued: leaf, want: leaf, wantWarn: true},
+		{name: "a chain missing an intermediate is returned and logged", issued: bytes.Join([][]byte{leaf, root}, nil), want: bytes.Join([][]byte{leaf, root}, nil), wantWarn: true},
+		{name: "a chain in the wrong order is returned and logged", issued: bytes.Join([][]byte{inter, leaf}, nil), want: bytes.Join([][]byte{inter, leaf}, nil), wantWarn: true},
+		{name: "a garbled block is kept as sent and logged", issued: append(bytes.Clone(leaf), []byte("-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n")...), want: append(bytes.Clone(leaf), []byte("-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n")...), wantWarn: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recordingHandler{}
+			l := &legoClient{
+				cfg: LegoConfig{CAID: CAGTS, Logger: slog.New(rec)},
+				obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+					return &certificate.Resource{Certificate: tc.issued}, nil
+				},
+			}
+			got, info, err := l.obtain(context.Background(), &x509.CertificateRequest{}, "n")
+			if err != nil {
+				t.Fatalf("obtain must not fail on the shape of the chain: %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("obtain = %q, want %q", got, tc.want)
+			}
+			block, _ := pem.Decode(tc.issued)
+			first, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.CA != CAGTS || info.Serial != first.SerialNumber.Text(16) || !info.NotAfter.Equal(first.NotAfter) {
+				t.Fatalf("cert info = %+v, want the first certificate's serial %s and not_after %s", info, first.SerialNumber.Text(16), first.NotAfter)
+			}
+			if warned := rec.loggedAt(slog.LevelWarn, incomplete); warned != tc.wantWarn {
+				t.Fatalf("warned = %v, want %v; records = %v", warned, tc.wantWarn, rec.aboveDebug())
+			}
+		})
+	}
+	unusable := []struct {
+		name   string
+		issued []byte
+	}{
+		{name: "no certificate at all", issued: []byte("not a certificate")},
+		{name: "the first certificate does not parse", issued: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{1}})},
+		{name: "the first block is not a certificate", issued: append(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: []byte{1}}), leaf...)},
+	}
+	for _, tc := range unusable {
+		t.Run(tc.name+" fails as permanent, unchanged", func(t *testing.T) {
+			t.Parallel()
+			l := &legoClient{
+				cfg: LegoConfig{CAID: CAGTS, Logger: testLogger()},
+				obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+					return &certificate.Resource{Certificate: tc.issued}, nil
+				},
+			}
+			_, _, err := l.obtain(context.Background(), &x509.CertificateRequest{}, "n")
+			var ie *IssuerError
+			if !errors.As(err, &ie) || ie.Class != ClassPermanent {
+				t.Fatalf("obtain = %v, want a permanent failure", err)
+			}
+		})
 	}
 }
