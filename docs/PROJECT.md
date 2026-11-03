@@ -69,7 +69,8 @@ of the raw TCP connection.
   buckets per registered domain, account, name and request rate), so a CA is asked only when it has budget; a
   429 makes that account wait out its Retry-After cluster-wide. The phone holds the TLS private key;
   only CSRs leave it. Every successful issuance — phone cert, renewal or reserved-host cert — logs
-  `acme certificate issued` at Info with the issuing `ca`, the `name`, the `serial` and `not_after`.
+  `acme certificate issued` at Info with the issuing `ca`, the `name`, the `serial`, `not_after` and the
+  number of certificates in the chain (`chain_certs`).
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
   **mesh-role** certs (SAN = node id). The public edge does NO client-cert auth (it relays opaque TLS).

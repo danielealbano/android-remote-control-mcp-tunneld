@@ -218,7 +218,14 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   (byte-exact, lowercase): as its single DNS SAN or, with no SAN, as its CN; a non-empty CN must equal it; no
   IP / email / URI SAN; anything else is `400` `csr_domain_mismatch` (not retryable).
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs; `ca` is the issuing
-  CA's id (`letsencrypt`, `gts` or `zerossl`), not a certificate.
+  CA's id (`letsencrypt`, `gts` or `zerossl`), not a certificate. `public_cert` is a PEM bundle holding the
+  full chain the CA issued, leaf first. The server re-encodes it with the certificates directly adjacent, with no blank
+  lines or other text between them, because older Android parsers (`CertificateFactory.generateCertificates`) silently
+  stop at a blank line and return only the leaf; a bundle holding a block it cannot re-encode is sent as the CA sent it,
+  which is why the phone SHOULD parse each PEM block separately. The phone MUST serve every certificate it parsed. A
+  chain that ends up with only the leaf is NOT a failed issuance: the phone MUST keep its tunnel serving and SHOULD
+  report it, because clients that fetch intermediates still work and the next renewal replaces the certificate, while
+  refusing it would take a working tunnel down.
 - **Latency**: the response arrives only after a live ACME order (validation + issuance, possibly spilling
   over to the next CA), so the phone MUST allow at least 400 s for it; the server gives up on the request
   after 390 s. A phone that gives up earlier can lose the issued certificate (the server discards an order

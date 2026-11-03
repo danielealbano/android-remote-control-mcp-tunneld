@@ -146,6 +146,12 @@ attestation + key binding, claims a name (Valkey lock, then S3), and signs a boo
 2 (`/api/v1/issue`, mTLS) re-verifies attestation, rotates the identity cert, and obtains the public cert for
 `<name>.<tunnel-domain>` via the ACME chain. Renewal is the SAME `/api/v1/issue` endpoint, triggered by a
 `RENEW_NUDGE{nonce}` on the control stream; the server-run chain applies LE-first migration + spillover.
+Every issued bundle is re-encoded with its certificates directly adjacent, because a CA's bundle can hold blank
+lines between them and older Android parsers stop there without an error; a bundle holding a PEM block that does not
+decode as a certificate block is sent as the CA sent it, so re-encoding never loses anything. An incomplete chain (only one
+certificate, a certificate not signed by the next, or a block after the leaf that is not a parseable certificate) is logged
+at Warn and still returned, for phone and reserved-host certs alike: a missing intermediate never fails an issuance, so it
+can never stop a phone from renewing. A bundle whose first block is not a parseable certificate fails the issuance as permanent.
 The name registry record carries the cert metadata (an issuance whose requester disconnected before the answer
 is counted but not recorded, so the renewal watcher keeps nudging the phone); the reserved-host (`--enroll-host`/`--control-host`)
 certs are obtained by the server itself (`ObtainSelf`) after the listeners bind (a valid disk cache is served
