@@ -1,6 +1,7 @@
 package acme
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -257,7 +258,11 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 		if err != nil {
 			return nil, store.CertInfo{}, permanent(err)
 		}
-		return r.res.Certificate, info, nil
+		pemChain := adjacentChain(r.res.Certificate)
+		if issue := chainIssue(r.res.Certificate); issue != nil {
+			l.cfg.Logger.Warn("acme issued an incomplete chain", "ca", l.cfg.CAID, "name", name, "chain_certs", chainCertCount(pemChain), "err", issue)
+		}
+		return pemChain, info, nil
 	}
 }
 
@@ -293,6 +298,75 @@ func (a *legoDNSAdapter) CleanUp(ctx context.Context, domain, _, keyAuth string)
 	defer cancel()
 	info := dns01.GetChallengeInfo(ctx, domain, keyAuth)
 	return a.p.CleanUp(ctx, info.EffectiveFQDN, info.Value)
+}
+
+const (
+	pemCertificateType = "CERTIFICATE"
+	pemBlockBegin      = "-----BEGIN "
+	minChainCerts      = 2
+)
+
+func adjacentChain(issued []byte) []byte {
+	var pemChain []byte
+	for rest := issued; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == pemCertificateType {
+			pemChain = append(pemChain, pem.EncodeToMemory(&pem.Block{Type: pemCertificateType, Bytes: block.Bytes})...)
+		}
+	}
+	if chainCertCount(pemChain) != bytes.Count(issued, []byte(pemBlockBegin)) {
+		return issued
+	}
+	return pemChain
+}
+
+func chainIssue(issued []byte) error {
+	var certs []*x509.Certificate
+	for rest := issued; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != pemCertificateType {
+			return fmt.Errorf("the bundle holds a %q block", block.Type)
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("certificate %d of the chain: %w", len(certs), err)
+		}
+		certs = append(certs, cert)
+	}
+	if blocks := bytes.Count(issued, []byte(pemBlockBegin)); blocks != len(certs) {
+		return fmt.Errorf("the bundle holds %d PEM blocks, %d parsed", blocks, len(certs))
+	}
+	if len(certs) < minChainCerts {
+		return fmt.Errorf("the chain holds %d certificate(s), want at least %d", len(certs), minChainCerts)
+	}
+	for i, cert := range certs[:len(certs)-1] {
+		if err := cert.CheckSignatureFrom(certs[i+1]); err != nil {
+			return fmt.Errorf("certificate %d of the chain is not signed by the next: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func chainCertCount(pemChain []byte) int {
+	n := 0
+	for rest := pemChain; ; {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return n
+		}
+		if block.Type == pemCertificateType {
+			n++
+		}
+	}
 }
 
 // certInfoFromPEM parses the issued leaf for serial/validity metadata.

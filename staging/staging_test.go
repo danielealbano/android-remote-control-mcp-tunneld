@@ -521,6 +521,12 @@ func runStagingCase(t *testing.T, env *stagingEnv, out io.Writer, tc stagingCase
 	if ident.CA != tc.wantCA {
 		t.Fatalf("issuing CA = %q, want %q", ident.CA, tc.wantCA)
 	}
+	if n := bytes.Count(ident.PublicCertPEM, []byte("-----BEGIN CERTIFICATE-----")); n < 2 {
+		t.Fatalf("public_cert holds %d certificate(s), want the whole chain", n)
+	}
+	if bytes.Contains(ident.PublicCertPEM, []byte("\n\n")) {
+		t.Fatal("public_cert holds a blank line, its certificates must be adjacent")
+	}
 	block, _ := pem.Decode(ident.PublicCertPEM)
 	if block == nil {
 		t.Fatal("public certificate is not PEM")
