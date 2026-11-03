@@ -400,6 +400,9 @@ func assertPhoneCert(t *testing.T, edge, fqdn string, roots *x509.CertPool) {
 		t.Fatalf("public TLS handshake to %s failed: %v", fqdn, err)
 	}
 	defer tunneltest.CloseOrLog(t, conn)
+	if n := len(conn.ConnectionState().PeerCertificates); n < 2 {
+		t.Fatalf("the phone served %d certificate(s), want the whole chain", n)
+	}
 	leaf := conn.ConnectionState().PeerCertificates[0]
 	if err := leaf.VerifyHostname(fqdn); err != nil {
 		t.Fatalf("phone cert SAN does not cover %s: %v (dns=%v)", fqdn, err, leaf.DNSNames)
