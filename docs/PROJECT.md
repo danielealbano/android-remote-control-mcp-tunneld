@@ -219,6 +219,14 @@ for the enroll / control host) and `blackbox-healthz` (each node's internal `/he
 Prometheus or Grafana.
 Secrets, key material, and tunnel payloads are NEVER logged.
 
+A public status board can read each node's state from `infra/status-report/`: a systemd timer on every node sends a
+few numbers every 30 s, with no inbound access and no dependency on Prometheus or another node: that tunneld answers,
+that it can reach Valkey (`/healthz`), that the node's own Valkey is up (`redis_up` from its exporter), and how many
+Valkey pool timeouts, real ACME failures and issuances happened since the last report. A CA rate limit is not a
+failure (`tunneld_acme_issue_total{result="rate-limited"}`). The values per node live in
+`/etc/tunneld/status-report.env` (`status-report.env.example`). To install, copy the script to
+`/usr/local/sbin/arc-status-report` and the two units to `/etc/systemd/system/`, then enable the timer.
+
 ## 7. Operations
 
 - **Deployment quickstart** (CA generation, `.env`, S3, ACME/DNS): [README](../README.md).
