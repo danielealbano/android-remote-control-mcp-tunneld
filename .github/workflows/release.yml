@@ -47,3 +47,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Sentry release name
+        id: sentry
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: echo "release=tunneld@${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Sentry release (commits + finalize)
+        uses: getsentry/action-release@e6703d0b00208e0b3687ba660d18ab5af7892821 # v3.7.2
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        with:
+          release: ${{ steps.sentry.outputs.release }}
+          set_commits: auto
+          ignore_missing: true
+          finalize: true
