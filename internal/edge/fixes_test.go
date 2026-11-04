@@ -69,12 +69,13 @@ func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 	conn := newScriptConn("198.51.100.21", nil)
 	done := runTunnel(te, conn, "abcdef012345.example.test")
 	phone := waitPhone(t, te, 0)
-	var connIDs []string
+	var connIDs, nodeIDs []string
 	deadline := time.Now().Add(5 * time.Second)
 	for len(connIDs) == 0 && time.Now().Before(deadline) {
 		te.e.smu.Lock()
 		for s := range te.e.streams {
 			connIDs = append(connIDs, s.connID)
+			nodeIDs = append(nodeIDs, s.nodeID)
 		}
 		te.e.smu.Unlock()
 		if len(connIDs) == 0 {
@@ -94,8 +95,11 @@ func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 		te.opener.calls[1].nodeID != "node-new" || te.opener.calls[1].connID != "conn-new" {
 		t.Fatalf("want one retry with the same token against the fresh route, got %+v", te.opener.calls)
 	}
-	if len(connIDs) != 1 || connIDs[0] != "conn-new" {
-		t.Fatalf("the splice must record the fresh route's connID, got %v", connIDs)
+	if te.opener.calls[0].clientAddr != "198.51.100.21:51000" || te.opener.calls[1].clientAddr != "198.51.100.21:51000" {
+		t.Fatalf("both OPENs must carry the client address, got %+v", te.opener.calls)
+	}
+	if len(connIDs) != 1 || connIDs[0] != "conn-new" || nodeIDs[0] != "node-new" {
+		t.Fatalf("the splice must record the fresh route's connID and node, got %v %v", connIDs, nodeIDs)
 	}
 	if containsStr(te.rec.rejectReasons(), "no-route") {
 		t.Fatalf("the retried stream must not be rejected, got %v", te.rec.rejectReasons())
@@ -484,8 +488,8 @@ func TestEdge_Splice_CloseReasonAttribution(t *testing.T) {
 		}
 	})
 
-	// A ctx cancel WITHOUT the eviction marker is the server draining (parent ctx) — never "evicted".
-	t.Run("server drain", func(t *testing.T) {
+	// A ctx cancel WITHOUT the eviction marker is the server (parent ctx) — never "evicted".
+	t.Run("server shutdown", func(t *testing.T) {
 		client := newScriptConn("203.0.113.23", nil) // blocks until closed
 		far := newScriptConn("203.0.113.23", nil)    // blocks until closed
 		ctx, cancel := context.WithCancel(context.Background())

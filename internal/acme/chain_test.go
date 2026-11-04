@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/go-acme/lego/v5/certificate"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
@@ -27,12 +28,16 @@ type fakeCA struct {
 	caID  string
 	err   error
 	calls int
+	pem   []byte
 }
 
 func (f *fakeCA) obtain(_ context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, store.CertInfo{}, f.err
+	}
+	if f.pem != nil {
+		return f.pem, store.CertInfo{CA: f.caID, Serial: "01", NotBefore: time.Unix(1_700_000_000, 0)}, nil
 	}
 	return []byte("CERT"), store.CertInfo{CA: f.caID, Serial: "01", NotBefore: time.Unix(1_700_000_000, 0)}, nil
 }
@@ -420,6 +425,32 @@ func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
 	assertNoCAFailureState(t, lim, CALetsEncrypt)
 }
 
+func TestChain_RecordsTheIssueResultByClass(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "a CA rate limit is not a failure", err: rateLimited(time.Minute, errors.New("too many requests")), want: CALetsEncrypt + " rate-limited"},
+		{name: "a transient error is a failure", err: transient(errors.New("connection reset")), want: CALetsEncrypt + " fail"},
+		{name: "a permanent error is a failure", err: permanent(errors.New("bad CSR")), want: CALetsEncrypt + " fail"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.err}
+			gts := &fakeCA{caID: CAGTS}
+			rec := &recordingChainRecorder{}
+			ch, _ := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+			if _, _, err := ch.Obtain(context.Background(), nil, "name"); err != nil && gts.calls != 0 {
+				t.Fatalf("Obtain = %v", err)
+			}
+			if len(rec.issues) == 0 || rec.issues[0] != tc.want {
+				t.Fatalf("issues = %v, want %q first", rec.issues, tc.want)
+			}
+		})
+	}
+}
+
 type cancellingCA struct {
 	caID   string
 	cancel context.CancelFunc
@@ -595,9 +626,11 @@ func TestChain_LogsTheIssuingCA(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var buf bytes.Buffer
-			le := &fakeCA{caID: CALetsEncrypt, err: tc.leErr}
-			gts := &fakeCA{caID: CAGTS, err: tc.gtsErr}
-			zs := &fakeCA{caID: CAZeroSSL}
+			leaf, inter, _ := testCertChain(t)
+			issued := bytes.Join([][]byte{leaf, inter}, nil)
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.leErr, pem: issued}
+			gts := &fakeCA{caID: CAGTS, err: tc.gtsErr, pem: issued}
+			zs := &fakeCA{caID: CAZeroSSL, pem: issued}
 			ch, _ := newChain(t, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))}, le, gts, zs)
 			if err := tc.issue(context.Background(), ch); err != nil {
 				t.Fatal(err)
@@ -606,8 +639,60 @@ func TestChain_LogsTheIssuingCA(t *testing.T) {
 			if !strings.Contains(buf.String(), want) {
 				t.Fatalf("log is missing %s; log = %q", want, buf.String())
 			}
+			if !strings.Contains(buf.String(), " chain_certs=2") {
+				t.Fatalf("log is missing chain_certs; log = %q", buf.String())
+			}
 			if n := strings.Count(buf.String(), `msg="acme certificate issued"`); n != 1 {
 				t.Fatalf("issuance logged %d times, want once; log = %q", n, buf.String())
+			}
+		})
+	}
+}
+
+func TestChain_ALeafOnlyChainIsInstalled(t *testing.T) {
+	t.Parallel()
+	leaf, inter, _ := testCertChain(t)
+	issuing := func() *legoClient {
+		return &legoClient{
+			cfg: LegoConfig{CAID: CALetsEncrypt, Logger: testLogger()},
+			obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+				return &certificate.Resource{Certificate: leaf}, nil
+			},
+		}
+	}
+	tests := []struct {
+		name  string
+		issue func(ctx context.Context, ch *chainIssuer) ([]byte, store.CertInfo, error)
+	}{
+		{name: "a phone's first issuance", issue: func(ctx context.Context, ch *chainIssuer) ([]byte, store.CertInfo, error) {
+			return ch.Obtain(ctx, nil, "phone")
+		}},
+		{name: "a phone's renewal", issue: func(ctx context.Context, ch *chainIssuer) ([]byte, store.CertInfo, error) {
+			return ch.Renew(ctx, nil, "phone", store.CertInfo{CA: CALetsEncrypt})
+		}},
+		{name: "a reserved host", issue: func(ctx context.Context, ch *chainIssuer) ([]byte, store.CertInfo, error) {
+			certPEM, _, info, err := ch.ObtainSelf(ctx, "enroll.example.test", store.CertInfo{})
+			return certPEM, info, err
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gts := &fakeCA{caID: CAGTS, pem: bytes.Join([][]byte{leaf, inter}, nil)}
+			ch, lim := newChain(t, ChainConfig{}, issuing(), gts)
+			got, info, err := tc.issue(context.Background(), ch)
+			if err != nil {
+				t.Fatalf("a short chain must not fail the issuance: %v", err)
+			}
+			if info.CA != CALetsEncrypt || !bytes.Equal(got, leaf) || gts.calls != 0 {
+				t.Fatalf("issued by %s, cert %q, next CA asked %d times; want the leaf from the first CA", info.CA, got, gts.calls)
+			}
+			cool, err := lim.CACooldown(context.Background(), CALetsEncrypt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cool != 0 {
+				t.Fatalf("a short chain must not back the account off: cooldown %s", cool)
 			}
 		})
 	}

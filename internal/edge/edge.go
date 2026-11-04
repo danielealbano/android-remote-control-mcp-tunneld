@@ -18,6 +18,7 @@ import (
 // Router resolves a tunnel name to its owner + connID.
 type Router interface {
 	LookupRoute(ctx context.Context, name string) (nodeID, connID string, ok bool, err error)
+	LookupNode(ctx context.Context, nodeID string) (advertise string, ok bool, err error)
 }
 
 type DialBackWaiter interface {
@@ -25,7 +26,7 @@ type DialBackWaiter interface {
 }
 
 type Opener interface {
-	Open(ctx context.Context, nodeID, name, connID, token string) error
+	Open(ctx context.Context, nodeID, name, connID, token, clientAddr string) error
 }
 
 type DialBackReadiness interface {
@@ -100,8 +101,9 @@ type Edge struct {
 	enrollLn  *chanListener
 	controlLn *chanListener
 
-	clients atomic.Int64
-	now     func() time.Time
+	clients  atomic.Int64
+	handling atomic.Int64
+	now      func() time.Time
 
 	wg sync.WaitGroup
 
@@ -109,15 +111,15 @@ type Edge struct {
 	streams map[*activeStream]struct{}
 }
 
-// Wait blocks until every in-flight public-connection handler has returned or ctx expires (server
-// drain: end events must be enqueued before the conn-log queue is flushed).
+// Wait blocks until every in-flight public-connection handler has returned or ctx expires (end events
+// must be enqueued before the conn-log queue is flushed).
 func (e *Edge) Wait(ctx context.Context) {
 	done := make(chan struct{})
 	go func() { e.wg.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-ctx.Done():
-		e.cfg.Logger.Warn("drain deadline reached before every public handler returned", "err", ctx.Err())
+		e.cfg.Logger.Warn("shutdown deadline reached before every public handler returned", "err", ctx.Err())
 	}
 }
 
@@ -153,6 +155,8 @@ func New(cfg Config, ban func(netip.Addr) bool,
 		enrollLn: newChanListener(addr, cfg.Logger), controlLn: newChanListener(addr, cfg.Logger), now: time.Now,
 	}
 }
+
+func (e *Edge) InFlightConns() int64 { return e.handling.Load() }
 
 // EnrollListener / ControlListener are the reserved-SNI listeners for the enroll + control HTTP servers.
 func (e *Edge) EnrollListener() net.Listener  { return e.enrollLn }

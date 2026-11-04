@@ -109,6 +109,7 @@ func NewMetrics() *Metrics {
 	for _, ca := range observ.ACMECAs {
 		m.acmeIssue.WithLabelValues(ca, "ok")
 		m.acmeIssue.WithLabelValues(ca, "fail")
+		m.acmeIssue.WithLabelValues(ca, "rate-limited")
 		m.acmeRenew.WithLabelValues(ca, "ok")
 		m.acmeCooldown.WithLabelValues(ca)
 		m.acmeRateLimited.WithLabelValues(ca)

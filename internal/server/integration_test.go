@@ -79,6 +79,10 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 	acmeDirLE, acmeDirGTS, acmeDirZeroSSL string, dnsResolvers []string) config.ServeCmd {
 	t.Helper()
 	caCert, caKey := writeCA(t)
+	publicIP, _, err := net.SplitHostPort(edgeAddr)
+	if err != nil {
+		t.Fatalf("split the edge address %q: %v", edgeAddr, err)
+	}
 	cfg := config.ServeCmd{
 		RedisURL:       redisURL,
 		Listen:         edgeAddr,
@@ -88,7 +92,7 @@ func itServeConfig(t *testing.T, redisURL, s3URL, access, secret, edgeAddr, mesh
 		MeshPoolSize:   4, MeshCertTTL: 24 * time.Hour,
 
 		TunnelDomain: itTunnelDomain, EnrollHost: itEnrollHost, ControlHost: itControlHost, NameLength: 10,
-		DialBackAdvertise: edgeAddr, DialBackHTTPS: true, DialBackMTLS: true,
+		PublicIP: publicIP, DialBackHTTPS: true, DialBackMTLS: true,
 		CACert: caCert, CAKey: caKey, CertValidity: 4380 * time.Hour,
 
 		S3Endpoint: s3URL, S3Region: "us-east-1", S3Bucket: itBucket,
@@ -221,10 +225,11 @@ func runIntegrationServer(t *testing.T, cfg config.ServeCmd, pebble *tunneltest.
 	drain := func() error {
 		drainOnce.Do(func() {
 			cancel()
+			within := cfg.PredrainWait + cfg.DrainGrace() + cfg.ShutdownGrace + 5*time.Second
 			select {
 			case drainErr = <-done:
-			case <-time.After(20 * time.Second):
-				drainErr = fmt.Errorf("server did not drain within 20s of cancellation")
+			case <-time.After(within):
+				drainErr = fmt.Errorf("server did not stop within %s of cancellation", within)
 			}
 		})
 		return drainErr
@@ -287,11 +292,19 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if ident.Name == "" || len(ident.PublicCertPEM) == 0 {
 		t.Fatalf("enrollment must yield a name + public cert: name=%q pubcert=%d", ident.Name, len(ident.PublicCertPEM))
 	}
+	if n := bytes.Count(ident.PublicCertPEM, []byte("-----BEGIN CERTIFICATE-----")); n < 2 {
+		t.Fatalf("public_cert holds %d certificate(s), want the whole chain", n)
+	}
+	if bytes.Contains(ident.PublicCertPEM, []byte("\n\n")) {
+		t.Fatal("public_cert holds a blank line, its certificates must be adjacent")
+	}
 	fqdn := ident.Name + "." + itTunnelDomain
 
 	// The phone TLS-terminates each dial-back data stream with its Pebble-issued public cert and echoes.
 	phoneTLS := phoneServerTLS(t, ident)
-	backend := func(s io.ReadWriteCloser) {
+	var clientAddrs sync.Map
+	backend := func(clientAddr string, s io.ReadWriteCloser) {
+		clientAddrs.Store(clientAddr, struct{}{})
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -321,6 +334,13 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 		return lastErr == nil
 	}) {
 		t.Fatalf("frontend TLS roundtrip never succeeded: %v", lastErr)
+	}
+	localAddr, err := frontendRoundtripFrom(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("frontend TLS roundtrip failed: %v", err)
+	}
+	if _, ok := clientAddrs.Load(localAddr); !ok {
+		t.Fatalf("the phone was not told the client address %s", localAddr)
 	}
 
 	// MinIO: the name registry object carries the issued cert, and a connection-log object landed.
@@ -452,31 +472,36 @@ func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
 // frontendRoundtrip dials the edge, does a full TLS handshake for fqdn (verifying against the Pebble
 // issuing roots), and asserts an echo.
 func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
+	_, err := frontendRoundtripFrom(edgeAddr, fqdn, roots)
+	return err
+}
+
+func frontendRoundtripFrom(edgeAddr, fqdn string, roots *x509.CertPool) (string, error) {
 	raw, err := net.DialTimeout("tcp", edgeAddr, 5*time.Second)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("dial the edge: %w", err)
 	}
 	defer tunneltest.CloseLogged(raw)
 	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return fmt.Errorf("set deadline: %w", err)
+		return "", fmt.Errorf("set deadline: %w", err)
 	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err != nil {
-		return fmt.Errorf("handshake: %w", err)
+		return "", fmt.Errorf("handshake: %w", err)
 	}
 	defer tunneltest.CloseLogged(conn)
 	msg := []byte("e2e-roundtrip-hello")
 	if _, err := conn.Write(msg); err != nil {
-		return fmt.Errorf("write: %w", err)
+		return "", fmt.Errorf("write: %w", err)
 	}
 	buf := make([]byte, len(msg))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return fmt.Errorf("read echo: %w", err)
+		return "", fmt.Errorf("read echo: %w", err)
 	}
 	if string(buf) != string(msg) {
-		return fmt.Errorf("echo mismatch: got %q", buf)
+		return "", fmt.Errorf("echo mismatch: got %q", buf)
 	}
-	return nil
+	return raw.LocalAddr().String(), nil
 }
 
 func waitBool(d time.Duration, cond func() bool) bool {

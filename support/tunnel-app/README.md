@@ -33,12 +33,18 @@ On `enroll` it:
   retries both phases as `docs/PROTOCOL.md` §2 prescribes;
 - starts a local **Ktor (Netty engine) `sslConnector`** HTTPS server on a fixed loopback port,
   terminating TLS with the non-exportable TLS key + the issued `<name>.<tunnel-domain>` cert, and
-  serving `GET /info` (echoes the app nonce + the current cert digest) and `GET /wait` (a paced,
+  serving `GET /info` (echoes the app nonce + the current cert digest + the `client_addr` of the connection it
+  was asked on) and `GET /wait` (a paced,
   hash-trailed stream for throughput checks);
-- opens the **duplex HTTP/2 `/control`** connection (OkHttp), answering `PING`/`OPEN`/`RENEW_NUDGE`, and
+- opens the **duplex HTTP/2 `/control`** connection (OkHttp), answering `PING`/`OPEN`/`RENEW_NUDGE`/`MOVE`, and
   answers each `OPEN` with a dial-back: a new connection to the `OPEN`'s `addr` (TLS when `use_https`,
   presenting the identity cert when `use_mtls`, plain TCP otherwise) carrying a `GET /api/v1/data` upgrade
-  with the `OPEN`'s token, then splices it opaquely to the local server.
+  with the `OPEN`'s token, then splices it opaquely to the local server; it remembers the `OPEN`'s `client_addr`
+  under the port of its local connection for the session's lifetime, and ignores an `OPEN` without one;
+- follows a `MOVE` as `docs/PROTOCOL.md` §7 prescribes: it opens a new control connection to the listed
+  addresses (then to the control host, on a new connection, and after its reconnect backoff when that one
+  answers with a `MOVE` too) and keeps serving the moved-away connection until the server closes it. Every
+  control connection uses its own connection pool.
 
 On `refresh` it forces a fresh `/issue` (rotating the identity + TLS keys and re-obtaining the public
 cert) and hot-swaps the server cert. On `stop` it tears everything down. On `forget` (only while stopped) it

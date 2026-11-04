@@ -99,9 +99,29 @@ type fakeRouter struct {
 	ok             bool
 	err            error
 
-	mu      sync.Mutex
-	queue   []fakeRoute
-	lookups int
+	mu        sync.Mutex
+	queue     []fakeRoute
+	lookups   int
+	liveNodes map[string]bool
+	nodeErr   error
+}
+
+func (r *fakeRouter) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.nodeErr != nil {
+		return "", false, r.nodeErr
+	}
+	if r.liveNodes[nodeID] {
+		return nodeID + ":9443", true, nil
+	}
+	return "", false, nil
+}
+
+func (r *fakeRouter) setNodes(live map[string]bool, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveNodes, r.nodeErr = live, err
 }
 
 func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, bool, error) {
@@ -174,7 +194,7 @@ func (f *fakeRemoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) boo
 	return f.free != nil && f.free(ctx, tunnel)
 }
 
-type openCall struct{ nodeID, name, connID, token string }
+type openCall struct{ nodeID, name, connID, token, clientAddr string }
 
 type fakeOpener struct {
 	mu        sync.Mutex
@@ -182,10 +202,10 @@ type fakeOpener struct {
 	errByNode map[string]error
 }
 
-func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token string) error {
+func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token, clientAddr string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token})
+	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token, clientAddr: clientAddr})
 	return o.errByNode[nodeID]
 }
 

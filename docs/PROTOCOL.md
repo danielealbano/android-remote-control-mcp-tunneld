@@ -113,6 +113,8 @@ auto-retries (a retried claim PUT would be a self-inflicted zombie write).
 
 **Phase-1 HTTP surface** (server-TLS on `--enroll-host`, JSON, all binary blobs hex/PEM as noted):
 
+- `GET /api/v1/health` → `200` `ok` while the node serves, `503` `stopping` from the moment it is told to stop
+  (plain text; §7). It is the target of a health-checking DNS load balancer and sits behind the same IP-ban check.
 - `GET /api/v1/enroll/nonce` → `{"nonce": "<hex>"}` — 32 random bytes as hex, single-use, valid 5 minutes.
   The attestation challenge is the hex-DECODED bytes. The nonce route and `POST /api/v1/enroll` share the
   per-IP enroll windows (`--limit-enroll-minute`, default 2; `--limit-enroll-hour`, default 20): each nonce
@@ -127,7 +129,8 @@ auto-retries (a retried claim PUT would be a self-inflicted zombie write).
   `banned` 403; `enroll_rate` 429 on the nonce route and 503 on POST (retryable, `retry_after_seconds` = time
   to the next window); `bad_request`, `bad_json`, `bad_nonce`, `bad_attestation_chain`, `bad_identity_csr`
   400; `invalid_nonce` 503 retryable; `unauthorized` 401; `name_unavailable` 503; `internal` 503;
-  `unsupported_key_type` 400; `identity_sign_failed` 503 retryable. An unknown path or method on
+  `unsupported_key_type` 400; `identity_sign_failed` 503 retryable; `draining` 503 retryable
+  (`retry_after_seconds` 1, with `Connection: close`, while the node drains — §7). An unknown path or method on
   `--enroll-host` gets a plain-text `404`.
 - **Retrying a failed enrollment**: the phone retries Phase 1 at most 3 times. A refusal with `retryable: true`
   waits its `retry_after_seconds`, at least 1 s; a network error or a timeout waits 2 s; `retryable: false` ends
@@ -145,7 +148,7 @@ The control stream is a `POST /api/v1/control` on an HTTP/2 connection to `--con
 client cert); over HTTP/1.x it is refused with `505` (an IP ban, a rejected certificate, a banned name or a
 non-POST method is answered first, as below; every HTTP/1.x answer carries `Connection: close`). Its request
 body is the phone→server frame stream (only `PONG`) and its response body the server→phone frame stream
-(`OPEN`, `PING`, `RENEW_NUDGE`), both length-framed as below; the server flushes each frame and the stream
+(`OPEN`, `PING`, `RENEW_NUDGE`, `MOVE`), both length-framed as below; the server flushes each frame and the stream
 stays open for the connection's lifetime. `POST /api/v1/issue` (below) may use the same connection or another
 one, over HTTP/2 or HTTP/1.1: the server authenticates every request by its client certificate.
 
@@ -153,10 +156,13 @@ one, over HTTP/2 or HTTP/1.1: the server authenticates every request by its clie
 with `--dialback-mtls=false`, no certificate; with the default `--dialback-mtls=true` a missing, untrusted or
 expired certificate fails the TLS handshake, with no HTTP answer) or `banned`, JSON. `405` non-POST, `505`
 HTTP/1.x, `503` "too many pending" (more than `--limit-stream-pending`, default 64, handshakes waiting to bind)
-and `503` "bind failed (retry)", plain text. `400` `bad_source_ip`, JSON (not reachable through the edge). A
+and `503` "bind failed (retry)", plain text. `400` `bad_source_ip`, JSON (not reachable through the edge). While
+the node drains (§7) a new control connection is not bound: it gets `200` and one `MOVE` frame, then the stream
+ends, or `503` "draining", plain text, when the node knows no other node; either way the server sends `GOAWAY`. A
 new control connection for a name REPLACES the previous one, on any node and whatever identity-certificate
 generation it presents: the old connection is closed at once on the same node, or at its next route heartbeat
-(every `--route-ttl`/3, 10 s by default) on another node. There is no `409`.
+(every `--route-ttl`/3, 10 s by default) on another node — unless that node is draining: there it stays open
+until the drain ends (§7). There is no `409`.
 
 **Liveness.** The server sends a `PING` every `--control-ping-interval` (at most 30 s). It sends the first
 `PING` one interval after the stream opens and closes the connection when no `PONG` arrived for more than three
@@ -174,10 +180,13 @@ Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values
 
 | Frame | Type | Direction | Payload |
 |---|---|---|---|
-| `OPEN` | `0x01` | server→phone | `{token, addr, use_https, use_mtls}` — dial back to `addr` for one public connection (§4) |
+| `OPEN` | `0x01` | server→phone | `{token, addr, use_https, use_mtls, client_addr}` — dial back to `addr` for one public connection (§4) |
 | `PING` | `0x02` | server→phone | (none) — application liveness |
 | `PONG` | `0x03` | phone→server | (none) — liveness answer |
 | `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window?}` — "renew now"; the phone answers by calling `POST /api/v1/issue` |
+| `MOVE` | `0x05` | server→phone | `{addrs}` — this node is draining: open a new control connection to one of `addrs` (§7) |
+
+A phone MUST ignore the fields it does not know in a control-frame payload.
 
 `ari_window` is optional and is NOT an ACME ARI window: it is the RFC 3339 renewal time the server computed
 (now or already past); an admin reissue omits it; for a tunnel with no certificate yet it is a year-1
@@ -194,9 +203,11 @@ stream. The only phone→server frame is `PONG` (liveness); a stream tears down 
 never a control frame.
 
 When the control connection closes (for any reason), every splice opened through it ends, on every node
-(§5 `evict`). A crashed owner node sends no `evict`: such splices end within 10 s after the route expires
-(`--route-ttl`) or is re-bound, when the entry node's per-splice route check (every 10 s each splice re-reads
-its tunnel's route) finds the route gone or bound to another connection. A ban eviction closes the control
+(§5 `evict`). A crashed owner node sends no `evict`: the entry node's per-splice route check (every 10 s each
+splice re-reads its tunnel's route) ends such a splice within 10 s after the route expires (`--route-ttl`), or,
+once the route is bound to another connection, within 10 s after the crashed node has left the node registry
+(its record expires `--route-ttl` after its last heartbeat). A route bound to another connection while the node
+holding the splice's connection is still registered does not end the splice: that connection's close does. A ban eviction closes the control
 connection with close reason `ban-evict`, which every node keeps for the splices it ends.
 
 ### `POST /api/v1/issue` (mTLS certificate-generation endpoint)
@@ -209,7 +220,14 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   (byte-exact, lowercase): as its single DNS SAN or, with no SAN, as its CN; a non-empty CN must equal it; no
   IP / email / URI SAN; anything else is `400` `csr_domain_mismatch` (not retryable).
 - Response: `{identity_cert, public_cert, ca}` — the regenerated identity + public certs; `ca` is the issuing
-  CA's id (`letsencrypt`, `gts` or `zerossl`), not a certificate.
+  CA's id (`letsencrypt`, `gts` or `zerossl`), not a certificate. `public_cert` is a PEM bundle holding the
+  full chain the CA issued, leaf first. The server re-encodes it with the certificates directly adjacent, with no blank
+  lines or other text between them, because older Android parsers (`CertificateFactory.generateCertificates`) silently
+  stop at a blank line and return only the leaf; a bundle holding a block it cannot re-encode is sent as the CA sent it,
+  which is why the phone SHOULD parse each PEM block separately. The phone MUST serve every certificate it parsed. A
+  chain that ends up with only the leaf is NOT a failed issuance: the phone MUST keep its tunnel serving and SHOULD
+  report it, because clients that fetch intermediates still work and the next renewal replaces the certificate, while
+  refusing it would take a working tunnel down.
 - **Latency**: the response arrives only after a live ACME order (validation + issuance, possibly spilling
   over to the next CA), so the phone MUST allow at least 400 s for it; the server gives up on the request
   after 390 s. A phone that gives up earlier can lose the issued certificate (the server discards an order
@@ -222,7 +240,8 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
   `bad_json`, `bad_nonce`, `bad_attestation`, `bad_identity_csr`, `bad_tls_csr` 400; `invalid_nonce` 503;
   `unauthorized` 401; `name_unknown` 400; `csr_domain_mismatch` 400; `unsupported_key_type` 400;
   `identity_sign_failed` 503; `issuance_cap` 503; `acme_rate_limited` 503; `acme_transient` 503
-  (`retry_after_seconds` 60); `acme_failed` 400; `internal` 503.
+  (`retry_after_seconds` 60); `acme_failed` 400; `internal` 503; `draining` 503 (`retry_after_seconds` 1, with
+  `Connection: close` — `GOAWAY` over HTTP/2 — while the node drains, §7).
 - **Retrying a failed issuance**: the phone retries `POST /api/v1/issue` at most 3 times, and only the issuance — it
   NEVER re-enrolls (a new enrollment assigns a new name and orphans the old one). A network error, a timeout, or
   an error answer with `retryable: true` is retried; `retryable: false` ends the attempts at once. Retry n
@@ -264,10 +283,16 @@ at its next `PING` (close reason `cert-expired`).
 `OPEN` (`0x01`, server→phone) payload:
 
 ```json
-{"token": "<26 chars, crypto/rand.Text, 128 bits>", "addr": "203.0.113.10:443", "use_https": true, "use_mtls": true}
+{"token": "<26 chars, crypto/rand.Text, 128 bits>", "addr": "203.0.113.10:443", "use_https": true, "use_mtls": true, "client_addr": "198.51.100.7:52144"}
 ```
 
-`addr` is the `host:port` of the node where the public connection entered (`--dialback-advertise`). On
+`client_addr` is the `host:port` of the public client this dial-back serves: the TCP peer of the public connection
+at the entry node (`[2001:db8::7]:52144` for IPv6), so a client behind NAT or a VPN shows that exit address. It is
+REQUIRED: the server sends it on every `OPEN`, a phone MUST support it, and an `OPEN` without it or with an empty
+value is invalid and ignored. Phones built before this field keep working only because they ignore it (§3).
+
+`addr` is the `host:port` of the node where the public connection entered: its `--public-ip` with the `--listen`
+port, or with the `--acme-http-listen` port when `use_https` is false. On
 `OPEN` the phone opens a NEW connection to `addr` — TLS with SNI = `--control-host` and ALPN `http/1.1` when
 `use_https`, presenting its identity client certificate when `use_mtls` (`use_mtls` without `use_https` is
 invalid and ignored); plain TCP otherwise — and sends:
@@ -322,7 +347,10 @@ mTLS). The ops:
   afterwards). The internal `POST /api/v1/admin/tunnels/{name}/terminate` endpoint sends it to EVERY node.
 - `open`: `{"op":"open","tunnel":"<name>","conn_id":"<route connID>","open":{<OPEN payload>}}` →
   `{"applied":true}` when the receiver holds that live connection and queued the `OPEN`, else
-  `{"applied":false}`. The entry node uses it when another node holds the phone's control connection.
+  `{"applied":false}`. The entry node uses it when another node holds the phone's control connection. A payload
+  without `client_addr` is still delivered, with an empty value, so a rolling restart across two versions fails no public connection of
+  a phone built before that field. A phone that requires the field ignores such an `OPEN`, so it can ship only once
+  every node sends the field.
 - `evict`: `{"op":"evict","tunnel":"<name>","conn_id":"<closed connID>","reason":"<the control connection's
   close reason>"}` → `{"applied":<any splice ended>}`. A node whose phone control connection closes sends it
   to every node; each ends the splices opened through that connection, keeping `ban-evict` /
@@ -359,3 +387,62 @@ send buffer is full; `terminate` answers `applied` = whether a live phone connec
 - A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME validation addressed to tunneld: it is answered locally with tunneld's challenge certificate and NEVER spliced to a phone.
 - An IP-ban `403` on `/api/v1/enroll` or `/api/v1/control` comes only on a connection opened before the ban was
   loaded; a new connection from a banned address is closed by the edge before TLS.
+
+## 7. Node drain and reconnection
+
+### Connections and DNS
+
+- Every connection the phone opens to `--enroll-host` or `--control-host` MUST resolve that name through DNS
+  when it is opened, so a node that has left the DNS answer is not reached again.
+- A connection the server answered with `Connection: close` MUST NOT carry another request: over HTTP/1.1 the
+  server closes it after the response, and over HTTP/2 it sends `GOAWAY`, so the streams already open on it go on
+  and the next request opens a new connection, resolved again.
+- Every control connection — a reconnect or a `MOVE` — is a new TCP + TLS connection. It never reuses the
+  connection of another control stream.
+- `OPEN.addr` and the `MOVE` addresses are literal `host:port` values, dialed as given.
+
+### Stopping a node
+
+A node told to stop (`SIGTERM` or `SIGINT`) goes through three phases:
+
+1. **Pre-drain** (`--predrain-wait`, default 0): `GET /api/v1/health` answers `503` and everything else is served
+   as usual, so a health-checking DNS load balancer drops the node from its answers before the drain starts.
+2. **Drain** (at most `--limit-conn-idle` + 5 s): the node sends `MOVE` on every phone control connection it holds,
+   listing the public TLS edge (`--public-ip` with the `--listen` port) of every other node in the node registry,
+   in an order shuffled per phone. When it cannot read the registry or knows no other node, it sends no `MOVE`.
+   While the node drains:
+   - a phone control connection that another node now owns stays open and keeps serving the splices opened
+     through it;
+   - a new `POST /api/v1/control` is not bound: `200` and one `MOVE` frame, then the stream ends (`503` "draining",
+     plain text, when there is no other node); either way the server sends `GOAWAY`;
+   - `GET /api/v1/enroll/nonce`, `POST /api/v1/enroll` and `POST /api/v1/issue` answer `503`
+     `{"reason":"draining","retryable":true,"retry_after_seconds":1}` with `Connection: close` (`GOAWAY` over HTTP/2);
+     `GET /api/v1/health` keeps answering `503`;
+   - dial-backs are accepted and public connections are served as usual: one that reaches this node reaches its
+     phone through the node that now owns the route, and the phone dials back to this node.
+
+   The drain ends sooner once the node holds no phone control connection and no public connection, and runs no
+   `POST /api/v1/issue`. A connection a phone moved away from stays held until the drain ends (the node cannot see
+   the splices opened through it on the other nodes), so a node that held a phone drains for the full time.
+3. **Shutdown** (`--shutdown-grace`): the node closes its remaining phone control connections (the splices opened
+   through them end on every node, §3) and public connections, and exits.
+
+### `MOVE` (server→phone)
+
+`MOVE` `{"addrs": ["203.0.113.11:443", "203.0.113.12:443"]}` means the node that sent it is draining. The phone:
+
+- opens a NEW control connection to the addresses in the order given — TLS with SNI = `--control-host`, its
+  identity client certificate, `POST /api/v1/control` — and the first that answers `200` is its new control
+  connection; an address that is not a valid `host:port` is skipped;
+- when none answers `200`, opens one to `--control-host` resolved through DNS, never on the connection that carried
+  the `MOVE`, and retries as after any lost connection; a `MOVE` that this connection answers is followed only after
+  the phone's reconnect backoff;
+- keeps the connection that carried the `MOVE` open and keeps serving its frames (`PING`, `OPEN`) until the server
+  closes it. It MUST NOT close it itself: closing it ends the splices opened through it (§3);
+- treats each dial-back session as belonging to the control connection whose `OPEN` started it: when a control
+  connection ends, the phone may end that connection's sessions, never those of its other control connection;
+- follows a `MOVE` that arrives on its new connection the same way (a phone can move again, for example when
+  several nodes drain at once); a further `MOVE` on a connection that already moved is ignored.
+
+A phone that ignores `MOVE` keeps its connection until the drain ends; when the node closes it, the phone
+reconnects through DNS.

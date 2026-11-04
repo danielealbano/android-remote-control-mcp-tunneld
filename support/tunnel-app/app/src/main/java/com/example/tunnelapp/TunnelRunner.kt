@@ -5,6 +5,7 @@ import android.util.Log
 import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 object TunnelRunner {
@@ -65,8 +66,9 @@ object TunnelRunner {
         }
         installed(id)
         val (tlsKey, tlsChain) = id.tlsCredential()
-        val srv = Server(FIXED_LOCAL_PORT, appNonce, id.name, stats).also { it.start(tlsKey, tlsChain) }
-        val tun = Tunnel(id.mtlsClient(), net, env.controlHost, net.dialBack(env.controlHost, id), srv::localPort, stats) { nonce ->
+        val clientAddrs = ConcurrentHashMap<Int, String>()
+        val srv = Server(FIXED_LOCAL_PORT, appNonce, id.name, stats, clientAddrs).also { it.start(tlsKey, tlsChain) }
+        val tun = Tunnel(id.mtlsClient(), net, env.controlHost, net.dialBack(env.controlHost, id), srv::localPort, stats, clientAddrs) { nonce ->
             synchronized(renewLock) {
                 try {
                     gate.renewal(id.name, { st.holds(id) }, { attempt -> Enroll.issue(id, nonce, attempt) }) {

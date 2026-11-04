@@ -16,7 +16,7 @@ lint:
 	golangci-lint run --build-tags=e2e ./...
 	golangci-lint run --build-tags=e2e,soak ./...
 	golangci-lint run --build-tags=staging ./...
-	shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh
+	shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh infra/status-report/*.sh
 	$(MAKE) compose-config
 
 vet:
@@ -54,6 +54,7 @@ test-all: test-unit test-integration test-e2e test-staging
 test-scripts:
 	sh deploy/scripts/scripts_test.sh
 	sh scripts/scripts_test.sh
+	sh infra/status-report/status_report_test.sh
 
 tidy:
 	go mod tidy

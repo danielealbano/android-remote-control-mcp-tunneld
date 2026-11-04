@@ -55,7 +55,7 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    ```
 3. **Configure**:
    ```sh
-   cp deploy/.env.example deploy/.env               # DEPLOY_UID (= id -u), domains, DIALBACK_ADVERTISE (this host's public IP:443), S3 credentials + bucket
+   cp deploy/.env.example deploy/.env               # DEPLOY_UID (= id -u), domains, PUBLIC_IP (this host's public IP address), S3 credentials + bucket
    cp deploy/tunneld.env.example deploy/tunneld.env # CA, conn-log dir, signer allowlist, ACME (+ the lego DNS-provider secret), ban file, DB-IP CSV, log sinks
    ```
 4. **DNS + ACME**: point `*.<tunnel-domain>`, `<enroll-host>`, and `<control-host>` at this host. tunneld

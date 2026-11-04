@@ -1,5 +1,5 @@
-// Package wire is the E2E wire contract: the length-framed control-stream codec (dial-back, ping,
-// renewal nudge) and ChunkSize (the opaque data-splice pacing size). See docs/PROTOCOL.md — the
+// Package wire is the E2E wire contract: the length-framed control-stream codec
+// and ChunkSize (the opaque data-splice pacing size). See docs/PROTOCOL.md — the
 // canonical contract both the Go and Kotlin clients conform to.
 package wire
 
@@ -24,10 +24,11 @@ const (
 	CtrlPing                              // liveness
 	CtrlPong                              // liveness
 	CtrlRenewNudge                        // server→phone {nonce, ariWindow}: "renew now" — the phone answers by calling POST /api/v1/issue (mTLS)
+	CtrlMove
 )
 
-// maxControlPayload bounds a control-frame payload. The control stream carries only small frames
-// (dial-back announcements, liveness, the renewal nudge); certificate material (attestation chains,
+// maxControlPayload bounds a control-frame payload. The control stream carries only small frames;
+// certificate material (attestation chains,
 // CSRs, issued certs) travels over the mTLS POST /api/v1/issue endpoint, NOT the stream.
 const maxControlPayload = 1 << 20 // 1 MiB
 
@@ -39,10 +40,11 @@ const ChunkSize = 16 * 1024
 // --- payloads ---
 
 type OpenPayload struct {
-	Token    string `json:"token"`
-	Addr     string `json:"addr"`
-	UseHTTPS bool   `json:"use_https"`
-	UseMTLS  bool   `json:"use_mtls"`
+	Token      string `json:"token"`
+	Addr       string `json:"addr"`
+	UseHTTPS   bool   `json:"use_https"`
+	UseMTLS    bool   `json:"use_mtls"`
+	ClientAddr string `json:"client_addr"`
 }
 
 const (
@@ -57,6 +59,10 @@ const (
 type RenewNudgePayload struct {
 	Nonce     string `json:"nonce"` // hex
 	ARIWindow string `json:"ari_window,omitempty"`
+}
+
+type MovePayload struct {
+	Addrs []string `json:"addrs"`
 }
 
 var (

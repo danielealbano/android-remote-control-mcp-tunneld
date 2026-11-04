@@ -188,3 +188,44 @@ func TestEdge_AcceptLoop_LogsAcceptFailure(t *testing.T) {
 		t.Fatalf("an accept failure must be logged with its backoff; log = %q", buf.String())
 	}
 }
+
+func TestEdge_InFlightConns_CountsFromAcceptUntilTheHandlerReturns(t *testing.T) {
+	cfg := baseConfig()
+	cfg.HandshakeTimeout = 30 * time.Second
+	te := newTestEdge(t, cfg, nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		te.e.acceptLoop(context.Background(), ln)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		tunneltest.CloseOrLog(t, ln)
+		<-done
+	})
+	waitConns := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for te.e.InFlightConns() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("InFlightConns = %d, want %d", te.e.InFlightConns(), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitConns(0)
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitConns(1)
+	time.Sleep(100 * time.Millisecond)
+	if n := te.e.InFlightConns(); n != 1 {
+		t.Fatalf("a connection still sending its ClientHello must stay counted, InFlightConns = %d", n)
+	}
+	tunneltest.CloseOrLog(t, client)
+	waitConns(0)
+}

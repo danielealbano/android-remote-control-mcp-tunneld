@@ -418,8 +418,8 @@ func TestPromRecorder_FlushErrorRequeuesDelta(t *testing.T) {
 	}
 }
 
-// TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the ordered
-// server drain owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
+// TestRunFlusher_NoFlushOnCancel: RunFlusher must return on ctx cancel WITHOUT flushing — the
+// server owns the final flush (FinalFlush), so a cancel-time flush that races live producers is gone.
 func TestRunFlusher_NoFlushOnCancel(t *testing.T) {
 	_, rec, _, _, _ := setup(t)
 	rec.Bytes("tunA", "in", 100)
@@ -536,7 +536,7 @@ func TestRegisterLogSinkErrors(t *testing.T) {
 func TestLabelledCountersPreCreatedAtZero(t *testing.T) {
 	want := map[string][]string{}
 	for _, ca := range observ.ACMECAs {
-		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail")
+		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail", "ca="+ca+",result=rate-limited")
 		want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+ca+",result=ok")
 		want["tunneld_acme_cooldown_total"] = append(want["tunneld_acme_cooldown_total"], "ca="+ca)
 		want["tunneld_acme_rate_limited_total"] = append(want["tunneld_acme_rate_limited_total"], "ca="+ca)

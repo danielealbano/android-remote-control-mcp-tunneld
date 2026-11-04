@@ -2,10 +2,13 @@ package phoneconn
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"math/big"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +59,8 @@ type conn struct {
 	mu     sync.Mutex
 	closed bool
 	reason string
+
+	moveDue atomic.Bool
 }
 
 // teardownTimeout bounds the best-effort unbind + end-event writes on connection teardown (a hung control
@@ -75,10 +80,15 @@ type Manager struct {
 	nodeStart string
 	routeTTL  time.Duration
 
-	mu    sync.RWMutex
-	conns map[string]*conn // name → conn
+	mu             sync.RWMutex
+	conns          map[string]*conn // name → conn
+	closeAllReason string
 
 	bindMu [64]sync.Mutex // striped per-name locks serializing BindRoute + the local-map insert
+
+	draining  atomic.Bool
+	moveMu    sync.Mutex
+	moveAddrs []string
 
 	now func() time.Time
 }
@@ -154,7 +164,11 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		old.close("phone-close")
 	}
 	m.conns[c.name] = c
+	late := m.closeAllReason
 	m.mu.Unlock()
+	if late != "" {
+		c.close(late)
+	}
 
 	m.rec.PhoneConnOpen()
 	m.writeEvent(ctx, c, "start", "")
@@ -181,7 +195,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 }
 
 // heartbeatLoop refreshes the route while the connection is owner, handling the three-state result:
-// not-owner → close this superseded connection without unbinding; missing → epoch-preserving self-heal.
+// missing → epoch-preserving self-heal.
 func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 	defer close(c.hbDone)
 	interval := m.routeTTL / 3
@@ -209,6 +223,9 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 			switch res {
 			case router.HeartbeatRefreshed:
 			case router.HeartbeatNotOwner:
+				if m.draining.Load() {
+					return
+				}
 				c.close("phone-close") // superseded — do NOT unbind the new owner's route
 				return
 			case router.HeartbeatMissing:
@@ -239,19 +256,115 @@ func (m *Manager) SendOpen(ctx context.Context, name, connID string, open wire.O
 	}
 }
 
-// CloseAll closes every live phone connection with the given close reason. Called at server drain so
+// CloseAll closes every live phone connection with the given close reason. Called so
 // each /api/v1/control handler returns and its deferred teardown runs (owner-conditional route unbind + the
 // durable end event) instead of the connections outliving Run and losing both.
 func (m *Manager) CloseAll(reason string) {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.closeAllReason = reason
 	victims := make([]*conn, 0, len(m.conns))
 	for _, c := range m.conns {
 		victims = append(victims, c)
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	for _, c := range victims {
 		c.close(reason)
 	}
+}
+
+func (m *Manager) StartDrain(addrs []string) {
+	m.moveMu.Lock()
+	m.moveAddrs = slices.Clone(addrs)
+	m.moveMu.Unlock()
+	m.draining.Store(true)
+	if len(addrs) == 0 {
+		return
+	}
+	m.mu.RLock()
+	live := make([]*conn, 0, len(m.conns))
+	for _, c := range m.conns {
+		live = append(live, c)
+	}
+	m.mu.RUnlock()
+	for _, c := range live {
+		m.sendMove(c)
+	}
+}
+
+func (m *Manager) sendMove(c *conn) {
+	if c.isClosed() {
+		return
+	}
+	frame, err := m.moveFrame()
+	if errors.Is(err, errNoMoveTarget) {
+		return
+	}
+	if err != nil {
+		if !c.moveDue.Swap(true) {
+			m.logger.Warn("MOVE frame failed (retried while the drain lasts)", "tunnel", c.name, "conn", c.connID, "err", err)
+		}
+		return
+	}
+	select {
+	case c.send <- frame:
+		c.moveDue.Store(false)
+	default:
+		if !c.moveDue.Swap(true) {
+			m.logger.Warn("MOVE not queued: the send buffer is full (retried while the drain lasts)", "tunnel", c.name, "conn", c.connID)
+		}
+	}
+}
+
+func (m *Manager) RetryMoves() {
+	m.mu.RLock()
+	var due []*conn
+	for _, c := range m.conns {
+		if c.moveDue.Load() {
+			due = append(due, c)
+		}
+	}
+	m.mu.RUnlock()
+	for _, c := range due {
+		m.sendMove(c)
+	}
+}
+
+func (m *Manager) Draining() bool { return m.draining.Load() }
+
+func (m *Manager) moveFrame() ([]byte, error) {
+	m.moveMu.Lock()
+	addrs := slices.Clone(m.moveAddrs)
+	m.moveMu.Unlock()
+	if len(addrs) == 0 {
+		return nil, errNoMoveTarget
+	}
+	for i := len(addrs) - 1; i > 0; i-- {
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			return nil, fmt.Errorf("shuffle the MOVE targets: %w", err)
+		}
+		j := int(n.Int64())
+		addrs[i], addrs[j] = addrs[j], addrs[i]
+	}
+	frame, err := wire.EncodeControl(wire.CtrlMove, wire.MovePayload{Addrs: addrs})
+	if err != nil {
+		return nil, fmt.Errorf("encode the MOVE frame: %w", err)
+	}
+	return frame, nil
+}
+
+var errNoMoveTarget = errors.New("phoneconn: no node to move to")
+
+func (m *Manager) LiveConns() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, c := range m.conns {
+		if !c.isClosed() {
+			n++
+		}
+	}
+	return n
 }
 
 // EvictBanned closes every live connection whose name matches the ban predicate,

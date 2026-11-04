@@ -367,7 +367,7 @@ func TestReadResponse_TruncatedBodyErrors(t *testing.T) {
 // connection once Run has returned.
 func TestClient_CloseReleasesControlTransport(t *testing.T) {
 	ts := startTestServer(t)
-	c := ts.newClient(t, func(io.ReadWriteCloser) {})
+	c := ts.newClient(t, func(string, io.ReadWriteCloser) {})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan struct{})

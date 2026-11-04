@@ -52,12 +52,20 @@ type Handler struct {
 	ban     BanFunc
 	rec     observ.Recorder
 	maxBody int64
+	life    Lifecycle
+}
+
+type Lifecycle interface {
+	Stopping() bool
+	Draining() bool
 }
 
 // NewHandler builds the HTTP handler. maxBody bounds the enroll POST body.
-func NewHandler(svc *Service, ban BanFunc, rec observ.Recorder, maxBody int64) *Handler {
-	return &Handler{svc: svc, ban: ban, rec: rec, maxBody: maxBody}
+func NewHandler(svc *Service, ban BanFunc, rec observ.Recorder, maxBody int64, life Lifecycle) *Handler {
+	return &Handler{svc: svc, ban: ban, rec: rec, maxBody: maxBody, life: life}
 }
+
+const drainingRetryAfterSeconds = 1
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := peerIP(r)
@@ -74,13 +82,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
 		return
 	}
+	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/health" {
+		h.handleHealth(w)
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/enroll/nonce":
-		h.handleNonce(w, r, ip)
+		if !h.refuseDraining(w) {
+			h.handleNonce(w, r, ip)
+		}
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/enroll":
-		h.handleEnroll(w, r, ip)
+		if !h.refuseDraining(w) {
+			h.handleEnroll(w, r, ip)
+		}
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+func (h *Handler) refuseDraining(w http.ResponseWriter) bool {
+	if !h.life.Draining() {
+		return false
+	}
+	w.Header().Set("Connection", "close")
+	h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "draining", Retryable: true, RetryAfter: drainingRetryAfterSeconds})
+	return true
+}
+
+func (h *Handler) handleHealth(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	body, status := "ok\n", http.StatusOK
+	if h.life.Stopping() {
+		body, status = "stopping\n", http.StatusServiceUnavailable
+	}
+	w.WriteHeader(status)
+	if _, err := io.WriteString(w, body); err != nil {
+		h.svc.logger.Debug("health response write failed", "status", status, "err", err)
 	}
 }
 

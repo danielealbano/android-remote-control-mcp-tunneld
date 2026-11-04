@@ -202,7 +202,7 @@ func TestControlOpenDispatches(t *testing.T) {
 	for _, applied := range []bool{true, false} {
 		fc := &fakeController{opened: applied}
 		h := newTestHandler(t, fc)
-		open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+		open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true, ClientAddr: "198.51.100.7:52144"}
 		body, err := json.Marshal(ControlRequest{Op: "open", Tunnel: "t", ConnID: "c1", Open: &open})
 		if err != nil {
 			t.Fatal(err)
@@ -222,6 +222,33 @@ func TestControlOpenDispatches(t *testing.T) {
 		if fc.tunnel != "t" || fc.connID != "c1" || fc.open != open {
 			t.Errorf("controller got tunnel=%q conn=%q open=%+v", fc.tunnel, fc.connID, fc.open)
 		}
+	}
+}
+
+func TestControlOpenWithoutClientAddrDispatches(t *testing.T) {
+	t.Parallel()
+	want := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "no client_addr key", body: `{"op":"open","tunnel":"t","conn_id":"c1","open":{"token":"TOKEN","addr":"203.0.113.10:443","use_https":true,"use_mtls":true}}`},
+		{name: "empty client_addr", body: `{"op":"open","tunnel":"t","conn_id":"c1","open":{"token":"TOKEN","addr":"203.0.113.10:443","use_https":true,"use_mtls":true,"client_addr":""}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fc := &fakeController{opened: true}
+			h := newTestHandler(t, fc)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", []byte(tc.body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", w.Code)
+			}
+			if !fc.called || fc.open != want {
+				t.Fatalf("controller called=%v open=%+v, want %+v", fc.called, fc.open, want)
+			}
+		})
 	}
 }
 

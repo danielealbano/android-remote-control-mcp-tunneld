@@ -33,12 +33,13 @@ type activeStream struct {
 	tunnel     string
 	member     string
 	connID     string
+	nodeID     string
 	parent     context.Context
 	lastAct    atomic.Int64 // unix nanos of last byte activity
 	recent     atomic.Int64 // bytes in the current rolling window
 	started    time.Time
 	cancel     context.CancelFunc
-	evicted    atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a server-drain (parent ctx) cancel
+	evicted    atomic.Bool // set BEFORE cancel() on saturation eviction, so the splice can tell an eviction cancel from a (parent ctx) cancel
 	banned     atomic.Bool // set BEFORE cancel() on a ban reload, so the splice attributes ban-evict over terminated/evicted/shutdown
 	terminated atomic.Bool // set BEFORE cancel() on an admin terminate, so the splice attributes admin-terminate over evicted/shutdown
 	phoneGone  atomic.Bool
@@ -230,16 +231,17 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
 	// owner/connID while we held stale values (one fresh route lookup + retry, then
 	// close) — and retry once when the fresh route differs.
-	openedVia := connID
-	far, ferr := e.openFar(ctx, name, nodeID, connID, token)
+	openedVia, openedOn := connID, nodeID
+	clientAddr := client.RemoteAddr().String()
+	far, ferr := e.openFar(ctx, name, nodeID, connID, token, clientAddr)
 	if ferr != nil {
 		n2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr != nil {
 			e.cfg.Logger.Debug("route re-lookup failed", "tunnel", name, "err", lerr)
 		}
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) {
-			openedVia = c2
-			far, ferr = e.openFar(ctx, name, n2, c2, token)
+			openedVia, openedOn = c2, n2
+			far, ferr = e.openFar(ctx, name, n2, c2, token, clientAddr)
 		}
 	}
 	if ferr != nil {
@@ -252,7 +254,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	as := &activeStream{tunnel: name, member: token, connID: openedVia, parent: ctx, started: e.now(), cancel: cancel}
+	as := &activeStream{tunnel: name, member: token, connID: openedVia, nodeID: openedOn, parent: ctx, started: e.now(), cancel: cancel}
 	as.release = releaseSlot
 	as.lastAct.Store(e.now().UnixNano())
 	e.trackStream(as)
@@ -318,7 +320,7 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 	return name, true
 }
 
-func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) (net.Conn, error) {
+func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token, clientAddr string) (net.Conn, error) {
 	timeout := e.cfg.DialBackTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -326,7 +328,7 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) 
 	octx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return e.dialBacks.Await(octx, token, name, func(ctx context.Context) error {
-		return e.opener.Open(ctx, nodeID, name, connID, token)
+		return e.opener.Open(ctx, nodeID, name, connID, token, clientAddr)
 	})
 }
 
@@ -434,9 +436,7 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 				}
 				if now >= nextRouteCheck {
 					nextRouteCheck = now + int64(routeCheckInterval)
-					if _, cur, ok, lerr := e.router.LookupRoute(ctx, name); lerr != nil {
-						e.cfg.Logger.Debug("splice route check failed (keeping the splice)", "tunnel", name, "err", lerr)
-					} else if !ok || cur != as.connID {
+					if e.parentGone(ctx, name, as) {
 						setReason(store.ClosePhoneClose)
 						closeBoth()
 						return
@@ -452,6 +452,26 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	close(stopWatch)
 	<-watchExited // all writers (copies + watcher) have stopped; reason is now safe to read
 	return reason
+}
+
+func (e *Edge) parentGone(ctx context.Context, name string, as *activeStream) bool {
+	_, cur, ok, err := e.router.LookupRoute(ctx, name)
+	if err != nil {
+		e.cfg.Logger.Debug("splice route check failed (keeping the splice)", "tunnel", name, "err", err)
+		return false
+	}
+	if !ok {
+		return true
+	}
+	if cur == as.connID {
+		return false
+	}
+	_, live, err := e.router.LookupNode(ctx, as.nodeID)
+	if err != nil {
+		e.cfg.Logger.Debug("splice route check: node lookup failed (keeping the splice)", "tunnel", name, "node", as.nodeID, "err", err)
+		return false
+	}
+	return !live
 }
 
 // pacedCopy outcome codes: the source EOF'd (or was force-closed), a write to the destination failed,

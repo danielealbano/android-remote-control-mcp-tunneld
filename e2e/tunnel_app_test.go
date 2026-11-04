@@ -17,12 +17,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,12 +77,11 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	// the committed debug signer allowlist. Generous bandwidth/concurrency so the /wait pacing does not
 	// throttle the concurrent ~1 MiB/s streams.
 	edge := inf.startReplica(t, replicaOpts{
-		attestRootURL:     googleAttestRootURL,
-		attestStatusURL:   googleAttestStatusURL,
-		attestSignerFile:  signersPath,
-		bandwidth:         "100mbit",
-		concurrent:        32,
-		dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppDevicePort),
+		attestRootURL:    googleAttestRootURL,
+		attestStatusURL:  googleAttestStatusURL,
+		attestSignerFile: signersPath,
+		bandwidth:        "100mbit",
+		concurrent:       32,
 	})
 	_, edgePort, err := net.SplitHostPort(edge)
 	if err != nil {
@@ -89,6 +90,7 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 
 	// Bridge device→host: the app's 127.0.0.1:tunnelAppDevicePort reaches the host replica's edge.
 	adb(t, serial, "reverse", "tcp:"+strconv.Itoa(tunnelAppDevicePort), "tcp:"+edgePort)
+	adbReverseSame(t, serial, edge)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -179,6 +181,9 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	if info1.TLSCertSHA256 == "" {
 		t.Fatal("/info returned empty tls_cert_sha256")
 	}
+	if info1.ClientAddr == "" || info1.ClientAddr != info1.LocalAddr {
+		t.Fatalf("/info client_addr = %q, want this connection's address %q", info1.ClientAddr, info1.LocalAddr)
+	}
 	f1 := info1.TLSCertSHA256
 
 	// Refresh: force a fresh /api/v1/issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
@@ -240,8 +245,6 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	amCommand(t, serial, tunnelAppPkg, "stop")
 }
 
-const tunnelAppModesDevicePort = 18461
-
 func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	serial, ok := attestDeviceSerial(t)
 	if !ok {
@@ -271,12 +274,11 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			opts := replicaOpts{
-				attestRootURL:     googleAttestRootURL,
-				attestStatusURL:   googleAttestStatusURL,
-				attestSignerFile:  signersPath,
-				dialBackAdvertise: "127.0.0.1:" + strconv.Itoa(tunnelAppModesDevicePort),
-				dialBackNoMTLS:    !mode.plain,
-				dialBackPlain:     mode.plain,
+				attestRootURL:    googleAttestRootURL,
+				attestStatusURL:  googleAttestStatusURL,
+				attestSignerFile: signersPath,
+				dialBackNoMTLS:   !mode.plain,
+				dialBackPlain:    mode.plain,
 			}
 			if mode.plain {
 				opts.acmeHTTPListen = tunneltest.FreeAddr(t)
@@ -286,17 +288,13 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 			if mode.plain {
 				dialBackTarget = opts.acmeHTTPListen
 			}
-			for _, r := range []struct {
-				devicePort int
-				addr       string
-			}{{tunnelAppDevicePort, edge}, {tunnelAppModesDevicePort, dialBackTarget}} {
-				_, port, err := net.SplitHostPort(r.addr)
-				if err != nil {
-					t.Fatalf("split addr %q: %v", r.addr, err)
-				}
-				adb(t, serial, "reverse", "tcp:"+strconv.Itoa(r.devicePort), "tcp:"+port)
-				t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(r.devicePort)) })
+			_, edgePort, err := net.SplitHostPort(edge)
+			if err != nil {
+				t.Fatalf("split addr %q: %v", edge, err)
 			}
+			adb(t, serial, "reverse", "tcp:"+strconv.Itoa(tunnelAppDevicePort), "tcp:"+edgePort)
+			t.Cleanup(func() { adbCleanup(t, serial, "reverse", "--remove", "tcp:"+strconv.Itoa(tunnelAppDevicePort)) })
+			adbReverseSame(t, serial, dialBackTarget)
 			adbRunAs(t, serial, tunnelAppPkg, "rm -f files/ready files/error files/info.json")
 			caB64 := base64.StdEncoding.EncodeToString(inf.pebble.IssuingRootsPEM)
 			adbRunAs(t, serial, tunnelAppPkg, "mkdir -p files && echo "+caB64+" | base64 -d > files/pebble-ca.pem")
@@ -331,6 +329,9 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 				}
 				if info.Name != name {
 					t.Fatalf("%s request %d reached %q, want %q", mode.name, i, info.Name, name)
+				}
+				if info.ClientAddr == "" || info.ClientAddr != info.LocalAddr {
+					t.Fatalf("%s request %d: client_addr = %q, want this connection's address %q", mode.name, i, info.ClientAddr, info.LocalAddr)
 				}
 			}
 		})
@@ -380,12 +381,21 @@ type infoResp struct {
 	Name          string `json:"name"`
 	SAN           string `json:"san"`
 	Issuer        string `json:"issuer"`
+	ClientAddr    string `json:"client_addr"`
+	LocalAddr     string `json:"-"`
 }
 
 // fetchInfo GETs /info through the tunnel (HTTP/1.1) and decodes the JSON.
 func fetchInfo(edge, fqdn string, roots *x509.CertPool) (infoResp, error) {
 	var out infoResp
-	status, body, err := h1Get(edge, fqdn, "/info", roots)
+	var localAddr atomic.Pointer[string]
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			addr := info.Conn.LocalAddr().String()
+			localAddr.Store(&addr)
+		},
+	})
+	status, body, err := h1Get(ctx, edge, fqdn, "/info", roots)
 	if err != nil {
 		return out, err
 	}
@@ -394,6 +404,9 @@ func fetchInfo(edge, fqdn string, roots *x509.CertPool) (infoResp, error) {
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("decode /info %q: %w", body, err)
+	}
+	if addr := localAddr.Load(); addr != nil {
+		out.LocalAddr = *addr
 	}
 	return out, nil
 }
@@ -407,6 +420,9 @@ func assertPhoneCert(t *testing.T, edge, fqdn string, roots *x509.CertPool) {
 		t.Fatalf("public TLS handshake to %s failed: %v", fqdn, err)
 	}
 	defer tunneltest.CloseOrLog(t, conn)
+	if n := len(conn.ConnectionState().PeerCertificates); n < 2 {
+		t.Fatalf("the phone served %d certificate(s), want the whole chain", n)
+	}
 	leaf := conn.ConnectionState().PeerCertificates[0]
 	if err := leaf.VerifyHostname(fqdn); err != nil {
 		t.Fatalf("phone cert SAN does not cover %s: %v (dns=%v)", fqdn, err, leaf.DNSNames)
@@ -439,12 +455,16 @@ func h1Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
 	return &http.Client{Transport: tr, Timeout: 90 * time.Second}
 }
 
-func h1Get(edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
+func h1Get(ctx context.Context, edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
 	c := h1Client(edge, fqdn, roots)
 	defer c.CloseIdleConnections()
-	resp, err := c.Get("https://" + fqdn + path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+fqdn+path, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("build the %s request: %w", path, err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("get %s: %w", path, err)
 	}
 	defer tunneltest.CloseLogged(resp.Body)
 	body, err := io.ReadAll(resp.Body)

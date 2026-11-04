@@ -84,9 +84,11 @@ func TestClient_HandleOpen_InvalidOpenIgnored(t *testing.T) {
 		want    string
 	}{
 		{name: "undecodable payload", payload: "{", want: `msg="malformed OPEN payload from the server (ignored)"`},
-		{name: "empty token", payload: `{"addr":"` + addr + `","use_https":false}`, want: `msg="invalid OPEN from the server (ignored)"`},
-		{name: "empty addr", payload: `{"token":"TOKEN","use_https":false}`, want: `msg="invalid OPEN from the server (ignored)"`},
-		{name: "mtls without https", payload: `{"token":"TOKEN","addr":"` + addr + `","use_https":false,"use_mtls":true}`, want: `msg="invalid OPEN from the server (ignored)"`},
+		{name: "empty token", payload: `{"addr":"` + addr + `","use_https":false,"client_addr":"198.51.100.7:52144"}`, want: `msg="invalid OPEN from the server (ignored)"`},
+		{name: "empty addr", payload: `{"token":"TOKEN","use_https":false,"client_addr":"198.51.100.7:52144"}`, want: `msg="invalid OPEN from the server (ignored)"`},
+		{name: "missing client addr", payload: `{"token":"TOKEN","addr":"` + addr + `","use_https":false}`, want: `msg="invalid OPEN from the server (ignored)"`},
+		{name: "empty client addr", payload: `{"token":"TOKEN","addr":"` + addr + `","use_https":false,"client_addr":""}`, want: `msg="invalid OPEN from the server (ignored)"`},
+		{name: "mtls without https", payload: `{"token":"TOKEN","addr":"` + addr + `","use_https":false,"use_mtls":true,"client_addr":"198.51.100.7:52144"}`, want: `msg="invalid OPEN from the server (ignored)"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,7 +104,7 @@ func TestClient_HandleOpen_InvalidOpenIgnored(t *testing.T) {
 	}
 }
 
-func echoBackend(s io.ReadWriteCloser) {
+func echoBackend(_ string, s io.ReadWriteCloser) {
 	if _, err := io.Copy(s, s); err != nil {
 		tunneltest.Logger().Debug("echo backend ended", "err", err)
 	}
@@ -166,6 +168,43 @@ func TestClient_HandleOpen_DialsBackAndSplices(t *testing.T) {
 	}
 }
 
+func TestClient_HandleOpen_IgnoresUnknownFields(t *testing.T) {
+	t.Parallel()
+	addr, accepts := newRawListener(t, func(c net.Conn) { tunneltest.CloseLogged(c) })
+	c, buf := newLoggedClient()
+	c.controlHost = testControlHost
+	c.dialBackTimeout = time.Second
+	c.handleOpen(context.Background(), []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false,"client_addr":"198.51.100.7:52144","extra":1}`))
+	if !waitFor(t, 3*time.Second, func() bool { return accepts.Load() == 1 }) {
+		t.Fatalf("an OPEN with an unknown field must still dial back; log = %q", buf.String())
+	}
+}
+
+func TestClient_HandleOpen_GivesTheBackendTheClientAddr(t *testing.T) {
+	ts := startTestServer(t)
+	got := make(chan string, 1)
+	runClient(t, ts.newClient(t, func(clientAddr string, s io.ReadWriteCloser) {
+		got <- clientAddr
+		echoBackend(clientAddr, s)
+	}))
+	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
+		t.Fatal("control connect must bind the route")
+	}
+	conn, err := ts.dialBack(t, "TOKEN-CLIENT-ADDR", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunneltest.CloseOrLog(t, conn)
+	select {
+	case addr := <-got:
+		if addr != testClientAddr {
+			t.Fatalf("the backend got client address %q, want %q", addr, testClientAddr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the backend was not invoked")
+	}
+}
+
 func TestClient_HandleOpen_TLSWithoutClientCert(t *testing.T) {
 	ts := startTestServerMode(t, false)
 	runClient(t, ts.newClient(t, echoBackend))
@@ -201,7 +240,7 @@ func TestClient_HandleOpen_RefusedClosesWithoutBackend(t *testing.T) {
 	ts := startTestServer(t)
 	buf := &syncBuf{}
 	var invoked atomic.Bool
-	c := ts.newClient(t, func(io.ReadWriteCloser) { invoked.Store(true) },
+	c := ts.newClient(t, func(string, io.ReadWriteCloser) { invoked.Store(true) },
 		WithLogger(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))))
 	runClient(t, c)
 	if !waitFor(t, 3*time.Second, func() bool { return ts.mgr.HasConn(testName) }) {
@@ -211,7 +250,7 @@ func TestClient_HandleOpen_RefusedClosesWithoutBackend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ts.mgr.SendOpen(context.Background(), testName, connID, wire.OpenPayload{Token: "UNKNOWN", Addr: ts.dialAdr, UseHTTPS: true, UseMTLS: true}); err != nil {
+	if err := ts.mgr.SendOpen(context.Background(), testName, connID, wire.OpenPayload{Token: "UNKNOWN", Addr: ts.dialAdr, UseHTTPS: true, UseMTLS: true, ClientAddr: testClientAddr}); err != nil {
 		t.Fatal(err)
 	}
 	if !waitFor(t, 3*time.Second, func() bool { return strings.Contains(buf.String(), "dial-back failed") }) {
@@ -243,7 +282,7 @@ func TestClient_DialBack_KeepsBytesSentWithThe101(t *testing.T) {
 	c, _ := newLoggedClient()
 	c.controlHost = testControlHost
 	c.dialBackTimeout = time.Second
-	c.backend = func(s io.ReadWriteCloser) {
+	c.backend = func(_ string, s io.ReadWriteCloser) {
 		buf := make([]byte, 5)
 		if _, err := io.ReadFull(s, buf); err != nil {
 			got <- "read error: " + err.Error()
@@ -251,7 +290,7 @@ func TestClient_DialBack_KeepsBytesSentWithThe101(t *testing.T) {
 		}
 		got <- string(buf)
 	}
-	c.handleOpen(context.Background(), []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false}`))
+	c.handleOpen(context.Background(), []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false,"client_addr":"198.51.100.7:52144"}`))
 	select {
 	case first := <-got:
 		if first != "hello" {
@@ -275,9 +314,9 @@ func TestClient_DialBack_HonoursTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	var invoked atomic.Bool
-	c.backend = func(io.ReadWriteCloser) { invoked.Store(true) }
+	c.backend = func(string, io.ReadWriteCloser) { invoked.Store(true) }
 	start := time.Now()
-	c.handleOpen(context.Background(), []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false}`))
+	c.handleOpen(context.Background(), []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false,"client_addr":"198.51.100.7:52144"}`))
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("the dial-back was not bounded by its timeout (took %s)", elapsed)
 	}
@@ -293,12 +332,12 @@ func TestClient_DialBack_UpgradeAbortedWhenRunStops(t *testing.T) {
 	c.controlHost = testControlHost
 	c.dialBackTimeout = time.Minute
 	var invoked atomic.Bool
-	c.backend = func(io.ReadWriteCloser) { invoked.Store(true) }
+	c.backend = func(string, io.ReadWriteCloser) { invoked.Store(true) }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	returned := make(chan struct{})
 	go func() {
-		c.handleOpen(ctx, []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false}`))
+		c.handleOpen(ctx, []byte(`{"token":"TOKEN","addr":"`+addr+`","use_https":false,"client_addr":"198.51.100.7:52144"}`))
 		close(returned)
 	}()
 	var srv net.Conn
@@ -335,7 +374,7 @@ func TestClient_DialBack_ClosedWhenRunStops(t *testing.T) {
 	ts := startTestServer(t)
 	entered := make(chan struct{})
 	readDone := make(chan error, 1)
-	cancel := runClient(t, ts.newClient(t, func(s io.ReadWriteCloser) {
+	cancel := runClient(t, ts.newClient(t, func(_ string, s io.ReadWriteCloser) {
 		close(entered)
 		_, err := s.Read(make([]byte, 1))
 		readDone <- err

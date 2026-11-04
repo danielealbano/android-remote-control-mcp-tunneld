@@ -116,7 +116,7 @@ func TestAdminController_Terminate_EvictThenClose(t *testing.T) {
 
 func TestAdminController_Open(t *testing.T) {
 	errOther := errors.New("encode failed")
-	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true}
+	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, ClientAddr: "198.51.100.7:52144"}
 	tests := []struct {
 		name        string
 		sendErr     error

@@ -16,7 +16,7 @@ type TrafficSink interface {
 	AddTraffic(ctx context.Context, name string, bytesIn, bytesOut int64) error
 }
 
-// flushShutdownTimeout bounds the final counter flush on shutdown so it cannot block the drain.
+// flushShutdownTimeout bounds the final counter flush on shutdown.
 const flushShutdownTimeout = 5 * time.Second
 
 // PromRecorder implements observ.Recorder by combining the metric registry, the cap-hit deduping
@@ -139,7 +139,7 @@ func (p *PromRecorder) accum(name string, f func(*aggEntry)) {
 }
 
 // RunFlusher periodically drains the accumulated deltas into the TrafficSink (router.AddTraffic — a real async write path).
-// On ctx cancel it returns WITHOUT a final flush: the ordered server drain calls FinalFlush AFTER every
+// On ctx cancel it returns WITHOUT a final flush: the server calls FinalFlush AFTER every
 // producer has stopped, so no late delta is lost to a flush that races the still-running data plane.
 func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) error {
 	ticker := time.NewTicker(every)
@@ -155,7 +155,7 @@ func (p *PromRecorder) RunFlusher(ctx context.Context, every time.Duration) erro
 }
 
 // FinalFlush drains the accumulated deltas once, bounded by flushShutdownTimeout (called from the
-// ordered server drain AFTER every producer has stopped).
+// server AFTER every producer has stopped).
 func (p *PromRecorder) FinalFlush() {
 	ctx, cancel := context.WithTimeout(context.Background(), flushShutdownTimeout)
 	defer cancel()
