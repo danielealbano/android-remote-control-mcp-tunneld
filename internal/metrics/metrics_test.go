@@ -191,7 +191,7 @@ func TestHealthz200WhenRedisUp(t *testing.T) {
 
 func TestHealthz503WhenRedisDown(t *testing.T) {
 	m, _, store, mr, rdb := setup(t)
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	h := Handler(m.Gatherer, rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))

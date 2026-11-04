@@ -960,8 +960,14 @@ func TestBudgetTransport_LogsEachRequestAtDebug(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	bare := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	gone := httptest.NewServer(http.NotFoundHandler())
-	gone.Close()
+	gone := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		tunneltest.CloseOrLog(t, conn)
+	})
 	b := testBudgets()
 	const answered = "the certificate authority answered a request"
 	tests := []struct {
@@ -980,7 +986,7 @@ func TestBudgetTransport_LogsEachRequestAtDebug(t *testing.T) {
 			want: []string{"method=POST", "path=/new-order", "status=200", "retry_after=3", "paced=", "took="}, wantMsg: answered, wantRA: "3"},
 		{name: "tracked without the CA's Retry-After", tracked: true, method: http.MethodPost, url: bare.srv.URL + "/challenge/x",
 			want: []string{"method=POST", "path=/challenge/x", "status=200", `retry_after=""`, "paced=", "took="}, wantMsg: answered, wantRA: "2"},
-		{name: "transport error", method: http.MethodGet, url: gone.URL + "/directory", wantErr: true,
+		{name: "transport error", method: http.MethodGet, url: gone.srv.URL + "/directory", wantErr: true,
 			want: []string{"method=GET", "path=/directory", "paced=", "took=", "err="}, wantMsg: "a request to the certificate authority failed; the error is passed back to the certificate order"},
 	}
 	for _, tc := range tests {

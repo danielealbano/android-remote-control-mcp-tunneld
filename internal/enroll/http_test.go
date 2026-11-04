@@ -232,7 +232,7 @@ func TestHandlerNonceMintedBeforeClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mr.Close() // Valkey down: the issue-nonce mint fails (and so would everything after)
+	mr.SetError("ERR valkey is down") // Valkey down: the issue-nonce mint fails (and so would everything after)
 	req := httptest.NewRequest("POST", "/api/v1/enroll", bytes.NewReader(b))
 	req.RemoteAddr = "203.0.113.17:5000"
 	rr := httptest.NewRecorder()

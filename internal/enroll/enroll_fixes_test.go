@@ -189,7 +189,7 @@ func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
 	})
 	name := doEnroll(t, svc, idCSR)
 	nonce := mintNonce(t, svc)
-	mr.Close() // Valkey down → consumeNonce errors
+	mr.SetError("ERR valkey is down") // Valkey down → consumeNonce errors
 	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test")})
 	if ee == nil || ee.Reason != "internal" {
 		t.Fatalf("a Valkey error during nonce consume must be internal, got %v", ee)

@@ -611,7 +611,7 @@ func TestChain_OrderedLevelsError(t *testing.T) {
 	g1 := &trackingFake{caID: CAGTS, label: "gts-1", order: calls}
 	g2 := &trackingFake{caID: CAGTS, label: "gts-2", order: calls}
 	ac := newAccountChain(t, ChainConfig{}, acct(g1, "g1", time.Minute), acct(g2, "g2", time.Minute))
-	ac.mr.Close()
+	ac.mr.SetError("ERR valkey is down")
 	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p"); err != nil {
 		t.Fatal(err)
 	}

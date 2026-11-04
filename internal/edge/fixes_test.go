@@ -136,7 +136,7 @@ func TestEdge_PacedCopy_TrafficErrorFailsOpen(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { tunneltest.CloseOrLog(t, rdb) })
 	te.e.lim = limit.NewLimiter(rdb, 1<<30, 1<<40, 1<<40, time.Hour)
-	mr.Close() // every Valkey call now errors
+	mr.SetError("ERR valkey is down") // every Valkey call now errors
 
 	src := &pipeStream{r: bytes.NewReader(make([]byte, 1024)), w: io.Discard, closed: make(chan struct{})}
 	as := &activeStream{tunnel: "t1"}

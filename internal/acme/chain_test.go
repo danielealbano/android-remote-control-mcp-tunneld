@@ -698,7 +698,7 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 			mr := miniredis.RunT(t)
 			ch, _ := newChainOn(t, mr, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))},
 				&fakeCA{caID: cmp.Or(tc.ca, CALetsEncrypt), err: tc.err})
-			mr.Close()
+			mr.SetError("ERR valkey is down")
 			_, _, err := ch.Obtain(context.Background(), nil, "name")
 			if (err == nil) != (tc.err == nil) {
 				t.Fatalf("Obtain error = %v, want error %v", err, tc.err != nil)

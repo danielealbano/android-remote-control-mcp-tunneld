@@ -131,7 +131,7 @@ func TestLimiter_IssuanceEnd_ReturnsReleaseError(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("begin: ok=%v err=%v", ok, err)
 	}
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	if err := l.IssuanceEnd(ctx, "t", orderID); err == nil {
 		t.Fatal("a failed lock release must be returned to the caller")
 	}

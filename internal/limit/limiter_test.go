@@ -136,14 +136,14 @@ func TestCharge_ExpireNXHealsMissingTTL(t *testing.T) {
 	}
 }
 
-// TestCharge_FailOpenOnValkeyError: a closed Valkey fails open (ChargeProceed) with the error.
+// TestCharge_FailOpenOnValkeyError: a failing Valkey fails open (ChargeProceed) with the error.
 func TestCharge_FailOpenOnValkeyError(t *testing.T) {
 	ctx := ctxT(t)
 	l, mr, _ := newChargeLimiter(t, 125000, 100, 1<<40, 1<<40)
-	mr.Close() // every Valkey call now errors
+	mr.SetError("ERR valkey is down") // every Valkey call now errors
 	action, wait, _, err := l.Charge(ctx, "t", "m1", "in", 4096)
 	if err == nil {
-		t.Fatal("a closed Valkey must return an error")
+		t.Fatal("a failing Valkey must return an error")
 	}
 	if action != ChargeProceed || wait != 0 {
 		t.Fatalf("fail-open: action=%v wait=%v, want Proceed wait=0", action, wait)
@@ -242,7 +242,7 @@ func TestCAWaitState_ReadsTheWaitUntilAndThe429Mark(t *testing.T) {
 	if err := l.MarkCALimited(ctx, "gts-1", 0); err == nil {
 		t.Fatal("a mark without a TTL must be refused")
 	}
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	if _, _, err := l.CAWaitState(ctx, "gts-1"); err == nil {
 		t.Fatal("a failed read must return an error")
 	}
