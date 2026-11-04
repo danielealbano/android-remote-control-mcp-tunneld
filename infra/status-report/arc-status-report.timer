@@ -1,0 +1,10 @@
+[Unit]
+Description=Report this node's state to the public status board every 30 s
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=1
+
+[Install]
+WantedBy=timers.target

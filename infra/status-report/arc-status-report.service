@@ -1,0 +1,11 @@
+[Unit]
+Description=Report this node's state to the public status board
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tunneld/status-report.env
+ExecStart=/usr/local/sbin/arc-status-report
+TimeoutStartSec=25
+RuntimeDirectory=arc-status-report
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
