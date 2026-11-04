@@ -21,6 +21,9 @@ const (
 	flushTimeout = 2 * time.Second
 	closeTimeout = 3 * time.Second
 	eventIDKey   = "sentry_event_id"
+
+	recoveredMsg = "recovered from a crash; only the affected work was stopped"
+	crashedMsg   = "a crash could not be contained; tunneld stops so it can be restarted"
 	maxTagLength = 200
 )
 
@@ -185,11 +188,11 @@ func (r *Reporter) Handler(next http.Handler, logger *slog.Logger, what string, 
 				aborted = true
 			} else {
 				panicked = true
-				handlePanic(ctx, logger, what, v)
+				handlePanic(ctx, logger, what, v, recoveredMsg)
 			}
 			if tw.hijacked != nil {
 				if err := tw.hijacked.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-					logger.DebugContext(ctx, "hijacked connection close failed", "where", what, "err", err)
+					logger.DebugContext(ctx, "could not close a taken-over connection cleanly after a crash; it is not used again", "where", what, "err", err)
 				}
 			}
 			if aborted {
@@ -201,7 +204,7 @@ func (r *Reporter) Handler(next http.Handler, logger *slog.Logger, what string, 
 			tw.Header().Set("Content-Type", "application/json")
 			tw.WriteHeader(http.StatusInternalServerError)
 			if _, err := tw.Write(internalErrorBody); err != nil {
-				logger.DebugContext(ctx, "panic response write failed", "where", what, "err", err)
+				logger.DebugContext(ctx, "could not send the error answer after a crash; the client may get an incomplete answer or none", "where", what, "err", err)
 			}
 		}()
 		next.ServeHTTP(tw, req)
@@ -242,7 +245,7 @@ func Recover(ctx context.Context, logger *slog.Logger, what string, onPanic func
 	if v == nil {
 		return
 	}
-	handlePanic(ctx, logger, what, v)
+	handlePanic(ctx, logger, what, v, recoveredMsg)
 	onPanic()
 }
 
@@ -251,14 +254,14 @@ func Crash(ctx context.Context, logger *slog.Logger, what string) {
 	if v == nil {
 		return
 	}
-	handlePanic(ctx, logger, what, v)
+	handlePanic(ctx, logger, what, v, crashedMsg)
 	if hub := sentry.GetHubFromContext(ctx); hub != nil {
 		flush(context.WithoutCancel(ctx), hub)
 	}
 	panic(v)
 }
 
-func handlePanic(ctx context.Context, logger *slog.Logger, what string, v any) {
+func handlePanic(ctx context.Context, logger *slog.Logger, what string, v any, msg string) {
 	var eventID string
 	if hub := sentry.GetHubFromContext(ctx); hub != nil {
 		h := hub.Clone()
@@ -274,7 +277,7 @@ func handlePanic(ctx context.Context, logger *slog.Logger, what string, v any) {
 	if eventID != "" {
 		attrs = append(attrs, eventIDKey, eventID)
 	}
-	logger.ErrorContext(ctx, "panic recovered", attrs...)
+	logger.ErrorContext(ctx, msg, attrs...)
 }
 
 func panicError(v any) error {

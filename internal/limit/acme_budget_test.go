@@ -327,7 +327,7 @@ func TestACMEBudget_UnparseableTreatedFull(t *testing.T) {
 	if ok, _ := h.reserve(t, b, "n1", "m1", h.now.Add(time.Minute), "n1"); !ok {
 		t.Fatal("an unparseable budget must read as full")
 	}
-	if !strings.Contains(h.log.String(), `msg="unparseable acme budget (treated as full)"`) {
+	if !strings.Contains(h.log.String(), `msg="could not read an issuance budget, so it is treated as full"`) {
 		t.Fatalf("the unparseable budget must be logged; log = %q", h.log.String())
 	}
 }
@@ -442,8 +442,8 @@ func TestBudgetLock_ReleaseFailureLogged(t *testing.T) {
 		fail string
 		want string
 	}{
-		{name: "ownership check fails", fail: "get", want: `msg="acme budget lock release check failed (lock expires by TTL)" ca=letsencrypt`},
-		{name: "delete fails", fail: "del", want: `msg="acme budget lock release failed (lock expires by TTL)" ca=letsencrypt`},
+		{name: "ownership check fails", fail: "get", want: `msg="could not check the issuance budget lock before releasing it; it expires on its own" ca=letsencrypt`},
+		{name: "delete fails", fail: "del", want: `msg="could not release the issuance budget lock; it expires on its own" ca=letsencrypt`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

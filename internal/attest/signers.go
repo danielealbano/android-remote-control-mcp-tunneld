@@ -71,7 +71,7 @@ func (a *SignerAllowlist) reload() error {
 	}
 	a.set.Store(&set)
 	a.mtime.Store(fi.ModTime().UnixNano())
-	a.logger.Info("signer allowlist loaded", "path", a.path, "digests", len(set))
+	a.logger.Info("app signer allowlist loaded", "path", a.path, "digests", len(set))
 	return nil
 }
 
@@ -106,7 +106,7 @@ func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 			fi, err := os.Stat(a.path)
 			if err != nil {
 				if !statErrLogged {
-					a.logger.Error("signer allowlist stat failed; keeping the last-known-good set", "path", a.path, "err", err)
+					a.logger.Error("could not check the app signer allowlist file; keeping the last good list", "path", a.path, "err", err)
 					statErrLogged = true
 				}
 				continue // keep last-known-good; never clear the set on a stat failure
@@ -114,7 +114,7 @@ func (a *SignerAllowlist) Watch(ctx context.Context, poll time.Duration) {
 			statErrLogged = false
 			if fi.ModTime().UnixNano() != a.mtime.Load() {
 				if rerr := a.reload(); rerr != nil {
-					a.logger.Warn("signer allowlist reload failed; keeping last-known-good set (retries every tick)", "path", a.path, "err", rerr)
+					a.logger.Warn("could not reload the app signer allowlist; keeping the last good list and retrying", "path", a.path, "err", rerr)
 				}
 			}
 		}

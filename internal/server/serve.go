@@ -69,7 +69,7 @@ func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *sl
 	}()
 	err := srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
-		logger.Warn("listener exited", "which", which, "err", err)
+		logger.Warn("a server stopped accepting connections unexpectedly, so tunneld stops to be restarted", "which", which, "err", err)
 		return err
 	}
 	return nil
@@ -77,13 +77,13 @@ func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *sl
 
 func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		logger.Warn("close failed", "what", what, "err", err)
+		logger.Warn("could not close a connection or listener cleanly; it is not used again", "what", what, "err", err)
 	}
 }
 
 func shutdownLogged(ctx context.Context, logger *slog.Logger, which string, srv *http.Server) {
 	if err := srv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
-		logger.Warn("server shutdown did not complete cleanly", "which", which, "err", err)
+		logger.Warn("a server did not finish shutting down cleanly; the shutdown continues and its remaining connections close when tunneld exits", "which", which, "err", err)
 	}
 }
 
@@ -135,7 +135,7 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 		e.CloseReason = ev.CloseReason
 	}
 	if err := s.st.PutConnLog(ctx, e); err != nil {
-		s.logger.Warn("public conn-log write failed", "tunnel", ev.Tunnel, "event", ev.Event, "err", err)
+		s.logger.Warn("could not write a public connection's log entry, so the entry is lost", "tunnel", ev.Tunnel, "event", ev.Event, "err", err)
 	}
 }
 
@@ -290,7 +290,7 @@ func broadcastControl(ctx context.Context, self string, nodes map[string]router.
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				logger.Warn("mesh control broadcast failed on a node", "op", req.Op, "tunnel", req.Tunnel, "node", id, "err", err)
+				logger.Warn("a request to another node failed, so that node may not have applied it", "op", req.Op, "tunnel", req.Tunnel, "node", id, "err", err)
 				failed[id] = true
 				return
 			}
@@ -361,7 +361,7 @@ func (r *remoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) bool {
 	select {
 	case r.inflight <- struct{}{}:
 	default:
-		r.logger.Debug("remote slot freeing skipped: too many attempts in flight", "tunnel", tunnel)
+		r.logger.Debug("skipped freeing a connection slot on another node because too many attempts are already running, so this connection is refused", "tunnel", tunnel)
 		return false
 	}
 	defer func() { <-r.inflight }()
@@ -370,7 +370,7 @@ func (r *remoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) bool {
 		res, err := r.mesh.Control(fctx, o.addr, mesh.ControlRequest{Op: "free-slot", Tunnel: tunnel})
 		cancel()
 		if err != nil {
-			r.logger.Debug("free-slot failed on a node", "tunnel", tunnel, "peer", o.node, "err", err)
+			r.logger.Debug("could not free a connection slot on another node; the connection tries again to get a slot", "tunnel", tunnel, "peer", o.node, "err", err)
 			return true
 		}
 		if res.Applied {
@@ -385,7 +385,7 @@ func (r *remoteSlots) offers(ctx context.Context, tunnel string) []slotOffer {
 	defer cancel()
 	nodes, err := r.nodes.LiveNodes(ctx)
 	if err != nil {
-		r.logger.Debug("slot-candidate: node listing failed", "tunnel", tunnel, "err", err)
+		r.logger.Debug("could not list the nodes to find a connection slot to free, so no slot is freed on another node", "tunnel", tunnel, "err", err)
 		return nil
 	}
 	var mu sync.Mutex
@@ -401,7 +401,7 @@ func (r *remoteSlots) offers(ctx context.Context, tunnel string) []slotOffer {
 			defer report.Recover(ctx, r.logger, "slot-candidate query", func() {})
 			res, err := r.mesh.Control(ctx, info.Advertise, mesh.ControlRequest{Op: "slot-candidate", Tunnel: tunnel})
 			if err != nil {
-				r.logger.Debug("slot-candidate failed on a node", "tunnel", tunnel, "peer", id, "err", err)
+				r.logger.Debug("could not ask another node for a connection slot to free, so that node is skipped", "tunnel", tunnel, "peer", id, "err", err)
 				return
 			}
 			if !res.Applied {
@@ -448,7 +448,7 @@ func (s *spliceEvictor) PhoneConnClosed(_ context.Context, name, connID, reason 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.draining {
-		s.logger.Warn("splice eviction broadcast skipped: the node is shutting down", "tunnel", name, "conn", connID)
+		s.logger.Warn("skipped telling the other nodes to close a disconnected phone's connections: this node is shutting down", "tunnel", name, "conn", connID)
 		return
 	}
 	s.wg.Add(1)
@@ -462,13 +462,13 @@ func (s *spliceEvictor) PhoneConnClosed(_ context.Context, name, connID, reason 
 		select {
 		case s.slots <- struct{}{}:
 		case <-ctx.Done():
-			s.logger.Warn("splice eviction broadcast dropped while waiting for a slot", "tunnel", name, "conn", connID, "err", ctx.Err())
+			s.logger.Warn("gave up telling the other nodes to close a disconnected phone's connections: too many such messages were waiting", "tunnel", name, "conn", connID, "err", ctx.Err())
 			return
 		}
 		defer func() { <-s.slots }()
 		nodes, err := s.nodes.LiveNodes(ctx)
 		if err != nil {
-			s.logger.Warn("splice eviction after a phone disconnect: node listing failed", "tunnel", name, "conn", connID, "err", err)
+			s.logger.Warn("could not list the nodes to close a disconnected phone's connections, so the other nodes keep them until they notice the phone is gone", "tunnel", name, "conn", connID, "err", err)
 			return
 		}
 		broadcastControl(ctx, s.nodeID, nodes, s.mesh, mesh.ControlRequest{Op: "evict", Tunnel: name, ConnID: connID, Reason: reason}, s.logger)
@@ -491,7 +491,7 @@ func (s *spliceEvictor) Drain(ctx context.Context) {
 		select {
 		case <-done:
 		default:
-			s.logger.Warn("shutdown deadline reached before every splice-eviction broadcast finished (cancelling them)", "err", ctx.Err())
+			s.logger.Warn("the shutdown time ran out before every message about disconnected phones was sent; cancelling the rest", "err", ctx.Err())
 		}
 	}
 	s.cancel()

@@ -113,7 +113,7 @@ func TestWatcher_StatPath_LogsUnexpectedStatError(t *testing.T) {
 			if st := w.statePath(tc.path); st.exists {
 				t.Fatalf("statePath(%q) must report the file as missing", tc.path)
 			}
-			logged := strings.Contains(buf.String(), `msg="ban input file stat failed (treated as missing)"`)
+			logged := strings.Contains(buf.String(), `msg="could not check a ban file, so it is treated as missing"`)
 			if logged != tc.wantLog {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
 			}

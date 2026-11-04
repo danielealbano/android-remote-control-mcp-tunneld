@@ -158,7 +158,7 @@ func TestHandler_PanicAnswers500AndReportsOnce(t *testing.T) {
 				t.Fatalf("a panic must be an exception with a stack, tagged with where it happened; tags %v", ev.Tags)
 			}
 			out := logs.String()
-			if !strings.Contains(out, `msg="panic recovered"`) || !strings.Contains(out, "sentry_event_id="+string(ev.EventID)) ||
+			if !strings.Contains(out, `msg="recovered from a crash; only the affected work was stopped"`) || !strings.Contains(out, "sentry_event_id="+string(ev.EventID)) ||
 				!strings.Contains(out, "client_ip=127.0.0.1") {
 				t.Fatalf("the panic must be logged with its event id and client address; log = %q", out)
 			}
@@ -547,14 +547,18 @@ func TestCrash_ReportsFlushesAndPanicsAgain(t *testing.T) {
 	t.Parallel()
 	rep, tr := newEnabled(t, 0)
 	ctx := rep.Context(context.Background())
+	var logs syncBuffer
 	var repanicked any
 	func() {
 		defer func() { repanicked = recover() }()
-		defer report.Crash(ctx, slog.New(slog.DiscardHandler), "test worker")
+		defer report.Crash(ctx, textLogger(&logs), "test worker")
 		panic("boom")
 	}()
 	if repanicked != "boom" {
 		t.Fatalf("Crash must panic again with the same value, got %v", repanicked)
+	}
+	if out := logs.String(); !strings.Contains(out, `level=ERROR msg="a crash could not be contained; tunneld stops so it can be restarted" where="test worker"`) {
+		t.Fatalf("Crash must log that the process stops; log = %q", out)
 	}
 	if tr.Flushes() == 0 {
 		t.Fatal("Crash must flush before panicking again")

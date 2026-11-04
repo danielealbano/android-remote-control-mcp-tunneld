@@ -34,11 +34,11 @@ func buildVerifier(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger
 	fetchClient := &http.Client{Timeout: 30 * time.Second}
 	roots, err := attest.NewRootSet(ctx, cfg.AttestRootURL, fetchClient, logger)
 	if err != nil {
-		logger.Warn("attestation root fetch failed (fail-closed until refresh)", "err", err)
+		logger.Warn("could not fetch Google's attestation root certificates; enrollments and certificate requests are refused until they are fetched", "err", err)
 	}
 	status, err := attest.NewStatusList(ctx, cfg.AttestStatusURL, fetchClient, logger)
 	if err != nil {
-		logger.Warn("attestation status fetch failed (fail-closed until refresh)", "err", err)
+		logger.Warn("could not fetch the attestation revocation list; enrollments and certificate requests are refused until it is fetched", "err", err)
 	}
 	return attest.NewVerifier(roots, status, signers, cfg.AttestStatusMaxStale), roots, status, signers, nil
 }
@@ -164,7 +164,7 @@ func (h *meshCertHolder) rotateLoop(ctx context.Context) {
 		case <-h.after(d):
 		}
 		if err := h.mint(); err != nil {
-			h.logger.Warn("mesh cert rotation failed (retrying on backoff)", "err", err)
+			h.logger.Warn("could not renew this node's certificate for talking to the other nodes; retrying", "err", err)
 			d = meshRotateRetry
 		} else {
 			d = interval
@@ -188,7 +188,7 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise,
 		}
 	}
 	if err := reg.RegisterNode(ctx, nodeID, info(), routeTTL); err != nil {
-		logger.Warn("node register failed (retrying at heartbeat cadence)", "err", err)
+		logger.Warn("could not register this node in the node list; retrying", "err", err)
 	}
 	interval := routeTTL / 3
 	if interval <= 0 {
@@ -202,7 +202,7 @@ func heartbeatNode(ctx context.Context, reg *router.Registry, nodeID, advertise,
 			return nil
 		case <-t.C:
 			if err := reg.RefreshNode(ctx, nodeID, info(), routeTTL); err != nil {
-				logger.Warn("node heartbeat refresh failed (will retry)", "err", err)
+				logger.Warn("could not refresh this node's entry in the node list; retrying", "err", err)
 			}
 		}
 	}
@@ -242,12 +242,12 @@ func (w *renewalWatcher) tick(ctx context.Context) {
 		if err != nil {
 			// Never silent: a persistent store failure would otherwise stop all renewal nudges (and
 			// eventually expire certs) with zero operator signal.
-			w.logger.Warn("renewal watcher: name record read failed", "tunnel", name, "err", err)
+			w.logger.Warn("could not read a tunnel's record while checking certificate renewals, so it is skipped until the next check", "tunnel", name, "err", err)
 			continue
 		}
 		due, at, err := w.chain.ShouldRenew(ctx, rec.CertInfo())
 		if err != nil {
-			w.logger.Warn("renewal watcher: ShouldRenew failed", "tunnel", name, "err", err)
+			w.logger.Warn("could not decide whether a tunnel's certificate needs renewing, so it is skipped until the next check", "tunnel", name, "err", err)
 			continue
 		}
 		if !due {
@@ -255,7 +255,7 @@ func (w *renewalWatcher) tick(ctx context.Context) {
 		}
 		nonceHex, err := w.nonce(ctx)
 		if err != nil {
-			w.logger.Warn("renewal nonce mint failed", "tunnel", name, "err", err)
+			w.logger.Warn("could not create the one-time code for a certificate renewal, so the tunnel is skipped until the next check", "tunnel", name, "err", err)
 			continue
 		}
 		w.mgr.SendRenewNudge(name, nonceHex, at.UTC().Format(time.RFC3339))

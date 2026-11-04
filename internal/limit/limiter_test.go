@@ -390,7 +390,7 @@ func TestTrafficExhausted_UnparseableCounterLogged(t *testing.T) {
 	if err != nil || day || week {
 		t.Fatalf("an unparseable counter counts as 0 (day=%v week=%v err=%v)", day, week, err)
 	}
-	if !strings.Contains(buf.String(), "unparseable Valkey counter") {
+	if !strings.Contains(buf.String(), "a Valkey counter could not be read") {
 		t.Fatalf("the unparseable counter must be logged; log = %q", buf.String())
 	}
 }

@@ -114,7 +114,7 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 			err = fmt.Errorf("%w: %w", report.ErrPanicked, err)
 		}
 		if err != nil {
-			l.logger.Debug("ACME client build failed (retried on the next use)", "ca", l.caID, "err", err)
+			l.logger.Debug("could not set up the client for a certificate authority account; it is retried on the next use", "ca", l.caID, "err", err)
 			return nil, err // not cached → retried on the next call
 		}
 		l.inner.Store(&c)

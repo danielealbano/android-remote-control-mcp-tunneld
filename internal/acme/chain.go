@@ -169,7 +169,7 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			// the CA) rather than blocking issuance on the control plane.
 			cool, cerr := c.cfg.Limiter.CACooldown(ctx, a.id)
 			if cerr != nil {
-				c.cfg.Logger.Warn("acme CA cooldown check failed (trying the CA)", "ca", a.ca, "name", name, "err", cerr, "account", a.label)
+				c.cfg.Logger.Warn("could not check whether this certificate authority account is cooling down, so it is tried anyway", "ca", a.ca, "name", name, "err", cerr, "account", a.label)
 			}
 			if cool > 0 {
 				note(cool)
@@ -184,10 +184,10 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
 				defer cancel()
 				if rerr := c.cfg.Limiter.ResetCAFailures(rctx, a.id); rerr != nil { // best-effort streak reset; a stale count self-expires at TTL
-					c.cfg.Logger.Warn("acme CA failure-streak reset failed", "ca", a.ca, "name", name, "err", rerr, "account", a.label)
+					c.cfg.Logger.Warn("could not reset this account's count of failures in a row after a success; the old count expires on its own, and until then a new failure backs off longer", "ca", a.ca, "name", name, "err", rerr, "account", a.label)
 				}
 				c.cfg.Recorder.ACMEIssue(a.ca, "ok")
-				c.cfg.Logger.Info("acme certificate issued", "ca", a.ca, "name", name, "serial", info.Serial, "not_after", info.NotAfter, "account", a.label, "chain_certs", chainCertCount(pemChain))
+				c.cfg.Logger.Info("certificate issued", "ca", a.ca, "name", name, "serial", info.Serial, "not_after", info.NotAfter, "account", a.label, "chain_certs", chainCertCount(pemChain))
 				return pemChain, info, nil
 			}
 			if ended {
@@ -198,7 +198,11 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 			if asIssuerError(err, &ie) {
 				class = ie.Class
 			}
-			c.cfg.Logger.Warn("acme CA order failed", "ca", a.ca, "name", name, "class", class, "err", err, "account", a.label)
+			failMsg := "the certificate authority did not issue the certificate; any remaining account or certificate authority that can take the order is tried"
+			if class == ClassPermanent || (class == ClassLocal && !errors.Is(err, report.ErrPanicked)) {
+				failMsg = "the certificate authority did not issue the certificate; the issuance stops"
+			}
+			c.cfg.Logger.Warn(failMsg, "ca", a.ca, "name", name, "class", class, "err", err, "account", a.label)
 			if class == ClassLocal && errors.Is(err, report.ErrPanicked) {
 				note(ie.Retry)
 				continue
@@ -263,9 +267,9 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	ok, wait, err := c.cfg.Limiter.ReserveACME(ctx, a.ca, reserved, c.cfg.NodeID, member, c.now().Add(timeout+c.cfg.FinalizeGrace), live)
 	switch {
 	case err != nil:
-		c.cfg.Logger.Warn("acme budget reservation failed (trying the account)", "ca", a.ca, "name", name, "err", err, "account", a.label)
+		c.cfg.Logger.Warn("could not reserve this account's issuance budget, so the account is tried anyway", "ca", a.ca, "name", name, "err", err, "account", a.label)
 	case !ok:
-		c.cfg.Logger.Debug("acme account out of budget (skipped)", "ca", a.ca, "name", name, "retry_after", wait, "account", a.label)
+		c.cfg.Logger.Debug("skipping a certificate authority account: its issuance budget is used up for now", "ca", a.ca, "name", name, "retry_after", wait, "account", a.label)
 		return nil, store.CertInfo{}, wait, false, nil
 	}
 	prepayBucket, perOrder := c.cfg.Budgets.prepayBucket(a)
@@ -273,21 +277,21 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	if perOrder > 0 {
 		var merr error
 		if _, mark, merr = c.cfg.Limiter.CAWaitState(ctx, a.id); merr != nil {
-			c.cfg.Logger.Warn("acme 429 mark read failed (no prepay; requests draw on the shared budget)", "ca", a.ca, "name", name, "err", merr, "account", a.label)
+			c.cfg.Logger.Warn("could not check whether the certificate authority recently rate-limited this account, so the order's requests use the shared request budget", "ca", a.ca, "name", name, "err", merr, "account", a.label)
 			perOrder = 0
 		}
 	}
 	prepaid, pwait, perr := c.cfg.Limiter.PrepayACME(ctx, a.ca, prepayBucket, perOrder)
 	switch {
 	case perr != nil:
-		c.cfg.Logger.Warn("acme request budget prepay failed (trying the account)", "ca", a.ca, "name", name, "err", perr, "account", a.label)
+		c.cfg.Logger.Warn("could not set aside the order's share of the request budget, so the account is tried anyway", "ca", a.ca, "name", name, "err", perr, "account", a.label)
 	case pwait > 0:
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
 		defer cancel()
 		if rerr := c.cfg.Limiter.ReleaseACME(rctx, reserved, c.cfg.NodeID, member); rerr != nil {
-			c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", rerr, "account", a.label)
+			c.cfg.Logger.Warn("could not give back an unused issuance budget reservation; it is released automatically at its deadline", "ca", a.ca, "err", rerr, "account", a.label)
 		}
-		c.cfg.Logger.Debug("acme account out of request budget (skipped)", "ca", a.ca, "name", name, "retry_after", pwait, "account", a.label)
+		c.cfg.Logger.Debug("skipping a certificate authority account: its request budget is used up for now", "ca", a.ca, "name", name, "retry_after", pwait, "account", a.label)
 		return nil, store.CertInfo{}, pwait, false, nil
 	}
 	var nameBucket, domainBucket limit.Bucket
@@ -326,11 +330,11 @@ func (c *chainIssuer) settle(ctx context.Context, a *account, member string, onC
 	}
 	for _, b := range spend {
 		if err := c.cfg.Limiter.CommitACME(sctx, a.ca, b, c.cfg.NodeID, member); err != nil {
-			c.cfg.Logger.Warn("acme budget spend failed (the reservation expires at its deadline)", "ca", a.ca, "bucket", b.Key, "err", err, "account", a.label)
+			c.cfg.Logger.Warn("could not record the issuance budget this order used; the reservation is released automatically at its deadline", "ca", a.ca, "bucket", b.Key, "err", err, "account", a.label)
 		}
 	}
 	if err := c.cfg.Limiter.ReleaseACME(sctx, release, c.cfg.NodeID, member); err != nil {
-		c.cfg.Logger.Warn("acme budget release failed (the reservation expires at its deadline)", "ca", a.ca, "err", err, "account", a.label)
+		c.cfg.Logger.Warn("could not give back an unused issuance budget reservation; it is released automatically at its deadline", "ca", a.ca, "err", err, "account", a.label)
 	}
 	if left, mark := tr.drainPrepaid(); left > 0 {
 		c.refund(sctx, a, left, mark)
@@ -338,7 +342,7 @@ func (c *chainIssuer) settle(ctx context.Context, a *account, member string, onC
 	if out.abandoned {
 		for _, f := range tr.takeCleanups() {
 			if err := f(sctx); err != nil {
-				c.cfg.Logger.Warn("abandoned order's challenge cleanup failed (it expires by TTL)", "ca", a.ca, "err", err, "account", a.label)
+				c.cfg.Logger.Warn("could not remove the validation challenge of an abandoned order; it expires on its own", "ca", a.ca, "err", err, "account", a.label)
 			}
 		}
 	}
@@ -348,13 +352,13 @@ func (c *chainIssuer) refund(ctx context.Context, a *account, left int, mark str
 	_, cur, err := c.cfg.Limiter.CAWaitState(ctx, a.id)
 	switch {
 	case err != nil:
-		c.cfg.Logger.Warn("acme 429 mark read failed (refund skipped; the budget refills on its own)", "ca", a.ca, "err", err, "account", a.label)
+		c.cfg.Logger.Warn("could not check whether the certificate authority recently rate-limited this account, so the order's unused requests are not refunded; the budget refills on its own", "ca", a.ca, "err", err, "account", a.label)
 	case cur != "" && cur != mark:
-		c.cfg.Logger.Debug("acme order dropped its prepaid requests", "ca", a.ca, "account", a.label, "reason", "the account answered 429", "dropped", left)
+		c.cfg.Logger.Debug("an order dropped the part of the request budget it had set aside and not used yet", "ca", a.ca, "account", a.label, "reason", "the account answered 429", "dropped", left)
 	default:
 		prepayBucket, _ := c.cfg.Budgets.prepayBucket(a)
 		if err := c.cfg.Limiter.RefundACME(ctx, a.ca, prepayBucket, left); err != nil {
-			c.cfg.Logger.Warn("acme request budget refund failed (the budget refills on its own)", "ca", a.ca, "err", err, "account", a.label)
+			c.cfg.Logger.Warn("could not refund the order's unused requests; the budget refills on its own", "ca", a.ca, "err", err, "account", a.label)
 		}
 	}
 }
@@ -372,7 +376,7 @@ func (c *chainIssuer) ordered(ctx context.Context, group []*account, live []stri
 	for _, a := range out {
 		lv, err := c.cfg.Limiter.ACMEBudgetLevel(ctx, c.cfg.Budgets.ordersBucket(a), live)
 		if err != nil {
-			c.cfg.Logger.Warn("acme budget levels unavailable (accounts in random order)", "ca", a.ca, "err", err)
+			c.cfg.Logger.Warn("could not read how much issuance budget each account has left, so the accounts are tried in random order", "ca", a.ca, "err", err)
 			return out
 		}
 		levels[a] = lv
@@ -384,7 +388,7 @@ func (c *chainIssuer) ordered(ctx context.Context, group []*account, live []stri
 func (c *chainIssuer) liveNodes(ctx context.Context) []string {
 	ids, err := c.cfg.Nodes.LiveNodeIDs(ctx)
 	if err != nil {
-		c.cfg.Logger.Warn("live node list unavailable (counting only this node's in-flight orders)", "err", err)
+		c.cfg.Logger.Warn("could not list the live nodes, so only this node's running orders are counted", "err", err)
 		ids = nil
 	}
 	if !slices.Contains(ids, c.cfg.NodeID) {
@@ -447,14 +451,14 @@ func (c *chainIssuer) handleFailure(ctx context.Context, a *account, err error) 
 	default: // transient / unknown → exponential backoff
 		cool, cerr := c.cfg.Limiter.CACooldown(ctx, a.id)
 		if cerr != nil {
-			c.cfg.Logger.Warn("acme CA cooldown check failed (backing off as for a new failure)", "ca", a.ca, "err", cerr, "account", a.label)
+			c.cfg.Logger.Warn("could not check this account's current cooldown, so a new backoff is set from its count of failures in a row", "ca", a.ca, "err", cerr, "account", a.label)
 		}
 		if cool > 0 {
 			return cool, false
 		}
 		n, berr := c.cfg.Limiter.BumpCAFailures(ctx, a.id, c.cfg.BackoffMax) // best-effort streak counter (see above)
 		if berr != nil {
-			c.cfg.Logger.Warn("acme CA failure-streak bump failed", "ca", a.ca, "err", berr, "account", a.label)
+			c.cfg.Logger.Warn("could not record another failure in a row for this account, so the backoff is set as after a first failure", "ca", a.ca, "err", berr, "account", a.label)
 		}
 		d := backoff(c.cfg.BackoffInitial, c.cfg.BackoffMax, n)
 		return c.setCooldown(ctx, a, d), false
@@ -464,12 +468,12 @@ func (c *chainIssuer) handleFailure(ctx context.Context, a *account, err error) 
 func (c *chainIssuer) setCooldown(ctx context.Context, a *account, d time.Duration) time.Duration {
 	c.cfg.Recorder.ACMECooldown(a.ca)
 	if err := c.cfg.Limiter.SetCACooldown(ctx, a.id, d); err != nil {
-		c.cfg.Logger.Warn("acme CA cooldown write failed", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
+		c.cfg.Logger.Warn("could not save this account's cooldown, so other attempts are not held back by it", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
 		return d
 	}
 	cur, err := c.cfg.Limiter.CACooldown(ctx, a.id)
 	if err != nil {
-		c.cfg.Logger.Warn("acme CA cooldown read failed (reporting the requested cooldown)", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
+		c.cfg.Logger.Warn("could not read back this account's cooldown, so the requested cooldown is reported", "ca", a.ca, "cooldown", d, "err", err, "account", a.label)
 		return d
 	}
 	return max(d, cur)

@@ -32,7 +32,7 @@ func HTTPChallengeHandler(keyAuths HTTPKeyAuths, onMiss func(clientIP string), l
 		}
 		keyAuth, found, err := keyAuths.HTTPKeyAuth(r.Context(), host, token)
 		if err != nil {
-			logger.Debug("acme http-01 challenge lookup failed", "domain", host, "ip", ip, "err", err)
+			logger.Debug("could not look up the HTTP validation challenge for this request, so the certificate authority gets an error answer", "domain", host, "ip", ip, "err", err)
 			http.Error(w, "challenge store unavailable", http.StatusServiceUnavailable)
 			return
 		}
@@ -41,10 +41,10 @@ func HTTPChallengeHandler(keyAuths HTTPKeyAuths, onMiss func(clientIP string), l
 			http.NotFound(w, r)
 			return
 		}
-		logger.Debug("acme http-01 challenge served", "domain", host, "ip", ip)
+		logger.Debug("answered a certificate authority's HTTP validation request", "domain", host, "ip", ip)
 		w.Header().Set("Content-Type", "text/plain")
 		if _, err := io.WriteString(w, html.EscapeString(keyAuth)); err != nil {
-			logger.Debug("acme http-01 challenge response write failed", "domain", host, "ip", ip, "err", err)
+			logger.Debug("could not send the answer to a certificate authority's HTTP validation request, so that validation may fail", "domain", host, "ip", ip, "err", err)
 		}
 	})
 }

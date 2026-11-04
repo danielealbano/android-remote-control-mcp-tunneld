@@ -135,7 +135,7 @@ func TestRegistry_Nodes_LogsMalformedEntry(t *testing.T) {
 	if len(nodes) != 1 || nodes["ok"].Advertise != "10.0.0.1:9443" {
 		t.Fatalf("Nodes() = %v, want only the well-formed node", nodes)
 	}
-	if !strings.Contains(buf.String(), `msg="malformed node registry entry skipped" key=node:broken`) {
+	if !strings.Contains(buf.String(), `msg="skipped an unreadable entry in the node list" key=node:broken`) {
 		t.Fatalf("the skipped entry must be logged; log = %q", buf.String())
 	}
 }

@@ -124,13 +124,13 @@ func (e *Edge) Wait(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		e.cfg.Logger.Warn("shutdown deadline reached before every public handler returned", "err", ctx.Err())
+		e.cfg.Logger.Warn("the shutdown time ran out before every public connection finished; the shutdown continues without waiting for them", "err", ctx.Err())
 	}
 }
 
 func closeLogged(logger *slog.Logger, what string, c io.Closer) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		logger.Debug("close failed", "what", what, "err", err)
+		logger.Debug("could not close a connection or listener cleanly; it is not used again", "what", what, "err", err)
 	}
 }
 
@@ -183,7 +183,7 @@ func (e *Edge) Serve(ctx context.Context, ln net.Listener) {
 func (e *Edge) connRate(ctx context.Context, ip netip.Addr) bool {
 	ok, _, err := e.lim.Allow(ctx, "conn-rate", ip, e.cfg.ConnRate, time.Second)
 	if err != nil {
-		e.cfg.Logger.Debug("conn-rate check failed (allowing)", "ip", ip, "err", err)
+		e.cfg.Logger.Debug("could not check the connection rate for this address, so the connection is allowed", "ip", ip, "err", err)
 		return true // fail-open on a control-plane error (never a hard outage)
 	}
 	return ok

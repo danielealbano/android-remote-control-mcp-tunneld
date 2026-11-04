@@ -657,7 +657,7 @@ func (h *recordingHandler) loggedAt(level slog.Level, msg string) bool {
 func TestLegoObtain_IssuedBundle(t *testing.T) {
 	t.Parallel()
 	leaf, inter, root := testCertChain(t)
-	const incomplete = "acme issued an incomplete chain"
+	const incomplete = "the certificate authority returned a certificate chain that is incomplete or does not verify; it is used as is"
 	tests := []struct {
 		name     string
 		issued   []byte

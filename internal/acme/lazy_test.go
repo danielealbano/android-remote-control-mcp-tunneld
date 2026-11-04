@@ -304,9 +304,9 @@ func TestLegoClient_AbandonedOrderOutcomeLogged(t *testing.T) {
 		err  error
 		want string
 	}{
-		{name: "order failed", err: errors.New("ca said no"), want: "abandoned ACME order failed"},
+		{name: "order failed", err: errors.New("ca said no"), want: "an order that was given up on failed later; nothing waits for it any more"},
 		{name: "certificate issued", res: &certificate.Resource{Domains: []string{"n.example.test"}},
-			want: "abandoned ACME order issued a certificate that was discarded"},
+			want: "an order that was given up on still produced a certificate, which was thrown away"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

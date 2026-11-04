@@ -63,12 +63,12 @@ func (r *Registry) atoiVal(name string, v any) int64 {
 	}
 	s, ok := v.(string)
 	if !ok {
-		r.logger.Warn("unexpected route byte counter type (reported as 0)", "tunnel", name, "type", fmt.Sprintf("%T", v))
+		r.logger.Warn("a tunnel byte counter has an unexpected type, so it is reported as 0", "tunnel", name, "type", fmt.Sprintf("%T", v))
 		return 0
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		r.logger.Warn("unparseable route byte counter (reported as 0)", "tunnel", name, "err", err)
+		r.logger.Warn("a tunnel byte counter could not be read, so it is reported as 0", "tunnel", name, "err", err)
 		return 0
 	}
 	return n

@@ -129,7 +129,7 @@ func (rc *reservedCerts) maybeRenew(ctx context.Context, rh *reservedHost) {
 	if rh.cur.Load() != nil {
 		due, _, err := rc.shouldRenew(ctx, rh.currentInfo())
 		if err != nil {
-			rc.logger.Warn("reserved-host renewal check failed (will retry next scan)", "host", rh.host, "err", err)
+			rc.logger.Warn("could not check whether the server certificate needs renewing; retrying on the next check", "host", rh.host, "err", err)
 			return
 		}
 		if !due {
@@ -150,9 +150,9 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 		}
 		return
 	case err != nil:
-		rc.logger.Warn("reserved-host issuance lock unavailable (issuing without it)", "host", rh.host, "err", err)
+		rc.logger.Warn("could not take the lock for issuing the server certificate, so it is issued without it", "host", rh.host, "err", err)
 	case !locked:
-		rc.logger.Info("reserved-host issuance busy on another node (will retry)", "host", rh.host)
+		rc.logger.Info("another node is issuing the server certificate; retrying later", "host", rh.host)
 		return
 	}
 	if locked && rc.adoptShared(ctx, rh, true) {
@@ -166,7 +166,7 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 		abandoned := ctx.Err() == nil && issueCtx.Err() != nil
 		if locked {
 			if abandoned {
-				rc.logger.Warn("reserved-host issuance abandoned at its deadline (lock kept until its TTL)", "host", rh.host)
+				rc.logger.Warn("gave up issuing the server certificate at its time limit; its lock expires on its own", "host", rh.host)
 			} else {
 				rc.releaseLock(rh.host, unlock)
 			}
@@ -175,9 +175,9 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 			return
 		}
 		if rh.cur.Load() == nil {
-			rc.logger.Warn("reserved-host cert unavailable (degraded; will retry)", "host", rh.host, "err", err)
+			rc.logger.Warn("the server certificate for this host is not available yet, so connections to this host cannot be served; retrying", "host", rh.host, "err", err)
 		} else {
-			rc.logger.Warn("reserved-host cert renewal failed (keeping current)", "host", rh.host, "err", err)
+			rc.logger.Warn("could not renew the server certificate; keeping the current one", "host", rh.host, "err", err)
 		}
 		return
 	}
@@ -186,7 +186,7 @@ func (rc *reservedCerts) issue(ctx context.Context, rh *reservedHost) {
 	}
 	c, perr := tls.X509KeyPair(certPEM, keyPEM)
 	if perr != nil {
-		rc.logger.Warn("reserved-host cert parse failed", "host", rh.host, "err", perr)
+		rc.logger.Warn("could not read the newly issued server certificate, so it is discarded and ordered again at the next check", "host", rh.host, "err", perr)
 		return
 	}
 	rh.store(&c, info)
@@ -200,7 +200,7 @@ func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requ
 	cancel()
 	if err != nil {
 		if ctx.Err() == nil {
-			rc.logger.Warn("reserved-host shared cert read failed (keeping the local cert)", "host", rh.host, "err", err)
+			rc.logger.Warn("could not read the server certificate shared by the other nodes, so it is not used", "host", rh.host, "err", err)
 		}
 		return false
 	}
@@ -209,19 +209,19 @@ func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requ
 	}
 	var b certBundle
 	if err := json.Unmarshal(raw, &b); err != nil {
-		rc.logger.Warn("reserved-host shared cert unparseable", "host", rh.host, "err", err)
+		rc.logger.Warn("the shared server certificate could not be read, so it is ignored", "host", rh.host, "err", err)
 		return false
 	}
 	cert, err := tls.X509KeyPair([]byte(b.CertPEM), []byte(b.KeyPEM))
 	if err != nil {
-		rc.logger.Warn("reserved-host shared cert holds no usable key pair", "host", rh.host, "err", err)
+		rc.logger.Warn("the shared server certificate has no usable key pair, so it is ignored", "host", rh.host, "err", err)
 		return false
 	}
 	info := b.Info
 	if info.NotAfter.IsZero() {
 		na, err := leafNotAfter([]byte(b.CertPEM))
 		if err != nil {
-			rc.logger.Warn("reserved-host shared cert leaf unparseable", "host", rh.host, "err", err)
+			rc.logger.Warn("could not read the expiry date of the shared server certificate, so it is ignored", "host", rh.host, "err", err)
 			return false
 		}
 		info.NotAfter = na
@@ -235,7 +235,7 @@ func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requ
 	if requireNotDue {
 		due, _, err := rc.shouldRenew(ctx, info)
 		if err != nil {
-			rc.logger.Warn("reserved-host shared cert renewal check failed (ordering instead)", "host", rh.host, "err", err)
+			rc.logger.Warn("could not check whether the shared server certificate needs renewing, so a new one is ordered", "host", rh.host, "err", err)
 			return false
 		}
 		if due {
@@ -244,26 +244,26 @@ func (rc *reservedCerts) adoptShared(ctx context.Context, rh *reservedHost, requ
 	}
 	rh.store(&cert, info)
 	rc.persist(rh.host, []byte(b.CertPEM), []byte(b.KeyPEM), info)
-	rc.logger.Info("reserved-host cert taken from the shared store", "host", rh.host, "not_after", info.NotAfter)
+	rc.logger.Info("using the server certificate from the store shared by all nodes", "host", rh.host, "not_after", info.NotAfter)
 	return true
 }
 
 func (rc *reservedCerts) publish(ctx context.Context, host string, certPEM, keyPEM []byte, info store.CertInfo) {
 	raw, err := json.Marshal(certBundle{CertPEM: string(certPEM), KeyPEM: string(keyPEM), Info: info})
 	if err != nil {
-		rc.logger.Warn("reserved-host shared cert encode failed", "host", host, "err", err)
+		rc.logger.Warn("could not prepare the server certificate for sharing, so the other nodes order their own", "host", host, "err", err)
 		return
 	}
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), selfPublishTimeout)
 	defer cancel()
 	if err := rc.shared.PutSelfCert(pctx, host, raw, info.NotAfter.Sub(rc.now())); err != nil {
-		rc.logger.Warn("reserved-host shared cert publish failed (other nodes order their own)", "host", host, "err", err)
+		rc.logger.Warn("could not share the server certificate, so the other nodes order their own", "host", host, "err", err)
 	}
 }
 
 func (rc *reservedCerts) releaseLock(host string, unlock func() error) {
 	if err := unlock(); err != nil {
-		rc.logger.Warn("reserved-host issuance lock release failed (expires by TTL)", "host", host, "err", err)
+		rc.logger.Warn("could not release the lock for issuing the server certificate; it expires on its own", "host", host, "err", err)
 	}
 }
 
@@ -346,25 +346,25 @@ func (rc *reservedCerts) loadBundle(host, path string) (*tls.Certificate, store.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			rc.logger.Warn("reserved-host cert bundle unreadable", "host", host, "err", err)
+			rc.logger.Warn("could not read the saved server certificate, so it is not used", "host", host, "err", err)
 		}
 		return nil, store.CertInfo{}, false
 	}
 	var b certBundle
 	if err := json.Unmarshal(raw, &b); err != nil {
-		rc.logger.Warn("reserved-host cert bundle unparseable", "host", host, "err", err)
+		rc.logger.Warn("the saved server certificate could not be parsed, so it is not used", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	cert, err := tls.X509KeyPair([]byte(b.CertPEM), []byte(b.KeyPEM))
 	if err != nil {
-		rc.logger.Warn("reserved-host cert bundle holds no usable key pair", "host", host, "err", err)
+		rc.logger.Warn("the saved server certificate has no usable key pair, so it is not used", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	info := b.Info
 	if info.NotAfter.IsZero() {
 		na, err := leafNotAfter([]byte(b.CertPEM))
 		if err != nil {
-			rc.logger.Warn("reserved-host cert bundle leaf unparseable", "host", host, "err", err)
+			rc.logger.Warn("could not read the expiry date of the saved server certificate, so it is not used", "host", host, "err", err)
 			return nil, store.CertInfo{}, false
 		}
 		info.NotAfter = na
@@ -377,18 +377,18 @@ func (rc *reservedCerts) loadLegacyTriple(host, dir string) (*tls.Certificate, s
 	certPEM, err := os.ReadFile(filepath.Join(dir, "cert.pem"))
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			rc.logger.Warn("reserved-host legacy cert unreadable", "host", host, "err", err)
+			rc.logger.Warn("could not read the server certificate saved in the old format, so it is not used", "host", host, "err", err)
 		}
 		return nil, store.CertInfo{}, false
 	}
 	keyPEM, err := os.ReadFile(filepath.Join(dir, "key.pem"))
 	if err != nil {
-		rc.logger.Warn("reserved-host legacy key unreadable", "host", host, "err", err)
+		rc.logger.Warn("could not read the key of the server certificate saved in the old format, so it is not used", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		rc.logger.Warn("reserved-host legacy cache holds no usable key pair", "host", host, "err", err)
+		rc.logger.Warn("the server certificate saved in the old format has no usable key pair, so it is not used", "host", host, "err", err)
 		return nil, store.CertInfo{}, false
 	}
 	info := store.CertInfo{}
@@ -396,16 +396,16 @@ func (rc *reservedCerts) loadLegacyTriple(host, dir string) (*tls.Certificate, s
 	switch {
 	case err == nil:
 		if err := json.Unmarshal(metaRaw, &info); err != nil {
-			rc.logger.Warn("reserved-host legacy meta unparseable (using the leaf's NotAfter)", "host", host, "err", err)
+			rc.logger.Warn("the details saved with the old-format server certificate could not be parsed, so its expiry date is read from the certificate", "host", host, "err", err)
 			info = store.CertInfo{}
 		}
 	case !errors.Is(err, fs.ErrNotExist):
-		rc.logger.Warn("reserved-host legacy meta unreadable (using the leaf's NotAfter)", "host", host, "err", err)
+		rc.logger.Warn("could not read the details saved with the old-format server certificate, so its expiry date is read from the certificate", "host", host, "err", err)
 	}
 	if info.NotAfter.IsZero() {
 		na, err := leafNotAfter(certPEM)
 		if err != nil {
-			rc.logger.Warn("reserved-host legacy leaf unparseable", "host", host, "err", err)
+			rc.logger.Warn("the server certificate saved in the old format could not be parsed, so it is not used", "host", host, "err", err)
 			return nil, store.CertInfo{}, false
 		}
 		info.NotAfter = na
@@ -419,21 +419,21 @@ func (rc *reservedCerts) loadLegacyTriple(host, dir string) (*tls.Certificate, s
 func (rc *reservedCerts) persist(host string, certPEM, keyPEM []byte, info store.CertInfo) {
 	dir := rc.hostDir(host)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		rc.logger.Warn("reserved-host cert dir create failed", "host", host, "err", err)
+		rc.logger.Warn("could not create the directory for saving the server certificate, so it is not kept on disk", "host", host, "err", err)
 		return
 	}
 	raw, err := json.Marshal(certBundle{CertPEM: string(certPEM), KeyPEM: string(keyPEM), Info: info})
 	if err != nil {
-		rc.logger.Warn("reserved-host cert bundle encode failed", "host", host, "err", err)
+		rc.logger.Warn("could not prepare the server certificate for saving, so it is not kept on disk", "host", host, "err", err)
 		return
 	}
 	tmp := filepath.Join(dir, "bundle.json.tmp")
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		rc.logger.Warn("reserved-host cert persist failed", "host", host, "err", err)
+		rc.logger.Warn("could not save the server certificate, so it is not kept on disk", "host", host, "err", err)
 		return
 	}
 	if err := os.Rename(tmp, filepath.Join(dir, "bundle.json")); err != nil {
-		rc.logger.Warn("reserved-host cert persist rename failed", "host", host, "err", err)
+		rc.logger.Warn("could not move the saved server certificate into place, so it is not kept on disk", "host", host, "err", err)
 	}
 }
 

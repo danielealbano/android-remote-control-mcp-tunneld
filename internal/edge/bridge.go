@@ -171,14 +171,14 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	}
 	report.SetAttrs(ctx, append(helloAttrs(info), slog.String("tunnel", name))...)
 	if !e.ready.DialBackReady() {
-		e.cfg.Logger.Debug("tunnel refused: this node cannot accept dial-backs yet", "tunnel", name)
+		e.cfg.Logger.Debug("refused a tunnel connection: this node is not ready to receive the phones' data connections yet", "tunnel", name)
 		e.rec.Reject("no-route", name, peerAddr(client))
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
 	nodeID, connID, ok, err := e.router.LookupRoute(ctx, name)
 	if err != nil {
-		e.cfg.Logger.Debug("route lookup failed", "tunnel", name, "err", err)
+		e.cfg.Logger.Debug("could not look up which node holds the phone for this tunnel, so the connection is refused", "tunnel", name, "err", err)
 	}
 	if err != nil || !ok {
 		e.rec.Reject("no-route", name, peerAddr(client))
@@ -191,7 +191,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// like connRate — never a hard outage.
 	dayOver, weekOver, qerr := e.lim.TrafficExhausted(ctx, name)
 	if qerr != nil {
-		e.cfg.Logger.Debug("traffic quota check failed (allowing)", "tunnel", name, "err", qerr)
+		e.cfg.Logger.Debug("could not check the tunnel's traffic quota, so the connection is allowed", "tunnel", name, "err", qerr)
 	}
 	if qerr == nil && (dayOver || weekOver) {
 		reason := "quota-day"
@@ -209,7 +209,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// connRate/pace/quota): a Valkey blip must neither evict a healthy live stream nor refuse admission.
 	acq, aerr := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 	if aerr != nil {
-		e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", aerr)
+		e.cfg.Logger.Debug("could not check the tunnel's open-connection limit, so the connection is allowed", "tunnel", name, "err", aerr)
 		acq = true
 	} else if !acq {
 		acq = e.evictAndAcquire(ctx, name, token)
@@ -225,7 +225,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	releaseSlot := func() {
 		slotOnce.Do(func() {
 			if err := e.lim.ReleaseStream(ctx, name, token); err != nil {
-				e.cfg.Logger.Debug("stream-cap release failed", "tunnel", name, "err", err)
+				e.cfg.Logger.Debug("could not release the tunnel's open-connection slot; it expires on its own", "tunnel", name, "err", err)
 			}
 		})
 	}
@@ -240,7 +240,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	if ferr != nil {
 		n2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr != nil {
-			e.cfg.Logger.Debug("route re-lookup failed", "tunnel", name, "err", lerr)
+			e.cfg.Logger.Debug("could not look up the phone's node again after the phone could not be reached, so the connection is refused", "tunnel", name, "err", lerr)
 		}
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) {
 			openedVia, openedOn = c2, n2
@@ -248,7 +248,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		}
 	}
 	if ferr != nil {
-		e.cfg.Logger.Debug("open far side failed", "tunnel", name, "err", ferr)
+		e.cfg.Logger.Debug("could not reach the phone for this connection, so the connection is refused", "tunnel", name, "err", ferr)
 		e.rec.Reject("no-route", name, peerAddr(client))
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
@@ -308,7 +308,7 @@ func (e *Edge) evictAndAcquire(ctx context.Context, name, token string) bool {
 		}
 		acq, err := e.lim.AcquireStream(ctx, name, token, e.cfg.Concurrent)
 		if err != nil {
-			e.cfg.Logger.Debug("stream-cap acquire failed (allowing)", "tunnel", name, "err", err)
+			e.cfg.Logger.Debug("could not check the tunnel's open-connection limit, so the connection is allowed", "tunnel", name, "err", err)
 			return true
 		}
 		if acq {
@@ -478,7 +478,7 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 func (e *Edge) parentGone(ctx context.Context, name string, as *activeStream) bool {
 	_, cur, ok, err := e.router.LookupRoute(ctx, name)
 	if err != nil {
-		e.cfg.Logger.Debug("splice route check failed (keeping the splice)", "tunnel", name, "err", err)
+		e.cfg.Logger.Debug("could not check whether the phone is still connected, so this connection is kept", "tunnel", name, "err", err)
 		return false
 	}
 	if !ok {
@@ -489,7 +489,7 @@ func (e *Edge) parentGone(ctx context.Context, name string, as *activeStream) bo
 	}
 	_, live, err := e.router.LookupNode(ctx, as.nodeID)
 	if err != nil {
-		e.cfg.Logger.Debug("splice route check: node lookup failed (keeping the splice)", "tunnel", name, "node", as.nodeID, "err", err)
+		e.cfg.Logger.Debug("could not look up the phone's node, so the connection is kept", "tunnel", name, "node", as.nodeID, "err", err)
 		return false
 	}
 	return !live
@@ -519,7 +519,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 			// a day/week cap whose reset is too far to wait out. A Valkey error yields Proceed (fail-open —
 			// never kill a live stream on a control-plane blip).
 			if action, wait, win, cerr := e.lim.Charge(ctx, name, as.member, dir, int64(nr)); cerr != nil {
-				e.cfg.Logger.Debug("traffic charge failed (proceeding)", "tunnel", name, "dir", dir, "err", cerr)
+				e.cfg.Logger.Debug("could not count this traffic against the tunnel's limits, so it is forwarded anyway", "tunnel", name, "dir", dir, "err", cerr)
 			} else {
 				switch action {
 				case limit.ChargeWait:
@@ -533,7 +533,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 				}
 			}
 			if _, ew := dst.Write(buf[:nr]); ew != nil {
-				e.cfg.Logger.Debug("splice write failed", "tunnel", name, "dir", dir, "err", ew)
+				e.cfg.Logger.Debug("could not forward data on a tunnel connection, so the connection is closed", "tunnel", name, "dir", dir, "err", ew)
 				return copyWriteErr
 			}
 			atomic.AddInt64(counter, int64(nr))
@@ -543,7 +543,7 @@ func (e *Edge) pacedCopy(ctx context.Context, name, dir string, dst io.Writer, s
 		}
 		if er != nil {
 			if !errors.Is(er, io.EOF) {
-				e.cfg.Logger.Debug("splice read ended with an error", "tunnel", name, "dir", dir, "err", er)
+				e.cfg.Logger.Debug("a tunnel connection ended with a read error", "tunnel", name, "dir", dir, "err", er)
 			}
 			return copySrcEOF
 		}

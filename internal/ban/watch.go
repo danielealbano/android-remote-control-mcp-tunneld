@@ -26,7 +26,7 @@ func NewWatcher(e *Engine, files []string, csvPath string, poll time.Duration, l
 func (w *watcher) Initial() {
 	cur := w.fingerprint()
 	if err := w.e.Load(w.files, w.csv, nil, w.log); err != nil {
-		w.log.Warn("initial ban load error; engine stays at empty snapshot until a successful load", "err", err)
+		w.log.Warn("could not load the ban files at startup; no bans apply until a load succeeds", "err", err)
 		return // do NOT record cur — retry on the next tick
 	}
 	s := w.e.current.Load()
@@ -80,7 +80,7 @@ func (w *watcher) tick(onReload func(*Engine)) {
 	// enforces the same refusal even when the deletion lands between this check and the file reads.
 	req := w.required()
 	if p, vanished := w.vanished(cur); vanished {
-		w.log.Error("ban input file disappeared; refusing reload and keeping the previous bans", "file", p)
+		w.log.Error("a ban file disappeared; not reloading and keeping the previous bans", "file", p)
 		return
 	}
 	// Torn-read guard: a non-atomic external writer can be caught mid-truncate. Build the snapshot
@@ -89,14 +89,14 @@ func (w *watcher) tick(onReload func(*Engine)) {
 	for range 3 {
 		snap, err := w.e.build(w.files, w.csv, req, w.log)
 		if err != nil {
-			w.log.Warn("ban reload error; keeping previous snapshot (will retry)", "err", err)
+			w.log.Warn("could not reload the ban files; keeping the previous bans and retrying", "err", err)
 			return
 		}
 		after := w.fingerprint()
 		if p, vanished := w.vanished(after); vanished {
 			// The deletion landed mid-tick: build already refused via `required`, but a stability pass
 			// here must never commit the vanished state as the new baseline.
-			w.log.Error("ban input file disappeared during reload; keeping the previous bans", "file", p)
+			w.log.Error("a ban file disappeared during the reload; keeping the previous bans", "file", p)
 			return
 		}
 		if sameStates(cur, after) {
@@ -111,7 +111,7 @@ func (w *watcher) tick(onReload func(*Engine)) {
 		}
 		cur = after
 	}
-	w.log.Warn("ban files kept changing during reload; retrying next tick")
+	w.log.Warn("the ban files kept changing during the reload; retrying shortly")
 }
 
 // required returns the paths present at the last successful load (they MUST still exist).
@@ -160,7 +160,7 @@ func (w *watcher) statePath(p string) fileState {
 	fi, err := os.Stat(p)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			w.log.Warn("ban input file stat failed (treated as missing)", "file", p, "err", err)
+			w.log.Warn("could not check a ban file, so it is treated as missing", "file", p, "err", err)
 		}
 		return fileState{exists: false}
 	}

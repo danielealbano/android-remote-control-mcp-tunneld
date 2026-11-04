@@ -132,7 +132,7 @@ func TestSpliceEvictor_BroadcastPanicIsContained(t *testing.T) {
 		t.Fatalf("local evictions = %d, want 1", n)
 	}
 	out := buf.String()
-	if !strings.Contains(out, `msg="panic recovered" where="mesh control broadcast"`) {
+	if !strings.Contains(out, `msg="recovered from a crash; only the affected work was stopped" where="mesh control broadcast"`) {
 		t.Fatalf("the broadcast panic must be logged; log = %q", out)
 	}
 	for _, id := range []string{"tunnel=t", "conn_id=conn-1", "peer_node=nodeB"} {

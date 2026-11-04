@@ -74,7 +74,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (fail closed — the ban gate is the first effective security check on this ingress edge).
 	addr, perr := netip.ParseAddr(ip)
 	if perr != nil {
-		h.svc.logger.Debug("enroll unparseable peer address (refused)", "peer", ip, "err", perr)
+		h.svc.logger.Debug("refused an enrollment request whose source address could not be read", "peer", ip, "err", perr)
 		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
 		return
 	}
@@ -118,7 +118,7 @@ func (h *Handler) handleHealth(w http.ResponseWriter) {
 	}
 	w.WriteHeader(status)
 	if _, err := io.WriteString(w, body); err != nil {
-		h.svc.logger.Debug("health response write failed", "status", status, "err", err)
+		h.svc.logger.Debug("could not send the health check answer; the checker may get an incomplete answer or none", "status", status, "err", err)
 	}
 }
 
@@ -136,7 +136,7 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 	}
 	nonce, err := h.svc.Nonce(r.Context())
 	if err != nil {
-		h.svc.logger.Debug("enrollment nonce mint failed", "ip", ip, "err", err)
+		h.svc.logger.Debug("could not create an enrollment one-time code; the request is refused and the phone can retry", "ip", ip, "err", err)
 		h.writeError(w, r, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
@@ -179,19 +179,19 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		h.writeErr(w, r, e, statusForError(e))
 		return
 	}
-	t = h.svc.logStep("enroll step", "limit-check", t, "ip", ip)
+	t = h.svc.logStep("enrollment step finished", "limit-check", t, "ip", ip)
 
 	// Mint the single-use nonce for the follow-up mTLS POST /api/v1/issue (Phase 2) BEFORE enrolling: a mint
 	// failure must fail the request before any name is claimed (an unused nonce simply expires by TTL,
 	// while a name claimed without a deliverable response would be orphaned).
 	issueNonce, nerr := h.svc.Nonce(r.Context())
 	if nerr != nil {
-		h.svc.logger.Debug("issuance nonce mint failed", "ip", ip, "err", nerr)
+		h.svc.logger.Debug("could not create the one-time code for the first certificate request; the request is refused and the phone can retry", "ip", ip, "err", nerr)
 		h.rec.EnrollmentResult("internal")
 		h.writeError(w, r, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
-	h.svc.logStep("enroll step", "issue-nonce", t, "ip", ip)
+	h.svc.logStep("enrollment step finished", "issue-nonce", t, "ip", ip)
 
 	res, ee := h.svc.Enroll(r.Context(), ip, Request{
 		Nonce:          nonce,
@@ -229,7 +229,7 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		h.svc.logger.Debug("enrollment response write failed", "status", status, "err", err)
+		h.svc.logger.Debug("could not send the answer to an enrollment request; the phone may get an incomplete answer or none", "status", status, "err", err)
 	}
 }
 

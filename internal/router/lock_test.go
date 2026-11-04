@@ -38,10 +38,10 @@ func TestRegistry_Release_LogsFailures(t *testing.T) {
 		cancelled bool
 		want      string
 	}{
-		{name: "ownership check fails", fail: "get", want: `msg="route lock release check failed (lock expires by TTL)" tunnel=n`},
-		{name: "delete fails", fail: "del", want: `msg="route lock release failed (lock expires by TTL)" tunnel=n`},
-		{name: "ownership check fails after the caller was cancelled", fail: "get", cancelled: true, want: `msg="route lock release check failed (lock expires by TTL)" tunnel=n`},
-		{name: "delete fails after the caller was cancelled", fail: "del", cancelled: true, want: `msg="route lock release failed (lock expires by TTL)" tunnel=n`},
+		{name: "ownership check fails", fail: "get", want: `msg="could not check the route lock before releasing it; it expires on its own" tunnel=n`},
+		{name: "delete fails", fail: "del", want: `msg="could not release the route lock; it expires on its own" tunnel=n`},
+		{name: "ownership check fails after the caller was cancelled", fail: "get", cancelled: true, want: `msg="could not check the route lock before releasing it; it expires on its own" tunnel=n`},
+		{name: "delete fails after the caller was cancelled", fail: "del", cancelled: true, want: `msg="could not release the route lock; it expires on its own" tunnel=n`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

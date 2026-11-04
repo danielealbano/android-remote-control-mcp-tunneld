@@ -42,8 +42,8 @@ const (
 	leStagingDir   = "https://acme-staging-v02.api.letsencrypt.org/directory"
 	gtsStagingDir  = "https://dv.acme-v02.test-api.pki.goog/directory"
 	unreachableDir = "https://127.0.0.1:1/dir"
-	alpnServed     = "acme tls-alpn-01 challenge served"
-	httpServed     = "acme http-01 challenge served"
+	alpnServed     = "answered a certificate authority's TLS validation request"
+	httpServed     = "answered a certificate authority's HTTP validation request"
 	stagingBucket  = "tunneld-staging"
 )
 

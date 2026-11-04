@@ -205,7 +205,7 @@ func TestBuildACMEChain_DNSProviderOnlyWhenUsed(t *testing.T) {
 			if _, err := buildACMEChain(cfg, nil, testChallengeStore(t), nil, logger, "node-test", fakeNodes{}); err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Contains(buf.String(), "acme dns provider unavailable"); got != tc.wantWarn {
+			if got := strings.Contains(buf.String(), "the DNS provider for certificate validation is not available"); got != tc.wantWarn {
 				t.Fatalf("dns provider warning logged = %v, want %v; log = %q", got, tc.wantWarn, buf.String())
 			}
 		})

@@ -77,7 +77,7 @@ func TestRegistry_TunnelMeta_LogsMalformedCounter(t *testing.T) {
 	if m := meta["live"]; m.BytesIn != 0 || m.BytesOut != 9 {
 		t.Fatalf("meta = %+v, want the malformed counter reported as 0", m)
 	}
-	if !strings.Contains(buf.String(), `msg="unparseable route byte counter (reported as 0)" tunnel=live`) {
+	if !strings.Contains(buf.String(), `msg="a tunnel byte counter could not be read, so it is reported as 0" tunnel=live`) {
 		t.Fatalf("the malformed counter must be logged; log = %q", buf.String())
 	}
 }
@@ -87,7 +87,7 @@ func TestRegistry_AtoiVal_UnexpectedTypeLogged(t *testing.T) {
 	if got := reg.atoiVal("n", int64(5)); got != 0 {
 		t.Fatalf("atoiVal(int64) = %d, want 0", got)
 	}
-	if !strings.Contains(buf.String(), `msg="unexpected route byte counter type (reported as 0)" tunnel=n type=int64`) {
+	if !strings.Contains(buf.String(), `msg="a tunnel byte counter has an unexpected type, so it is reported as 0" tunnel=n type=int64`) {
 		t.Fatalf("an unexpected counter type must be logged; log = %q", buf.String())
 	}
 }

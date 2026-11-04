@@ -103,7 +103,7 @@ func (l *Limiter) releaseBudgetLock(ctx context.Context, ca, token string) {
 	v, err := l.rdb.Get(ctx, budgetLockKey(ca)).Result()
 	if err != nil {
 		if !errors.Is(err, redis.Nil) {
-			l.logger.Warn("acme budget lock release check failed (lock expires by TTL)", "ca", ca, "err", err)
+			l.logger.Warn("could not check the issuance budget lock before releasing it; it expires on its own", "ca", ca, "err", err)
 		}
 		return
 	}
@@ -111,7 +111,7 @@ func (l *Limiter) releaseBudgetLock(ctx context.Context, ca, token string) {
 		return
 	}
 	if err := l.rdb.Del(ctx, budgetLockKey(ca)).Err(); err != nil {
-		l.logger.Warn("acme budget lock release failed (lock expires by TTL)", "ca", ca, "err", err)
+		l.logger.Warn("could not release the issuance budget lock; it expires on its own", "ca", ca, "err", err)
 	}
 }
 
@@ -124,7 +124,7 @@ func (l *Limiter) parseBucket(b Bucket, vals []any, now time.Time) bucketState {
 	t, errT := strconv.ParseFloat(ts, 64)
 	at, errA := strconv.ParseInt(as, 10, 64)
 	if !okT || !okA || errT != nil || errA != nil {
-		l.logger.Warn("unparseable acme budget (treated as full)", "bucket", b.Key, "err", errors.Join(errT, errA))
+		l.logger.Warn("could not read an issuance budget, so it is treated as full", "bucket", b.Key, "err", errors.Join(errT, errA))
 		return bucketState{tokens: b.Capacity, at: now}
 	}
 	return bucketState{tokens: t, at: time.UnixMilli(at)}

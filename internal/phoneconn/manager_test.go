@@ -55,7 +55,7 @@ func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	go m.heartbeatLoop(ctx, c)
 
 	deadline := time.After(2 * time.Second)
-	for !strings.Contains(buf.String(), "heartbeat failed") {
+	for !strings.Contains(buf.String(), "could not refresh the phone's route") {
 		select {
 		case <-deadline:
 			cancel()
@@ -543,7 +543,7 @@ func TestHeartbeatLoop_FailureLogging(t *testing.T) {
 			heal: func(cancel context.CancelFunc) func() error {
 				return func() error { cancel(); return context.Canceled }
 			}},
-		{name: "self-heal failure is logged", wantLog: "route self-heal failed (retried on the next heartbeat)",
+		{name: "self-heal failure is logged", wantLog: "could not restore the phone's missing route; retrying on the next refresh",
 			hb: func(context.CancelFunc) func() (router.HeartbeatResult, error) { return missing },
 			heal: func(context.CancelFunc) func() error {
 				return func() error { return errors.New("valkey unreachable") }
@@ -817,7 +817,7 @@ func TestManager_StartDrain_FullSendBufferIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.StartDrain([]string{"203.0.113.2:443"})
-	if !strings.Contains(buf.String(), "MOVE not queued") {
+	if !strings.Contains(buf.String(), "could not queue the message telling the phone to move") {
 		t.Fatalf("a MOVE that cannot be queued must be logged, got %q", buf.String())
 	}
 }

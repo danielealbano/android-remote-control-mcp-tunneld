@@ -30,7 +30,7 @@ func (l *Limiter) AcquireStream(ctx context.Context, name, member string, maxN i
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), streamReleaseTimeout)
 	defer cancel()
 	if err := l.rdb.ZRem(rctx, key, member).Err(); err != nil {
-		l.logger.Debug("stream-cap rollback failed (the member expires with its score)", "tunnel", name, "err", err)
+		l.logger.Debug("could not undo an open-connection slot; it expires on its own", "tunnel", name, "err", err)
 	}
 	return false, nil
 }

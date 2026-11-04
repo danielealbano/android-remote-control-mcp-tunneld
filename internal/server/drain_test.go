@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -99,6 +101,37 @@ func TestDrainer_NodeListingErrorSendsNoMove(t *testing.T) {
 	}
 	if !d.life.Draining() {
 		t.Fatal("the node must still drain when the node listing fails")
+	}
+}
+
+func TestDrainer_LogsWhetherThePhonesAreToldWhereToMove(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		nodes liveNodeLister
+		want  string
+	}{
+		{name: "other nodes", nodes: fakeLiveNodes{nodes: map[string]router.NodeInfo{
+			"self": {Advertise: "10.0.0.1:9443", Public: "203.0.113.1:443"},
+			"b":    {Advertise: "10.0.0.2:9443", Public: "203.0.113.2:443"},
+		}}, want: `msg="draining: telling the phones to move to other nodes"`},
+		{name: "this node only", nodes: fakeLiveNodes{nodes: map[string]router.NodeInfo{
+			"self": {Advertise: "10.0.0.1:9443", Public: "203.0.113.1:443"},
+		}}, want: `msg="draining: no other node is known, so the phones are not told where to move"`},
+		{name: "node listing error", nodes: fakeLiveNodes{err: errors.New("valkey down")},
+			want: `msg="draining: no other node is known, so the phones are not told where to move"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := newTestDrainer(tc.nodes, 0, time.Second)
+			buf := &syncBuffer{}
+			d.logger = slog.New(slog.NewTextHandler(buf, nil))
+			waitDrain(t, runDrain(context.Background(), d), 5*time.Second)
+			if out := buf.String(); !strings.Contains(out, "level=INFO "+tc.want) {
+				t.Fatalf("want %s at Info; log = %q", tc.want, out)
+			}
+		})
 	}
 }
 

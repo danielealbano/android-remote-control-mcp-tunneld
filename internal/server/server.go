@@ -76,7 +76,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	logger = rep.Logger(logger).With("node", nodeID, "version", version)
 	defer func() {
 		if !rep.Close(context.WithoutCancel(ctx), baseLogger) {
-			baseLogger.Warn("sentry did not send everything before the stop: some events may be lost")
+			baseLogger.Warn("Sentry did not finish sending before the stop; some events may be lost")
 		}
 	}()
 	defer report.Crash(ctx, logger, "tunneld run")
@@ -458,7 +458,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	rec.FinalFlush()     // after ALL producers stopped — no late deltas lost (self-bounded)
 	rec.FlushCapLog()    // pending cap-hit summaries
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
-		logger.Warn("node deregister failed (expires by TTL)", "err", err)
+		logger.Warn("could not remove this node from the node list; its entry expires on its own", "err", err)
 	}
 	evictor.Drain(sctx)
 	if werr != nil && !errors.Is(werr, context.Canceled) {
@@ -486,7 +486,7 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 		}
 		owner, _, ok, err := reg.LookupRoute(r.Context(), name)
 		if err != nil {
-			log.Warn("admin "+op+": route lookup failed", "tunnel", name, "err", err)
+			log.Warn("admin "+op+": could not look up the tunnel's route, so the request fails", "tunnel", name, "err", err)
 			http.Error(w, "route lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -500,7 +500,7 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 		} else {
 			addr, addrOK, lerr := reg.LookupNode(r.Context(), owner)
 			if lerr != nil || !addrOK {
-				log.Warn("admin "+op+": owner node unresolved", "tunnel", name, "owner", owner, "err", lerr)
+				log.Warn("admin "+op+": could not find the node that holds the tunnel, so the request fails", "tunnel", name, "owner", owner, "err", lerr)
 				http.Error(w, "owner node unavailable", http.StatusBadGateway)
 				return
 			}
@@ -509,13 +509,13 @@ func adminActionHandler(nodeID string, reg *router.Registry, mc *mesh.Client, lo
 			applied = res.Applied
 		}
 		if err != nil {
-			log.Warn("admin "+op+": failed", "tunnel", name, "owner", owner, "err", err)
+			log.Warn("admin "+op+": the node that holds the tunnel could not apply it, so the request fails", "tunnel", name, "owner", owner, "err", err)
 			http.Error(w, op+" failed", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, respField: applied}); err != nil {
-			log.Warn("admin "+op+": response write failed", "tunnel", name, "err", err)
+			log.Warn("admin "+op+": could not send the answer, although the action already ran; the admin client may get an incomplete answer or none", "tunnel", name, "err", err)
 		}
 	}
 }
@@ -534,7 +534,7 @@ func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, 
 		}
 		owner, _, ok, err := reg.LookupRoute(r.Context(), name)
 		if err != nil {
-			log.Warn("admin terminate: route lookup failed", "tunnel", name, "err", err)
+			log.Warn("admin terminate: could not look up the tunnel's route, so the request fails", "tunnel", name, "err", err)
 			http.Error(w, "route lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -544,13 +544,13 @@ func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, 
 		}
 		nodes, err := reg.LiveNodes(r.Context())
 		if err != nil {
-			log.Warn("admin terminate: node listing failed", "tunnel", name, "err", err)
+			log.Warn("admin terminate: could not list the nodes, so the request fails", "tunnel", name, "err", err)
 			http.Error(w, "node listing failed", http.StatusInternalServerError)
 			return
 		}
 		applied, lerr := local(r.Context(), name)
 		if lerr != nil {
-			log.Warn("admin terminate: local terminate failed", "tunnel", name, "err", lerr)
+			log.Warn("admin terminate: could not close the tunnel on this node; the other nodes are still asked", "tunnel", name, "err", lerr)
 		}
 		remote, failed := broadcastControl(r.Context(), nodeID, nodes, mc, mesh.ControlRequest{Op: "terminate", Tunnel: name}, log)
 		applied = applied || remote
@@ -560,13 +560,13 @@ func adminTerminateHandler(nodeID string, reg *router.Registry, mc meshControl, 
 			http.Error(w, "terminate failed", http.StatusBadGateway)
 			return
 		case owner != nodeID && !ownerLive:
-			log.Warn("admin terminate: owner node unresolved", "tunnel", name, "owner", owner)
+			log.Warn("admin terminate: could not find the node that holds the tunnel, so the request fails", "tunnel", name, "owner", owner)
 			http.Error(w, "owner node unavailable", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{"tunnel": name, "owner": owner, "terminated": applied}); err != nil {
-			log.Warn("admin terminate: response write failed", "tunnel", name, "err", err)
+			log.Warn("admin terminate: could not send the answer, although the action already ran; the admin client may get an incomplete answer or none", "tunnel", name, "err", err)
 		}
 	}
 }

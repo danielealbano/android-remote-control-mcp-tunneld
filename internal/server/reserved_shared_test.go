@@ -211,7 +211,7 @@ func TestReservedCerts_SharedErrorFallsBackToDisk(t *testing.T) {
 	if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(info.NotAfter) {
 		t.Fatalf("an unavailable shared store must fall back to the disk cache, served NotAfter = %v", got)
 	}
-	if !strings.Contains(buf.String(), `msg="reserved-host shared cert read failed (keeping the local cert)"`) {
+	if !strings.Contains(buf.String(), `msg="could not read the server certificate shared by the other nodes, so it is not used"`) {
 		t.Fatalf("the shared-store failure must be logged; log = %q", buf.String())
 	}
 }
@@ -228,7 +228,7 @@ func TestReservedCerts_SharedUnderLockStillOrders(t *testing.T) {
 	}{
 		{name: "shared cert due for renewal", shouldRenew: alwaysRenew},
 		{name: "shared cert renewal check fails", shouldRenew: failCheck,
-			wantLog: `msg="reserved-host shared cert renewal check failed (ordering instead)"`},
+			wantLog: `msg="could not check whether the shared server certificate needs renewing, so a new one is ordered"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,7 +273,7 @@ func TestReservedCerts_PublishFailureLoggedCertStillServed(t *testing.T) {
 	if _, disk, ok := rc.loadCached(sharedHost); !ok || !disk.NotAfter.Equal(info.NotAfter) {
 		t.Fatalf("the issued cert must be persisted even when publishing fails, got %+v (ok=%v)", disk, ok)
 	}
-	if !strings.Contains(buf.String(), `msg="reserved-host shared cert publish failed (other nodes order their own)"`) {
+	if !strings.Contains(buf.String(), `msg="could not share the server certificate, so the other nodes order their own"`) {
 		t.Fatalf("the publish failure must be logged; log = %q", buf.String())
 	}
 }
@@ -343,7 +343,7 @@ func TestReservedCerts_HangingSharedStoreDoesNotBlockStartup(t *testing.T) {
 	if got := rc.hosts[sharedHost].currentInfo().NotAfter; !got.Equal(info.NotAfter) {
 		t.Fatalf("the disk cert must be served when the shared store hangs, NotAfter = %v", got)
 	}
-	if !strings.Contains(buf.String(), `msg="reserved-host shared cert read failed (keeping the local cert)"`) {
+	if !strings.Contains(buf.String(), `msg="could not read the server certificate shared by the other nodes, so it is not used"`) {
 		t.Fatalf("the timed-out read must be logged; log = %q", buf.String())
 	}
 }

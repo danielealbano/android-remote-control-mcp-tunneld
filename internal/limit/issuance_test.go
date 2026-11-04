@@ -145,7 +145,7 @@ func TestLimiter_IssuanceBegin_CountReadErrorLogsRelease(t *testing.T) {
 	if ok || orderID != "" || !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "issuance count read") {
 		t.Fatalf("IssuanceBegin = (%v, %q, %v), want a refusal carrying the read error", ok, orderID, err)
 	}
-	if !strings.Contains(buf.String(), `msg="issuance lock release failed (lock expires by TTL)" tunnel=t`) || !strings.Contains(buf.String(), "issuance lock release check") {
+	if !strings.Contains(buf.String(), `msg="could not release the tunnel's issuance lock; it expires on its own" tunnel=t`) || !strings.Contains(buf.String(), "issuance lock release check") {
 		t.Fatalf("the failed release must be logged; log = %q", buf.String())
 	}
 }
@@ -211,7 +211,7 @@ func TestLimiter_IssuanceBegin_OverCapReleaseFailureLogged(t *testing.T) {
 	if ok || err != nil {
 		t.Fatalf("IssuanceBegin over the cap = (%v, %v), want a plain refusal", ok, err)
 	}
-	if !strings.Contains(buf.String(), `msg="issuance lock release failed (lock expires by TTL)" tunnel=t`) {
+	if !strings.Contains(buf.String(), `msg="could not release the tunnel's issuance lock; it expires on its own" tunnel=t`) {
 		t.Fatalf("the failed release must be logged; log = %q", buf.String())
 	}
 }
@@ -222,8 +222,8 @@ func TestLimiter_RefreshIssLock_LogsFailures(t *testing.T) {
 		fail string
 		want string
 	}{
-		{name: "ownership check fails", fail: "get", want: `msg="issuance lock refresh check failed (lock may expire; a retry could then start)" tunnel=t`},
-		{name: "ttl refresh fails", fail: "pexpire", want: `msg="issuance lock refresh failed (lock may expire; a retry could then start)" tunnel=t`},
+		{name: "ownership check fails", fail: "get", want: `msg="could not check the tunnel's issuance lock before refreshing it; if it expires, a retried request could start a second issuance" tunnel=t`},
+		{name: "ttl refresh fails", fail: "pexpire", want: `msg="could not refresh the tunnel's issuance lock; if it expires, a retried request could start a second issuance" tunnel=t`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -284,9 +284,9 @@ func TestLimiter_IssuanceBegin_CancelledCallerStillReleases(t *testing.T) {
 		wantLog   string
 	}{
 		{name: "count read cancelled", cancelOn: "set", wantErr: "issuance count read"},
-		{name: "count read cancelled, release fails", cancelOn: "set", fail: "del", wantErr: "issuance count read", wantHeld: true, wantLog: `msg="issuance lock release failed (lock expires by TTL)" tunnel=t`},
+		{name: "count read cancelled, release fails", cancelOn: "set", fail: "del", wantErr: "issuance count read", wantHeld: true, wantLog: `msg="could not release the tunnel's issuance lock; it expires on its own" tunnel=t`},
 		{name: "over the cap", count: "3", cancelOn: "get", wantErr: "issuance window read"},
-		{name: "over the cap, release fails", count: "3", cancelOn: "get", fail: "del", wantErr: "issuance window read", wantHeld: true, wantLog: `msg="issuance lock release failed (lock expires by TTL)" tunnel=t`},
+		{name: "over the cap, release fails", count: "3", cancelOn: "get", fail: "del", wantErr: "issuance window read", wantHeld: true, wantLog: `msg="could not release the tunnel's issuance lock; it expires on its own" tunnel=t`},
 		{
 			name: "over the cap, lock already expired", count: "3", cancelOn: "get", wantErr: "issuance window read",
 			replace: func(mr *miniredis.Miniredis) error { mr.Del(issLockKey("t")); return nil },

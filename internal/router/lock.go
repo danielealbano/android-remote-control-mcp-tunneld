@@ -42,7 +42,7 @@ func (r *Registry) release(ctx context.Context, name, token string) {
 	v, err := r.rdb.Get(ctx, lockKey(name)).Result()
 	if err != nil {
 		if !errors.Is(err, redis.Nil) {
-			r.logger.Warn("route lock release check failed (lock expires by TTL)", "tunnel", name, "err", err)
+			r.logger.Warn("could not check the route lock before releasing it; it expires on its own", "tunnel", name, "err", err)
 		}
 		return
 	}
@@ -50,7 +50,7 @@ func (r *Registry) release(ctx context.Context, name, token string) {
 		return
 	}
 	if err := r.rdb.Del(ctx, lockKey(name)).Err(); err != nil {
-		r.logger.Warn("route lock release failed (lock expires by TTL)", "tunnel", name, "err", err)
+		r.logger.Warn("could not release the route lock; it expires on its own", "tunnel", name, "err", err)
 	}
 }
 

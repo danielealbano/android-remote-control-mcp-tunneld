@@ -184,7 +184,7 @@ func TestEdge_AcceptLoop_LogsAcceptFailure(t *testing.T) {
 	var buf bytes.Buffer
 	e := &Edge{cfg: Config{Logger: slog.New(slog.NewTextHandler(&buf, nil))}}
 	e.acceptLoop(context.Background(), &failOnceListener{})
-	if !strings.Contains(buf.String(), `msg="edge accept failed (backing off)" backoff=5ms err="too many open files"`) {
+	if !strings.Contains(buf.String(), `msg="could not accept a new connection on the public port; retrying shortly" backoff=5ms err="too many open files"`) {
 		t.Fatalf("an accept failure must be logged with its backoff; log = %q", buf.String())
 	}
 }

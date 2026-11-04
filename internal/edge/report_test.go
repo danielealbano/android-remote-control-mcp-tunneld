@@ -76,7 +76,7 @@ func TestAcceptLoop_PanicIsContainedToTheConnection(t *testing.T) {
 			t.Fatalf("tag %s = %q, want %q (all tags %v)", k, tags[k], want, tags)
 		}
 	}
-	if !strings.Contains(logs.String(), `msg="panic recovered" where="public connection"`) {
+	if !strings.Contains(logs.String(), `msg="recovered from a crash; only the affected work was stopped" where="public connection"`) {
 		t.Fatalf("the panic must be logged; log = %q", logs.String())
 	}
 }

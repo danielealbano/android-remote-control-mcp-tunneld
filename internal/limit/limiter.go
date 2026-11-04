@@ -142,12 +142,12 @@ func (l *Limiter) atoiCap(key string, v any) int64 {
 	}
 	s, ok := v.(string)
 	if !ok {
-		l.logger.Warn("unexpected Valkey counter type (counted as 0)", "key", key, "type", fmt.Sprintf("%T", v))
+		l.logger.Warn("a Valkey counter has an unexpected type, so it is counted as 0", "key", key, "type", fmt.Sprintf("%T", v))
 		return 0
 	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		l.logger.Warn("unparseable Valkey counter (counted as 0)", "key", key, "err", err)
+		l.logger.Warn("a Valkey counter could not be read, so it is counted as 0", "key", key, "err", err)
 		return 0
 	}
 	return n

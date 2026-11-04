@@ -63,7 +63,7 @@ func (d *DialBacks) abandon(token string, w *dialWaiter) {
 	select {
 	case c := <-w.conn:
 		if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			d.logger.Debug("abandoned dial-back close failed", "tunnel", w.tunnel, "err", err)
+			d.logger.Debug("could not close a phone data connection nobody was waiting for cleanly; it is not used again", "tunnel", w.tunnel, "err", err)
 		}
 	default:
 	}
@@ -119,11 +119,11 @@ func (h *Handler) serveDialBack(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, brw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
-		h.mgr.logger.Warn("dial-back hijack failed", "tunnel", tunnel, "err", err)
+		h.mgr.logger.Warn("could not take over a phone data connection from the HTTP server, so the public connection waiting for it is not served through this data connection", "tunnel", tunnel, "err", err)
 		return
 	}
 	if err := upgradeDialBack(conn, brw); err != nil {
-		h.mgr.logger.Debug("dial-back upgrade failed", "tunnel", tunnel, "err", err)
+		h.mgr.logger.Debug("could not switch a phone data connection to raw forwarding, so it is closed and the public connection waiting for it is not served through it", "tunnel", tunnel, "err", err)
 		h.closeDialBack(conn, tunnel)
 		return
 	}
@@ -147,7 +147,7 @@ func upgradeDialBack(conn net.Conn, brw *bufio.ReadWriter) error {
 
 func (h *Handler) closeDialBack(c net.Conn, tunnel string) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		h.mgr.logger.Debug("dial-back close failed", "tunnel", tunnel, "err", err)
+		h.mgr.logger.Debug("could not close a phone data connection cleanly; it is not used again", "tunnel", tunnel, "err", err)
 	}
 }
 

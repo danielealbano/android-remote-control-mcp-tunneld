@@ -25,7 +25,7 @@ func connRateAllow(lim connRateLimiter, rate int, logger *slog.Logger) func(cont
 	return func(ctx context.Context, ip netip.Addr) bool {
 		ok, _, err := lim.Allow(ctx, "conn-rate", ip, rate, time.Second)
 		if err != nil {
-			logger.Debug("acme-http conn-rate check failed (allowing)", "ip", ip, "err", err)
+			logger.Debug("could not check the connection rate on the plain HTTP port, so the connection is allowed", "ip", ip, "err", err)
 			return true
 		}
 		return ok
@@ -71,7 +71,7 @@ func (l *guardedListener) acceptLoop(ctx context.Context) {
 				return
 			}
 			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
-			l.logger.Warn("acme-http accept failed (backing off)", "backoff", delay, "err", err)
+			l.logger.Warn("could not accept a new connection on the plain HTTP port; retrying shortly", "backoff", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-l.closed:
@@ -98,7 +98,7 @@ func (l *guardedListener) check(ctx context.Context, c net.Conn) {
 	}
 	ip, perr := netip.ParseAddr(host)
 	if perr != nil {
-		l.logger.Debug("acme-http unparseable peer address (refused)", "peer", host, "err", perr)
+		l.logger.Debug("refused a connection on the plain HTTP port whose source address could not be read", "peer", host, "err", perr)
 		closeLogged(l.logger, "acme-http rejected conn", c)
 		return
 	}
@@ -155,7 +155,7 @@ func (l *guardedListener) Wait(ctx context.Context) {
 	select {
 	case <-done:
 	case <-ctx.Done():
-		l.logger.Warn("acme-http shutdown deadline reached before every accept check returned", "err", ctx.Err())
+		l.logger.Warn("the shutdown time ran out before every plain HTTP port connection check finished; the shutdown continues without waiting for them", "err", ctx.Err())
 	}
 }
 

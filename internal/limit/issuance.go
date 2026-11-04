@@ -41,13 +41,13 @@ func (l *Limiter) IssuanceBegin(ctx context.Context, name string, maxN int) (ok 
 	n, err := l.rdb.Get(ctx, issuanceKey(name)).Int()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		if rerr := l.releaseIssLock(ctx, name, token); rerr != nil {
-			l.logger.Warn("issuance lock release failed (lock expires by TTL)", "tunnel", name, "err", rerr)
+			l.logger.Warn("could not release the tunnel's issuance lock; it expires on its own", "tunnel", name, "err", rerr)
 		}
 		return false, "", 0, fmt.Errorf("issuance count read: %w", err)
 	}
 	if n >= maxN {
 		if rerr := l.releaseIssLock(ctx, name, token); rerr != nil { // over cap — release and refuse
-			l.logger.Warn("issuance lock release failed (lock expires by TTL)", "tunnel", name, "err", rerr)
+			l.logger.Warn("could not release the tunnel's issuance lock; it expires on its own", "tunnel", name, "err", rerr)
 		}
 		left, werr := l.issuanceWindowLeft(ctx, name)
 		if werr != nil {
@@ -99,14 +99,14 @@ func (l *Limiter) refreshIssLock(ctx context.Context, name, orderID string) {
 	v, err := l.rdb.Get(ctx, issLockKey(name)).Result()
 	if err != nil {
 		if !errors.Is(err, redis.Nil) && ctx.Err() == nil {
-			l.logger.Warn("issuance lock refresh check failed (lock may expire; a retry could then start)",
+			l.logger.Warn("could not check the tunnel's issuance lock before refreshing it; if it expires, a retried request could start a second issuance",
 				"tunnel", name, "err", err)
 		}
 		return
 	}
 	if v == orderID {
 		if err := l.rdb.PExpire(ctx, issLockKey(name), issLockTTL).Err(); err != nil && ctx.Err() == nil {
-			l.logger.Warn("issuance lock refresh failed (lock may expire; a retry could then start)",
+			l.logger.Warn("could not refresh the tunnel's issuance lock; if it expires, a retried request could start a second issuance",
 				"tunnel", name, "err", err)
 		}
 	}

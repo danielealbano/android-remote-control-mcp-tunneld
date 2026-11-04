@@ -117,7 +117,7 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 			} else if delay *= 2; delay > time.Second {
 				delay = time.Second
 			}
-			e.cfg.Logger.Warn("edge accept failed (backing off)", "backoff", delay, "err", err)
+			e.cfg.Logger.Warn("could not accept a new connection on the public port; retrying shortly", "backoff", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -177,7 +177,7 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 	ip := peerAddr(conn)
 	addr, addrErr := netip.ParseAddr(ip)
 	if addrErr != nil {
-		e.cfg.Logger.Debug("unparseable peer address (refused)", "peer", ip, "err", addrErr)
+		e.cfg.Logger.Debug("refused a connection whose source address could not be read", "peer", ip, "err", addrErr)
 		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
@@ -208,7 +208,7 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
 	if err != nil {
-		e.cfg.Logger.Debug("client hello peek failed", "ip", ip, "err", err)
+		e.cfg.Logger.Debug("could not read the client's TLS greeting, so the connection is refused", "ip", ip, "err", err)
 		e.rec.Reject("handshake-timeout", "", ip)
 		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
