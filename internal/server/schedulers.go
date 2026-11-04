@@ -15,6 +15,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -96,18 +97,19 @@ func (h *meshCertHolder) getCert(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
 // clientTLS returns the mesh client's tls.Config factory (hot cert via GetClientCertificate; peer mesh
 // certs are verified by chain-to-CA + mesh-role, NOT by hostname — see meshVerifyConnection).
-func (h *meshCertHolder) clientTLS(caObj *ca.CA) func() *tls.Config {
+func (h *meshCertHolder) clientTLS(ctx context.Context, logger *slog.Logger, caObj *ca.CA) func() *tls.Config {
 	pool := caObj.Pool()
 	return func() *tls.Config {
 		return &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"h2"},
-			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-				if c := h.cur.Load(); c != nil {
-					return c, nil
-				}
-				return &tls.Certificate{}, nil
-			},
+			GetClientCertificate: report.GetClientCertificate(ctx, logger, "mesh client certificate",
+				func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+					if c := h.cur.Load(); c != nil {
+						return c, nil
+					}
+					return &tls.Certificate{}, nil
+				}),
 			// A mesh cert's identity is the node id (its SAN/CN), NOT the dial address — a node dials a peer
 			// at the advertise address held in the trusted node registry, so standard hostname verification
 			// does not apply. Instead verify the peer cert chains to the internal CA AND carries the
@@ -115,7 +117,7 @@ func (h *meshCertHolder) clientTLS(caObj *ca.CA) func() *tls.Config {
 			// VerifyConnection (NOT VerifyPeerCertificate) also runs on RESUMED sessions, so a resumed
 			// handshake cannot bypass the custom check.
 			InsecureSkipVerify: true,
-			VerifyConnection:   meshVerifyConnection(pool),
+			VerifyConnection:   report.VerifyConnection(ctx, logger, "mesh peer verification", meshVerifyConnection(pool)),
 		}
 	}
 }

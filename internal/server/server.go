@@ -34,6 +34,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/metrics"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
@@ -65,7 +66,20 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	nodeID := newNodeID()
 	nodeHost := hostname(os.Hostname, logger)
 	nodeStart := nodeStartStamp()
-	logger = logger.With("node", nodeID, "version", version)
+	rep, err := report.New(report.Config{DSN: cfg.SentryDSN, Environment: cfg.SentryEnvironment, Release: "tunneld@" + version, ServerName: nodeHost,
+		Node: nodeID, TracesSampleRate: cfg.SentryTracesSampleRate})
+	if err != nil {
+		return config.RedactSentryDSN(err, cfg.SentryDSN)
+	}
+	ctx = rep.Context(ctx)
+	baseLogger := logger.With("node", nodeID, "version", version)
+	logger = rep.Logger(logger).With("node", nodeID, "version", version)
+	defer func() {
+		if !rep.Close(context.WithoutCancel(ctx), baseLogger) {
+			baseLogger.Warn("sentry did not send everything before the stop: some events may be lost")
+		}
+	}()
+	defer report.Crash(ctx, logger, "tunneld run")
 
 	caObj, err := ca.Load(cfg.CACert, cfg.CAKey, cfg.CertValidity)
 	if err != nil {
@@ -140,7 +154,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// Async connection-log writer: enqueue is O(1) so no admission/splice/teardown path blocks on an
 	// S3 write; a full queue drops-newest and bumps the dropped-events counter. Both the phone control
 	// plane and the public edge log through it.
-	connLogs, err := store.NewConnLogSpool(cfg.ConnLogDir, nodeID, st, connLogDropped(m.ConnLogDropped()), logger)
+	connLogs, err := store.NewConnLogSpool(ctx, cfg.ConnLogDir, nodeID, st, connLogDropped(m.ConnLogDropped()), logger)
 	if err != nil {
 		return fmt.Errorf("connection-log spool: %w", err)
 	}
@@ -197,11 +211,11 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	if err != nil {
 		return err
 	}
-	meshClient := mesh.NewClient(meshCert.clientTLS(caObj), cfg.MeshPoolSize, mesh.WithRecorder(rec))
+	meshClient := mesh.NewClient(meshCert.clientTLS(ctx, logger, caObj), cfg.MeshPoolSize, logger, mesh.WithRecorder(rec))
 
 	// Phone control plane.
 	dialBacks := phoneconn.NewDialBacks(logger)
-	evictor := newSpliceEvictor(nodeID, reg, meshClient, logger)
+	evictor := newSpliceEvictor(ctx, nodeID, reg, meshClient, logger)
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
 		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger, Closed: evictor,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
@@ -263,24 +277,27 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// full-request read and keep-alive idling are tightly bounded (idle TLS conns must not accumulate).
 	publicErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelDebug)
 	internalErrLog := slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
-	enrollSrv := &http.Server{Handler: enrollHandler, ReadHeaderTimeout: readHeaderTimeout,
+	enrollSrv := &http.Server{Handler: rep.Handler(enrollHandler, logger, "enroll request", traceEnroll), ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout: 30 * time.Second, IdleTimeout: time.Minute, ErrorLog: publicErrLog,
-		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.EnrollHost), MinVersion: tls.VersionTLS12}}
+		TLSConfig: &tls.Config{GetCertificate: report.GetCertificate(ctx, logger, "enroll certificate",
+			reserved.getCertificateFor(cfg.EnrollHost)), MinVersion: tls.VersionTLS12}}
 	// The control server's idle timeout closes mTLS-authenticated HTTP/2 conns holding NO active stream
 	// (a bound phone always keeps its /api/v1/control stream open, so real connections are never idle).
-	controlSrv := &http.Server{Handler: phoneHandler, ReadHeaderTimeout: readHeaderTimeout,
+	controlSrv := &http.Server{Handler: rep.Handler(phoneHandler, logger, "control request", traceIssue), ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout: 4 * cfg.ControlPingInterval, ErrorLog: publicErrLog,
 		ConnContext: phoneconn.ConnContext,
 		Protocols:   h2Protocols(),
-		TLSConfig: &tls.Config{GetCertificate: reserved.getCertificateFor(cfg.ControlHost),
+		TLSConfig: &tls.Config{GetCertificate: report.GetCertificate(ctx, logger, "control certificate",
+			reserved.getCertificateFor(cfg.ControlHost)),
 			ClientAuth: controlClientAuth(cfg.DialBackMTLS), ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12,
 			NextProtos: h2NextProtos()}}
 
 	// Mesh server (mTLS mesh-role, HTTP/2); its listener is bound LAST, below.
-	meshSrv := &http.Server{Handler: meshHandler, ReadHeaderTimeout: readHeaderTimeout,
+	meshSrv := &http.Server{Handler: rep.Handler(meshHandler, logger, "mesh request", traceAll), ReadHeaderTimeout: readHeaderTimeout,
 		Protocols: h2Protocols(), ErrorLog: internalErrLog,
-		TLSConfig: &tls.Config{GetCertificate: meshCert.getCert, ClientAuth: tls.RequireAndVerifyClientCert,
-			ClientCAs: caObj.Pool(), MinVersion: tls.VersionTLS12, NextProtos: h2NextProtos()}}
+		TLSConfig: &tls.Config{GetCertificate: report.GetCertificate(ctx, logger, "mesh certificate", meshCert.getCert),
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			ClientCAs:  caObj.Pool(), MinVersion: tls.VersionTLS12, NextProtos: h2NextProtos()}}
 
 	// Internal server (metrics + healthz + admin actions; never proxied). The mux mounts the per-tunnel
 	// admin actions /api/v1/admin/tunnels/{name}/reissue and .../terminate and delegates everything else to
@@ -292,7 +309,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		adminTerminateHandler(nodeID, reg, meshClient, logger, adminCtl.Terminate))
 	internalMux.Handle("/", metrics.Handler(m.Gatherer, rdb, adminTunnels, reg, logger))
 	internalSrv := &http.Server{Addr: cfg.InternalListen, ReadHeaderTimeout: readHeaderTimeout,
-		Handler: internalMux, ErrorLog: internalErrLog}
+		Handler: rep.Handler(internalMux, logger, "internal request", traceNone), ErrorLog: internalErrLog}
 
 	var acmeHTTPSrv *http.Server
 	if cfg.ServesPlainHTTP() {
@@ -308,7 +325,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 			})
 		}
 		acmeHTTPSrv = &http.Server{
-			Handler:           plain,
+			Handler:           rep.Handler(plain, logger, "plain request", traceNone),
 			ReadHeaderTimeout: readHeaderTimeout, ReadTimeout: readHeaderTimeout, WriteTimeout: readHeaderTimeout,
 			IdleTimeout: acmeHTTPIdleTimeout, MaxHeaderBytes: acmeHTTPMaxHeaderBytes,
 			DisableGeneralOptionsHandler: true, ErrorLog: publicErrLog,
@@ -352,56 +369,56 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	g, gctx := errgroup.WithContext(serveCtx)
 
 	// Reserved-host + mesh + internal servers.
-	g.Go(func() error {
+	g.Go(crashOnPanic(gctx, logger, "enroll server", func() error {
 		return serveTLS(gctx, enrollSrv, tls.NewListener(ed.EnrollListener(), enrollSrv.TLSConfig), logger, "enroll")
-	})
-	g.Go(func() error {
+	}))
+	g.Go(crashOnPanic(gctx, logger, "control server", func() error {
 		return serveTLS(gctx, controlSrv, tls.NewListener(ed.ControlListener(), controlSrv.TLSConfig), logger, "control")
-	})
-	g.Go(func() error {
+	}))
+	g.Go(crashOnPanic(gctx, logger, "mesh server", func() error {
 		return serveTLS(gctx, meshSrv, tls.NewListener(meshLn, meshSrv.TLSConfig), logger, "mesh")
-	})
-	g.Go(func() error { return serveTLS(gctx, internalSrv, internalLn, logger, "internal") })
+	}))
+	g.Go(crashOnPanic(gctx, logger, "internal server", func() error { return serveTLS(gctx, internalSrv, internalLn, logger, "internal") }))
 
 	// Edge accept loop.
-	g.Go(func() error { ed.Serve(gctx, rawLn); return nil })
+	g.Go(crashOnPanic(gctx, logger, "edge accept loop", func() error { ed.Serve(gctx, rawLn); return nil }))
 	var guarded *guardedListener
 	if acmeHTTPSrv != nil {
 		guarded = newGuardedListener(gctx, acmeHTTPLn, banIP, connRateAllow(lim, cfg.LimitConnRate, logger),
 			ed.Admit, ed.Release, rec.Reject, logger)
-		g.Go(func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") })
+		g.Go(crashOnPanic(gctx, logger, "acme-http server", func() error { return serveTLS(gctx, acmeHTTPSrv, guarded, logger, "acme-http") }))
 	}
 
 	// Recorder flusher.
-	g.Go(func() error { return rec.RunFlusher(gctx, 5*time.Second) })
+	g.Go(crashOnPanic(gctx, logger, "recorder flusher", func() error { return rec.RunFlusher(gctx, 5*time.Second) }))
 
 	// Mesh pool janitor (reaps per-peer pools idle for 10m).
-	g.Go(func() error { return meshClient.Run(gctx, 10*time.Minute) })
+	g.Go(crashOnPanic(gctx, logger, "mesh pool janitor", func() error { return meshClient.Run(gctx, 10*time.Minute) }))
 
 	// Attestation refreshers: root set + status list at --attest-refresh (last-known-good), and the
 	// signer-digest allowlist mtime watcher at the ban poll cadence.
-	g.Go(func() error { attRoots.Refresh(gctx, cfg.AttestRefresh); return nil })
-	g.Go(func() error { attStatus.Refresh(gctx, cfg.AttestRefresh); return nil })
-	g.Go(func() error { attSigners.Watch(gctx, cfg.BanPoll); return nil })
+	g.Go(crashOnPanic(gctx, logger, "attestation roots refresher", func() error { attRoots.Refresh(gctx, cfg.AttestRefresh); return nil }))
+	g.Go(crashOnPanic(gctx, logger, "attestation status refresher", func() error { attStatus.Refresh(gctx, cfg.AttestRefresh); return nil }))
+	g.Go(crashOnPanic(gctx, logger, "signer allowlist watcher", func() error { attSigners.Watch(gctx, cfg.BanPoll); return nil }))
 
 	// Schedulers: node heartbeat, mesh-cert rotation, reserved-cert renewal, phone renewal watcher.
-	g.Go(func() error {
+	g.Go(crashOnPanic(gctx, logger, "node heartbeat", func() error {
 		return heartbeatNode(gctx, reg, nodeID, cfg.MeshAdvertise, edgePublicAddr, nodeHost, version, nodeStart, cfg.RouteTTL, logger)
-	})
-	g.Go(func() error { meshCert.rotateLoop(gctx); return nil })
-	g.Go(func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) })
-	g.Go(func() error {
+	}))
+	g.Go(crashOnPanic(gctx, logger, "mesh certificate rotation", func() error { meshCert.rotateLoop(gctx); return nil }))
+	g.Go(crashOnPanic(gctx, logger, "reserved certificate renewal", func() error { return reserved.run(gctx, renewalScanInterval, reservedDegradedRetry) }))
+	g.Go(crashOnPanic(gctx, logger, "phone renewal watcher", func() error {
 		rw := &renewalWatcher{mgr: phoneMgr, names: st, chain: chain, nonce: challengeFunc(enrollSvc), logger: logger}
 		return rw.run(gctx, renewalScanInterval)
-	})
+	}))
 
 	// Ban watcher with the live eviction hook.
-	g.Go(func() error {
+	g.Go(crashOnPanic(gctx, logger, "ban watcher", func() error {
 		banWatcher.Run(gctx, func(e *ban.Engine) {
 			phoneMgr.EvictBanned(func(name string) bool { _, b := e.MatchTunnel(name); return b })
 		})
 		return nil
-	})
+	}))
 
 	select {
 	case <-ctx.Done():
@@ -418,7 +435,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	// (so their end events are enqueued) → join the errgroup goroutines → flush the async conn-log queue
 	// (the server-shutdown end events land) → final admin-counter flush + pending cap-hit summaries. The
 	// route/node TTLs remain the crash backstop.
-	sctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownGrace)
 	defer cancel()
 	closeLogged(logger, "raw listener", rawLn)
 	if guarded != nil {
@@ -558,15 +575,24 @@ type sinkErrorCounter interface {
 	SinkErrors() uint64
 }
 
+type wrappingHandler interface {
+	Unwrap() slog.Handler
+}
+
 func registerLogSinkErrors(m *metrics.Metrics, logger *slog.Logger) error {
-	c, ok := logger.Handler().(sinkErrorCounter)
-	if !ok {
-		return nil
+	for h := logger.Handler(); ; {
+		if c, ok := h.(sinkErrorCounter); ok {
+			if err := m.RegisterLogSinkErrors(func() float64 { return float64(c.SinkErrors()) }); err != nil {
+				return fmt.Errorf("register the log sink error metric: %w", err)
+			}
+			return nil
+		}
+		w, ok := h.(wrappingHandler)
+		if !ok {
+			return nil
+		}
+		h = w.Unwrap()
 	}
-	if err := m.RegisterLogSinkErrors(func() float64 { return float64(c.SinkErrors()) }); err != nil {
-		return fmt.Errorf("register the log sink error metric: %w", err)
-	}
-	return nil
 }
 
 func registerValkeyPool(m *metrics.Metrics, rdb *redis.Client) error {

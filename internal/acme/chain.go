@@ -11,12 +11,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -197,12 +199,19 @@ func (c *chainIssuer) run(ctx context.Context, csr *x509.CertificateRequest, nam
 				class = ie.Class
 			}
 			c.cfg.Logger.Warn("acme CA order failed", "ca", a.ca, "name", name, "class", class, "err", err, "account", a.label)
+			if class == ClassLocal && errors.Is(err, report.ErrPanicked) {
+				note(ie.Retry)
+				continue
+			}
 			if class == ClassLocal {
 				return nil, store.CertInfo{}, rateLimited(ie.Retry, err)
 			}
 			result := "fail"
 			if class == ClassRateLimited {
 				result = ClassRateLimited
+			} else {
+				report.CaptureError(ctx, err, slog.String("ca", a.ca), slog.String("tunnel", name),
+					slog.String("class", class), slog.String("account", a.label))
 			}
 			c.cfg.Recorder.ACMEIssue(a.ca, result)
 			fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
@@ -287,8 +296,12 @@ func (c *chainIssuer) attempt(ctx context.Context, a *account, csr *x509.Certifi
 	}
 	tr := newOrderTrack(nameBucket, domainBucket)
 	tr.setPrepaid(prepayBucket.Key, prepaid, mark)
-	actx, cancel := attemptContext(withTrack(ctx, tr), tr, timeout, c.cfg.FinalizeGrace)
+	actx, cancel := attemptContext(withTrack(ctx, tr), tr, timeout, c.cfg.FinalizeGrace, c.cfg.Logger)
+	actx, flag := withPanicFlag(actx)
 	pemChain, info, oerr := a.issuer.obtain(actx, csr, name)
+	if oerr != nil && flag.panicked() {
+		oerr = panicked(oerr)
+	}
 	ended := runEnded(ctx) != nil
 	cancel()
 	out := tr.outcome()
@@ -530,9 +543,12 @@ func backoff(initial, maxDur time.Duration, n int) time.Duration {
 	return d
 }
 
-func attemptContext(parent context.Context, tr *orderTrack, timeout, grace time.Duration) (context.Context, context.CancelFunc) {
+var errTimerPanicked = fmt.Errorf("acme: the attempt timer panicked: %w", report.ErrPanicked)
+
+func attemptContext(parent context.Context, tr *orderTrack, timeout, grace time.Duration, logger *slog.Logger) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
 	go func() {
+		defer report.Recover(ctx, logger, "ACME attempt timer", func() { cancel(errTimerPanicked) })
 		t := time.NewTimer(timeout)
 		defer t.Stop()
 		select {

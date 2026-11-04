@@ -6,8 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
@@ -412,5 +415,89 @@ func TestHandler_StoppingStillServesEnrollment(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != 200 {
 		t.Fatalf("the nonce route during the pre-drain = %d, want 200", rr.Code)
+	}
+}
+
+func TestHandler_TracesOnlyRequestsThatWereNotRefused(t *testing.T) {
+	t.Parallel()
+	banned := netip.MustParseAddr("203.0.113.13")
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		peer    string
+		life    fakeLifecycle
+		valkey  bool
+		wantTxs int
+	}{
+		{name: "a served nonce", method: "GET", path: "/api/v1/enroll/nonce", peer: "198.51.100.20:5000", wantTxs: 1},
+		{name: "a banned client", method: "GET", path: "/api/v1/enroll/nonce", peer: "203.0.113.13:5000", wantTxs: 0},
+		{name: "a draining node", method: "GET", path: "/api/v1/enroll/nonce", peer: "198.51.100.20:5000",
+			life: fakeLifecycle{draining: true}, wantTxs: 0},
+		{name: "a malformed enrollment", method: "POST", path: "/api/v1/enroll", body: "{", peer: "198.51.100.20:5000", wantTxs: 0},
+		{name: "a Valkey failure", method: "GET", path: "/api/v1/enroll/nonce", peer: "198.51.100.20:5000", valkey: true, wantTxs: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			_, idPub := newCSR(t)
+			svc, mr := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+				Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+			if tc.valkey {
+				mr.SetError("valkey down")
+			}
+			h := newTestHandlerLife(t, svc, func(a netip.Addr) bool { return a == banned }, tc.life)
+			rep, tr := tunneltest.NewReporter(t, 1)
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.RemoteAddr = tc.peer
+			rep.Handler(h, slog.New(slog.DiscardHandler), "enroll request", func(*http.Request) bool { return true }).
+				ServeHTTP(httptest.NewRecorder(), req)
+			rep.Flush(context.Background())
+			if n := len(tr.Events("transaction")); n != tc.wantTxs {
+				t.Fatalf("sent %d transactions, want %d", n, tc.wantTxs)
+			}
+		})
+	}
+}
+
+func TestError_Refusal(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{"internal", "name_unavailable", "identity_sign_failed", "acme_rate_limited", "acme_transient", "acme_failed"} {
+		if (&Error{Reason: reason}).Refusal() {
+			t.Errorf("%s reports work that failed, not a refusal", reason)
+		}
+	}
+	for _, reason := range []string{"invalid_nonce", "enroll_rate", "unauthorized", "unsupported_key_type", "issuance_cap"} {
+		if !(&Error{Reason: reason}).Refusal() {
+			t.Errorf("%s is a refusal", reason)
+		}
+	}
+}
+
+func TestEnroll_PanicAfterTheClaimCarriesTheName(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{CA: testCA(t), Names: st, Evidence: st,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{}})
+	rep, tr := tunneltest.NewReporter(t, 0)
+	nonce := mintNonce(t, svc)
+	var name string
+	h := rep.Handler(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		res, ee := svc.Enroll(r.Context(), "198.51.100.21", Request{Nonce: nonce, IdentityCSR: idCSR})
+		if ee != nil {
+			t.Errorf("enroll: %v", ee)
+			return
+		}
+		name = res.Name
+		panic("boom after the claim")
+	}), slog.New(slog.DiscardHandler), "enroll request", func(*http.Request) bool { return false })
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/enroll", nil))
+	rep.Flush(context.Background())
+	events := tr.Events("")
+	if len(events) != 1 || name == "" || events[0].Tags["tunnel"] != name {
+		t.Fatalf("want one panic event tagged with the claimed name %q, got %d events", name, len(events))
 	}
 }

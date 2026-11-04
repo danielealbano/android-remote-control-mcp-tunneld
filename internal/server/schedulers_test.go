@@ -242,7 +242,7 @@ func TestMeshCertHolderHotSwap(t *testing.T) {
 		t.Fatal("a re-mint must swap the served cert (fresh serial), not keep the old one")
 	}
 
-	gcc := h.clientTLS(caObj)().GetClientCertificate
+	gcc := h.clientTLS(context.Background(), tunneltest.Logger(), caObj)().GetClientCertificate
 	cc, err := gcc(&tls.CertificateRequestInfo{})
 	if err != nil {
 		t.Fatal(err)

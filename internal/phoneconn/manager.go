@@ -166,11 +166,18 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 	m.conns[c.name] = c
 	late := m.closeAllReason
 	m.mu.Unlock()
+	registered, opened := false, false
+	defer func() {
+		if !registered {
+			m.abandon(ctx, c, opened)
+		}
+	}()
 	if late != "" {
 		c.close(late)
 	}
 
 	m.rec.PhoneConnOpen()
+	opened = true
 	m.writeEvent(ctx, c, "start", "")
 
 	teardown := func() {
@@ -191,7 +198,25 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		m.rec.PhoneConnClose(c.closeReason())
 		m.closed.PhoneConnClosed(tctx, c.name, c.connID, c.closeReason())
 	}
+	registered = true
 	return teardown, nil
+}
+
+func (m *Manager) abandon(ctx context.Context, c *conn, opened bool) {
+	c.close(store.CloseError)
+	m.mu.Lock()
+	if m.conns[c.name] == c {
+		delete(m.conns, c.name)
+	}
+	m.mu.Unlock()
+	tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
+	defer cancel()
+	if err := m.router.Unbind(tctx, c.name, c.connID); err != nil {
+		m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)
+	}
+	if opened {
+		m.rec.PhoneConnClose(store.CloseError)
+	}
 }
 
 // heartbeatLoop refreshes the route while the connection is owner, handling the three-state result:

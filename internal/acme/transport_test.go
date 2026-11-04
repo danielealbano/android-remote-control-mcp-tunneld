@@ -20,6 +20,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -121,6 +122,65 @@ func readAll(t *testing.T, r io.Reader) string {
 }
 
 const leDomainDetail = `{"type":"urn:ietf:params:acme:error:rateLimited","detail":"too many certificates (50) already issued for \"example.com\" in the last 168h0m0s: see https://letsencrypt.org/docs/rate-limits/#new-certificates-per-registered-domain"}`
+
+type panicRoundTripper struct{}
+
+func (panicRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { panic("round trip boom") }
+
+func TestBudgetTransport_PanicBecomesAnError(t *testing.T) {
+	h := newTransportHarness(t, &account{id: "le-local", ca: CALetsEncrypt, label: "local"}, Budgets{})
+	h.bt.base = panicRoundTripper{}
+	ctx, flag := withPanicFlag(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://ca.example.test/directory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.bt.RoundTrip(req)
+	if resp != nil || !errors.Is(err, report.ErrPanicked) || !flag.panicked() {
+		t.Fatalf("RoundTrip = %v, %v (flag %v); want no response, ErrPanicked and the request's panic flag set", resp, err, flag.panicked())
+	}
+	if !strings.Contains(h.logs.String(), `msg="panic recovered" where="ACME request"`) {
+		t.Fatalf("the panic must be logged; log = %q", h.logs.String())
+	}
+}
+
+type answeredRoundTripper struct {
+	answered atomic.Bool
+	closed   atomic.Bool
+}
+
+func (a *answeredRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	a.answered.Store(true)
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: &closeRecorder{closed: &a.closed}}, nil
+}
+
+type closeRecorder struct{ closed *atomic.Bool }
+
+func (c *closeRecorder) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *closeRecorder) Close() error             { c.closed.Store(true); return nil }
+
+func TestBudgetTransport_PanicAfterTheResponseClosesItsBody(t *testing.T) {
+	h := newTransportHarness(t, &account{id: "le-local", ca: CALetsEncrypt, label: "local"}, Budgets{})
+	base := &answeredRoundTripper{}
+	h.bt.base = base
+	h.bt.now = func() time.Time {
+		if base.answered.Load() {
+			panic("clock boom after the answer")
+		}
+		return time.Now()
+	}
+	req, err := http.NewRequest(http.MethodGet, "https://ca.example.test/directory", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.bt.RoundTrip(req)
+	if resp != nil || !errors.Is(err, report.ErrPanicked) {
+		t.Fatalf("RoundTrip = %v, %v; want no response and ErrPanicked", resp, err)
+	}
+	if !base.closed.Load() {
+		t.Fatal("the response the panic dropped must have its body closed")
+	}
+}
 
 func TestBudgetTransport_429(t *testing.T) {
 	acct := &account{ca: CALetsEncrypt, id: "le-acct", label: "local"}
@@ -291,7 +351,7 @@ func TestBudgetTransport_HeldRequestReportsTheAttemptDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
-	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 50*time.Millisecond, time.Hour)
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 50*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
 	defer cancel()
 	if _, err := h.do(ctx, t, http.MethodPost, ca.srv.URL+"/authz/1", nil); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a request held past the attempt deadline = %v, want context.DeadlineExceeded", err)

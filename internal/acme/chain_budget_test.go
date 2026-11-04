@@ -25,6 +25,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -696,7 +697,7 @@ func TestAttemptContext(t *testing.T) {
 		}
 	}
 	t.Run("unfinalized order stops at the deadline", func(t *testing.T) {
-		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), 20*time.Millisecond, time.Hour)
+		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
 		defer cancel()
 		wait(t, ctx)
 		if !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
@@ -707,7 +708,7 @@ func TestAttemptContext(t *testing.T) {
 		tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
 		tr.markFinalized(time.Now())
 		start := time.Now()
-		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond)
+		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond, slog.New(slog.DiscardHandler))
 		defer cancel()
 		wait(t, ctx)
 		if elapsed := time.Since(start); elapsed < 220*time.Millisecond || !errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
@@ -719,7 +720,7 @@ func TestAttemptContext(t *testing.T) {
 		tr.setOrder("https://ca.test/order/1", "https://ca.test/finalize/1")
 		tr.markSent(http.MethodPost, "https://ca.test/finalize/1")
 		start := time.Now()
-		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond)
+		ctx, cancel := attemptContext(context.Background(), tr, 20*time.Millisecond, 200*time.Millisecond, slog.New(slog.DiscardHandler))
 		defer cancel()
 		wait(t, ctx)
 		if elapsed := time.Since(start); elapsed < 220*time.Millisecond {
@@ -727,11 +728,19 @@ func TestAttemptContext(t *testing.T) {
 		}
 	})
 	t.Run("caller cancel", func(t *testing.T) {
-		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), time.Hour, time.Hour)
+		ctx, cancel := attemptContext(context.Background(), newOrderTrack(limit.Bucket{}, limit.Bucket{}), time.Hour, time.Hour, slog.New(slog.DiscardHandler))
 		cancel()
 		wait(t, ctx)
 		if !errors.Is(context.Cause(ctx), context.Canceled) {
 			t.Fatalf("cause = %v, want the caller's cancel", context.Cause(ctx))
+		}
+	})
+	t.Run("timer panic", func(t *testing.T) {
+		ctx, cancel := attemptContext(context.Background(), nil, 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
+		defer cancel()
+		wait(t, ctx)
+		if cause := context.Cause(ctx); !errors.Is(cause, report.ErrPanicked) || errors.Is(cause, context.DeadlineExceeded) {
+			t.Fatalf("cause = %v, want the timer's panic, not the attempt deadline", cause)
 		}
 	})
 }

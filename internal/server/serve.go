@@ -24,6 +24,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/mesh"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
@@ -38,13 +39,34 @@ func h2Protocols() *http.Protocols {
 
 func h2NextProtos() []string { return []string{"h2", "http/1.1"} }
 
+func crashOnPanic(ctx context.Context, logger *slog.Logger, what string, f func() error) func() error {
+	return func() error {
+		defer report.Crash(ctx, logger, what)
+		return f()
+	}
+}
+
+func traceAll(*http.Request) bool  { return true }
+func traceNone(*http.Request) bool { return false }
+func traceIssue(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/api/v1/issue"
+}
+func traceEnroll(r *http.Request) bool {
+	return (r.Method == http.MethodPost && r.URL.Path == "/api/v1/enroll") ||
+		(r.Method == http.MethodGet && r.URL.Path == "/api/v1/enroll/nonce")
+}
+
 // serveTLS runs srv on ln until ctx is cancelled, then closes the listener. ln is a tls.Listener for the
 // TLS servers (enroll/control/mesh), or the plain
 // listener. A non-shutdown Serve error is returned so the errgroup
 // cancels and the process exits for the orchestrator to restart; ErrServerClosed / net.ErrClosed are the
 // normal signals and stay non-fatal (srv.Shutdown bounds in-flight requests).
 func serveTLS(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.Logger, which string) error {
-	go func() { <-ctx.Done(); closeLogged(logger, which+" listener", ln) }()
+	go func() {
+		defer report.Crash(ctx, logger, which+" listener closer")
+		<-ctx.Done()
+		closeLogged(logger, which+" listener", ln)
+	}()
 	err := srv.Serve(ln)
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 		logger.Warn("listener exited", "which", which, "err", err)
@@ -123,28 +145,35 @@ func (s *edgeLogSink) PutConnLogPublic(ctx context.Context, ev edge.PublicEvent)
 // public certs. It serves BOTH the initial public cert and every renewal.
 func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 	return func(ctx context.Context, name, ip string, req phoneconn.IssueRequest) (phoneconn.IssueResponse, *phoneconn.IssueError) {
+		refuse := func(reason string) (phoneconn.IssueResponse, *phoneconn.IssueError) {
+			report.Refuse(ctx)
+			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: reason}
+		}
 		nonce, err := hex.DecodeString(req.Nonce)
 		if err != nil {
-			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_nonce"}
+			return refuse("bad_nonce")
 		}
 		chainPEM := []byte(req.AttestationChainPEM)
 		attestChain, err := parseCertChainPEM(chainPEM)
 		if err != nil {
-			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_attestation"}
+			return refuse("bad_attestation")
 		}
 		idCSR, err := parseCSRPEM(req.IdentityCSR)
 		if err != nil {
-			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_identity_csr"}
+			return refuse("bad_identity_csr")
 		}
 		tlsCSR, err := parseCSRPEM(req.TLSCSR)
 		if err != nil {
-			return phoneconn.IssueResponse{}, &phoneconn.IssueError{Reason: "bad_tls_csr"}
+			return refuse("bad_tls_csr")
 		}
 		res, eerr := svc.Issue(ctx, name, ip, enroll.Request{
 			Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: attestChain,
 			IdentityCSR: idCSR, TLSCSR: tlsCSR,
 		})
 		if eerr != nil {
+			if eerr.Refusal() {
+				report.Refuse(ctx)
+			}
 			return phoneconn.IssueResponse{}, &phoneconn.IssueError{
 				Reason: eerr.Reason, Retryable: eerr.Retryable, Unauthorized: eerr.Reason == "unauthorized",
 				RetryAfter: eerr.RetryAfter,
@@ -250,7 +279,14 @@ func broadcastControl(ctx context.Context, self string, nodes map[string]router.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res, err := mc.Control(ctx, info.Advertise, req)
+			nctx := report.WithScope(ctx)
+			defer report.Recover(nctx, logger, "mesh control broadcast", func() {
+				mu.Lock()
+				defer mu.Unlock()
+				failed[id] = true
+			})
+			report.SetAttrs(nctx, slog.String("tunnel", req.Tunnel), slog.String("peer_node", id))
+			res, err := mc.Control(nctx, info.Advertise, req)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -362,6 +398,7 @@ func (r *remoteSlots) offers(ctx context.Context, tunnel string) []slotOffer {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer report.Recover(ctx, r.logger, "slot-candidate query", func() {})
 			res, err := r.mesh.Control(ctx, info.Advertise, mesh.ControlRequest{Op: "slot-candidate", Tunnel: tunnel})
 			if err != nil {
 				r.logger.Debug("slot-candidate failed on a node", "tunnel", tunnel, "peer", id, "err", err)
@@ -400,8 +437,8 @@ type spliceEvictor struct {
 	draining bool
 }
 
-func newSpliceEvictor(nodeID string, nodes liveNodeLister, mc meshControl, logger *slog.Logger) *spliceEvictor {
-	ctx, cancel := context.WithCancel(context.Background())
+func newSpliceEvictor(parent context.Context, nodeID string, nodes liveNodeLister, mc meshControl, logger *slog.Logger) *spliceEvictor {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	return &spliceEvictor{nodeID: nodeID, nodes: nodes, mesh: mc, logger: logger, ctx: ctx, cancel: cancel,
 		slots: make(chan struct{}, evictBroadcastConcurrency)}
 }
@@ -417,7 +454,10 @@ func (s *spliceEvictor) PhoneConnClosed(_ context.Context, name, connID, reason 
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		ctx, cancel := context.WithTimeout(s.ctx, evictBroadcastTimeout)
+		sctx := report.WithScope(s.ctx)
+		defer report.Recover(sctx, s.logger, "splice eviction broadcast", func() {})
+		report.SetAttrs(sctx, slog.String("tunnel", name), slog.String("conn_id", connID))
+		ctx, cancel := context.WithTimeout(sctx, evictBroadcastTimeout)
 		defer cancel()
 		select {
 		case s.slots <- struct{}{}:
@@ -440,7 +480,11 @@ func (s *spliceEvictor) Drain(ctx context.Context) {
 	s.draining = true
 	s.mu.Unlock()
 	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	go func() {
+		defer report.Crash(ctx, s.logger, "splice eviction drain")
+		s.wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-ctx.Done():

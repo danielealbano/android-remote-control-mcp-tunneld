@@ -7,8 +7,11 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"errors"
+	"fmt"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -50,6 +53,12 @@ func permanent(err error) *IssuerError {
 }
 func local(retry time.Duration, err error) *IssuerError {
 	return &IssuerError{Class: ClassLocal, Reason: "challenge store", Retry: retry, Err: err}
+}
+func panicked(err error) *IssuerError {
+	if !errors.Is(err, report.ErrPanicked) {
+		err = fmt.Errorf("%w: %w", report.ErrPanicked, err)
+	}
+	return &IssuerError{Class: ClassLocal, Reason: "panicked", Retry: localChallengeRetry, Err: err}
 }
 
 // caIssuer is one CA's issuance seam (implemented by legoClient; faked in unit tests).

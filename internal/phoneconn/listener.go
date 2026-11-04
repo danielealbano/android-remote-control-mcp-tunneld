@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -164,17 +166,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == wire.DialBackPath || (r.URL.Path == "/api/v1/control" && r.ProtoMajor != 2) {
 		w.Header().Set("Connection", "close")
 	}
+	report.SetAttrs(r.Context(), metaAttrs(metaFromRequest(r))...)
 	// Peer-IP ban check FIRST — a newly-banned IP must not keep using an established mTLS identity.
 	ip := peerIP(r)
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
 		h.mgr.logger.Debug("phone control unparseable peer address (refused)", "peer", ip, "err", err)
-		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_source_ip", "retryable": false})
+		h.refuse(w, r, http.StatusBadRequest, map[string]any{"reason": "bad_source_ip", "retryable": false})
 		return
 	}
 	if h.banIP != nil && h.banIP(addr) {
 		h.reject("ban", "", ip)
-		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
+		h.refuse(w, r, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
 		return
 	}
 	if r.URL.Path == wire.DialBackPath {
@@ -183,12 +186,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	id, ok := h.identity(r)
 	if !ok {
-		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "forbidden", "retryable": false})
+		h.refuse(w, r, http.StatusForbidden, map[string]any{"reason": "forbidden", "retryable": false})
 		return
 	}
+	report.SetAttrs(r.Context(), slog.String("tunnel", id.name))
 	if h.banTunnel != nil && h.banTunnel(id.name) {
 		h.reject("ban", id.name, ip)
-		h.writeJSON(w, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
+		h.refuse(w, r, http.StatusForbidden, map[string]any{"reason": "banned", "retryable": false})
 		return
 	}
 	switch r.URL.Path {
@@ -214,18 +218,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the regenerated identity + public certs. POST only.
 func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost {
-		h.writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
+		h.refuse(w, r, http.StatusMethodNotAllowed, map[string]any{"reason": "method_not_allowed", "retryable": false})
 		return
 	}
 	h.issuing.Add(1)
 	defer h.issuing.Add(-1)
 	if h.mgr.Draining() {
 		w.Header().Set("Connection", "close")
-		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "draining", "retryable": true, "retry_after_seconds": drainingRetryAfterSeconds})
+		h.refuse(w, r, http.StatusServiceUnavailable, map[string]any{"reason": "draining", "retryable": true, "retry_after_seconds": drainingRetryAfterSeconds})
 		return
 	}
 	if h.onIssue == nil {
-		h.writeJSON(w, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
+		h.refuse(w, r, http.StatusServiceUnavailable, map[string]any{"reason": "issuance_unavailable", "retryable": true})
 		return
 	}
 	deadline := time.Now().Add(h.issueDeadline)
@@ -234,12 +238,12 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name string
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.issueBody))
 	if err != nil {
-		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_request", "retryable": false})
+		h.refuse(w, r, http.StatusBadRequest, map[string]any{"reason": "bad_request", "retryable": false})
 		return
 	}
 	var req IssueRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.writeJSON(w, http.StatusBadRequest, map[string]any{"reason": "bad_json", "retryable": false})
+		h.refuse(w, r, http.StatusBadRequest, map[string]any{"reason": "bad_json", "retryable": false})
 		return
 	}
 	ictx, cancel := context.WithDeadline(r.Context(), deadline)
@@ -281,6 +285,11 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		h.mgr.logger.Debug("phone control response write failed", "status", status, "err", err)
 	}
+}
+
+func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, status int, body map[string]any) {
+	report.Refuse(r.Context())
+	h.writeJSON(w, status, body)
 }
 
 // livenessMissedPings is how many consecutive PING intervals may elapse without a PONG before the
@@ -335,17 +344,35 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 		http.Error(w, "bind failed (retry)", http.StatusServiceUnavailable)
 		return
 	}
+	go func() {
+		defer report.Recover(ctx, h.mgr.logger, "phone control heartbeat", func() { c.close(store.CloseError) })
+		h.mgr.heartbeatLoop(ctx, c)
+	}()
 	defer teardown()
+	finished := false
+	defer func() {
+		if !finished {
+			c.close(store.CloseError)
+		}
+	}()
+	report.SetAttrs(ctx, slog.String("tunnel", c.name), slog.String("conn_id", c.connID))
 	releaseSem() // bound — the pre-bind slot frees for the next handshake
 	if h.mgr.Draining() {
 		h.mgr.sendMove(c)
 	}
 
+	h.runControl(ctx, w, flusher, r.Body, c)
+	finished = true
+}
+
+func (h *Handler) runControl(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, body io.Reader, c *conn) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	go h.mgr.heartbeatLoop(ctx, c)
-	go h.readPump(r.Body, c)
+	go func() {
+		defer report.Recover(ctx, h.mgr.logger, "phone control reader", func() { c.close(store.CloseError) })
+		h.readPump(body, c)
+	}()
 
 	ping := time.NewTicker(h.pingInterval)
 	defer ping.Stop()
@@ -435,6 +462,17 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 			c.lastPong.Store(time.Now().UnixNano())
 		}
 	}
+}
+
+func metaAttrs(m ConnMeta) []slog.Attr {
+	var attrs []slog.Attr
+	for _, a := range []slog.Attr{slog.String("sni", m.SNI), slog.String("alpn", m.ALPN),
+		slog.String("tls_version", m.TLSVersion), slog.String("ja4", m.JA4)} {
+		if a.Value.String() != "" {
+			attrs = append(attrs, a)
+		}
+	}
+	return attrs
 }
 
 func metaFromRequest(r *http.Request) ConnMeta {

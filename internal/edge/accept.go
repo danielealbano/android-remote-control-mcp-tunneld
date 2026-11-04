@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 // peekConn is a net.Conn that replays a buffered prefix (the peeked ClientHello) before the underlying
@@ -130,7 +131,10 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 		go func() {
 			defer e.wg.Done()
 			defer e.handling.Add(-1)
-			e.handleConn(ctx, conn)
+			cctx := report.WithScope(ctx)
+			defer report.Recover(cctx, e.cfg.Logger, "public connection", func() { closeLogged(e.cfg.Logger, "public client", conn) })
+			report.SetAttrs(cctx, report.ClientAttrs(conn.RemoteAddr().String())...)
+			e.handleConn(cctx, conn)
 		}()
 	}
 }
@@ -209,6 +213,7 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 		closeLogged(e.cfg.Logger, "rejected conn", conn)
 		return
 	}
+	report.SetAttrs(ctx, helloAttrs(info)...)
 	if info.ALPN == acmeTLS1Protocol {
 		e.serveACMEChallenge(ctx, pc, info, ip)
 		return
@@ -263,3 +268,8 @@ func (c *metaConn) ConnMeta() phoneconn.ConnMeta { return c.meta }
 
 // NetConn exposes the wrapped connection so a tls.Conn layered on top can be unwrapped to this carrier.
 func (c *metaConn) NetConn() net.Conn { return c.Conn }
+
+func helloAttrs(info ClientHelloInfo) []slog.Attr {
+	return []slog.Attr{slog.String("sni", info.SNI), slog.String("alpn", info.ALPN),
+		slog.String("tls_version", info.TLSVersion), slog.String("ja4", info.JA4)}
+}

@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 const (
@@ -54,6 +56,7 @@ func newGuardedListener(ctx context.Context, ln net.Listener, ban func(netip.Add
 	l.wg.Add(1)
 	go func() {
 		defer l.wg.Done()
+		defer report.Crash(ctx, logger, "acme-http accept loop")
 		l.acceptLoop(ctx)
 	}()
 	return l
@@ -80,7 +83,10 @@ func (l *guardedListener) acceptLoop(ctx context.Context) {
 		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
-			l.check(ctx, c)
+			cctx := report.WithScope(ctx)
+			defer report.Recover(cctx, l.logger, "acme-http admission", func() { closeLogged(l.logger, "acme-http conn", c) })
+			report.SetAttrs(cctx, report.ClientAttrs(c.RemoteAddr().String())...)
+			l.check(cctx, c)
 		}()
 	}
 }
@@ -141,7 +147,11 @@ func (l *guardedListener) Addr() net.Addr { return l.ln.Addr() }
 
 func (l *guardedListener) Wait(ctx context.Context) {
 	done := make(chan struct{})
-	go func() { l.wg.Wait(); close(done) }()
+	go func() {
+		defer report.Crash(ctx, l.logger, "acme-http drain")
+		l.wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-ctx.Done():

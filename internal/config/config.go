@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/logging"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -168,6 +169,10 @@ type ServeCmd struct {
 	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Deadline of the final shutdown after the drain (servers, public handlers, conn-log upload)."`
 
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
+
+	SentryDSN              string  `name:"sentry-dsn" help:"Sentry DSN: panics, errors, warning logs and traces go to Sentry. Empty sends nothing; panics are still contained and logged."`
+	SentryEnvironment      string  `name:"sentry-environment" default:"production" help:"Sentry environment of this node's events; deploys are recorded against it."`
+	SentryTracesSampleRate float64 `name:"sentry-traces-sample-rate" default:"1" help:"Share of traces sent to Sentry, from 0 to 1."`
 }
 
 func (c ServeCmd) LEEnabled() bool  { return c.ACMEDirLE != "" }
@@ -289,6 +294,17 @@ func (c ServeCmd) Validate() error {
 	}
 	if c.PredrainWait < 0 {
 		return fmt.Errorf("--predrain-wait must be ≥ 0, got %s", c.PredrainWait)
+	}
+	if c.SentryDSN != "" {
+		if err := report.CheckDSN(c.SentryDSN); err != nil {
+			return RedactSentryDSN(err, c.SentryDSN)
+		}
+		if c.SentryEnvironment == "" {
+			return errors.New("--sentry-environment must not be empty when --sentry-dsn is set")
+		}
+	}
+	if !(c.SentryTracesSampleRate >= 0 && c.SentryTracesSampleRate <= 1) {
+		return fmt.Errorf("--sentry-traces-sample-rate must be within [0, 1], got %v", c.SentryTracesSampleRate)
 	}
 	if c.DialBackMTLS && !c.DialBackHTTPS {
 		return errors.New("--dialback-mtls requires --dialback-https: a plain dial-back carries no client certificate")

@@ -3,6 +3,7 @@ package acme
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -97,13 +99,20 @@ func (l *lazyCA) resolve(ctx context.Context) (caIssuer, error) {
 	if c, ok := l.cached(); ok {
 		return c, nil
 	}
-	ch := l.group.DoChan("build", func() (any, error) {
+	ch := l.group.DoChan("build", func() (built any, err error) {
+		defer report.Recover(ctx, l.logger, "ACME client build", func() {
+			built, err = nil, fmt.Errorf("acme: the %s client build panicked: %w", l.caID, report.ErrPanicked)
+		})
 		if c, ok := l.cached(); ok {
 			return c, nil
 		}
 		bctx, cancel := context.WithTimeout(withoutTrack(context.WithoutCancel(ctx)), lazyBuildTimeout)
 		defer cancel()
+		bctx, flag := withPanicFlag(bctx)
 		c, err := l.build(bctx)
+		if err != nil && flag.panicked() && !errors.Is(err, report.ErrPanicked) {
+			err = fmt.Errorf("%w: %w", report.ErrPanicked, err)
+		}
 		if err != nil {
 			l.logger.Debug("ACME client build failed (retried on the next use)", "ca", l.caID, "err", err)
 			return nil, err // not cached → retried on the next call
@@ -130,7 +139,7 @@ func (l *lazyCA) prepare(ctx context.Context) error {
 func (l *lazyCA) client(ctx context.Context) (caIssuer, error) {
 	c, err := l.resolve(ctx)
 	if err != nil {
-		if ie := classifyLego(err); ie.Class == ClassRateLimited {
+		if ie := classifyLego(err); ie.Class == ClassRateLimited || ie.Class == ClassLocal {
 			return nil, ie
 		}
 		return nil, transient(err)

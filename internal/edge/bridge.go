@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -167,6 +169,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
+	report.SetAttrs(ctx, append(helloAttrs(info), slog.String("tunnel", name))...)
 	if !e.ready.DialBackReady() {
 		e.cfg.Logger.Debug("tunnel refused: this node cannot accept dial-backs yet", "tunnel", name)
 		e.rec.Reject("no-route", name, peerAddr(client))
@@ -260,29 +263,40 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	e.trackStream(as)
 	defer e.untrackStream(as)
 
-	e.rec.PublicConnOpen()
-	e.rec.StreamOpen()
 	srcIP, srcPort := splitAddr(client.RemoteAddr())
 	ev := PublicEvent{Conn: store.MustConnID(), Tunnel: name, Event: "start", SrcIP: srcIP, SrcPort: srcPort,
 		SNI: info.SNI, ALPN: info.ALPN, TLSVersion: info.TLSVersion, JA4: info.JA4, StartedAt: as.started}
+	e.rec.PublicConnOpen()
+	e.rec.StreamOpen()
+	reason := store.CloseError
+	var span report.Span
+	defer func() {
+		bytesIn, bytesOut := atomic.LoadInt64(&as.bytesIn), atomic.LoadInt64(&as.bytesOut)
+		span.SetAttrs(slog.String("close_reason", reason), slog.Int64("bytes_in", bytesIn), slog.Int64("bytes_out", bytesOut))
+		span.Finish()
+		e.rec.StreamClose()
+		e.rec.PublicConnClose(reason)
+		if e.logs != nil {
+			end := ev
+			end.Event = "end"
+			end.CloseReason = reason
+			end.EndedAt = e.now()
+			end.BytesIn = bytesIn
+			end.BytesOut = bytesOut
+			e.logs.PutConnLogPublic(context.WithoutCancel(ctx), end)
+		}
+		closeLogged(e.cfg.Logger, "public client", client)
+	}()
 	if e.logs != nil {
 		e.logs.PutConnLogPublic(ctx, ev)
 	}
+	report.SetAttrs(ctx, slog.String("conn_id", ev.Conn))
+	_, span = report.StartSpan(ctx, "tunnel.connection", "public connection")
+	span.SetAttrs(append(report.ClientAttrs(client.RemoteAddr().String()), slog.String("tunnel", name),
+		slog.String("sni", info.SNI), slog.String("alpn", info.ALPN), slog.String("tls_version", info.TLSVersion),
+		slog.String("ja4", info.JA4), slog.String("conn_id", ev.Conn))...)
 
-	reason := e.splice(sctx, name, client, far, as)
-
-	e.rec.StreamClose()
-	e.rec.PublicConnClose(reason)
-	if e.logs != nil {
-		end := ev
-		end.Event = "end"
-		end.CloseReason = reason
-		end.EndedAt = e.now()
-		end.BytesIn = atomic.LoadInt64(&as.bytesIn)
-		end.BytesOut = atomic.LoadInt64(&as.bytesOut)
-		e.logs.PutConnLogPublic(context.WithoutCancel(ctx), end)
-	}
-	closeLogged(e.cfg.Logger, "public client", client)
+	reason = e.splice(sctx, name, client, far, as)
 }
 
 func (e *Edge) evictAndAcquire(ctx context.Context, name, token string) bool {
@@ -349,8 +363,14 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	}
 
 	done := make(chan struct{}, 2)
+	onPanic := func() {
+		setReason(store.CloseError)
+		closeBoth()
+	}
 	// client → phone (in, from the peer's perspective): the source is the public client.
 	go func() {
+		defer func() { done <- struct{}{} }()
+		defer report.Recover(ctx, e.cfg.Logger, "public connection upload", onPanic)
 		switch e.pacedCopy(ctx, name, "in", far, client, as, &as.bytesIn) {
 		case quotaHit:
 			setReason(store.CloseQuotaExhausted)
@@ -359,10 +379,11 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		case copyWriteErr:
 			setReason(store.CloseError) // writing to the phone failed
 		}
-		done <- struct{}{}
 	}()
 	// phone → client (out): the source is the phone.
 	go func() {
+		defer func() { done <- struct{}{} }()
+		defer report.Recover(ctx, e.cfg.Logger, "public connection download", onPanic)
 		switch e.pacedCopy(ctx, name, "out", client, far, as, &as.bytesOut) {
 		case quotaHit:
 			setReason(store.CloseQuotaExhausted)
@@ -371,7 +392,6 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 		case copyWriteErr:
 			setReason(store.CloseError) // writing to the public client failed
 		}
-		done <- struct{}{}
 	}()
 
 	// Policy watcher: closes both sides, then exits; otherwise it exits once signalled after both copies finish. It
@@ -381,6 +401,7 @@ func (e *Edge) splice(ctx context.Context, name string, client net.Conn, far io.
 	watchExited := make(chan struct{})
 	go func() {
 		defer close(watchExited)
+		defer report.Recover(ctx, e.cfg.Logger, "public connection watcher", onPanic)
 		ticker := time.NewTicker(e.idlePoll())
 		defer ticker.Stop()
 		type sample struct{ t, bytes int64 }

@@ -59,6 +59,7 @@ func TestIssueWithRetries_Rule(t *testing.T) {
 	paced := &EnrollError{Status: http.StatusServiceUnavailable, Reason: "acme_rate_limited", Retryable: true, RetryAfter: 7 * time.Second}
 	final := &EnrollError{Status: http.StatusBadRequest, Reason: "acme_failed"}
 	transport := &transportError{errInjected}
+	internal := errorFromResponse(http.StatusInternalServerError, []byte(`{"reason":"internal_error","retryable":true}`))
 	tests := []struct {
 		name        string
 		script      issueScript
@@ -74,6 +75,8 @@ func TestIssueWithRetries_Rule(t *testing.T) {
 			wantErr: retryable, wantSlept: []time.Duration{5 * time.Second, 10 * time.Second, 15 * time.Second},
 			wantIssued: []string{"n0", "fresh-1", "fresh-2", "fresh-3"}, wantFetched: 3},
 		{name: "transport error retried", script: issueScript{issueErrs: []error{transport}},
+			wantSlept: []time.Duration{5 * time.Second}, wantIssued: []string{"n0", "fresh-1"}, wantFetched: 1},
+		{name: "server panic retried", script: issueScript{issueErrs: []error{internal}},
 			wantSlept: []time.Duration{5 * time.Second}, wantIssued: []string{"n0", "fresh-1"}, wantFetched: 1},
 		{name: "non-retryable stops", script: issueScript{issueErrs: []error{final}},
 			wantErr: final, wantIssued: []string{"n0"}},
@@ -138,6 +141,7 @@ func TestEnrollWithRetries_Rule(t *testing.T) {
 	paced := &EnrollError{Status: http.StatusTooManyRequests, Reason: "rate_limited", Retryable: true, RetryAfter: 7 * time.Second}
 	final := &EnrollError{Status: http.StatusForbidden, Reason: "banned"}
 	transport := &transportError{errInjected}
+	internal := errorFromResponse(http.StatusInternalServerError, []byte(`{"reason":"internal_error","retryable":true}`))
 	tests := []struct {
 		name         string
 		script       enrollScript
@@ -153,6 +157,8 @@ func TestEnrollWithRetries_Rule(t *testing.T) {
 			wantErr: refused, wantSlept: []time.Duration{time.Second, time.Second, time.Second}, wantAttempts: 4},
 		{name: "network error waits 2 s", script: enrollScript{errs: []error{transport, transport}},
 			wantSlept: []time.Duration{2 * time.Second, 2 * time.Second}, wantAttempts: 3},
+		{name: "server panic waits 1 s", script: enrollScript{errs: []error{internal}},
+			wantSlept: []time.Duration{time.Second}, wantAttempts: 2},
 		{name: "non-retryable stops", script: enrollScript{errs: []error{final}},
 			wantErr: final, wantAttempts: 1},
 		{name: "other error stops", script: enrollScript{errs: []error{errInjected}},

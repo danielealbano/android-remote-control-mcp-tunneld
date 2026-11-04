@@ -13,9 +13,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 var (
@@ -60,7 +62,38 @@ type budgetTransport struct {
 	now       func() time.Time
 }
 
-func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+type panicFlag struct{ set atomic.Bool }
+
+type panicFlagKey struct{}
+
+func withPanicFlag(ctx context.Context) (context.Context, *panicFlag) {
+	f := &panicFlag{}
+	return context.WithValue(ctx, panicFlagKey{}, f), f
+}
+
+func markPanicked(ctx context.Context) {
+	if f, ok := ctx.Value(panicFlagKey{}).(*panicFlag); ok {
+		f.set.Store(true)
+	}
+}
+
+func (f *panicFlag) panicked() bool { return f.set.Load() }
+
+func (t *budgetTransport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
+	var got *http.Response
+	defer report.Recover(req.Context(), t.logger, "ACME request", func() {
+		markPanicked(req.Context())
+		resp, err = nil, fmt.Errorf("acme request to %s: %w", req.URL.Host, report.ErrPanicked)
+		if got != nil {
+			if cerr := got.Body.Close(); cerr != nil {
+				err = errors.Join(err, cerr)
+			}
+		}
+	})
+	return t.roundTrip(req, &got)
+}
+
+func (t *budgetTransport) roundTrip(req *http.Request, got **http.Response) (*http.Response, error) {
 	start := t.now()
 	tr := trackFrom(req.Context())
 	paid, err := t.before(req, tr)
@@ -69,7 +102,7 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, closeRequestBody(req, err)
 	}
 	if tr == nil {
-		resp, err := t.send(req, start)
+		resp, err := t.send(req, start, got)
 		if err != nil {
 			return nil, err
 		}
@@ -87,7 +120,7 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.logUnsent(req, start, errOrderAbandoned)
 		return nil, closeRequestBody(req, errOrderAbandoned)
 	}
-	resp, err := t.send(req, start)
+	resp, err := t.send(req, start, got)
 	if err != nil {
 		return nil, err
 	}
@@ -108,9 +141,12 @@ func (t *budgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func (t *budgetTransport) send(req *http.Request, start time.Time) (*http.Response, error) {
+func (t *budgetTransport) send(req *http.Request, start time.Time, got **http.Response) (*http.Response, error) {
 	sent := t.now()
 	resp, err := t.base.RoundTrip(req)
+	if resp != nil {
+		*got = resp
+	}
 	took := t.now().Sub(sent)
 	if err != nil {
 		t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
