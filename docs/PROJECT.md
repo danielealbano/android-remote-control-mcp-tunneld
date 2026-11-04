@@ -224,8 +224,8 @@ few numbers every 30 s, with no inbound access and no dependency on Prometheus o
 that it can reach Valkey (`/healthz`), that the node's own Valkey is up (`redis_up` from its exporter), and how many
 Valkey pool timeouts, real ACME failures and issuances happened since the last report. A CA rate limit is not a
 failure (`tunneld_acme_issue_total{result="rate-limited"}`). The values per node live in
-`/etc/tunneld/status-report.env` (`status-report.env.example`). To install, copy the script to
-`/usr/local/sbin/arc-status-report` and the two units to `/etc/systemd/system/`, then enable the timer.
+`/etc/tunneld/status-report.env` (`status-report.env.example`). `infra/status-report/install.sh` installs it on every
+node in a config file; its settings come from the command line or the environment (`--help` lists them).
 
 ## 7. Operations
 
