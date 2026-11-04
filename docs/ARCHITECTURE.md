@@ -333,7 +333,9 @@ hits the window (its LOG is caplog-deduped), and forced closures of existing con
 `evicted`, `idle-timeout`, `quota-exhausted`, `cert-expired`, `ban-evict`, `admin-terminate`, …) are recorded via
 `PublicConnClose(reason)` / `PhoneConnClose(reason)` — never via `Reject`.
 `tunneld_enrollments_total{result}` carries the enrollment outcome;
-`tunneld_attest_verify_total{result}` the attestation verdicts; and
+`tunneld_attest_verify_total{result}` the attestation verdicts;
+`tunneld_acme_issue_total{ca,result}` each CA's order outcomes (`ok`, `fail` for a real failure, and
+`rate-limited` when the CA refused with its rate limit, which is not a failure); and
 `tunneld_acme_renew_total{ca,result}` the tunnel-cert renewal outcomes (`ca="all"` on a failure, since
 every CA in the chain declined). `tunneld_acme_cooldown_total{ca}` counts account wait-until activations and
 `tunneld_acme_rate_limited_total{ca}` the CAs' 429 answers.

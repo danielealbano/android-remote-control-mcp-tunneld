@@ -425,6 +425,32 @@ func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
 	assertNoCAFailureState(t, lim, CALetsEncrypt)
 }
 
+func TestChain_RecordsTheIssueResultByClass(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "a CA rate limit is not a failure", err: rateLimited(time.Minute, errors.New("too many requests")), want: CALetsEncrypt + " rate-limited"},
+		{name: "a transient error is a failure", err: transient(errors.New("connection reset")), want: CALetsEncrypt + " fail"},
+		{name: "a permanent error is a failure", err: permanent(errors.New("bad CSR")), want: CALetsEncrypt + " fail"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.err}
+			gts := &fakeCA{caID: CAGTS}
+			rec := &recordingChainRecorder{}
+			ch, _ := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+			if _, _, err := ch.Obtain(context.Background(), nil, "name"); err != nil && gts.calls != 0 {
+				t.Fatalf("Obtain = %v", err)
+			}
+			if len(rec.issues) == 0 || rec.issues[0] != tc.want {
+				t.Fatalf("issues = %v, want %q first", rec.issues, tc.want)
+			}
+		})
+	}
+}
+
 type cancellingCA struct {
 	caID   string
 	cancel context.CancelFunc
