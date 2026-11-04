@@ -26,6 +26,7 @@ import (
 	legolog "github.com/go-acme/lego/v5/log"
 	"github.com/go-acme/lego/v5/registration"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -192,6 +193,8 @@ func newLegoConfig(cfg LegoConfig, user registration.User) *lego.Config {
 	return lc
 }
 
+var errOrderPanicked = fmt.Errorf("acme: the order goroutine panicked: %w", report.ErrPanicked)
+
 func (l *legoClient) id() string { return l.cfg.CAID }
 
 func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, name string) ([]byte, store.CertInfo, error) {
@@ -216,6 +219,13 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 		l.cfg.Logger.Warn("abandoned ACME order issued a certificate that was discarded", "ca", l.cfg.CAID, "name", name, "domains", r.res.Domains)
 	}
 	go func() {
+		defer report.Recover(ctx, l.cfg.Logger, "ACME order", func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if !abandoned {
+				ch <- result{nil, errOrderPanicked}
+			}
+		})
 		res, err := l.obtainCSR(context.WithoutCancel(ctx), req)
 		mu.Lock()
 		defer mu.Unlock()
@@ -246,7 +256,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 	select {
 	case <-ctx.Done():
 		abandon()
-		return nil, store.CertInfo{}, transient(context.Cause(ctx))
+		return nil, store.CertInfo{}, classifyLego(context.Cause(ctx))
 	case d := <-limited:
 		abandon()
 		return nil, store.CertInfo{}, rateLimited(d, errCARateLimited)
@@ -392,6 +402,9 @@ var errCARateLimited = errors.New("acme: the CA answered 429 (rate limited)")
 // as *acme.RateLimitedError carrying the CA's Retry-After header — that value is HONORED
 // (parsed per RFC 7231); the --acme-cooldown-default applies only when no header was sent.
 func classifyLego(err error) *IssuerError {
+	if errors.Is(err, report.ErrPanicked) {
+		return panicked(err)
+	}
 	if errors.Is(err, ErrChallengeStore) {
 		return local(localChallengeRetry, err)
 	}

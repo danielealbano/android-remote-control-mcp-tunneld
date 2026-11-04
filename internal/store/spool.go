@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 const (
@@ -141,7 +143,7 @@ func withFileOps(write func(*os.File, []byte) (int, error), sync func(*os.File) 
 	}
 }
 
-func NewConnLogSpool(dir, nodeID string, up ConnLogUploader, onDrop func(n int), logger *slog.Logger, opts ...spoolOption) (*ConnLogSpool, error) {
+func NewConnLogSpool(ctx context.Context, dir, nodeID string, up ConnLogUploader, onDrop func(n int), logger *slog.Logger, opts ...spoolOption) (*ConnLogSpool, error) {
 	switch {
 	case dir == "":
 		return nil, errors.New("store: empty conn-log spool directory")
@@ -178,9 +180,15 @@ func NewConnLogSpool(dir, nodeID string, up ConnLogUploader, onDrop func(n int),
 		s.releaseLock()
 		return nil, err
 	}
-	s.upCtx, s.upCancel = context.WithCancel(context.Background())
-	go s.writer()
-	go s.uploader()
+	s.upCtx, s.upCancel = context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		defer report.Crash(s.upCtx, s.logger, "conn-log writer")
+		s.writer()
+	}()
+	go func() {
+		defer report.Crash(s.upCtx, s.logger, "conn-log uploader")
+		s.uploader()
+	}()
 	s.signalUpload()
 	return s, nil
 }

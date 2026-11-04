@@ -2,9 +2,19 @@ package acme
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -14,6 +24,7 @@ import (
 	"github.com/go-acme/lego/v5/certificate"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -122,12 +133,65 @@ func TestLazyCA_ObtainReportsTheAttemptDeadline(t *testing.T) {
 		return nil, errors.New("released")
 	}, testLogger())
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
-	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour)
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
 	defer cancel()
 	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
 	var ie *IssuerError
 	if !errors.As(err, &ie) || ie.Class != ClassTransient || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("obtain = %v, want a transient attempt deadline", err)
+	}
+}
+
+func TestLazyCA_PanicsAreLocalErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		build func(context.Context) (caIssuer, error)
+	}{
+		{name: "the build panics", build: func(context.Context) (caIssuer, error) { panic("build boom") }},
+		{name: "a request of the build panics", build: func(context.Context) (caIssuer, error) {
+			return nil, fmt.Errorf("account lookup: %w", report.ErrPanicked)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var builds atomic.Int32
+			l := newLazyCA(CAGTS, 0, 0, func(ctx context.Context) (caIssuer, error) {
+				if builds.Add(1) == 1 {
+					return tc.build(ctx)
+				}
+				return &fakeCA{caID: CAGTS}, nil
+			}, slog.New(slog.DiscardHandler))
+			err := l.prepare(context.Background())
+			var ie *IssuerError
+			if !errors.As(err, &ie) || ie.Class != ClassLocal || ie.Reason != "panicked" || !errors.Is(err, report.ErrPanicked) {
+				t.Fatalf("prepare = %v, want a local error carrying the panic", err)
+			}
+			if err := l.prepare(context.Background()); err != nil {
+				t.Fatalf("the next use must build again, got %v", err)
+			}
+		})
+	}
+}
+
+func TestLazyCA_TimerPanicIsALocalError(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	l := newLazyCA(CAGTS, 0, 0, func(ctx context.Context) (caIssuer, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, errors.New("released")
+	}, slog.New(slog.DiscardHandler))
+	ctx, cancel := attemptContext(context.Background(), nil, 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
+	defer cancel()
+	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassLocal || !errors.Is(err, report.ErrPanicked) {
+		t.Fatalf("obtain = %v, want a local error carrying the timer's panic", err)
 	}
 }
 
@@ -308,5 +372,51 @@ func TestLazyCA_BuildIgnoresAttemptTracker(t *testing.T) {
 		if err := <-ch; err != nil {
 			t.Fatalf("resolve = %v, want the built client", err)
 		}
+	}
+}
+
+type panicOnHead struct{ base http.RoundTripper }
+
+func (p panicOnHead) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodHead {
+		panic("nonce boom")
+	}
+	return p.base.RoundTrip(r)
+}
+
+func TestLazyCA_NoncePanicHiddenByLegoIsALocalError(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Replay-Nonce", fmt.Sprintf("nonce-%d", time.Now().UnixNano()))
+		if r.URL.Path != "/directory" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]string{
+			"newNonce": srv.URL + "/nonce", "newAccount": srv.URL + "/account", "newOrder": srv.URL + "/order",
+		}); err != nil {
+			t.Errorf("write directory: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	caFile := filepath.Join(t.TempDir(), "stub-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGO_CA_CERTIFICATES", caFile)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTransportHarness(t, &account{id: "le-local", ca: CALetsEncrypt, label: "local"}, Budgets{})
+	cfg := LegoConfig{CAID: CALetsEncrypt, Label: "local", DirectoryURL: srv.URL + "/directory", AccountKey: key,
+		Wrap: func(base http.RoundTripper) http.RoundTripper { h.bt.base = panicOnHead{base}; return h.bt }}
+	l := newLazyCA(CALetsEncrypt, 0, 0, func(ctx context.Context) (caIssuer, error) { return NewLegoClient(ctx, cfg) },
+		slog.New(slog.DiscardHandler))
+	err = l.prepare(context.Background())
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassLocal || ie.Reason != "panicked" || !errors.Is(err, report.ErrPanicked) {
+		t.Fatalf("prepare = %v, want a local error carrying the nonce request's panic", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"net/netip"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 // BanFunc reports whether a peer IP is banned (a closure over the ban engine, so enroll stays
@@ -74,12 +75,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	addr, perr := netip.ParseAddr(ip)
 	if perr != nil {
 		h.svc.logger.Debug("enroll unparseable peer address (refused)", "peer", ip, "err", perr)
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_source_ip"})
 		return
 	}
 	if h.ban != nil && h.ban(addr) {
 		h.rec.Reject("ban", "", ip)
-		h.writeJSON(w, http.StatusForbidden, errorResponse{Reason: "banned"})
+		h.writeError(w, r, http.StatusForbidden, errorResponse{Reason: "banned"})
 		return
 	}
 	if r.Method == http.MethodGet && r.URL.Path == "/api/v1/health" {
@@ -88,11 +89,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/enroll/nonce":
-		if !h.refuseDraining(w) {
+		if !h.refuseDraining(w, r) {
 			h.handleNonce(w, r, ip)
 		}
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/enroll":
-		if !h.refuseDraining(w) {
+		if !h.refuseDraining(w, r) {
 			h.handleEnroll(w, r, ip)
 		}
 	default:
@@ -100,12 +101,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) refuseDraining(w http.ResponseWriter) bool {
+func (h *Handler) refuseDraining(w http.ResponseWriter, r *http.Request) bool {
 	if !h.life.Draining() {
 		return false
 	}
 	w.Header().Set("Connection", "close")
-	h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "draining", Retryable: true, RetryAfter: drainingRetryAfterSeconds})
+	h.writeError(w, r, http.StatusServiceUnavailable, errorResponse{Reason: "draining", Retryable: true, RetryAfter: drainingRetryAfterSeconds})
 	return true
 }
 
@@ -130,13 +131,13 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 		if e.Reason == "enroll_rate" {
 			status = http.StatusTooManyRequests
 		}
-		h.writeErr(w, e, status)
+		h.writeErr(w, r, e, status)
 		return
 	}
 	nonce, err := h.svc.Nonce(r.Context())
 	if err != nil {
 		h.svc.logger.Debug("enrollment nonce mint failed", "ip", ip, "err", err)
-		h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
+		h.writeError(w, r, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 	h.writeJSON(w, http.StatusOK, nonceResponse{Nonce: hex.EncodeToString(nonce)})
@@ -145,27 +146,27 @@ func (h *Handler) handleNonce(w http.ResponseWriter, r *http.Request, ip string)
 func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBody))
 	if err != nil {
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_request"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_request"})
 		return
 	}
 	var req enrollRequestBody
 	if err := json.Unmarshal(body, &req); err != nil {
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_json"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_json"})
 		return
 	}
 	nonce, err := decodeHex(req.Nonce)
 	if err != nil {
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_nonce"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_nonce"})
 		return
 	}
 	chain, err := parsePEMChain([]byte(req.AttestChainPEM))
 	if err != nil {
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_attestation_chain"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_attestation_chain"})
 		return
 	}
 	idCSR, err := parseCSR([]byte(req.IdentityCSR))
 	if err != nil {
-		h.writeJSON(w, http.StatusBadRequest, errorResponse{Reason: "bad_identity_csr"})
+		h.writeError(w, r, http.StatusBadRequest, errorResponse{Reason: "bad_identity_csr"})
 		return
 	}
 
@@ -175,7 +176,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	t := h.svc.now()
 	if e := h.svc.enrollLimitCheck(r.Context(), ip); e != nil {
 		h.rec.EnrollmentResult(e.Reason)
-		h.writeErr(w, e, statusForError(e))
+		h.writeErr(w, r, e, statusForError(e))
 		return
 	}
 	t = h.svc.logStep("enroll step", "limit-check", t, "ip", ip)
@@ -187,7 +188,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	if nerr != nil {
 		h.svc.logger.Debug("issuance nonce mint failed", "ip", ip, "err", nerr)
 		h.rec.EnrollmentResult("internal")
-		h.writeJSON(w, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
+		h.writeError(w, r, http.StatusServiceUnavailable, errorResponse{Reason: "internal", Retryable: true})
 		return
 	}
 	h.svc.logStep("enroll step", "issue-nonce", t, "ip", ip)
@@ -200,7 +201,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 	})
 	if ee != nil {
 		h.rec.EnrollmentResult(ee.Reason)
-		h.writeErr(w, ee, statusForError(ee))
+		h.writeErr(w, r, ee, statusForError(ee))
 		return
 	}
 
@@ -232,10 +233,17 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-func (h *Handler) writeErr(w http.ResponseWriter, e *Error, status int) {
+func (h *Handler) writeErr(w http.ResponseWriter, r *http.Request, e *Error, status int) {
 	resp := errorResponse{Reason: e.Reason, Retryable: e.Retryable}
 	if e.RetryAfter > 0 {
 		resp.RetryAfter = int64(e.RetryAfter.Seconds())
+	}
+	h.writeError(w, r, status, resp)
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, status int, resp errorResponse) {
+	if refusal(resp.Reason) {
+		report.Refuse(r.Context())
 	}
 	h.writeJSON(w, status, resp)
 }

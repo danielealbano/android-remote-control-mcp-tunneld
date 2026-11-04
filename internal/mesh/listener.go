@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -86,45 +87,54 @@ func NewHandler(control Controller, opts ...HandlerOption) (*Handler, error) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Mesh-role peer cert required (identity-role rejected).
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 || !ca.HasMeshRole(r.TLS.PeerCertificates[0]) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		refuse(w, r, "forbidden", http.StatusForbidden)
 		return
 	}
 	if r.URL.Path != "/api/v1/mesh/control" {
-		http.NotFound(w, r)
+		refuse(w, r, "404 page not found", http.StatusNotFound)
 		return
 	}
 	h.serveControl(w, r)
+}
+
+func refuse(w http.ResponseWriter, r *http.Request, msg string, status int) {
+	report.Refuse(r.Context())
+	http.Error(w, msg, status)
 }
 
 // serveControl handles the mesh control RPC (mesh-role mTLS already enforced by ServeHTTP): a JSON
 // {op, tunnel} request/response. Unknown op / missing tunnel → 400; op failure → 502.
 func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		refuse(w, r, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req ControlRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
 		h.logger.Warn("mesh control request malformed", "err", err)
-		http.Error(w, "bad control request", http.StatusBadRequest)
+		refuse(w, r, "bad control request", http.StatusBadRequest)
 		return
 	}
 	if req.Op != "renew" && req.Op != "terminate" && req.Op != "open" && req.Op != "evict" &&
 		req.Op != "slot-candidate" && req.Op != "free-slot" {
-		http.Error(w, "unknown op", http.StatusBadRequest)
+		refuse(w, r, "unknown op", http.StatusBadRequest)
 		return
 	}
 	if req.Tunnel == "" {
-		http.Error(w, "missing tunnel", http.StatusBadRequest)
+		refuse(w, r, "missing tunnel", http.StatusBadRequest)
 		return
 	}
 	if (req.Op == "open" || req.Op == "evict") && req.ConnID == "" {
-		http.Error(w, "missing conn_id", http.StatusBadRequest)
+		refuse(w, r, "missing conn_id", http.StatusBadRequest)
 		return
 	}
 	if req.Op == "open" && (req.Open == nil || req.Open.Token == "" || req.Open.Addr == "") {
-		http.Error(w, "bad open request", http.StatusBadRequest)
+		refuse(w, r, "bad open request", http.StatusBadRequest)
 		return
+	}
+	report.SetAttrs(r.Context(), slog.String("op", req.Op), slog.String("tunnel", req.Tunnel))
+	if req.ConnID != "" {
+		report.SetAttrs(r.Context(), slog.String("conn_id", req.ConnID))
 	}
 	var resp ControlResponse
 	var err error

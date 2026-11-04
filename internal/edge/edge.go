@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 // Router resolves a tunnel name to its owner + connID.
@@ -115,7 +116,11 @@ type Edge struct {
 // must be enqueued before the conn-log queue is flushed).
 func (e *Edge) Wait(ctx context.Context) {
 	done := make(chan struct{})
-	go func() { e.wg.Wait(); close(done) }()
+	go func() {
+		defer report.Crash(ctx, e.cfg.Logger, "public handlers drain")
+		e.wg.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -165,6 +170,7 @@ func (e *Edge) ControlListener() net.Listener { return e.controlLn }
 // Serve runs the accept loop on ln until ctx is done.
 func (e *Edge) Serve(ctx context.Context, ln net.Listener) {
 	go func() {
+		defer report.Crash(ctx, e.cfg.Logger, "edge listener closer")
 		<-ctx.Done()
 		closeLogged(e.cfg.Logger, "edge listener", ln)
 		closeLogged(e.cfg.Logger, "enroll listener", e.enrollLn)

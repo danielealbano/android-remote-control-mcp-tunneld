@@ -35,6 +35,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -269,6 +270,29 @@ func TestLegoObtain_LimitedSignalEndsAttempt(t *testing.T) {
 	}
 }
 
+func TestLegoObtain_OrderPanicFailsTheAttempt(t *testing.T) {
+	l := &legoClient{
+		cfg: LegoConfig{CAID: CALetsEncrypt, Logger: testLogger()},
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			panic("order boom")
+		},
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := l.obtain(context.Background(), &x509.CertificateRequest{}, "n")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		var ie *IssuerError
+		if !errors.Is(err, report.ErrPanicked) || !errors.As(err, &ie) || ie.Class != ClassLocal {
+			t.Fatalf("obtain = %v, want a local error carrying the panic", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a panicking order must fail the attempt at once")
+	}
+}
+
 func TestNewLegoClient_ResolveOnly(t *testing.T) {
 	var accountCalls atomic.Int32
 	var onlyExisting atomic.Bool
@@ -347,12 +371,32 @@ func TestLegoObtain_AttemptDeadlineCause(t *testing.T) {
 		},
 	}
 	tr := newOrderTrack(limit.Bucket{}, limit.Bucket{})
-	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour)
+	ctx, cancel := attemptContext(withTrack(context.Background(), tr), tr, 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
 	defer cancel()
 	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
 	var ie *IssuerError
 	if !errors.As(err, &ie) || ie.Class != ClassTransient || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("obtain = %v, want a transient attempt deadline", err)
+	}
+}
+
+func TestLegoObtain_TimerPanicIsALocalError(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	defer close(release)
+	l := &legoClient{
+		cfg: LegoConfig{CAID: CAGTS, Logger: testLogger()},
+		obtainCSR: func(context.Context, certificate.ObtainForCSRRequest) (*certificate.Resource, error) {
+			<-release
+			return nil, errors.New("released")
+		},
+	}
+	ctx, cancel := attemptContext(context.Background(), nil, 20*time.Millisecond, time.Hour, slog.New(slog.DiscardHandler))
+	defer cancel()
+	_, _, err := l.obtain(ctx, &x509.CertificateRequest{}, "n")
+	var ie *IssuerError
+	if !errors.As(err, &ie) || ie.Class != ClassLocal || !errors.Is(err, report.ErrPanicked) {
+		t.Fatalf("obtain = %v, want a local error carrying the timer's panic", err)
 	}
 }
 

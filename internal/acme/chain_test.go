@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
@@ -425,6 +426,57 @@ func TestChain_LocalErrorSkipsCooldown(t *testing.T) {
 	assertNoCAFailureState(t, lim, CALetsEncrypt)
 }
 
+type panicMarkingCA struct{ *fakeCA }
+
+func (p *panicMarkingCA) obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	p.calls++
+	markPanicked(ctx)
+	return nil, store.CertInfo{}, transient(errors.New("post JWS message: error generating nonce: a request panicked"))
+}
+
+func TestChain_APanicMovesToTheNextAccount(t *testing.T) {
+	t.Run("the next CA issues", func(t *testing.T) {
+		le := &fakeCA{caID: CALetsEncrypt, err: panicked(errOrderPanicked)}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		if _, info, err := ch.Obtain(context.Background(), nil, "name"); err != nil || info.CA != CAGTS {
+			t.Fatalf("Obtain = %+v, %v; want GTS to issue after the LE panic", info, err)
+		}
+		if len(rec.issues) != 1 || rec.issues[0] != CAGTS+" ok" || len(rec.cooldowns) != 0 {
+			t.Fatalf("a panic must record nothing for its CA, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("a request panic the order error does not carry", func(t *testing.T) {
+		le := &panicMarkingCA{fakeCA: &fakeCA{caID: CALetsEncrypt}}
+		gts := &fakeCA{caID: CAGTS}
+		rec := &recordingChainRecorder{}
+		ch, lim := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		if _, info, err := ch.Obtain(context.Background(), nil, "name"); err != nil || info.CA != CAGTS {
+			t.Fatalf("Obtain = %+v, %v; want GTS to issue after the LE request panic", info, err)
+		}
+		if len(rec.issues) != 1 || rec.issues[0] != CAGTS+" ok" || len(rec.cooldowns) != 0 {
+			t.Fatalf("a panic must record nothing for its CA, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+		assertNoCAFailureState(t, lim, CALetsEncrypt)
+	})
+	t.Run("every CA panics", func(t *testing.T) {
+		le := &fakeCA{caID: CALetsEncrypt, err: panicked(errOrderPanicked)}
+		gts := &fakeCA{caID: CAGTS, err: panicked(errOrderPanicked)}
+		rec := &recordingChainRecorder{}
+		ch, _ := newChain(t, ChainConfig{Recorder: rec}, le, gts)
+		_, _, err := ch.Obtain(context.Background(), nil, "name")
+		var ie *IssuerError
+		if !errors.As(err, &ie) || ie.Class != ClassRateLimited || ie.Retry < localChallengeRetry || gts.calls != 1 {
+			t.Fatalf("Obtain = %v after %d GTS calls, want a retryable error after trying every CA", err, gts.calls)
+		}
+		if len(rec.issues) != 0 || len(rec.cooldowns) != 0 {
+			t.Fatalf("panics must record nothing, got issues=%v cooldowns=%v", rec.issues, rec.cooldowns)
+		}
+	})
+}
+
 func TestChain_RecordsTheIssueResultByClass(t *testing.T) {
 	tests := []struct {
 		name string
@@ -446,6 +498,42 @@ func TestChain_RecordsTheIssueResultByClass(t *testing.T) {
 			}
 			if len(rec.issues) == 0 || rec.issues[0] != tc.want {
 				t.Fatalf("issues = %v, want %q first", rec.issues, tc.want)
+			}
+		})
+	}
+}
+
+func TestChain_ReportsOnlyRealFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantIssues int
+	}{
+		{name: "a CA rate limit is not reported", err: rateLimited(time.Minute, errors.New("too many requests")), wantIssues: 0},
+		{name: "a local challenge error is not reported", err: local(localChallengeRetry, ErrChallengePending), wantIssues: 0},
+		{name: "a panicked order is not a CA failure", err: panicked(errOrderPanicked), wantIssues: 0},
+		{name: "a transient failure is reported", err: transient(errors.New("connection reset")), wantIssues: 1},
+		{name: "a permanent failure is reported", err: permanent(errors.New("bad CSR")), wantIssues: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.err}
+			gts := &fakeCA{caID: CAGTS}
+			ch, _ := newChain(t, ChainConfig{Recorder: &recordingChainRecorder{}}, le, gts)
+			rep, tr := tunneltest.NewReporter(t, 0)
+			ctx := report.WithScope(rep.Context(context.Background()))
+			report.SetAttrs(ctx, slog.String("client_ip", "198.51.100.40"))
+			if _, _, err := ch.Obtain(ctx, nil, "name"); err != nil && gts.calls != 0 {
+				t.Fatalf("Obtain = %v", err)
+			}
+			rep.Flush(context.Background())
+			issues := tr.Events("")
+			if len(issues) != tc.wantIssues {
+				t.Fatalf("issues = %d, want %d", len(issues), tc.wantIssues)
+			}
+			if tc.wantIssues == 1 && (issues[0].Tags["ca"] != CALetsEncrypt || issues[0].Tags["tunnel"] != "name" ||
+				issues[0].Tags["client_ip"] != "198.51.100.40" || len(issues[0].Exception) == 0) {
+				t.Fatalf("the issue must be the order error tagged with its CA and tunnel, got tags %v", issues[0].Tags)
 			}
 		})
 	}

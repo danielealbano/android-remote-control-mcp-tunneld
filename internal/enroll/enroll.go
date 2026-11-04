@@ -19,6 +19,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/observ"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -76,6 +77,18 @@ type Error struct {
 
 func (e *Error) Error() string { return "enroll: " + e.Reason }
 
+func (e *Error) Refusal() bool { return refusal(e.Reason) }
+
+var errIssuanceHeartbeatPanicked = fmt.Errorf("enroll: the issuance lock heartbeat panicked: %w", report.ErrPanicked)
+
+func refusal(reason string) bool {
+	switch reason {
+	case "internal", "name_unavailable", "identity_sign_failed", "acme_rate_limited", "acme_transient", "acme_failed":
+		return false
+	}
+	return true
+}
+
 // Config wires the Service (constructor DI).
 type Config struct {
 	RDB            redis.UniversalClient
@@ -107,11 +120,14 @@ type Service struct {
 	logger  *slog.Logger
 	now     func() time.Time
 	nameGen func() (string, error)
+
+	issuanceHeartbeat func(ctx context.Context, name, orderID string)
 }
 
 // NewService builds the enrollment service (injectable clock for tests).
 func NewService(cfg Config) *Service {
-	s := &Service{cfg: cfg, rdb: cfg.RDB, rec: cfg.Recorder, logger: cfg.Logger, now: time.Now}
+	s := &Service{cfg: cfg, rdb: cfg.RDB, rec: cfg.Recorder, logger: cfg.Logger, now: time.Now,
+		issuanceHeartbeat: cfg.Limiter.IssuanceHeartbeatLoop}
 	if s.rec == nil {
 		s.rec = observ.Nop{}
 	}
@@ -181,6 +197,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		}
 		return Result{}, &Error{Reason: "name_unavailable", Retryable: true}
 	}
+	report.SetAttrs(ctx, slog.String("tunnel", name))
 	t = s.logStep("enroll step", "claim", t, "ip", ip, "tunnel", name)
 
 	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
@@ -287,9 +304,14 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		}
 		s.logStep("issue step", "issuance-unlock", ut, "tunnel", name, "ip", ip)
 	}()
+	octx, ocancel := context.WithCancelCause(ctx)
+	defer ocancel(nil)
 	hbCtx, hbStop := context.WithCancel(ctx)
 	defer hbStop()
-	go s.cfg.Limiter.IssuanceHeartbeatLoop(hbCtx, name, orderID)
+	go func() {
+		defer report.Recover(hbCtx, s.logger, "issuance heartbeat", func() { ocancel(errIssuanceHeartbeatPanicked) })
+		s.issuanceHeartbeat(hbCtx, name, orderID)
+	}()
 	t = s.logStep("issue step", "issuance-lock", t, "tunnel", name, "ip", ip)
 
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
@@ -308,11 +330,15 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	)
 	renewal := cur.CA != ""
 	if renewal {
-		pubChain, info, err = s.cfg.Issuer.Renew(ctx, req.TLSCSR, name, cur.CertInfo())
+		pubChain, info, err = s.cfg.Issuer.Renew(octx, req.TLSCSR, name, cur.CertInfo())
 	} else {
-		pubChain, info, err = s.cfg.Issuer.Obtain(ctx, req.TLSCSR, name)
+		pubChain, info, err = s.cfg.Issuer.Obtain(octx, req.TLSCSR, name)
 	}
 	if err != nil {
+		if errors.Is(context.Cause(octx), errIssuanceHeartbeatPanicked) {
+			s.logger.Warn("issuance stopped: its lock heartbeat panicked", "tunnel", name, "ip", ip)
+			return Result{}, &Error{Reason: "internal", Retryable: true}
+		}
 		s.rec.Reject("acme-failed", name, ip)
 		if renewal {
 			s.rec.ACMERenew(observ.ACMERenewAllCAs, "fail")

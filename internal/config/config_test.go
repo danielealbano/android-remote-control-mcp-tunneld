@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -882,6 +883,73 @@ func TestValidate_PredrainWait(t *testing.T) {
 	}
 }
 
+func TestValidate_SentryDSN(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		dsn     string
+		wantErr string
+	}{
+		{name: "unset", dsn: ""},
+		{name: "valid", dsn: "https://public@example.test/1"},
+		{name: "CRLF line ending", dsn: "https://0123456789abcdefPUBLICKEY@o1.ingest.example.test/42\r", wantErr: "invalid control character"},
+		{name: "wrong scheme", dsn: "ftp://0123456789abcdefPUBLICKEY@o1.ingest.example.test/42", wantErr: "invalid scheme"},
+		{name: "no key", dsn: "https://o1.ingest.example.test/42", wantErr: "empty username"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := validCfg(t)
+			c.SentryDSN, c.SentryEnvironment = tc.dsn, "production"
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate = %v, want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "--sentry-dsn") || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate = %v, want the --sentry-dsn %q error", err, tc.wantErr)
+			}
+			for _, secret := range []string{"0123456789abcdefPUBLICKEY", "o1.ingest.example.test"} {
+				if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(secret)) {
+					t.Fatalf("the error must not print the DSN, got %q", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidate_SentryEnvironment(t *testing.T) {
+	t.Parallel()
+	c := validCfg(t)
+	c.SentryDSN, c.SentryEnvironment = "https://public@example.test/1", ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--sentry-environment must not be empty") {
+		t.Fatalf("Validate = %v, want the empty --sentry-environment error", err)
+	}
+	c.SentryDSN = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("an empty environment without a DSN must validate: %v", err)
+	}
+}
+
+func TestValidate_SentryTracesSampleRate(t *testing.T) {
+	for _, bad := range []float64{-0.1, 1.01, math.NaN()} {
+		c := validCfg(t)
+		c.SentryTracesSampleRate = bad
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "--sentry-traces-sample-rate must be within [0, 1]") {
+			t.Fatalf("Validate(%v) = %v, want the --sentry-traces-sample-rate error", bad, err)
+		}
+	}
+	for _, ok := range []float64{0, 0.25, 1} {
+		c := validCfg(t)
+		c.SentryTracesSampleRate = ok
+		if err := c.Validate(); err != nil {
+			t.Fatalf("--sentry-traces-sample-rate %v must validate: %v", ok, err)
+		}
+	}
+}
+
 func TestServeCmd_PublicAddresses(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -1020,6 +1088,20 @@ func TestDialBackEnvTwins(t *testing.T) {
 		c := parse(t)
 		if c.PublicIP != "203.0.113.10" || !c.DialBackHTTPS || !c.DialBackMTLS || c.PredrainWait != 0 {
 			t.Errorf("public-ip = %q https=%v mtls=%v predrain-wait=%s, want the public-ip twin, both flags true and no pre-drain wait", c.PublicIP, c.DialBackHTTPS, c.DialBackMTLS, c.PredrainWait)
+		}
+	})
+	t.Run("sentry", func(t *testing.T) {
+		setRequiredServeEnv(t)
+		t.Setenv("TUNNELD_PUBLIC_IP", "203.0.113.10")
+		if c := parse(t); c.SentryDSN != "" || c.SentryEnvironment != "production" || c.SentryTracesSampleRate != 1 {
+			t.Errorf("sentry-dsn = %q env = %q traces = %v, want no DSN, production and every trace by default",
+				c.SentryDSN, c.SentryEnvironment, c.SentryTracesSampleRate)
+		}
+		t.Setenv("TUNNELD_SENTRY_DSN", "https://public@example.test/1")
+		t.Setenv("TUNNELD_SENTRY_ENVIRONMENT", "staging")
+		t.Setenv("TUNNELD_SENTRY_TRACES_SAMPLE_RATE", "0.5")
+		if c := parse(t); c.SentryDSN != "https://public@example.test/1" || c.SentryEnvironment != "staging" || c.SentryTracesSampleRate != 0.5 {
+			t.Errorf("sentry-dsn = %q env = %q traces = %v, want the env twins", c.SentryDSN, c.SentryEnvironment, c.SentryTracesSampleRate)
 		}
 	})
 	t.Run("plain", func(t *testing.T) {

@@ -322,6 +322,42 @@ func TestIssueAcmeFailure(t *testing.T) {
 	}
 }
 
+type cancelledIssuer struct{}
+
+func (cancelledIssuer) Obtain(ctx context.Context, _ *x509.CertificateRequest, _ string) ([]byte, store.CertInfo, error) {
+	<-ctx.Done()
+	return nil, store.CertInfo{}, context.Cause(ctx)
+}
+
+func (b cancelledIssuer) Renew(ctx context.Context, csr *x509.CertificateRequest, name string, _ store.CertInfo) ([]byte, store.CertInfo, error) {
+	return b.Obtain(ctx, csr, name)
+}
+
+func TestIssue_HeartbeatPanicEndsTheIssuance(t *testing.T) {
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test",
+		Verifier: fakeVerifier{key: idPub}, Issuer: cancelledIssuer{},
+	})
+	svc.issuanceHeartbeat = func(context.Context, string, string) { panic("heartbeat boom") }
+	name := doEnroll(t, svc, idCSR)
+	tlsCSR := newTLSCSR(t, name+".example.test")
+	done := make(chan *Error, 1)
+	go func() {
+		_, ee := svc.Issue(context.Background(), name, "2.2.2.2", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: tlsCSR})
+		done <- ee
+	}()
+	select {
+	case ee := <-done:
+		if ee == nil || ee.Reason != "internal" || !ee.Retryable {
+			t.Fatalf("Issue = %v, want a retryable internal error", ee)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an issuance whose lock heartbeat panicked must end, not run on without its lock")
+	}
+}
+
 func TestEnrollInvalidNonce(t *testing.T) {
 	st := tunneltest.NewStore()
 	idCSR, idPub := newCSR(t)

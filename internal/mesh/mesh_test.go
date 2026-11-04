@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/ca"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
@@ -54,6 +55,7 @@ func meshCert(t *testing.T, mesh bool) *x509.Certificate {
 // fakeController is a func-backed mesh.Controller for the /api/v1/mesh/control tests: it records the call
 // and returns the configured result.
 type fakeController struct {
+	panics     bool
 	called     bool
 	tunnel     string
 	connID     string
@@ -88,6 +90,9 @@ func (f *fakeController) Open(_ context.Context, tunnel, connID string, open wir
 }
 
 func (f *fakeController) Evict(_ context.Context, tunnel, connID, reason string) (bool, error) {
+	if f.panics {
+		panic("evict boom")
+	}
 	f.called = true
 	f.tunnel, f.connID, f.reason = tunnel, connID, reason
 	return f.evicted, f.err
@@ -497,7 +502,7 @@ func TestControlClient_Errors(t *testing.T) {
 			peer := strings.TrimPrefix(ts.URL, "https://")
 			c := NewClient(func() *tls.Config {
 				return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-			}, 1)
+			}, 1, tunneltest.Logger())
 			resp, err := c.Control(context.Background(), peer, ControlRequest{Op: "renew", Tunnel: "t"})
 			if tc.wantErr {
 				if err == nil {
@@ -516,7 +521,7 @@ func TestControlClient_Errors(t *testing.T) {
 }
 
 func TestClientPoolRoundRobin(t *testing.T) {
-	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4)
+	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, tunneltest.Logger())
 	p := c.pool("10.0.0.1:9443")
 	if len(p.clients) != 4 {
 		t.Errorf("pool size = %d, want 4", len(p.clients))
@@ -543,7 +548,7 @@ func (r *poolRec) MeshPool(peer string, size int) {
 
 func TestClientReportsPoolSizeOnce(t *testing.T) {
 	rec := &poolRec{}
-	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, WithRecorder(rec))
+	c := NewClient(func() *tls.Config { return &tls.Config{} }, 4, tunneltest.Logger(), WithRecorder(rec))
 	c.pool("10.0.0.2:9443")
 	c.pool("10.0.0.2:9443") // memoized — must NOT re-report
 	if len(rec.calls) != 1 {
@@ -558,7 +563,7 @@ func TestClientReportsPoolSizeOnce(t *testing.T) {
 // closed, gauge zeroed) and lazily re-created on the next use.
 func TestClientReapsIdlePools(t *testing.T) {
 	rec := &poolRec{}
-	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, WithRecorder(rec))
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 2, tunneltest.Logger(), WithRecorder(rec))
 	p := c.pool("10.0.0.5:9443")
 	p.active.Add(-1) // pool() counted this acquisition; release it (no live stream) so the reaper can run
 	if len(c.pools) != 1 {
@@ -645,7 +650,7 @@ func TestClient_Control_UnblocksOnDeadPeer(t *testing.T) {
 
 	c := NewClient(func() *tls.Config {
 		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second), WithControlTimeout(time.Minute))
+	}, 1, tunneltest.Logger(), WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, time.Second), WithControlTimeout(time.Minute))
 
 	start := time.Now()
 	_, err = c.Control(context.Background(), ln.Addr().String(), ControlRequest{Op: "renew", Tunnel: "t"})
@@ -662,7 +667,7 @@ func TestClient_Control_UnblocksOnDeadPeer(t *testing.T) {
 func TestClient_ReapSkipsActivePools(t *testing.T) {
 	release := make(chan struct{})
 	peer := startMeshPeer(t, 0, release)
-	c := NewClient(insecureMeshTLS, 1)
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger())
 	callDone := make(chan error, 1)
 	go func() {
 		_, err := c.Control(context.Background(), peer.addr, ControlRequest{Op: "renew", Tunnel: "t"})
@@ -714,7 +719,7 @@ func TestClient_ReapSkipsActivePools(t *testing.T) {
 func TestClient_ControlErrorDecrementsActive(t *testing.T) {
 	c := NewClient(func() *tls.Config {
 		return &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}, InsecureSkipVerify: true}
-	}, 1, WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond))
+	}, 1, tunneltest.Logger(), WithHealthTimeouts(150*time.Millisecond, 150*time.Millisecond, 200*time.Millisecond))
 
 	const peer = "127.0.0.1:1" // nothing listening → the dial fails
 	if _, err := c.Control(context.Background(), peer, ControlRequest{Op: "renew", Tunnel: "t"}); err == nil {
@@ -842,17 +847,43 @@ func TestClient_RejectsNonH2Peer(t *testing.T) {
 			}()
 		}
 	}()
-	c := NewClient(insecureMeshTLS, 1)
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger())
 	_, err = c.Control(context.Background(), ln.Addr().String(), ControlRequest{Op: "renew", Tunnel: "t"})
 	if !errors.Is(err, errPeerNotHTTP2) {
 		t.Fatalf("want errPeerNotHTTP2, got %v", err)
 	}
 }
 
+func TestClient_DialPanicFailsTheCall(t *testing.T) {
+	t.Parallel()
+	p := startMeshPeer(t, 0, nil)
+	var logs bytes.Buffer
+	var mu sync.Mutex
+	logger := slog.New(slog.NewTextHandler(writerFunc(func(b []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs.Write(b)
+	}), nil))
+	c := NewClient(func() *tls.Config { panic("tls config boom") }, 1, logger)
+	_, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
+	if !errors.Is(err, report.ErrPanicked) {
+		t.Fatalf("Control = %v, want the dial's panic error", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if out := logs.String(); !strings.Contains(out, "panic recovered") || !strings.Contains(out, `where="mesh dial"`) {
+		t.Fatalf("the dial's panic must be logged, log = %q", out)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
 func TestClient_OneConnForConcurrentColdStreams(t *testing.T) {
 	t.Parallel()
 	p := startMeshPeer(t, 0, nil)
-	c := NewClient(insecureMeshTLS, 1)
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger())
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -876,7 +907,7 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
 	p := startMeshPeer(t, 2, release)
-	c := NewClient(insecureMeshTLS, 1)
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger())
 	warm := make(chan error, 1)
 	go func() {
 		_, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"})
@@ -909,7 +940,7 @@ func TestClient_OpensSecondConnWhenStreamsSaturated(t *testing.T) {
 func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
 	t.Parallel()
 	p := startMeshPeer(t, 0, nil)
-	c := NewClient(insecureMeshTLS, 1)
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger())
 	if _, err := c.Control(context.Background(), p.addr, ControlRequest{Op: "renew", Tunnel: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -935,7 +966,7 @@ func TestClient_ReconnectsAfterPeerConnDrop(t *testing.T) {
 func TestClient_Control_HonoursTimeout(t *testing.T) {
 	t.Parallel()
 	p := startMeshPeer(t, 0, make(chan struct{}))
-	c := NewClient(insecureMeshTLS, 1, WithControlTimeout(200*time.Millisecond))
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger(), WithControlTimeout(200*time.Millisecond))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	start := time.Now()
@@ -953,7 +984,7 @@ func TestClient_Control_HonoursTimeout(t *testing.T) {
 
 func TestClient_NewH2ClientMapsPingTimeouts(t *testing.T) {
 	t.Parallel()
-	c := NewClient(insecureMeshTLS, 1, WithHealthTimeouts(3*time.Second, 7*time.Second, time.Second))
+	c := NewClient(insecureMeshTLS, 1, tunneltest.Logger(), WithHealthTimeouts(3*time.Second, 7*time.Second, time.Second))
 	tr, ok := c.newH2Client().Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("the mesh client transport must be *http.Transport")
@@ -1023,7 +1054,7 @@ func (f meshRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func TestClient_Control_ReturnsBodyCloseError(t *testing.T) {
 	const peer = "peer.example.test:9443"
-	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1)
+	c := NewClient(func() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }, 1, tunneltest.Logger())
 	c.pools[peer] = &peerPool{addr: peer, clients: []*http.Client{{Transport: meshRoundTrip(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: failingBody{strings.NewReader(`{"applied":true}`)}, Request: r}, nil
 	})}}}
@@ -1033,5 +1064,73 @@ func TestClient_Control_ReturnsBodyCloseError(t *testing.T) {
 	}
 	if got := c.pools[peer].active.Load(); got != 0 {
 		t.Fatalf("Control must release the pool slot, active = %d", got)
+	}
+}
+
+func TestControl_PanicCarriesTheRequest(t *testing.T) {
+	t.Parallel()
+	h := newTestHandler(t, &fakeController{panics: true})
+	rep, tr := tunneltest.NewReporter(t, 0)
+	body, err := json.Marshal(ControlRequest{Op: "evict", Tunnel: "abcdef234567", ConnID: "c1", Reason: "ban-evict"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	rep.Handler(h, slog.New(slog.DiscardHandler), "mesh request", func(*http.Request) bool { return false }).
+		ServeHTTP(w, meshRoleReq(t, "POST", "/api/v1/mesh/control", body))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	rep.Flush(context.Background())
+	events := tr.Events("")
+	if len(events) != 1 {
+		t.Fatalf("want one panic event, got %d", len(events))
+	}
+	for k, want := range map[string]string{"op": "evict", "tunnel": "abcdef234567", "conn_id": "c1"} {
+		if got := events[0].Tags[k]; got != want {
+			t.Errorf("tag %s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestControl_TracesOnlyRequestsThatWereNotRefused(t *testing.T) {
+	t.Parallel()
+	renew := []byte(`{"op":"renew","tunnel":"t"}`)
+	identityRole := func(t *testing.T) *http.Request {
+		r := meshRoleReq(t, "POST", "/api/v1/mesh/control", renew)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{meshCert(t, false)}}
+		return r
+	}
+	tests := []struct {
+		name    string
+		req     func(*testing.T) *http.Request
+		opErr   error
+		wantTxs int
+	}{
+		{name: "served", req: func(t *testing.T) *http.Request { return meshRoleReq(t, "POST", "/api/v1/mesh/control", renew) }, wantTxs: 1},
+		{name: "the op failed", req: func(t *testing.T) *http.Request { return meshRoleReq(t, "POST", "/api/v1/mesh/control", renew) },
+			opErr: errors.New("renew failed"), wantTxs: 1},
+		{name: "an identity-role certificate", req: identityRole, wantTxs: 0},
+		{name: "an unknown path", req: func(t *testing.T) *http.Request { return meshRoleReq(t, "POST", "/api/v1/mesh/other", renew) }, wantTxs: 0},
+		{name: "a non-POST", req: func(t *testing.T) *http.Request { return meshRoleReq(t, "GET", "/api/v1/mesh/control", nil) }, wantTxs: 0},
+		{name: "malformed JSON", req: func(t *testing.T) *http.Request {
+			return meshRoleReq(t, "POST", "/api/v1/mesh/control", []byte("{"))
+		}, wantTxs: 0},
+		{name: "an unknown op", req: func(t *testing.T) *http.Request {
+			return meshRoleReq(t, "POST", "/api/v1/mesh/control", []byte(`{"op":"nope","tunnel":"t"}`))
+		}, wantTxs: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newTestHandler(t, &fakeController{err: tc.opErr})
+			rep, tr := tunneltest.NewReporter(t, 1)
+			rep.Handler(h, slog.New(slog.DiscardHandler), "mesh request", func(*http.Request) bool { return true }).
+				ServeHTTP(httptest.NewRecorder(), tc.req(t))
+			rep.Flush(context.Background())
+			if n := len(tr.Events("transaction")); n != tc.wantTxs {
+				t.Fatalf("sent %d transactions, want %d", n, tc.wantTxs)
+			}
+		})
 	}
 }

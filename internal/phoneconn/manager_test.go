@@ -73,6 +73,7 @@ type fakeRouter struct {
 	bound    map[string]string // name → bound connID
 	hbResult router.HeartbeatResult
 	hbErr    error // when set, Heartbeat returns it (persistent-failure test)
+	hbPanic  bool
 	unbound  map[string]bool
 	collide  int      // upcoming BindRoute calls that return router.ErrConnIDCollision
 	bindErr  error    // when set (and not colliding), BindRoute returns it
@@ -106,8 +107,11 @@ func (f *fakeRouter) BindRoute(_ context.Context, name, _, connID string) error 
 func (f *fakeRouter) Heartbeat(_ context.Context, _, _ string) (router.HeartbeatResult, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, "Heartbeat")
-	res, err := f.hbResult, f.hbErr
+	res, err, boom := f.hbResult, f.hbErr, f.hbPanic
 	f.mu.Unlock()
+	if boom {
+		panic("heartbeat boom")
+	}
 	return res, err
 }
 func (f *fakeRouter) Unbind(_ context.Context, name, _ string) error {

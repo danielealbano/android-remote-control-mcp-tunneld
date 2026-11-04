@@ -104,6 +104,8 @@ type fakeRouter struct {
 	lookups   int
 	liveNodes map[string]bool
 	nodeErr   error
+
+	panicLookup bool
 }
 
 func (r *fakeRouter) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
@@ -128,6 +130,9 @@ func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, bool,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lookups++
+	if r.panicLookup {
+		panic("route lookup boom")
+	}
 	if len(r.queue) > 0 {
 		q := r.queue[0]
 		r.queue = r.queue[1:]
@@ -143,12 +148,13 @@ func (r *fakeRouter) set(nodeID, connID string, ok bool, err error) {
 }
 
 type fakeDialBacks struct {
-	mu      sync.Mutex
-	tokens  []string
-	tunnels []string
-	err     error
-	never   bool
-	phones  []net.Conn
+	mu       sync.Mutex
+	tokens   []string
+	tunnels  []string
+	err      error
+	never    bool
+	phones   []net.Conn
+	wrapEdge func(net.Conn) net.Conn
 }
 
 func (f *fakeDialBacks) Await(ctx context.Context, token, tunnel string, open func(context.Context) error) (net.Conn, error) {
@@ -170,7 +176,11 @@ func (f *fakeDialBacks) Await(ctx context.Context, token, tunnel string, open fu
 	edgeSide, phoneSide := net.Pipe()
 	f.mu.Lock()
 	f.phones = append(f.phones, phoneSide)
+	wrap := f.wrapEdge
 	f.mu.Unlock()
+	if wrap != nil {
+		return wrap(edgeSide), nil
+	}
 	return edgeSide, nil
 }
 
@@ -261,13 +271,18 @@ func (r *recRecorder) rejectReasons() []string {
 
 // fakeSink captures PublicEvent connection-log writes.
 type fakeSink struct {
-	mu      sync.Mutex
-	events  []PublicEvent
-	endCtxs []context.Context
+	mu           sync.Mutex
+	events       []PublicEvent
+	endCtxs      []context.Context
+	panicOnStart bool
 }
 
 func (s *fakeSink) PutConnLogPublic(ctx context.Context, ev PublicEvent) {
 	s.mu.Lock()
+	if s.panicOnStart && ev.Event == "start" {
+		s.mu.Unlock()
+		panic("conn log boom")
+	}
 	s.events = append(s.events, ev)
 	if ev.Event == "end" {
 		s.endCtxs = append(s.endCtxs, ctx)
@@ -285,12 +300,16 @@ type fakeACMEChallenges struct {
 	mu      sync.Mutex
 	cert    *tls.Certificate
 	err     error
+	panics  bool
 	domains []string
 }
 
 func (f *fakeACMEChallenges) TLSALPNCertificate(_ context.Context, domain string) (*tls.Certificate, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.panics {
+		panic("acme challenge boom")
+	}
 	f.domains = append(f.domains, domain)
 	if f.err != nil {
 		return nil, false, f.err

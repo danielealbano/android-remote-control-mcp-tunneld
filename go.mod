@@ -10,6 +10,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
 	github.com/aws/smithy-go v1.28.7
 	github.com/gaissmai/bart v0.30.0
+	github.com/getsentry/sentry-go v0.50.0
+	github.com/getsentry/sentry-go/slog v0.50.0
 	github.com/go-acme/lego/v5 v5.6.0
 	github.com/moby/moby/client v0.6.2
 	github.com/prometheus/client_golang v1.25.0

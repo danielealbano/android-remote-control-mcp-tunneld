@@ -227,6 +227,43 @@ failure (`tunneld_acme_issue_total{result="rate-limited"}`). The values per node
 `/etc/tunneld/status-report.env` (`status-report.env.example`). `infra/status-report/install.sh` installs it on every
 node in a config file; its settings come from the command line or the environment (`--help` lists them).
 
+**Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
+against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
+identifiers known at that point (tunnel, client IP and port, connection id):
+
+- **HTTP handler** (enroll, control, mesh, internal, `:80`): answered with `500`
+  `{"reason": "internal_error", "retryable": true}`; when the response had already started, an HTTP/2 stream is
+  reset and an HTTP/1.1 or upgraded connection is closed (`docs/PROTOCOL.md` §6).
+- **TLS certificate callback** (enroll, control, mesh, and the mesh client's certificate and peer check) or the
+  mesh client's dial: that handshake or dial fails.
+- **Public connection or phone control connection**: only that connection closes (`close_reason=error`).
+- **Helper goroutine of one request** (mesh broadcast, ACME order, ACME client build, ACME attempt timer, issuance
+  heartbeat, ACME budget metrics): that piece of work ends. A panicking ACME order, ACME request, ACME client build
+  or attempt timer is not a CA failure: it neither counts as `result="fail"` nor penalises the CA account, and the
+  chain moves on to the next account. A panicking issuance heartbeat, which keeps the per-name issuance lock, ends
+  its issuance with a retryable `internal` answer, so no issuance runs without the lock.
+- **Background worker** (servers, schedulers, watchers, connection-log writer and uploader, and the startup, drain
+  and shutdown that `serve` runs itself): the panic is sent and flushed, then the process crashes so the service
+  manager restarts it.
+
+With `--sentry-dsn` (`TUNNELD_SENTRY_DSN`) set, Sentry receives:
+
+- **Issues**: every panic, tagged with where it happened, the node and, when known, the tunnel, client IP and port,
+  SNI, ALPN, TLS version, JA4 and connection id; every Error log line, with the fields that line logs; and every
+  real ACME order failure, tagged with the CA, tunnel, error class and account plus the identifiers of the issue
+  request it ran for (a CA rate limit, a local challenge error and a panic are not failures).
+- **Logs**: every Warn and Error line with the fields that line logs, client IPs included.
+- **Traces** (`--sentry-traces-sample-rate`, default `1`): enrollment requests (`GET /api/v1/enroll/nonce` and
+  `POST /api/v1/enroll`, never the health check), `POST /api/v1/issue`, mesh requests, and one transaction per public connection that reached a phone, tagged as above plus the close reason
+  and bytes in and out. A request refused before its work starts (a ban, a malformed, unauthenticated or
+  unauthorized request, a rate limit, a cap, a replayed nonce, draining) and a connection refused before a phone is
+  reached (`no-route` and every other refusal) are not traced; a request whose work fails (a CA failure, a storage or
+  signing error) is.
+
+Events carry the release `tunneld@<version>`, the environment `--sentry-environment` (default `production`) and the
+node's hostname. Every trace starts on the node: incoming `sentry-trace` and `baggage` headers are ignored, so a
+client cannot force or suppress one. Tunnel traffic is never sent. Without a DSN nothing leaves the node.
+
 ## 7. Operations
 
 - **Deployment quickstart** (CA generation, `.env`, S3, ACME/DNS): [README](../README.md).
@@ -239,7 +276,8 @@ node in a config file; its settings come from the command line or the environmen
 - **Stopping a node**: a stop signal runs a pre-drain (`--predrain-wait`, default 0: the node's
   `GET https://<enroll-host>/api/v1/health` answers `503`, everything else is served), then a drain of at most
   `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, in-flight connections finish), then the
-  shutdown (`--shutdown-grace`) — see `docs/PROTOCOL.md` §7. The service manager's stop timeout (podman
+  shutdown (`--shutdown-grace`), then, with `--sentry-dsn`, at most 5 s to send the last Sentry events — see
+  `docs/PROTOCOL.md` §7. The service manager's stop timeout (podman
   `StopTimeout`, compose `stop_grace_period`) must exceed their sum, with a margin, or the process is killed
   mid-drain. Behind a DNS load balancer that health-checks every node on that endpoint (through its IP, with the
   enroll host as the HTTPS host), set `--predrain-wait` to at least the time the balancer needs to drop a node —
@@ -261,7 +299,11 @@ node in a config file; its settings come from the command line or the environmen
   `README.md` and `THIRD_PARTY_LICENSES.txt`; every image (goreleaser and compose-built) carries
   `/THIRD_PARTY_LICENSES.txt`. That file is generated at build time by `scripts/third-party-licenses.sh`
   from the Go toolchain's license and the license/notice files of every module compiled into `cmd/tunneld`
-  on linux amd64 and arm64 (the goreleaser platforms); it is never committed.
+  on linux amd64 and arm64 (the goreleaser platforms); it is never committed. The release workflow then creates
+  the Sentry release `tunneld@<version>` with its commits and finalizes it; it needs the repository secret
+  `SENTRY_AUTH_TOKEN` (a token with the `project:releases` and `org:read` scopes) and the repository variables
+  `SENTRY_ORG` and `SENTRY_PROJECT`. After a rollout, record it with
+  `sentry-cli deploys new --release tunneld@<version> -e production` (the nodes' `--sentry-environment`).
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
   `test-integration`, `test-e2e`, `test-staging`, `test-scripts`, `compose-config`, `mermaid-check`,
   `third-party-licenses`; `test-soak-app` runs the

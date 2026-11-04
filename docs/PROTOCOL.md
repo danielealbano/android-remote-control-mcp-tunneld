@@ -125,12 +125,14 @@ auto-retries (a retried claim PUT would be a self-inflicted zombie write).
   single-use nonce the phone echoes in its follow-up `POST /api/v1/issue`. Errors are
   `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping (both enroll routes): `403`
   banned, `429` nonce-route rate limit, `401` unauthorized, `503` retryable (the body's `retryable`
-  field is authoritative), `400` otherwise. Reasons: `bad_source_ip` 400 (not reachable through the edge);
-  `banned` 403; `enroll_rate` 429 on the nonce route and 503 on POST (retryable, `retry_after_seconds` = time
-  to the next window); `bad_request`, `bad_json`, `bad_nonce`, `bad_attestation_chain`, `bad_identity_csr`
-  400; `invalid_nonce` 503 retryable; `unauthorized` 401; `name_unavailable` 503; `internal` 503;
+  field is authoritative), `500` `internal_error` retryable (§6), `400` otherwise. Reasons: `bad_source_ip` 400
+  (not reachable through the edge); `banned` 403; `enroll_rate` 429 on the nonce route and 503 on POST
+  (retryable, `retry_after_seconds` = time to the next window); `bad_request`, `bad_json`, `bad_nonce`,
+  `bad_attestation_chain`, `bad_identity_csr` 400; `invalid_nonce` 503 retryable; `unauthorized` 401;
+  `name_unavailable` 503; `internal` 503;
   `unsupported_key_type` 400; `identity_sign_failed` 503 retryable; `draining` 503 retryable
-  (`retry_after_seconds` 1, with `Connection: close`, while the node drains — §7). An unknown path or method on
+  (`retry_after_seconds` 1, with `Connection: close`, while the node drains — §7); `internal_error` 500
+  retryable (an unexpected server error, see §6). An unknown path or method on
   `--enroll-host` gets a plain-text `404`.
 - **Retrying a failed enrollment**: the phone retries Phase 1 at most 3 times. A refusal with `retryable: true`
   waits its `retry_after_seconds`, at least 1 s; a network error or a timeout waits 2 s; `retryable: false` ends
@@ -156,7 +158,8 @@ one, over HTTP/2 or HTTP/1.1: the server authenticates every request by its clie
 with `--dialback-mtls=false`, no certificate; with the default `--dialback-mtls=true` a missing, untrusted or
 expired certificate fails the TLS handshake, with no HTTP answer) or `banned`, JSON. `405` non-POST, `505`
 HTTP/1.x, `503` "too many pending" (more than `--limit-stream-pending`, default 64, handshakes waiting to bind)
-and `503` "bind failed (retry)", plain text. `400` `bad_source_ip`, JSON (not reachable through the edge). While
+and `503` "bind failed (retry)", plain text. `400` `bad_source_ip`, JSON (not reachable through the edge). `500`
+`internal_error` retryable, JSON, before the stream starts (§6). While
 the node drains (§7) a new control connection is not bound: it gets `200` and one `MOVE` frame, then the stream
 ends, or `503` "draining", plain text, when the node knows no other node; either way the server sends `GOAWAY`. A
 new control connection for a name REPLACES the previous one, on any node and whatever identity-certificate
@@ -235,12 +238,14 @@ renewal, authenticated by the phone's mTLS identity cert (name = its CN). Reques
 - Errors: `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping: `403`
   banned/forbidden identity, `405` non-POST method, `401` unauthorized, `503` retryable (the body's
   `retryable` field is authoritative; `retry_after_seconds` carries the pacing hint when known, e.g.
-  an ACME rate-limit cooldown), `400` otherwise. Reasons: `bad_source_ip` 400 (not reachable through the
-  edge); `forbidden` (as for `/api/v1/control`), `banned` 403; `method_not_allowed` 405; `bad_request`,
-  `bad_json`, `bad_nonce`, `bad_attestation`, `bad_identity_csr`, `bad_tls_csr` 400; `invalid_nonce` 503;
+  an ACME rate-limit cooldown), `500` `internal_error` retryable (§6), `400` otherwise. Reasons: `bad_source_ip`
+  400 (not reachable through the edge); `forbidden` (as for `/api/v1/control`), `banned` 403;
+  `method_not_allowed` 405; `bad_request`, `bad_json`, `bad_nonce`, `bad_attestation`, `bad_identity_csr`,
+  `bad_tls_csr` 400; `invalid_nonce` 503;
   `unauthorized` 401; `name_unknown` 400; `csr_domain_mismatch` 400; `unsupported_key_type` 400;
   `identity_sign_failed` 503; `issuance_cap` 503; `acme_rate_limited` 503; `acme_transient` 503
-  (`retry_after_seconds` 60); `acme_failed` 400; `internal` 503; `draining` 503 (`retry_after_seconds` 1, with
+  (`retry_after_seconds` 60); `acme_failed` 400; `internal` 503; `internal_error` 500 retryable (an unexpected
+  server error, see §6); `draining` 503 (`retry_after_seconds` 1, with
   `Connection: close` — `GOAWAY` over HTTP/2 — while the node drains, §7).
 - **Retrying a failed issuance**: the phone retries `POST /api/v1/issue` at most 3 times, and only the issuance — it
   NEVER re-enrolls (a new enrollment assigns a new name and orphans the old one). A network error, a timeout, or
@@ -317,7 +322,7 @@ HTTP/1.1, no token, no `Upgrade: tunneld-dial`), `403` banned source IP or ident
 (mesh-role, invalid name, banned tunnel; with `use_mtls` a missing or untrusted client certificate already
 fails the TLS handshake, with no HTTP response), `404`
 unknown, expired or already-used token, or — with `use_mtls` — a token of another tunnel (without `use_mtls`
-the token alone authorises the dial-back), `405` non-`GET`. The token is single-use
+the token alone authorises the dial-back), `405` non-`GET`, `500` `internal_error` retryable, JSON (§6). The token is single-use
 and valid only while the entry node waits (`--limit-dialback-timeout`). If the open fails — the `OPEN` could
 not be delivered, or no dial-back arrived within `--limit-dialback-timeout` — the entry node takes ONE fresh
 route lookup and, when the route changed, sends a second `OPEN` with the SAME token; if that also fails, or the
@@ -372,7 +377,7 @@ starts after 2 s (`ARCHITECTURE.md` §2).
 the owner). Unknown op → `400`, missing tunnel → `400`, `open`/`evict` without `conn_id` → `400`, `open`
 without a payload carrying `token` + `addr` → `400`, non-POST → `405`, op failure → `502`; `403` a non-mesh-role
 certificate; `404` any other path; `400` a body that is not valid JSON within its first 4096 bytes; error bodies
-are plain text. `renew` answers `applied:false` when the node holds no live connection for the tunnel or its
+are plain text, except the JSON `500` of a handler panic (§6). `renew` answers `applied:false` when the node holds no live connection for the tunnel or its
 send buffer is full; `terminate` answers `applied` = whether a live phone connection existed on that node.
 
 ## 6. Security invariants
@@ -384,6 +389,13 @@ send buffer is full; `terminate` answers `applied` = whether a live phone connec
 - The dial-back token is 128-bit random, single-use, valid only while the entry node waits; without
   `use_mtls` it is the only authorisation of a dial-back.
 - No secrets, key material, or tunnel payloads are ever logged.
+- An unexpected server error (a panic in a handler) on any HTTP endpoint — enroll, `/api/v1/control`,
+  `/api/v1/issue`, `/api/v1/data`, the mesh and the plain `:80` listener — answers `500` with
+  `{"reason": "internal_error", "retryable": true}` when no response has started. Once one has, an HTTP/2 request
+  (an open control stream, a mesh request) has its stream reset with `RST_STREAM` `INTERNAL_ERROR` while the
+  connection stays open, and an HTTP/1.1 request or an upgraded dial-back has its connection closed. Either way
+  only that request or connection ends. A phone treats the `500` like any retryable refusal, and a reset control
+  stream or a closed connection like a network error.
 - A ClientHello whose first ALPN protocol is `acme-tls/1` is an ACME validation addressed to tunneld: it is answered locally with tunneld's challenge certificate and NEVER spliced to a phone.
 - An IP-ban `403` on `/api/v1/enroll` or `/api/v1/control` comes only on a connection opened before the ban was
   loaded; a new connection from a banned address is closed by the edge before TLS.

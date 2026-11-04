@@ -194,7 +194,7 @@ func TestRun_Lifecycle(t *testing.T) {
 		t.Fatal("Run did not drain within 15s of context cancellation")
 	}
 	waitAsyncLogGoroutines(t, baseline)
-	spool, err := store.NewConnLogSpool(cfg.ConnLogDir, "00000000000000aa", tunneltest.NewStore(), func(int) {}, testLogger())
+	spool, err := store.NewConnLogSpool(context.Background(), cfg.ConnLogDir, "00000000000000aa", tunneltest.NewStore(), func(int) {}, testLogger())
 	if err != nil {
 		t.Fatalf("a cleanly returned Run must release the --conn-log-dir lock: %v", err)
 	}

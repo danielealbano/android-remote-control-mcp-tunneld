@@ -10,11 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 var errPeerNotHTTP2 = errors.New("mesh: peer did not negotiate HTTP/2 (ALPN h2)")
@@ -51,6 +54,7 @@ type Client struct {
 	tlsConf     func() *tls.Config // hot-swappable mesh-role client cert
 	poolSize    int
 	rec         Recorder
+	logger      *slog.Logger
 	readIdle    time.Duration // PING health cadence (see meshReadIdleTimeout)
 	pingTimeout time.Duration
 	dialTimeout time.Duration
@@ -67,12 +71,12 @@ func WithHealthTimeouts(readIdle, ping, dial time.Duration) Option {
 }
 
 // NewClient builds the mesh client. tlsConf returns the current mesh-role client tls.Config (rotated).
-func NewClient(tlsConf func() *tls.Config, poolSize int, opts ...Option) *Client {
+func NewClient(tlsConf func() *tls.Config, poolSize int, logger *slog.Logger, opts ...Option) *Client {
 	if poolSize < 1 {
 		poolSize = 4
 	}
 	c := &Client{
-		tlsConf: tlsConf, poolSize: poolSize, pools: map[string]*peerPool{},
+		tlsConf: tlsConf, poolSize: poolSize, pools: map[string]*peerPool{}, logger: logger,
 		readIdle: meshReadIdleTimeout, pingTimeout: meshPingTimeout, dialTimeout: meshDialTimeout,
 		controlTimeout: meshControlTimeout,
 	}
@@ -151,18 +155,24 @@ func (c *Client) Run(ctx context.Context, reapAfter time.Duration) error {
 func (c *Client) newH2Client() *http.Client {
 	var protocols http.Protocols
 	protocols.SetHTTP2(true)
-	cfg := c.tlsConf()
 	tr := &http.Transport{
 		Protocols:       &protocols,
 		HTTP2:           &http.HTTP2Config{SendPingTimeout: c.readIdle, PingTimeout: c.pingTimeout},
 		MaxConnsPerHost: 1,
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: c.dialTimeout}, Config: cfg}
-			conn, err := d.DialContext(ctx, network, addr)
+		DialTLSContext: func(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+			var raw net.Conn
+			defer report.Recover(ctx, c.logger, "mesh dial", func() {
+				conn, err = nil, fmt.Errorf("mesh: dial %s: %w", addr, report.ErrPanicked)
+				if raw != nil {
+					err = errors.Join(err, raw.Close())
+				}
+			})
+			d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: c.dialTimeout}, Config: c.tlsConf()}
+			raw, err = d.DialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			return requirePeerH2(conn)
+			return requirePeerH2(raw)
 		},
 	}
 	return &http.Client{Transport: tr}

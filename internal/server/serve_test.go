@@ -247,6 +247,20 @@ func TestShutdownLogged(t *testing.T) {
 	}
 }
 
+func fanOutLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	l, closeAll, err := logging.New([]string{"output=std;level=error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cerr := closeAll(); cerr != nil {
+			t.Errorf("close log sinks: %v", cerr)
+		}
+	})
+	return l
+}
+
 func TestRegisterLogSinkErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -254,18 +268,17 @@ func TestRegisterLogSinkErrors(t *testing.T) {
 		registered bool
 	}{
 		{name: "fan-out logger", registered: true, logger: func(t *testing.T) *slog.Logger {
-			l, closeAll, err := logging.New([]string{"output=std;level=error"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if cerr := closeAll(); cerr != nil {
-					t.Errorf("close log sinks: %v", cerr)
-				}
-			})
-			return l.With("node", "n1")
+			return fanOutLogger(t).With("node", "n1")
+		}},
+		{name: "fan-out logger behind a reporter", registered: true, logger: func(t *testing.T) *slog.Logger {
+			rep, _ := tunneltest.NewReporter(t, 0)
+			return rep.Logger(fanOutLogger(t)).With("node", "n1")
 		}},
 		{name: "plain logger", registered: false, logger: func(*testing.T) *slog.Logger { return testLogger() }},
+		{name: "plain logger behind a reporter", registered: false, logger: func(t *testing.T) *slog.Logger {
+			rep, _ := tunneltest.NewReporter(t, 0)
+			return rep.Logger(testLogger())
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -355,6 +368,7 @@ type fakeMeshControl struct {
 	inflight atomic.Int32
 	maxSeen  atomic.Int32
 	returned atomic.Int32
+	panics   map[string]bool
 }
 
 func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.ControlRequest) (mesh.ControlResponse, error) {
@@ -369,6 +383,10 @@ func (f *fakeMeshControl) Control(ctx context.Context, peer string, req mesh.Con
 	}
 	f.mu.Lock()
 	f.calls = append(f.calls, meshCall{peer: peer, req: req})
+	if f.panics[peer] {
+		f.mu.Unlock()
+		panic("mesh control boom")
+	}
 	applied, err := f.applied[peer], f.errs[peer]
 	res, byOp := f.byOp[req.Op+"@"+peer]
 	f.mu.Unlock()
@@ -485,7 +503,7 @@ func newTestEvictor(t *testing.T, nodes liveNodeLister, mc meshControl, logger *
 	t.Helper()
 	var mu sync.Mutex
 	var calls []evictCall
-	s := newSpliceEvictor("nodeA", nodes, mc, logger)
+	s := newSpliceEvictor(context.Background(), "nodeA", nodes, mc, logger)
 	s.local = func(name, connID, reason string) bool {
 		mu.Lock()
 		defer mu.Unlock()

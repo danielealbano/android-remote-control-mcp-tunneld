@@ -145,6 +145,23 @@ func TestACMEBudgetCollector_ErrorKeepsScrape(t *testing.T) {
 	}
 }
 
+func TestACMEBudgetCollector_PanicIsContained(t *testing.T) {
+	t.Parallel()
+	logs := &syncBuffer{}
+	m := NewMetrics()
+	if err := m.RegisterACMEBudgets(func(context.Context) ([]ACMEBudgetLevel, error) { panic("budget boom") },
+		slog.New(slog.NewTextHandler(logs, nil))); err != nil {
+		t.Fatal(err)
+	}
+	fams := gatherFamilies(t, m.Gatherer(context.Background()))
+	if _, ok := fams["tunneld_acme_issue_total"]; !ok {
+		t.Fatal("a panicking budget source must keep the other families")
+	}
+	if out := logs.String(); !strings.Contains(out, "panic recovered") || !strings.Contains(out, `where="ACME budget metrics"`) {
+		t.Fatalf("the panic must be logged; log = %q", out)
+	}
+}
+
 func TestRegisterACMEBudgets_RejectsNil(t *testing.T) {
 	t.Parallel()
 	levels := func(context.Context) ([]ACMEBudgetLevel, error) { return nil, nil }

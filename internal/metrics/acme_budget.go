@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 )
 
 const (
@@ -40,6 +42,7 @@ type acmeBudgetCollector struct {
 func (c *acmeBudgetCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.src.desc }
 
 func (c *acmeBudgetCollector) Collect(ch chan<- prometheus.Metric) {
+	defer report.Recover(c.ctx, c.src.logger, "ACME budget metrics", func() {})
 	ctx, cancel := context.WithTimeout(c.ctx, acmeBudgetScrapeTimeout)
 	defer cancel()
 	levels, err := c.src.levels(ctx)

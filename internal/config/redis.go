@@ -67,6 +67,10 @@ func (c RedisConn) NewClient() *redis.Client {
 	return redis.NewClient(c.single)
 }
 
+func RedactSentryDSN(err error, dsn string) error {
+	return fmt.Errorf("--sentry-dsn: %s", redactURLSecrets(err.Error(), dsn))
+}
+
 func redactURLSecrets(msg, raw string) string {
 	var sources []string
 	var inURL [256]bool

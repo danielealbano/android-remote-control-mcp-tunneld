@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/wire"
 )
 
@@ -104,6 +105,7 @@ func (h *Handler) serveDialBack(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		report.SetAttrs(r.Context(), slog.String("tunnel", id.name))
 		if h.banTunnel != nil && h.banTunnel(id.name) {
 			h.reject("ban", id.name, peerIP(r))
 			http.Error(w, "banned", http.StatusForbidden)

@@ -128,7 +128,7 @@ func newSpool(t *testing.T, dir string, up ConnLogUploader, opts ...spoolOption)
 	t.Helper()
 	drops := &atomic.Int64{}
 	log := &syncBuf{}
-	s, err := NewConnLogSpool(dir, testNode, up, func(n int) { drops.Add(int64(n)) },
+	s, err := NewConnLogSpool(context.Background(), dir, testNode, up, func(n int) { drops.Add(int64(n)) },
 		slog.New(slog.NewTextHandler(log, nil)), opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -565,7 +565,7 @@ func TestSpool_HeldLockFailsFast(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	first := newSpool(t, dir, &fakeUploader{}, fastTicks()...)
-	_, err := NewConnLogSpool(dir, testNode, &fakeUploader{}, func(int) {}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	_, err := NewConnLogSpool(context.Background(), dir, testNode, &fakeUploader{}, func(int) {}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err == nil || !strings.Contains(err.Error(), "in use by another process") {
 		t.Fatalf("a second spool on a locked directory must fail fast, got %v", err)
 	}
@@ -660,29 +660,31 @@ func TestNewConnLogSpool_RejectsInvalidInput(t *testing.T) {
 		make func(dir string) (*ConnLogSpool, error)
 	}{
 		{name: "empty dir", make: func(string) (*ConnLogSpool, error) {
-			return NewConnLogSpool("", testNode, &fakeUploader{}, drop, logger)
+			return NewConnLogSpool(context.Background(), "", testNode, &fakeUploader{}, drop, logger)
 		}},
 		{name: "non-hex node id", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, "Node-1", &fakeUploader{}, drop, logger)
+			return NewConnLogSpool(context.Background(), d, "Node-1", &fakeUploader{}, drop, logger)
 		}},
-		{name: "nil uploader", make: func(d string) (*ConnLogSpool, error) { return NewConnLogSpool(d, testNode, nil, drop, logger) }},
+		{name: "nil uploader", make: func(d string) (*ConnLogSpool, error) {
+			return NewConnLogSpool(context.Background(), d, testNode, nil, drop, logger)
+		}},
 		{name: "nil drop counter", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, nil, logger)
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, nil, logger)
 		}},
 		{name: "nil logger", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, nil)
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, drop, nil)
 		}},
 		{name: "zero tick", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolTick(0))
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, drop, logger, withSpoolTick(0))
 		}},
 		{name: "zero retry", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolRetry(0))
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, drop, logger, withSpoolRetry(0))
 		}},
 		{name: "zero limits", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolLimits(0, 1))
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, drop, logger, withSpoolLimits(0, 1))
 		}},
 		{name: "nil clock", make: func(d string) (*ConnLogSpool, error) {
-			return NewConnLogSpool(d, testNode, &fakeUploader{}, drop, logger, withSpoolClock(nil))
+			return NewConnLogSpool(context.Background(), d, testNode, &fakeUploader{}, drop, logger, withSpoolClock(nil))
 		}},
 	}
 	for _, tc := range tests {

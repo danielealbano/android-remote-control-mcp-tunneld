@@ -64,6 +64,7 @@ does NOT duplicate them.
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
 | Metrics | `github.com/prometheus/client_golang` | Custom registry on the INTERNAL listener only; NO per-tunnel labels. |
+| Error reporting | `github.com/getsentry/sentry-go` (stable 0.x line), wrapped by `internal/report` | Optional (`--sentry-dsn`): panics, Error lines and real ACME failures as issues, Warn+ lines as logs, traces of enrollment, issuance, mesh and each public connection that reached a phone; panic guards run with or without it. See `docs/PROJECT.md` §6. |
 | Logging | `log/slog` fan-out + `gopkg.in/natefinch/lumberjack.v2` | Repeatable composite `--log` sinks; `std` splits by severity (info+ → stdout, warn+ → stderr). |
 | Unit-test Valkey | `github.com/alicebob/miniredis/v2` | In-process; UNIT tier only. |
 | Integration + e2e infra | `github.com/testcontainers/testcontainers-go` | Valkey + MinIO (PGSTY Silo build) + Pebble/challtestsrv (`//go:build integration` / `e2e` / `staging`); needs Docker. The `staging` tier also uses real LE / GTS staging through a reverse SSH tunnel. |
@@ -265,6 +266,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `metrics` | `internal/metrics`: registry, internal HTTP server, PromRecorder |
 | `admin` | `internal/admin`: tunnels list + batch-stats composer (over router + limit) |
 | `caplog` | `internal/caplog`: deduped cap-hit logger |
+| `report` | `internal/report`: panic guards and the optional Sentry reporting |
 | `observ` | `internal/observ`: the Recorder interface |
 | `tunneltest` | `internal/tunneltest`: shared test fakes (Recorder, Store) |
 | `client` | `client/`: the Go tunnel client library |
@@ -325,6 +327,10 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   ctx; the mesh/edge/flusher goroutines on the serving ctx; a stop runs the pre-drain → the drain (MOVE) →
   the serving-ctx cancel → raw-`:443` listener close → server shutdowns → schedulers/watchers unwind (see
   `docs/ARCHITECTURE.md` §9).
+- **Every goroutine, HTTP handler and TLS callback has a panic guard** (`internal/report`): `report.Recover` for
+  per-connection and per-request work, `report.Crash` for background workers, `Reporter.Handler` around every HTTP
+  server, `report.GetCertificate` / `GetClientCertificate` / `VerifyConnection` around TLS callbacks. A new goroutine
+  or callback MUST get one (see `docs/ARCHITECTURE.md` §8).
 - **Config via kong flags + `TUNNELD_*` env twins** (`config.EnvTwins`), validated fail-fast in
   `Validate()`. NO hardcoded secrets or environment-specific values; byte sizes are BINARY
   (`1mb` = 1048576), bitrates are DECIMAL bits (`1mbit` = 125000 B/s) — two distinct parsers.
