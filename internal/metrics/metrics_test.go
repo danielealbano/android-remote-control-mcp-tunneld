@@ -536,7 +536,7 @@ func TestRegisterLogSinkErrors(t *testing.T) {
 func TestLabelledCountersPreCreatedAtZero(t *testing.T) {
 	want := map[string][]string{}
 	for _, ca := range observ.ACMECAs {
-		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail")
+		want["tunneld_acme_issue_total"] = append(want["tunneld_acme_issue_total"], "ca="+ca+",result=ok", "ca="+ca+",result=fail", "ca="+ca+",result=rate-limited")
 		want["tunneld_acme_renew_total"] = append(want["tunneld_acme_renew_total"], "ca="+ca+",result=ok")
 		want["tunneld_acme_cooldown_total"] = append(want["tunneld_acme_cooldown_total"], "ca="+ca)
 		want["tunneld_acme_rate_limited_total"] = append(want["tunneld_acme_rate_limited_total"], "ca="+ca)
