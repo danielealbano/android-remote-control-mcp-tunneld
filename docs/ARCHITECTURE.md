@@ -88,10 +88,10 @@ sequenceDiagram
     C->>A: TCP connect :443, TLS ClientHello (SNI name.tunnel-domain)
     A->>A: ban check, peek SNI/JA4, resolve route (Valkey), stream slot, mint token
     alt owner is A
-        A->>P: OPEN token, addr of A
+        A->>P: OPEN token, addr of A, client_addr
     else owner is B
-        A->>B: mesh control open (token, addr of A, connID)
-        B->>P: OPEN token, addr of A
+        A->>B: mesh control open (token, addr of A, client_addr, connID)
+        B->>P: OPEN token, addr of A, client_addr
     end
     P->>A: new connection to addr, GET /api/v1/data with the token
     A-->>P: 101 Switching Protocols

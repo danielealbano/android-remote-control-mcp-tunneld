@@ -157,7 +157,7 @@ MUST NOT be relaxed without explicit user direction.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
 - Control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE/MOVE — the type
-  values are frozen); `OPEN{token, addr, use_https, use_mtls}`; the phone answers with a NEW connection to
+  values are frozen); `OPEN{token, addr, use_https, use_mtls, client_addr}`; the phone answers with a NEW connection to
   `addr` carrying a `GET /api/v1/data` HTTP/1.1 upgrade with the token (`101`, then an OPAQUE unframed splice;
   `wire.ChunkSize` = 16384 is the pacing slice). The mesh carries control RPCs only (`renew`, `terminate`,
   `open`, `evict`, `slot-candidate`, `free-slot` — replica↔replica, not part of the phone contract). ANY wire change MUST update

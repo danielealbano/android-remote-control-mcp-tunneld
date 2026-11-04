@@ -180,11 +180,13 @@ Control-frame layout: `[type:1][payloadLen:4 BE][payload JSON]`. The type values
 
 | Frame | Type | Direction | Payload |
 |---|---|---|---|
-| `OPEN` | `0x01` | server→phone | `{token, addr, use_https, use_mtls}` — dial back to `addr` for one public connection (§4) |
+| `OPEN` | `0x01` | server→phone | `{token, addr, use_https, use_mtls, client_addr}` — dial back to `addr` for one public connection (§4) |
 | `PING` | `0x02` | server→phone | (none) — application liveness |
 | `PONG` | `0x03` | phone→server | (none) — liveness answer |
 | `RENEW_NUDGE` | `0x04` | server→phone | `{nonce, ari_window?}` — "renew now"; the phone answers by calling `POST /api/v1/issue` |
 | `MOVE` | `0x05` | server→phone | `{addrs}` — this node is draining: open a new control connection to one of `addrs` (§7) |
+
+A phone MUST ignore the fields it does not know in a control-frame payload.
 
 `ari_window` is optional and is NOT an ACME ARI window: it is the RFC 3339 renewal time the server computed
 (now or already past); an admin reissue omits it; for a tunnel with no certificate yet it is a year-1
@@ -281,8 +283,13 @@ at its next `PING` (close reason `cert-expired`).
 `OPEN` (`0x01`, server→phone) payload:
 
 ```json
-{"token": "<26 chars, crypto/rand.Text, 128 bits>", "addr": "203.0.113.10:443", "use_https": true, "use_mtls": true}
+{"token": "<26 chars, crypto/rand.Text, 128 bits>", "addr": "203.0.113.10:443", "use_https": true, "use_mtls": true, "client_addr": "198.51.100.7:52144"}
 ```
+
+`client_addr` is the `host:port` of the public client this dial-back serves: the TCP peer of the public connection
+at the entry node (`[2001:db8::7]:52144` for IPv6), so a client behind NAT or a VPN shows that exit address. It is
+REQUIRED: the server sends it on every `OPEN`, a phone MUST support it, and an `OPEN` without it or with an empty
+value is invalid and ignored. Phones built before this field keep working only because they ignore it (§3).
 
 `addr` is the `host:port` of the node where the public connection entered: its `--public-ip` with the `--listen`
 port, or with the `--acme-http-listen` port when `use_https` is false. On
@@ -340,7 +347,10 @@ mTLS). The ops:
   afterwards). The internal `POST /api/v1/admin/tunnels/{name}/terminate` endpoint sends it to EVERY node.
 - `open`: `{"op":"open","tunnel":"<name>","conn_id":"<route connID>","open":{<OPEN payload>}}` →
   `{"applied":true}` when the receiver holds that live connection and queued the `OPEN`, else
-  `{"applied":false}`. The entry node uses it when another node holds the phone's control connection.
+  `{"applied":false}`. The entry node uses it when another node holds the phone's control connection. A payload
+  without `client_addr` is still delivered, with an empty value, so a rolling restart across two versions fails no public connection of
+  a phone built before that field. A phone that requires the field ignores such an `OPEN`, so it can ship only once
+  every node sends the field.
 - `evict`: `{"op":"evict","tunnel":"<name>","conn_id":"<closed connID>","reason":"<the control connection's
   close reason>"}` → `{"applied":<any splice ended>}`. A node whose phone control connection closes sends it
   to every node; each ends the splices opened through that connection, keeping `ban-evict` /
