@@ -47,11 +47,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      - name: Sentry release name
+      - name: Sentry release name and commit range
         id: sentry
         env:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: echo "release=tunneld@${TAG#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "release=tunneld@${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-list -n 1 "$TAG")" >> "$GITHUB_OUTPUT"
+          if prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null); then
+            echo "previous_commit=$(git rev-list -n 1 "$prev")" >> "$GITHUB_OUTPUT"
+          fi
       - name: Sentry release (commits + finalize)
         uses: getsentry/action-release@e6703d0b00208e0b3687ba660d18ab5af7892821 # v3.7.2
         env:
@@ -60,6 +65,9 @@ jobs:
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
         with:
           release: ${{ steps.sentry.outputs.release }}
-          set_commits: auto
+          set_commits: ${{ steps.sentry.outputs.previous_commit && 'manual' || 'auto' }}
+          repo: ${{ github.repository }}
+          commit: ${{ steps.sentry.outputs.commit }}
+          previous_commit: ${{ steps.sentry.outputs.previous_commit }}
           ignore_missing: true
           finalize: true
