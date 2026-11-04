@@ -300,8 +300,9 @@ client cannot force or suppress one. Tunnel traffic is never sent. Without a DSN
   `/THIRD_PARTY_LICENSES.txt`. That file is generated at build time by `scripts/third-party-licenses.sh`
   from the Go toolchain's license and the license/notice files of every module compiled into `cmd/tunneld`
   on linux amd64 and arm64 (the goreleaser platforms); it is never committed. The release workflow then creates
-  the Sentry release `tunneld@<version>` with its commits and finalizes it; it needs the repository secret
-  `SENTRY_AUTH_TOKEN` (a token with the `project:releases` and `org:read` scopes) and the repository variables
+  the Sentry release `tunneld@<version>` with its commits (from the previous `v*` tag to this one; Sentry picks the
+  range itself when there is no previous tag) and finalizes it; it needs the repository secret
+  `SENTRY_AUTH_TOKEN` (an organization auth token, scope `org:ci`) and the repository variables
   `SENTRY_ORG` and `SENTRY_PROJECT`. After a rollout, record it with
   `sentry-cli deploys new --release tunneld@<version> -e production` (the nodes' `--sentry-environment`).
 - **Standard commands**: the Makefile (`build`, `lint`, `vet`, `govulncheck`, `test-unit`,
