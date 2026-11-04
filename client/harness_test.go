@@ -29,6 +29,7 @@ import (
 const testControlHost = "connect.example.test"
 const testTunnelDomain = "example.test"
 const testName = "abcdef23456x"
+const testClientAddr = "198.51.100.7:52144"
 
 type testCA struct {
 	cert *x509.Certificate
@@ -234,7 +235,7 @@ func (ts *testServer) dialBack(t *testing.T, token string, useHTTPS, useMTLS boo
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return ts.dialBacks.Await(ctx, token, testName, func(ctx context.Context) error {
-		return ts.mgr.SendOpen(ctx, testName, connID, wire.OpenPayload{Token: token, Addr: addr, UseHTTPS: useHTTPS, UseMTLS: useMTLS})
+		return ts.mgr.SendOpen(ctx, testName, connID, wire.OpenPayload{Token: token, Addr: addr, UseHTTPS: useHTTPS, UseMTLS: useMTLS, ClientAddr: testClientAddr})
 	})
 }
 

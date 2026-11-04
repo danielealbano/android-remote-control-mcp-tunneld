@@ -194,7 +194,7 @@ func TestNewMTLSTransport_ReconnectsAfterConnDrop(t *testing.T) {
 // full-duplex splice (the echo backend proves interleaved read/write works across the dial-back).
 func TestControlConnectBindAndDuplex(t *testing.T) {
 	ts := startTestServer(t)
-	echo := func(s io.ReadWriteCloser) {
+	echo := func(_ string, s io.ReadWriteCloser) {
 		if _, err := io.Copy(s, s); err != nil {
 			tunneltest.Logger().Debug("echo backend ended", "err", err)
 		}
@@ -239,7 +239,7 @@ func TestControlConnectBindAndDuplex(t *testing.T) {
 // swaps in the rotated identity (both certs change).
 func TestRenewViaNudgeAndIssue(t *testing.T) {
 	ts := startTestServer(t)
-	c := ts.newClient(t, func(io.ReadWriteCloser) {})
+	c := ts.newClient(t, func(string, io.ReadWriteCloser) {})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {

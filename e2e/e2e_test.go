@@ -315,7 +315,7 @@ func echoPhoneRun(t *testing.T, inf *e2eInfra, enrollAddr, controlAddr string) (
 		t.Fatalf("enroll: %v", err)
 	}
 	phoneTLS := phoneServerTLS(t, ident)
-	backend := func(s io.ReadWriteCloser) {
+	backend := func(_ string, s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -596,9 +596,11 @@ func TestE2E_RenewedIdentityTakesOverAcrossNodes(t *testing.T) {
 	}
 
 	var hitsB atomic.Int32
+	var clientAddrsB sync.Map
 	tlsB := phoneServerTLS(t, renewed)
-	backendB := func(s io.ReadWriteCloser) {
+	backendB := func(clientAddr string, s io.ReadWriteCloser) {
 		hitsB.Add(1)
+		clientAddrsB.Store(clientAddr, struct{}{})
 		conn := tls.Server(&rwcConn{rwc: s}, tlsB)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -641,8 +643,12 @@ func TestE2E_RenewedIdentityTakesOverAcrossNodes(t *testing.T) {
 		t.Fatal("replica A must close the replaced connection at its next heartbeat")
 	}
 	for _, edge := range []string{edgeA, edgeB} {
-		if err := frontendRoundtrip(edge, fqdn, inf.pebble.IssuingRoots); err != nil {
+		localAddr, err := frontendRoundtripFrom(edge, fqdn, inf.pebble.IssuingRoots)
+		if err != nil {
 			t.Fatalf("a public connection through %s must reach the renewed phone: %v", edge, err)
+		}
+		if _, ok := clientAddrsB.Load(localAddr); !ok {
+			t.Fatalf("a public connection through %s must tell the phone its client address %s", edge, localAddr)
 		}
 	}
 	if hitsB.Load() < 2 {
@@ -1105,23 +1111,28 @@ func healthOK(internalAddr string) (bool, error) {
 }
 
 func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
+	_, err := frontendRoundtripFrom(edgeAddr, fqdn, roots)
+	return err
+}
+
+func frontendRoundtripFrom(edgeAddr, fqdn string, roots *x509.CertPool) (string, error) {
 	conn, err := dialTunnelTLS(edgeAddr, fqdn, roots)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("dial the tunnel: %w", err)
 	}
 	defer tunneltest.CloseLogged(conn)
 	msg := []byte("e2e-hello")
 	if _, err := conn.Write(msg); err != nil {
-		return err
+		return "", fmt.Errorf("write: %w", err)
 	}
 	buf := make([]byte, len(msg))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return fmt.Errorf("read echo: %w", err)
+		return "", fmt.Errorf("read echo: %w", err)
 	}
 	if string(buf) != string(msg) {
-		return fmt.Errorf("echo mismatch: %q", buf)
+		return "", fmt.Errorf("echo mismatch: %q", buf)
 	}
-	return nil
+	return conn.LocalAddr().String(), nil
 }
 
 // frontendTransfer writes n bytes and tries to read them all back; it returns an error if the full echo

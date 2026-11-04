@@ -18,7 +18,7 @@ import (
 func newSilenceClient(t *testing.T, dialAddr string, s *h2TestServer, silence time.Duration) *Client {
 	t.Helper()
 	c, err := New(dialAddr, testEnrollHost, testControlHost, testTunnelDomain, s.pool, newCAIdentity(t, newTestCA(t)),
-		func(io.ReadWriteCloser) {}, WithControlSilenceTimeout(silence))
+		func(string, io.ReadWriteCloser) {}, WithControlSilenceTimeout(silence))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestRenew_NudgeSingleFlight(t *testing.T) {
 	var logs syncBuf
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	c, err := New(dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool, newCAIdentity(t, ca),
-		func(io.ReadWriteCloser) {}, WithLogger(logger))
+		func(string, io.ReadWriteCloser) {}, WithLogger(logger))
 	if err != nil {
 		t.Fatal(err)
 	}

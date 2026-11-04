@@ -21,7 +21,7 @@ import (
 
 // Backend is invoked for each dial-back data stream: it reads client→phone bytes and writes phone→client
 // bytes (the opaque splice to the phone's local target; an echo in tests).
-type Backend func(stream io.ReadWriteCloser)
+type Backend func(clientAddr string, stream io.ReadWriteCloser)
 
 // Client is the HTTP/2 phone control client. It holds a hot-swappable identity (rotated via the mTLS
 // POST /api/v1/issue exchange in Renew, not a control frame) and opens dial-back data streams to a

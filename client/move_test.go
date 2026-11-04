@@ -151,7 +151,7 @@ func moveThenHold(t *testing.T, addrs []string) func(s *moveServer, w http.Respo
 func newMoveClient(t *testing.T, dialAddr string, ca *testCA, logger *slog.Logger, opts ...Option) *Client {
 	t.Helper()
 	c, err := New(dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool, newCAIdentity(t, ca),
-		func(io.ReadWriteCloser) {}, append([]Option{WithLogger(logger)}, opts...)...)
+		func(string, io.ReadWriteCloser) {}, append([]Option{WithLogger(logger)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

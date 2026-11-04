@@ -34,7 +34,7 @@ func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {
 	fqdn := ident.Name + "." + itTunnelDomain
 	phoneTLS := phoneServerTLS(t, ident)
 	var streams atomic.Int32
-	backend := func(s io.ReadWriteCloser) {
+	backend := func(_ string, s io.ReadWriteCloser) {
 		streams.Add(1)
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer func() {

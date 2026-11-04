@@ -32,8 +32,8 @@ func (c *Client) handleOpen(ctx context.Context, payload []byte) {
 		c.logger.Warn("malformed OPEN payload from the server (ignored)", "err", err)
 		return
 	}
-	if op.Token == "" || op.Addr == "" || (op.UseMTLS && !op.UseHTTPS) {
-		c.logger.Warn("invalid OPEN from the server (ignored)", "addr", op.Addr, "use_https", op.UseHTTPS, "use_mtls", op.UseMTLS)
+	if op.Token == "" || op.Addr == "" || op.ClientAddr == "" || (op.UseMTLS && !op.UseHTTPS) {
+		c.logger.Warn("invalid OPEN from the server (ignored)", "addr", op.Addr, "use_https", op.UseHTTPS, "use_mtls", op.UseMTLS, "has_client_addr", op.ClientAddr != "")
 		return
 	}
 	conn, err := c.dialBack(ctx, op)
@@ -42,7 +42,7 @@ func (c *Client) handleOpen(ctx context.Context, payload []byte) {
 		return
 	}
 	stop := context.AfterFunc(ctx, func() { c.closeLogged("dial-back connection", conn) })
-	c.backend(conn)
+	c.backend(op.ClientAddr, conn)
 	stop()
 	c.closeLogged("dial-back connection", conn)
 }
