@@ -194,7 +194,8 @@ MUST NOT be relaxed without explicit user direction.
   routing key + the TTL'd Valkey windows; the byte counters are written ASYNCHRONOUSLY by the recorder's
   background flusher — never synchronously on the data plane).
 - Cap-hit logging is deduplicated (first hit per `(tunnel, reason)` immediately, then ≤1
-  summary/min) — attacker-driven log flooding MUST stay impossible. EXCEPTION: `no-route` (whose tunnel
+  summary/min) — attacker-driven log flooding MUST stay impossible. Routine internet noise (`handshake-timeout`,
+  `ban`, `conn-rate`, `acme-http-miss`) logs at Info, every other reason at Warn. EXCEPTION: `no-route` (whose tunnel
   value is attacker-controlled raw SNI) is metric + Debug-line ONLY — it MUST NEVER key the dedup map. `acme-http-miss` (an unmatched `:80` request; empty tunnel value) uses the standard dedup and is kept out of the `NoRouteSpike` alert. Go HTTP-server errors (failed TLS handshakes) go through slog: Debug on the public enroll/control/`:80` servers, Warn on mesh/internal.
 - Connection logs are SPOOLED and uploaded per node (`store.ConnLogSpool`): enqueue is O(1) and MUST NEVER
   block an admission/splice/teardown path (a 5000-event channel → ONE writer appending JSON lines to a local
@@ -343,7 +344,8 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   Valkey/MinIO/Pebble; e2e (`//go:build e2e`) = two in-process replicas + shared testcontainers; staging (`//go:build staging`, `staging/`) = the real server against Let's Encrypt staging + GTS staging through a reverse SSH tunnel (every CI run; skips without the key). Shared
   fakes + the containers harness live in `internal/tunneltest`.
 - **Logging with `log/slog`** through the fan-out handler; identifiers on every line; deduped
-  cap-hit events via `internal/caplog`.
+  cap-hit events via `internal/caplog`. Every message is a plain sentence a person understands without knowing
+  the code (what happened and, for a failure or refusal, what follows); the structured fields carry the details.
 
 ---
 
