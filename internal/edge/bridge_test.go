@@ -116,6 +116,36 @@ func clientWrites(c *scriptConn) string {
 	return string(c.writes)
 }
 
+func TestEdge_OpenFar_CarriesTheClientAddr(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		peer string
+		want string
+	}{
+		{name: "ipv4", peer: "198.51.100.70", want: "198.51.100.70:51000"},
+		{name: "ipv6", peer: "2001:db8::70", want: "[2001:db8::70]:51000"},
+		{name: "ipv4-mapped on a dual-stack listener", peer: "::ffff:198.51.100.70", want: "198.51.100.70:51000"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			te := newTestEdge(t, baseConfig(), nil)
+			te.rtr.set("node-b", "conn-7", true, nil)
+			done := runTunnel(te, newScriptConn(tc.peer, nil), "abcdef012345.example.test")
+			phone := waitPhone(t, te, 0)
+			tunneltest.CloseOrLog(t, phone)
+			waitDone(t, done, 5*time.Second)
+
+			te.opener.mu.Lock()
+			defer te.opener.mu.Unlock()
+			if len(te.opener.calls) != 1 || te.opener.calls[0].clientAddr != tc.want {
+				t.Fatalf("opens = %+v, want one with client address %q", te.opener.calls, tc.want)
+			}
+		})
+	}
+}
+
 func TestEdge_OpenFar_OpensThenAwaitsWithOneToken(t *testing.T) {
 	te := newTestEdge(t, baseConfig(), nil)
 	te.rtr.set("node-b", "conn-7", true, nil)
@@ -147,7 +177,7 @@ func TestEdge_OpenFar_OpensThenAwaitsWithOneToken(t *testing.T) {
 	if len(calls) != 1 || len(tokens) != 1 {
 		t.Fatalf("want one open and one wait, got opens=%+v waits=%v", calls, tokens)
 	}
-	want := openCall{nodeID: "node-b", name: "abcdef012345", connID: "conn-7", token: tokens[0]}
+	want := openCall{nodeID: "node-b", name: "abcdef012345", connID: "conn-7", token: tokens[0], clientAddr: "198.51.100.70:51000"}
 	if calls[0] != want || tunnels[0] != "abcdef012345" || len(tokens[0]) != 26 {
 		t.Fatalf("open = %+v (waited for %q on %q), want %+v with a 26-char token", calls[0], tokens[0], tunnels[0], want)
 	}

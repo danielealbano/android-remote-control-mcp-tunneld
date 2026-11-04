@@ -95,6 +95,9 @@ func TestEdge_HandleTunnel_FreshRouteRetryOnOpenFailure(t *testing.T) {
 		te.opener.calls[1].nodeID != "node-new" || te.opener.calls[1].connID != "conn-new" {
 		t.Fatalf("want one retry with the same token against the fresh route, got %+v", te.opener.calls)
 	}
+	if te.opener.calls[0].clientAddr != "198.51.100.21:51000" || te.opener.calls[1].clientAddr != "198.51.100.21:51000" {
+		t.Fatalf("both OPENs must carry the client address, got %+v", te.opener.calls)
+	}
 	if len(connIDs) != 1 || connIDs[0] != "conn-new" || nodeIDs[0] != "node-new" {
 		t.Fatalf("the splice must record the fresh route's connID and node, got %v %v", connIDs, nodeIDs)
 	}

@@ -583,7 +583,7 @@ func TestHeartbeatLoop_FailureLogging(t *testing.T) {
 }
 
 func TestManager_SendOpen(t *testing.T) {
-	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}
+	open := wire.OpenPayload{Token: "TOKEN", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true, ClientAddr: "198.51.100.7:52144"}
 	tests := []struct {
 		name    string
 		setup   func(t *testing.T, m *Manager) *conn

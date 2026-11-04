@@ -12,7 +12,8 @@ func TestControlFrameRoundTrip(t *testing.T) {
 		ct      ControlType
 		payload any
 	}{
-		{CtrlOpen, OpenPayload{Token: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true}},
+		{CtrlOpen, OpenPayload{Token: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true, ClientAddr: "198.51.100.7:52144"}},
+		{CtrlOpen, OpenPayload{Token: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", Addr: "203.0.113.10:443", UseHTTPS: true, UseMTLS: true, ClientAddr: "[2001:db8::7]:52144"}},
 		{CtrlPing, nil},
 		{CtrlPong, nil},
 		{CtrlRenewNudge, RenewNudgePayload{Nonce: "00112233", ARIWindow: "2026-08-20T00:00:00Z"}},
@@ -55,7 +56,7 @@ func TestControlFrameRoundTrip(t *testing.T) {
 }
 
 func TestOpenPayload_JSONFieldNames(t *testing.T) {
-	b, err := json.Marshal(OpenPayload{Token: "t", Addr: "a:1", UseHTTPS: true, UseMTLS: true})
+	b, err := json.Marshal(OpenPayload{Token: "t", Addr: "a:1", UseHTTPS: true, UseMTLS: true, ClientAddr: "c:2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestOpenPayload_JSONFieldNames(t *testing.T) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"token", "addr", "use_https", "use_mtls"}
+	want := []string{"token", "addr", "use_https", "use_mtls", "client_addr"}
 	if len(m) != len(want) {
 		t.Fatalf("OPEN keys = %v, want exactly %v", m, want)
 	}

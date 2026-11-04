@@ -416,11 +416,12 @@ func TestOpenAdapter_LocalOwnerSendsOpen(t *testing.T) {
 	ph := &fakePhoneControl{order: new(int)}
 	mc := &fakeMeshControl{}
 	a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: fakeNodeResolver{}, mesh: mc, open: testOpen}
-	if err := a.Open(context.Background(), "nodeA", "t", "conn-1", "TOKEN"); err != nil {
+	if err := a.Open(context.Background(), "nodeA", "t", "conn-1", "TOKEN", "198.51.100.7:52144"); err != nil {
 		t.Fatal(err)
 	}
 	want := testOpen
 	want.Token = "TOKEN"
+	want.ClientAddr = "198.51.100.7:52144"
 	if ph.openName != "t" || ph.openConnID != "conn-1" || ph.openPayload != want {
 		t.Fatalf("SendOpen got (%q, %q, %+v), want (t, conn-1, %+v)", ph.openName, ph.openConnID, ph.openPayload, want)
 	}
@@ -433,12 +434,13 @@ func TestOpenAdapter_RemoteOwnerUsesMeshOpen(t *testing.T) {
 	ph := &fakePhoneControl{order: new(int)}
 	mc := &fakeMeshControl{applied: map[string]bool{"10.0.0.2:9443": true}}
 	a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: fakeNodeResolver{adv: map[string]string{"nodeB": "10.0.0.2:9443"}}, mesh: mc, open: testOpen}
-	if err := a.Open(context.Background(), "nodeB", "t", "conn-1", "TOKEN"); err != nil {
+	if err := a.Open(context.Background(), "nodeB", "t", "conn-1", "TOKEN", "198.51.100.7:52144"); err != nil {
 		t.Fatal(err)
 	}
 	calls := mc.snapshot()
 	want := testOpen
 	want.Token = "TOKEN"
+	want.ClientAddr = "198.51.100.7:52144"
 	if len(calls) != 1 || calls[0].peer != "10.0.0.2:9443" || calls[0].req.Op != "open" || calls[0].req.Tunnel != "t" ||
 		calls[0].req.ConnID != "conn-1" || calls[0].req.Open == nil || *calls[0].req.Open != want {
 		t.Fatalf("mesh calls = %+v, want one open to the owner's advertise address", calls)
@@ -470,7 +472,7 @@ func TestOpenAdapter_Failures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ph := &fakePhoneControl{order: new(int), openErr: tc.local}
 			a := &openAdapter{nodeID: "nodeA", phones: ph, nodes: tc.nodes, mesh: tc.mc, open: testOpen}
-			if err := a.Open(context.Background(), tc.owner, "t", "conn-1", "TOKEN"); !errors.Is(err, tc.wantErr) {
+			if err := a.Open(context.Background(), tc.owner, "t", "conn-1", "TOKEN", "198.51.100.7:52144"); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Open = %v, want it to wrap %v", err, tc.wantErr)
 			}
 		})

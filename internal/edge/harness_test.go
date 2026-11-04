@@ -194,7 +194,7 @@ func (f *fakeRemoteSlots) FreeRemoteSlot(ctx context.Context, tunnel string) boo
 	return f.free != nil && f.free(ctx, tunnel)
 }
 
-type openCall struct{ nodeID, name, connID, token string }
+type openCall struct{ nodeID, name, connID, token, clientAddr string }
 
 type fakeOpener struct {
 	mu        sync.Mutex
@@ -202,10 +202,10 @@ type fakeOpener struct {
 	errByNode map[string]error
 }
 
-func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token string) error {
+func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token, clientAddr string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token})
+	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token, clientAddr: clientAddr})
 	return o.errByNode[nodeID]
 }
 
