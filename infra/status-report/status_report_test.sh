@@ -113,5 +113,76 @@ case "$err" in
 *) fail "a refused report is an error: $err" ;;
 esac
 
+cat > "$bindir/ssh" <<'SHIM'
+#!/bin/sh
+echo "$*" >> "$STUB_DIR/ssh_args"
+if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
+	case "$*" in
+	*"$STUB_SSH_FAIL_ON"*) exit 1 ;;
+	esac
+fi
+cat >> "$STUB_DIR/ssh_stdin"
+SHIM
+chmod +x "$bindir/ssh"
+
+cat > "$tmproot/nodes.conf" <<'CONF'
+# node ssh-target internal-address
+
+n1 root@198.51.100.1 10.0.0.1
+n2 root@198.51.100.2 10.0.0.2
+CONF
+printf 'sekret-token\n' > "$tmproot/token"
+
+install() {
+	rm -f "$tmproot/ssh_args" "$tmproot/ssh_stdin"
+	PATH="$bindir:$PATH" STUB_DIR="$tmproot" sh "$DIR/install.sh" "$@"
+}
+
+has() {
+	if grep -q -- "$3" "$tmproot/$2" 2>/dev/null; then pass "$1"; else fail "$1"; fi
+}
+
+hasnt() {
+	if grep -q -- "$3" "$tmproot/$2" 2>/dev/null; then fail "$1"; else pass "$1"; fi
+}
+
+out="$(install --config "$tmproot/nodes.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/token" -- -o BatchMode=yes)"
+case "$out" in
+*"n1 installed"*"n2 installed"*) pass "install reaches every node in order, past comments and blanks" ;;
+*) fail "install reaches every node in order: $out" ;;
+esac
+has "install writes the first node's values" ssh_stdin 'STATUS_NODE=n1'
+has "install writes the first node's address" ssh_stdin 'STATUS_HOST=10.0.0.1'
+has "install writes the second node's values" ssh_stdin 'STATUS_NODE=n2'
+has "install writes the URL" ssh_stdin 'STATUS_URL=https://ingest.example.test/metrics'
+has "install writes the token to the node" ssh_stdin 'STATUS_TOKEN=sekret-token'
+hasnt "install keeps the token off the command line" ssh_args 'sekret-token'
+has "install passes the options after -- to ssh" ssh_args '-o BatchMode=yes root@198.51.100.2'
+has "install enables the timer" ssh_args 'enable --now arc-status-report.timer'
+has "install copies the reporter" ssh_stdin 'arc_valkey_reachable'
+
+if STATUS_REPORT_CONFIG="$tmproot/nodes.conf" STATUS_URL=https://env.example.test/metrics STATUS_TOKEN_FILE="$tmproot/token" install >/dev/null; then pass "install reads its settings from the environment"; else fail "install reads its settings from the environment"; fi
+has "install uses the URL from the environment" ssh_stdin 'STATUS_URL=https://env.example.test/metrics'
+
+STATUS_REPORT_CONFIG="$tmproot/nodes.conf" STATUS_URL=https://env.example.test/metrics STATUS_TOKEN_FILE="$tmproot/token" install --url https://cli.example.test/metrics >/dev/null
+has "a command-line setting overrides the environment" ssh_stdin 'STATUS_URL=https://cli.example.test/metrics'
+
+rm -f "$tmproot/ssh_args"
+if install --config "$tmproot/nodes.conf" --token-file "$tmproot/token" >/dev/null 2>&1; then fail "install without a URL must fail"; else pass "install without a URL fails"; fi
+if [ -e "$tmproot/ssh_args" ]; then fail "install without a URL must touch no node"; else pass "install without a URL touches no node"; fi
+
+: > "$tmproot/empty-token"
+if install --config "$tmproot/nodes.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/empty-token" >/dev/null 2>&1; then fail "an empty token file must fail"; else pass "an empty token file fails"; fi
+
+printf 'n1 root@198.51.100.1\n' > "$tmproot/bad.conf"
+if install --config "$tmproot/bad.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/token" >/dev/null 2>&1; then fail "an incomplete config line must fail"; else pass "an incomplete config line fails"; fi
+
+out="$(STUB_SSH_FAIL_ON=root@198.51.100.1 install --config "$tmproot/nodes.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/token" 2>/dev/null || true)"
+case "$out" in
+*"installed"*) fail "a failed node must stop the install: $out" ;;
+*) pass "a failed node stops the install" ;;
+esac
+hasnt "a failed node leaves the next node untouched" ssh_args 'root@198.51.100.2'
+
 [ "$FAILS" = 0 ] || { echo "$FAILS failed"; exit 1; }
 echo "all passed"
