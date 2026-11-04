@@ -42,6 +42,7 @@ class Tunnel(
     private val dialBack: DialBack,
     private val localServerPort: () -> Int, // lambda defers reading the server's fixed loopback port
     private val stats: Stats,
+    private val clientAddrs: ConcurrentHashMap<Int, String>,
     private val onRenewNudge: (String) -> Unit,
 ) {
     private val running = AtomicBoolean(true)
@@ -218,8 +219,9 @@ class Tunnel(
         val addr = open.optString("addr")
         val useHttps = open.optBoolean("use_https")
         val useMtls = open.optBoolean("use_mtls")
-        if (token.isEmpty() || addr.isEmpty() || (useMtls && !useHttps)) {
-            Log.w(TAG, "invalid OPEN ignored: addr=$addr use_https=$useHttps use_mtls=$useMtls")
+        val clientAddr = open.optString("client_addr")
+        if (token.isEmpty() || addr.isEmpty() || clientAddr.isEmpty() || (useMtls && !useHttps)) {
+            Log.w(TAG, "invalid OPEN ignored: addr=$addr use_https=$useHttps use_mtls=$useMtls has_client_addr=${clientAddr.isNotEmpty()}")
             return
         }
         val local = try {
@@ -230,26 +232,32 @@ class Tunnel(
             return
         }
         if (!sessions.add(local)) return
-        val remote = try {
-            dialBack.open(token, addr, useHttps, useMtls)
-        } catch (t: Throwable) {
-            Log.w(TAG, "dial-back to $addr failed", t)
-            stats.error("dial-back to $addr failed: $t")
-            sessions.release(local)
-            try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
-            return
-        }
-        if (!sessions.add(remote.socket)) {
-            sessions.release(local)
-            try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
-            return
-        }
-        stats.connection()
+        val localPort = local.localPort
+        clientAddrs[localPort] = clientAddr
         try {
-            splice(local, remote)
+            val remote = try {
+                dialBack.open(token, addr, useHttps, useMtls)
+            } catch (t: Throwable) {
+                Log.w(TAG, "dial-back to $addr failed", t)
+                stats.error("dial-back to $addr failed: $t")
+                sessions.release(local)
+                try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
+                return
+            }
+            if (!sessions.add(remote.socket)) {
+                sessions.release(local)
+                try { local.close() } catch (c: Throwable) { Log.d(TAG, "local socket close failed", c) }
+                return
+            }
+            stats.connection()
+            try {
+                splice(local, remote)
+            } finally {
+                sessions.release(local)
+                sessions.release(remote.socket)
+            }
         } finally {
-            sessions.release(local)
-            sessions.release(remote.socket)
+            clientAddrs.remove(localPort, clientAddr)
         }
     }
 

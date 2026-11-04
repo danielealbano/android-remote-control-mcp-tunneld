@@ -40,10 +40,11 @@ const ChunkSize = 16 * 1024
 // --- payloads ---
 
 type OpenPayload struct {
-	Token    string `json:"token"`
-	Addr     string `json:"addr"`
-	UseHTTPS bool   `json:"use_https"`
-	UseMTLS  bool   `json:"use_mtls"`
+	Token      string `json:"token"`
+	Addr       string `json:"addr"`
+	UseHTTPS   bool   `json:"use_https"`
+	UseMTLS    bool   `json:"use_mtls"`
+	ClientAddr string `json:"client_addr"`
 }
 
 const (

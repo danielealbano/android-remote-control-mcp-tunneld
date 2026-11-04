@@ -36,7 +36,7 @@ func TestIntegration_ACMEBudgetExhaustedRetryAfter(t *testing.T) {
 	}
 
 	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident,
-		func(s io.ReadWriteCloser) { tunneltest.CloseLogged(s) })
+		func(_ string, s io.ReadWriteCloser) { tunneltest.CloseLogged(s) })
 	if err != nil {
 		t.Fatal(err)
 	}

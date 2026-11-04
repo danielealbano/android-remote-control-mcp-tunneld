@@ -26,7 +26,7 @@ type DialBackWaiter interface {
 }
 
 type Opener interface {
-	Open(ctx context.Context, nodeID, name, connID, token string) error
+	Open(ctx context.Context, nodeID, name, connID, token, clientAddr string) error
 }
 
 type DialBackReadiness interface {

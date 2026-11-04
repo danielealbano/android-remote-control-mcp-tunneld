@@ -257,7 +257,7 @@ func TestRenew_RetriesWithFreshNonce(t *testing.T) {
 		return nil
 	}}
 	dialAddr, _ := startEnrollServer(t, ca, opts)
-	c, err := New(dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool, newCAIdentity(t, ca), func(io.ReadWriteCloser) {})
+	c, err := New(dialAddr, testEnrollHost, testControlHost, testTunnelDomain, ca.pool, newCAIdentity(t, ca), func(string, io.ReadWriteCloser) {})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,7 +54,7 @@ func TestIntegration_DrainWritesShutdownEndEvents(t *testing.T) {
 	fqdn := ident.Name + "." + itTunnelDomain
 
 	phoneTLS := phoneServerTLS(t, ident)
-	backend := func(s io.ReadWriteCloser) {
+	backend := func(_ string, s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -331,7 +331,7 @@ func TestIntegration_DrainBoundedWithUnreachablePeer(t *testing.T) {
 	}
 	fqdn := ident.Name + "." + itTunnelDomain
 	phoneTLS := phoneServerTLS(t, ident)
-	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(s io.ReadWriteCloser) {
+	c, err := client.New(env.edgeAddr, itEnrollHost, itControlHost, itTunnelDomain, env.pebble.IssuingRoots, ident, func(_ string, s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -623,7 +623,7 @@ func TestIntegration_StopRunsThePredrainAndTheDrain(t *testing.T) {
 	}
 	fqdn := ident.Name + "." + itTunnelDomain
 	phoneTLS := phoneServerTLS(t, ident)
-	echo := func(s io.ReadWriteCloser) {
+	echo := func(_ string, s io.ReadWriteCloser) {
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {

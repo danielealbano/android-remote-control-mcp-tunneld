@@ -232,7 +232,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 	// owner/connID while we held stale values (one fresh route lookup + retry, then
 	// close) — and retry once when the fresh route differs.
 	openedVia, openedOn := connID, nodeID
-	far, ferr := e.openFar(ctx, name, nodeID, connID, token)
+	clientAddr := client.RemoteAddr().String()
+	far, ferr := e.openFar(ctx, name, nodeID, connID, token, clientAddr)
 	if ferr != nil {
 		n2, c2, ok2, lerr := e.router.LookupRoute(ctx, name)
 		if lerr != nil {
@@ -240,7 +241,7 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		}
 		if lerr == nil && ok2 && (n2 != nodeID || c2 != connID) {
 			openedVia, openedOn = c2, n2
-			far, ferr = e.openFar(ctx, name, n2, c2, token)
+			far, ferr = e.openFar(ctx, name, n2, c2, token, clientAddr)
 		}
 	}
 	if ferr != nil {
@@ -319,7 +320,7 @@ func (e *Edge) tunnelName(sni string) (string, bool) {
 	return name, true
 }
 
-func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) (net.Conn, error) {
+func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token, clientAddr string) (net.Conn, error) {
 	timeout := e.cfg.DialBackTimeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -327,7 +328,7 @@ func (e *Edge) openFar(ctx context.Context, name, nodeID, connID, token string) 
 	octx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return e.dialBacks.Await(octx, token, name, func(ctx context.Context) error {
-		return e.opener.Open(ctx, nodeID, name, connID, token)
+		return e.opener.Open(ctx, nodeID, name, connID, token, clientAddr)
 	})
 }
 

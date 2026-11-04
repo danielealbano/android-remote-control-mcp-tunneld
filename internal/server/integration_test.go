@@ -302,7 +302,9 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 
 	// The phone TLS-terminates each dial-back data stream with its Pebble-issued public cert and echoes.
 	phoneTLS := phoneServerTLS(t, ident)
-	backend := func(s io.ReadWriteCloser) {
+	var clientAddrs sync.Map
+	backend := func(clientAddr string, s io.ReadWriteCloser) {
+		clientAddrs.Store(clientAddr, struct{}{})
 		conn := tls.Server(&rwcConn{rwc: s}, phoneTLS)
 		defer tunneltest.CloseLogged(conn)
 		if err := conn.Handshake(); err != nil {
@@ -332,6 +334,13 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 		return lastErr == nil
 	}) {
 		t.Fatalf("frontend TLS roundtrip never succeeded: %v", lastErr)
+	}
+	localAddr, err := frontendRoundtripFrom(env.edgeAddr, fqdn, env.pebble.IssuingRoots)
+	if err != nil {
+		t.Fatalf("frontend TLS roundtrip failed: %v", err)
+	}
+	if _, ok := clientAddrs.Load(localAddr); !ok {
+		t.Fatalf("the phone was not told the client address %s", localAddr)
 	}
 
 	// MinIO: the name registry object carries the issued cert, and a connection-log object landed.
@@ -463,31 +472,36 @@ func phoneServerTLS(t *testing.T, id *client.Identity) *tls.Config {
 // frontendRoundtrip dials the edge, does a full TLS handshake for fqdn (verifying against the Pebble
 // issuing roots), and asserts an echo.
 func frontendRoundtrip(edgeAddr, fqdn string, roots *x509.CertPool) error {
+	_, err := frontendRoundtripFrom(edgeAddr, fqdn, roots)
+	return err
+}
+
+func frontendRoundtripFrom(edgeAddr, fqdn string, roots *x509.CertPool) (string, error) {
 	raw, err := net.DialTimeout("tcp", edgeAddr, 5*time.Second)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("dial the edge: %w", err)
 	}
 	defer tunneltest.CloseLogged(raw)
 	if err := raw.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
-		return fmt.Errorf("set deadline: %w", err)
+		return "", fmt.Errorf("set deadline: %w", err)
 	}
 	conn := tls.Client(raw, &tls.Config{ServerName: fqdn, RootCAs: roots, MinVersion: tls.VersionTLS12})
 	if err := conn.Handshake(); err != nil {
-		return fmt.Errorf("handshake: %w", err)
+		return "", fmt.Errorf("handshake: %w", err)
 	}
 	defer tunneltest.CloseLogged(conn)
 	msg := []byte("e2e-roundtrip-hello")
 	if _, err := conn.Write(msg); err != nil {
-		return fmt.Errorf("write: %w", err)
+		return "", fmt.Errorf("write: %w", err)
 	}
 	buf := make([]byte, len(msg))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		return fmt.Errorf("read echo: %w", err)
+		return "", fmt.Errorf("read echo: %w", err)
 	}
 	if string(buf) != string(msg) {
-		return fmt.Errorf("echo mismatch: got %q", buf)
+		return "", fmt.Errorf("echo mismatch: got %q", buf)
 	}
-	return nil
+	return raw.LocalAddr().String(), nil
 }
 
 func waitBool(d time.Duration, cond func() bool) bool {

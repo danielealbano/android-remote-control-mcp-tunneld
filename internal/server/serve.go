@@ -273,9 +273,10 @@ type openAdapter struct {
 	open   wire.OpenPayload
 }
 
-func (a *openAdapter) Open(ctx context.Context, nodeID, name, connID, token string) error {
+func (a *openAdapter) Open(ctx context.Context, nodeID, name, connID, token, clientAddr string) error {
 	open := a.open
 	open.Token = token
+	open.ClientAddr = clientAddr
 	if nodeID == a.nodeID {
 		if err := a.phones.SendOpen(ctx, name, connID, open); err != nil {
 			return fmt.Errorf("send OPEN to the local phone %s: %w", name, err)
