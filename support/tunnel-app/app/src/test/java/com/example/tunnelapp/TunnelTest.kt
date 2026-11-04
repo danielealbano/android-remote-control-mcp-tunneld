@@ -15,6 +15,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -25,6 +26,7 @@ import javax.net.ssl.SSLContext
 class TunnelTest {
     private val server: MockWebServer = ControlServer.start()
     private val stats = Stats()
+    private val clientAddrs = ConcurrentHashMap<Int, String>()
     private val nudges = AtomicInteger()
     private val dial = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
     private val local = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
@@ -38,7 +40,7 @@ class TunnelTest {
 
     private fun tunnel(): Tunnel = Tunnel(
         ControlServer.client(), Net(null, server.port), ControlServer.HOST,
-        DialBack(ControlServer.HOST, SSLContext.getDefault(), SSLContext.getDefault()), { local.localPort }, stats,
+        DialBack(ControlServer.HOST, SSLContext.getDefault(), SSLContext.getDefault()), { local.localPort }, stats, clientAddrs,
     ) { nudges.incrementAndGet() }
 
     private fun acceptLocal(accepted: AtomicReference<Socket>, done: CountDownLatch) {
@@ -63,7 +65,7 @@ class TunnelTest {
     }
 
     private fun openFrame() = ControlServer.frame(
-        Frames.OPEN, """{"token":"t","addr":"127.0.0.1:${dial.localPort}","use_https":false,"use_mtls":false}""",
+        Frames.OPEN, """{"token":"t","addr":"127.0.0.1:${dial.localPort}","use_https":false,"use_mtls":false,"client_addr":"198.51.100.7:52144"}""",
     )
 
     private fun acceptUpgrade(accepted: AtomicReference<Socket>, upgraded: CountDownLatch) {
@@ -228,6 +230,176 @@ class TunnelTest {
             t.stop()
             assertClosedByPeer(accepted.get())
             assertClosedByPeer(localAccepted.get())
+        } finally {
+            t.stop()
+            accepted.get()?.close()
+            localAccepted.get()?.close()
+        }
+    }
+
+    @Test
+    fun openWithoutClientAddrIsIgnored() =
+        assertOpenIsIgnored("""{"token":"t","addr":"127.0.0.1:${dial.localPort}","use_https":false,"use_mtls":false}""")
+
+    @Test
+    fun openWithAnEmptyClientAddrIsIgnored() =
+        assertOpenIsIgnored("""{"token":"t","addr":"127.0.0.1:${dial.localPort}","use_https":false,"use_mtls":false,"client_addr":""}""")
+
+    private fun assertOpenIsIgnored(payload: String) {
+        val localConnections = AtomicInteger()
+        Thread {
+            try {
+                while (true) {
+                    local.accept().close()
+                    localConnections.incrementAndGet()
+                }
+            } catch (e: IOException) {
+                System.err.println("local server ended: $e")
+            }
+        }.apply { isDaemon = true; start() }
+        server.enqueue(ControlServer.answer(200) { s ->
+            try {
+                val out = s.sink.buffer()
+                out.write(ControlServer.frame(Frames.OPEN, payload))
+                out.flush()
+                s.source.buffer().readByteArray()
+            } catch (e: IOException) {
+                System.err.println("control stream ended: $e")
+            }
+        })
+        val t = tunnel()
+        run(t)
+        try {
+            assertTrue(t.awaitBound(5))
+            Thread.sleep(1_000)
+            assertEquals("an OPEN without a client_addr must not open a session", 0, localConnections.get())
+            assertEquals(0L, stats.snapshot().connections)
+        } finally {
+            t.stop()
+        }
+    }
+
+    private fun assertClientAddrsDropped() {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (clientAddrs.isNotEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        assertTrue("the address must be dropped with the session", clientAddrs.isEmpty())
+    }
+
+    @Test
+    fun openWithAnUnknownFieldIsServed() {
+        val accepted = AtomicReference<Socket>()
+        val upgraded = CountDownLatch(1)
+        acceptUpgrade(accepted, upgraded)
+        val localAccepted = AtomicReference<Socket>()
+        val localDone = CountDownLatch(1)
+        acceptLocal(localAccepted, localDone)
+        server.enqueue(ControlServer.answer(200) { s ->
+            try {
+                val out = s.sink.buffer()
+                out.write(
+                    ControlServer.frame(
+                        Frames.OPEN,
+                        """{"token":"t","addr":"127.0.0.1:${dial.localPort}","use_https":false,"use_mtls":false,"client_addr":"198.51.100.7:52144","extra":1}""",
+                    ),
+                )
+                out.flush()
+                s.source.buffer().readByteArray()
+            } catch (e: IOException) {
+                System.err.println("control stream ended: $e")
+            }
+        })
+        val t = tunnel()
+        run(t)
+        try {
+            assertTrue("an OPEN with an unknown field must still dial back", upgraded.await(5, TimeUnit.SECONDS))
+        } finally {
+            t.stop()
+            accepted.get()?.close()
+            localAccepted.get()?.close()
+        }
+    }
+
+    @Test
+    fun clientAddrIsDroppedWhenTheDialBackIsRefused() {
+        val requestRead = CountDownLatch(1)
+        val refuse = CountDownLatch(1)
+        val peer = AtomicReference<Socket>()
+        Thread {
+            try {
+                val c = dial.accept()
+                peer.set(c)
+                val input = c.getInputStream()
+                var tail = 0
+                while (tail != 0x0d0a0d0a) {
+                    val b = input.read()
+                    if (b < 0) break
+                    tail = (tail shl 8) or b
+                }
+                requestRead.countDown()
+                refuse.await(5, TimeUnit.SECONDS)
+                c.getOutputStream().apply { write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".toByteArray()); flush() }
+            } catch (e: IOException) {
+                System.err.println("dial-back peer ended: $e")
+            }
+        }.apply { isDaemon = true; start() }
+        val localAccepted = AtomicReference<Socket>()
+        val localDone = CountDownLatch(1)
+        acceptLocal(localAccepted, localDone)
+        server.enqueue(ControlServer.answer(200) { s ->
+            try {
+                val out = s.sink.buffer()
+                out.write(openFrame())
+                out.flush()
+                s.source.buffer().readByteArray()
+            } catch (e: IOException) {
+                System.err.println("control stream ended: $e")
+            }
+        })
+        val t = tunnel()
+        run(t)
+        try {
+            assertTrue(requestRead.await(5, TimeUnit.SECONDS))
+            assertTrue(localDone.await(5, TimeUnit.SECONDS))
+            assertEquals("198.51.100.7:52144", clientAddrs[localAccepted.get().port])
+            refuse.countDown()
+            assertClientAddrsDropped()
+        } finally {
+            t.stop()
+            peer.get()?.close()
+            localAccepted.get()?.close()
+        }
+    }
+
+    @Test
+    fun clientAddrIsKnownForItsLocalConnectionUntilTheSessionEnds() {
+        val accepted = AtomicReference<Socket>()
+        val upgraded = CountDownLatch(1)
+        acceptUpgrade(accepted, upgraded)
+        val localAccepted = AtomicReference<Socket>()
+        val localDone = CountDownLatch(1)
+        acceptLocal(localAccepted, localDone)
+        val release = CountDownLatch(1)
+        server.enqueue(ControlServer.answer(200) { s ->
+            try {
+                val out = s.sink.buffer()
+                out.write(openFrame())
+                out.flush()
+                release.await(10, TimeUnit.SECONDS)
+                out.close()
+            } catch (e: IOException) {
+                System.err.println("control stream write failed: $e")
+            }
+        })
+        server.enqueue(hold())
+        val t = tunnel()
+        run(t)
+        try {
+            assertTrue(upgraded.await(5, TimeUnit.SECONDS))
+            assertTrue(localDone.await(5, TimeUnit.SECONDS))
+            assertEquals("198.51.100.7:52144", clientAddrs[localAccepted.get().port])
+            release.countDown()
+            assertClosedByPeer(localAccepted.get())
+            assertClientAddrsDropped()
         } finally {
             t.stop()
             accepted.get()?.close()

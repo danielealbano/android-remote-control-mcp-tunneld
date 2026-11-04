@@ -17,12 +17,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,6 +181,9 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	if info1.TLSCertSHA256 == "" {
 		t.Fatal("/info returned empty tls_cert_sha256")
 	}
+	if info1.ClientAddr == "" || info1.ClientAddr != info1.LocalAddr {
+		t.Fatalf("/info client_addr = %q, want this connection's address %q", info1.ClientAddr, info1.LocalAddr)
+	}
 	f1 := info1.TLSCertSHA256
 
 	// Refresh: force a fresh /api/v1/issue (new TLS key + Pebble cert) and hot-swap the server cert. Clear the
@@ -325,6 +330,9 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 				if info.Name != name {
 					t.Fatalf("%s request %d reached %q, want %q", mode.name, i, info.Name, name)
 				}
+				if info.ClientAddr == "" || info.ClientAddr != info.LocalAddr {
+					t.Fatalf("%s request %d: client_addr = %q, want this connection's address %q", mode.name, i, info.ClientAddr, info.LocalAddr)
+				}
 			}
 		})
 	}
@@ -373,12 +381,21 @@ type infoResp struct {
 	Name          string `json:"name"`
 	SAN           string `json:"san"`
 	Issuer        string `json:"issuer"`
+	ClientAddr    string `json:"client_addr"`
+	LocalAddr     string `json:"-"`
 }
 
 // fetchInfo GETs /info through the tunnel (HTTP/1.1) and decodes the JSON.
 func fetchInfo(edge, fqdn string, roots *x509.CertPool) (infoResp, error) {
 	var out infoResp
-	status, body, err := h1Get(edge, fqdn, "/info", roots)
+	var localAddr atomic.Pointer[string]
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			addr := info.Conn.LocalAddr().String()
+			localAddr.Store(&addr)
+		},
+	})
+	status, body, err := h1Get(ctx, edge, fqdn, "/info", roots)
 	if err != nil {
 		return out, err
 	}
@@ -387,6 +404,9 @@ func fetchInfo(edge, fqdn string, roots *x509.CertPool) (infoResp, error) {
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return out, fmt.Errorf("decode /info %q: %w", body, err)
+	}
+	if addr := localAddr.Load(); addr != nil {
+		out.LocalAddr = *addr
 	}
 	return out, nil
 }
@@ -435,12 +455,16 @@ func h1Client(edge, fqdn string, roots *x509.CertPool) *http.Client {
 	return &http.Client{Transport: tr, Timeout: 90 * time.Second}
 }
 
-func h1Get(edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
+func h1Get(ctx context.Context, edge, fqdn, path string, roots *x509.CertPool) (int, []byte, error) {
 	c := h1Client(edge, fqdn, roots)
 	defer c.CloseIdleConnections()
-	resp, err := c.Get("https://" + fqdn + path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+fqdn+path, nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("build the %s request: %w", path, err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("get %s: %w", path, err)
 	}
 	defer tunneltest.CloseLogged(resp.Body)
 	body, err := io.ReadAll(resp.Body)
