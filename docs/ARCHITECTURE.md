@@ -75,6 +75,7 @@ flowchart TD
 | `internal/wire` | control-frame codec + dial-back constants + the ChunkSize pacing constant |
 | `internal/metrics` / `internal/admin` / `internal/caplog` / `internal/observ` | metrics + `/api/v1/admin/tunnels/list` & `/stats` composer + deduped cap logger + the Recorder interface |
 | `internal/logging` | `log/slog` fan-out + composite `--log` sinks |
+| `internal/report` | panic guards for HTTP handlers and goroutines, and the optional Sentry reporting (issues, logs, traces) |
 | `internal/tunneltest` | shared test fakes + the testcontainers harness |
 
 ## 2. Public connection lifecycle
@@ -211,7 +212,7 @@ attempt deadline plus those 30 s), so a certificate the CA issued is not thrown 
 abandoned attempt removes its pending TLS-ALPN-01 challenge; a run is capped at 290 s, and an attempt still
 running when the run ends (the cap passes or the caller goes away) ends the run without counting as a failure of
 its account. Otherwise, any unsuccessful attempt
-other than a 429, a permanent CA error or a local error (a transient CA error, the attempt deadline, or a request
+other than a 429, a permanent CA error, a local error or a panic (a transient CA error, the attempt deadline, or a request
 tunneld refused or held) puts the account on the exponential backoff; one that fails while the account already
 waits (a wait-until or a backoff in effect) adds no step to it, so concurrent attempts count once. GTS accounts are tried
 by remaining order budget. When no account can take the order, the issue answer is `acme_rate_limited` with
@@ -311,6 +312,29 @@ also `ca="all", result="fail"`). A series that first appeared at 1 would hide it
 `_idle_connections`, `_max_connections`, `_waits_total` and `_timeouts_total` (a timeout is a command that
 gave up waiting for a free connection). `tunneld_acme_budget_ratio{ca,account,budget}` reads the budget buckets
 at scrape time (2 s timeout; an error drops only that family, Warn ≤ 1/min).
+
+`internal/report` wraps the Sentry SDK. `Run` builds one reporter: without `--sentry-dsn` it sends nothing, with one
+it creates a client and a root hub that `Run` puts on its context, and it adds a Sentry handler beside the
+`--log` sinks (Warn and Error lines become Sentry logs, Error lines also become issues). Every HTTP server's handler
+is wrapped by `Reporter.Handler`: it opens a per-request scope (a cloned hub with the request, without its body,
+and the client address), starts a new transaction for the traced routes (the enroll nonce and enroll POST,
+`POST /api/v1/issue`, mesh; a handler that refuses the request marks its scope with `report.Refuse`, and the
+transaction of a refused request is never finished, so never sent), and turns a panic into an issue, an Error log line and a
+`500` with the `internal_error` body; once the response has started it aborts the request instead (net/http resets
+an HTTP/2 stream and closes an HTTP/1.1 connection) and closes a hijacked connection itself. The TLS `GetCertificate` callbacks are
+wrapped by `report.GetCertificate` and the mesh client's `GetClientCertificate` and `VerifyConnection` by
+`report.GetClientCertificate` and `report.VerifyConnection` (a panic fails that handshake); the mesh client's dial
+recovers a panic into an error. A panic in the ACME budget transport, the lazy CA client build or the attempt timer
+becomes an error wrapping `report.ErrPanicked`; the transport also marks a flag on the build's or attempt's context,
+because lego can wrap a request error without keeping its chain. Either way the chain records no failure and no backoff
+for that account and moves on to the next one (Retry-After 30 s when every account panicked). Goroutines defer `report.Recover` (per-connection and per-request work: the panic is logged and
+sent, then a callback closes that connection or ends that work) or `report.Crash` (background workers: logged,
+sent, flushed, then the panic continues and the process exits). Each public connection runs in its own scope (`report.WithScope`:
+a cloned hub with a fresh trace id, plus identifiers kept on the context even without Sentry) that grows as the edge
+learns the client address, the tunnel, the ClientHello fields and the connection id; the panic log line carries
+them; once the dial-back is open the edge also starts the connection's transaction. Captures happen on a further
+clone, so tags never leak between scopes. A real ACME order failure is sent with
+`report.CaptureError`. The panic log line carries `sentry_event_id`, which keeps it from raising a second issue.
 
 ### Registered rejection reasons (`tunneld_rejections_total{reason}`)
 
@@ -425,7 +449,8 @@ terminate). The ordering is load-bearing:
 the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the conn-log spool is
 rotated and uploaded (what does not upload within `--shutdown-grace` stays on disk for the next start), and
 only then the admin/cap-log final flush runs — so no end event or counter delta is lost. A service manager must
-allow `--predrain-wait` + `--limit-conn-idle` + 5 s + `--shutdown-grace` (plus a margin) before it kills the process.
+allow `--predrain-wait` + `--limit-conn-idle` + 5 s + `--shutdown-grace` (+ 5 s with `--sentry-dsn`: `Run` flushes
+the last Sentry events for at most 2 s and closes the client for at most 3 s) (plus a margin) before it kills the process.
 
 ## 10. Configuration
 
@@ -440,4 +465,7 @@ or round-robin one; the phones dial back to it on the `--listen` port, or on the
 listen port; both ports must be numeric), `--dialback-https` (default `true`) and `--dialback-mtls` (default
 `true`; requires `--dialback-https`; the control-host TLS then requires a client certificate, otherwise it only
 verifies one when given). The stop flags are `--predrain-wait` (default `0s`) and `--shutdown-grace` (default
-`15s`); the drain's bound is `--limit-conn-idle` + 5 s.
+`15s`); the drain's bound is `--limit-conn-idle` + 5 s. Sentry is optional: `--sentry-dsn` (empty sends
+nothing; a DSN the SDK cannot parse fails startup with its error redacted like a `--redis-url` one, since the DSN
+holds the project key), `--sentry-environment` (default `production`; it must not be empty when a DSN is set) and
+`--sentry-traces-sample-rate` (default `1`, from 0 to 1).
