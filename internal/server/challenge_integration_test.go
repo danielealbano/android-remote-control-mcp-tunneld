@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	alpnServedLog = "acme tls-alpn-01 challenge served"
-	httpServedLog = "acme http-01 challenge served"
+	alpnServedLog = "answered a certificate authority's TLS validation request"
+	httpServedLog = "answered a certificate authority's HTTP validation request"
 )
 
 func bindEchoPhone(t *testing.T, env *itEnv) (string, *atomic.Int32) {

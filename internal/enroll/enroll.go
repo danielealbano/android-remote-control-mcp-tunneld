@@ -161,17 +161,17 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	if e := s.enrollLimit(ctx, ip); e != nil {
 		return Result{}, e
 	}
-	t = s.logStep("enroll step", "limit", t, "ip", ip)
+	t = s.logStep("enrollment step finished", "limit", t, "ip", ip)
 
 	// Consume + validate the single-use nonce. A control-plane error is retryable/internal; a genuinely
 	// absent/replayed nonce is invalid_nonce.
 	if ok, err := s.consumeNonce(ctx, req.Nonce); err != nil {
-		s.logger.Debug("enrollment nonce consume failed", "ip", ip, "err", err)
+		s.logger.Debug("could not check the enrollment's one-time code; the request is refused and the phone can retry", "ip", ip, "err", err)
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
-	t = s.logStep("enroll step", "nonce", t, "ip", ip)
+	t = s.logStep("enrollment step finished", "nonce", t, "ip", ip)
 
 	// Attestation gate (skipped only in the fail-closed test-only optional mode) + key binding. No name
 	// exists yet at Phase 1, so rejections are recorded with an empty tunnel name.
@@ -179,26 +179,26 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	if e != nil {
 		return Result{}, e
 	}
-	t = s.logStep("enroll step", "attest", t, "ip", ip)
+	t = s.logStep("enrollment step finished", "attest", t, "ip", ip)
 
 	// Generate + claim a fresh name.
 	rec := store.NameRecord{Device: att.Device}
 	if req.IdentityCSR != nil {
 		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
 		if err != nil {
-			s.logger.Warn("identity key fingerprint failed (recorded empty)", "ip", ip, "err", err)
+			s.logger.Warn("could not compute the identity key's fingerprint, so it is recorded empty", "ip", ip, "err", err)
 		}
 		rec.IdentityKeyFP = fp
 	}
 	name, err := s.claimName(ctx, rec)
 	if err != nil {
 		if ctx.Err() == nil {
-			s.logger.Warn("enrollment name claim failed", "ip", ip, "err", err)
+			s.logger.Warn("could not claim a name for the new phone; the request is refused and the phone can retry", "ip", ip, "err", err)
 		}
 		return Result{}, &Error{Reason: "name_unavailable", Retryable: true}
 	}
 	report.SetAttrs(ctx, slog.String("tunnel", name))
-	t = s.logStep("enroll step", "claim", t, "ip", ip, "tunnel", name)
+	t = s.logStep("enrollment step finished", "claim", t, "ip", ip, "tunnel", name)
 
 	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
 	// failure rolls the freshly claimed name back (plain delete);
@@ -209,11 +209,11 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer dcancel()
 		if derr := s.cfg.Names.DeleteName(dctx, name); derr != nil {
-			s.logger.Warn("claim rollback failed (name orphaned in the registry)", "tunnel", name, "err", derr)
+			s.logger.Warn("could not release a claimed name after a failed enrollment; the name stays reserved in the registry", "tunnel", name, "err", derr)
 		}
 		return Result{}, signError(err)
 	}
-	s.logStep("enroll step", "sign", t, "ip", ip, "tunnel", name)
+	s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
 	return Result{Name: name, IdentityCert: identityPEM}, nil
 }
 
@@ -233,18 +233,18 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		// A control-plane (Valkey/script) error is retryable and distinct from a genuinely absent/replayed
 		// nonce — do NOT mislabel a Valkey outage as invalid_nonce.
 		if ctx.Err() == nil {
-			s.logger.Warn("issuance nonce consume failed", "tunnel", name, "ip", ip, "err", err)
+			s.logger.Warn("could not check the certificate request's one-time code; the request is refused and the phone can retry", "tunnel", name, "ip", ip, "err", err)
 		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	} else if !ok {
 		return Result{}, &Error{Reason: "invalid_nonce", Retryable: true}
 	}
-	t = s.logStep("issue step", "nonce", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "nonce", t, "tunnel", name, "ip", ip)
 	att, e := s.attestAndBind(ctx, ip, name, req)
 	if e != nil {
 		return Result{}, e
 	}
-	t = s.logStep("issue step", "attest", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "attest", t, "tunnel", name, "ip", ip)
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
 	// and MUST request exactly <name>.<tunnel-domain>.
 	if err := req.TLSCSR.CheckSignature(); err != nil {
@@ -272,11 +272,11 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 			return Result{}, &Error{Reason: "name_unknown"}
 		}
 		if ctx.Err() == nil {
-			s.logger.Warn("issuance name record read failed", "tunnel", name, "ip", ip, "err", err)
+			s.logger.Warn("could not read the tunnel's record before issuing its certificate; the request is refused and the phone can retry", "tunnel", name, "ip", ip, "err", err)
 		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
-	t = s.logStep("issue step", "registry-read", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "registry-read", t, "tunnel", name, "ip", ip)
 
 	// Issuance cap (keyed on the name): acquire the per-tunnel issuance lock so concurrent /api/v1/issue calls
 	// for one name are serialized and cannot both pass the weekly cap they only commit against on success.
@@ -289,7 +289,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	}
 	if err != nil {
 		if ctx.Err() == nil {
-			s.logger.Warn("issuance lock or cap check failed", "tunnel", name, "ip", ip, "err", err)
+			s.logger.Warn("could not take the tunnel's issuance lock or check its issuance limit; the request is refused and the phone can retry", "tunnel", name, "ip", ip, "err", err)
 		}
 		return Result{}, &Error{Reason: "internal", Retryable: true}
 	}
@@ -300,9 +300,9 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	defer func() {
 		ut := s.now()
 		if err := s.cfg.Limiter.IssuanceEnd(ctx, name, orderID); err != nil {
-			s.logger.Warn("issuance lock release failed (lock self-expires)", "tunnel", name, "err", err)
+			s.logger.Warn("could not release the tunnel's issuance lock; it expires on its own", "tunnel", name, "err", err)
 		}
-		s.logStep("issue step", "issuance-unlock", ut, "tunnel", name, "ip", ip)
+		s.logStep("certificate issuance step finished", "issuance-unlock", ut, "tunnel", name, "ip", ip)
 	}()
 	octx, ocancel := context.WithCancelCause(ctx)
 	defer ocancel(nil)
@@ -312,7 +312,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		defer report.Recover(hbCtx, s.logger, "issuance heartbeat", func() { ocancel(errIssuanceHeartbeatPanicked) })
 		s.issuanceHeartbeat(hbCtx, name, orderID)
 	}()
-	t = s.logStep("issue step", "issuance-lock", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "issuance-lock", t, "tunnel", name, "ip", ip)
 
 	// Rotate the identity cert (CN = the server-assigned name; CSR subject ignored).
 	identityPEM, err := s.cfg.CA.SignIdentity(req.IdentityCSR, name)
@@ -320,7 +320,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		s.logSignError(name, ip, err)
 		return Result{}, signError(err)
 	}
-	t = s.logStep("issue step", "sign", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "sign", t, "tunnel", name, "ip", ip)
 
 	// Public cert: Obtain on the FIRST issuance for this name (full spillover), Renew afterwards
 	// (LE-first opportunistic migration).
@@ -336,7 +336,7 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	}
 	if err != nil {
 		if errors.Is(context.Cause(octx), errIssuanceHeartbeatPanicked) {
-			s.logger.Warn("issuance stopped: its lock heartbeat panicked", "tunnel", name, "ip", ip)
+			s.logger.Warn("stopped a certificate issuance because the task keeping its lock alive crashed", "tunnel", name, "ip", ip)
 			return Result{}, &Error{Reason: "internal", Retryable: true}
 		}
 		s.rec.Reject("acme-failed", name, ip)
@@ -348,21 +348,21 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if renewal {
 		s.rec.ACMERenew(info.CA, "ok")
 	}
-	t = s.logStep("issue step", "acme", t, "tunnel", name, "ip", ip, "ca", info.CA)
+	t = s.logStep("certificate issuance step finished", "acme", t, "tunnel", name, "ip", ip, "ca", info.CA)
 
 	bctx, bcancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer bcancel()
 	// Count this SUCCESSFUL issuance.
 	if err := s.cfg.Limiter.IssuanceRecord(bctx, name); err != nil {
 		// Non-fatal: the cert is issued; the counter is best-effort here — but never silent.
-		s.logger.Warn("issuance counter record failed", "tunnel", name, "err", err)
+		s.logger.Warn("could not count the issued certificate against the tunnel's weekly limit, so the tunnel may get one more certificate this week", "tunnel", name, "err", err)
 	}
-	t = s.logStep("issue step", "issuance-record", t, "tunnel", name, "ip", ip)
+	t = s.logStep("certificate issuance step finished", "issuance-record", t, "tunnel", name, "ip", ip)
 	if errors.Is(ctx.Err(), context.Canceled) {
-		s.logger.Info("issued certificate not recorded (requester gone)", "tunnel", name, "ip", ip, "ca", info.CA)
+		s.logger.Info("a certificate was issued but not recorded because the phone stopped waiting for it", "tunnel", name, "ip", ip, "ca", info.CA)
 	} else {
 		s.recordCert(ctx, name, cur, req, info, att.Device)
-		s.logStep("issue step", "registry-write", t, "tunnel", name, "ip", ip)
+		s.logStep("certificate issuance step finished", "registry-write", t, "tunnel", name, "ip", ip)
 	}
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
@@ -380,7 +380,7 @@ func (s *Service) attestAndBind(ctx context.Context, ip, name string, req Reques
 	if !s.cfg.AttestOptional {
 		res, err := s.cfg.Verifier.Verify(req.AttestChain, req.Nonce, s.now())
 		if err != nil {
-			s.logger.Debug("attestation rejected", "tunnel", name, "ip", ip, "reason", attestReason(err), "err", err)
+			s.logger.Debug("refused a device attestation", "tunnel", name, "ip", ip, "reason", attestReason(err), "err", err)
 			s.rec.AttestVerify(attestReason(err))
 			s.recordRejection(ctx, ip, name, attestReason(err), req)
 			return attest.Result{}, &Error{Reason: "unauthorized"}
@@ -412,7 +412,7 @@ func (s *Service) logSignError(name, ip string, err error) {
 	if errors.Is(err, ca.ErrUnsupportedKeyType) {
 		return
 	}
-	s.logger.Error("identity certificate signing failed", "tunnel", name, "ip", ip, "err", err)
+	s.logger.Error("could not sign the phone's identity certificate; the request is refused and the phone can retry", "tunnel", name, "ip", ip, "err", err)
 }
 
 // csrMatchesTunnel reports whether csr requests EXACTLY <name>.<tunnelDomain> and NOTHING else. lego
@@ -463,34 +463,34 @@ func (s *Service) claimCandidate(ctx context.Context, cand string, rec store.Nam
 	locked, err := s.rdb.SetNX(cctx, claimLockKey(cand), 1, s.cfg.ClaimSettle).Result()
 	if err != nil {
 		if ctx.Err() == nil {
-			s.logger.Warn("name claim lock failed (trying another name)", "name", cand, "err", err)
+			s.logger.Warn("could not lock a candidate name; the next candidate is tried if attempts remain", "name", cand, "err", err)
 		}
 		return false, fmt.Errorf("enroll: claim lock %q: %w", cand, err)
 	}
 	if !locked {
 		return false, nil
 	}
-	t = s.logStep("enroll step", "claim-lock", t, "name", cand)
+	t = s.logStep("enrollment step finished", "claim-lock", t, "name", cand)
 	// GET: if it already exists, draw a new name.
 	if _, err := s.cfg.Names.GetName(cctx, cand); err == nil {
 		return false, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		if ctx.Err() == nil {
-			s.logger.Warn("name claim read failed (trying another name)", "name", cand, "err", err)
+			s.logger.Warn("could not check whether a candidate name is free; the next candidate is tried if attempts remain", "name", cand, "err", err)
 		}
 		return false, fmt.Errorf("enroll: claim read %q: %w", cand, err) // transient — try a different name
 	}
-	t = s.logStep("enroll step", "claim-get", t, "name", cand)
+	t = s.logStep("enrollment step finished", "claim-get", t, "name", cand)
 
 	rec.Schema, rec.EnrolledAt, rec.LastRenewedAt = 1, s.now().UTC(), s.now().UTC()
 	if err := s.cfg.Names.PutName(cctx, cand, rec); err != nil {
 		// Timeout/error: abandon this name PERMANENTLY (a retried PUT would be a zombie write).
 		if ctx.Err() == nil {
-			s.logger.Warn("name claim write failed (name abandoned)", "name", cand, "err", err)
+			s.logger.Warn("could not save the claimed name, so it is abandoned", "name", cand, "err", err)
 		}
 		return false, fmt.Errorf("enroll: claim write %q: %w", cand, err)
 	}
-	s.logStep("enroll step", "claim-put", t, "name", cand)
+	s.logStep("enrollment step finished", "claim-put", t, "name", cand)
 	return true, nil
 }
 
@@ -506,7 +506,7 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	// already read this call) so the enrolled_at is PRESERVED, never zeroed.
 	rec, err := s.cfg.Names.GetName(ctx, name)
 	if err != nil {
-		s.logger.Warn("name record re-read failed (using the record read earlier)", "tunnel", name, "err", err)
+		s.logger.Warn("could not re-read the tunnel's record, so the copy read earlier is used", "tunnel", name, "err", err)
 		rec = cur
 	}
 	rec.Schema = 1
@@ -517,7 +517,7 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	if req.IdentityCSR != nil {
 		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
 		if err != nil {
-			s.logger.Warn("identity key fingerprint failed (recorded empty)", "tunnel", name, "err", err)
+			s.logger.Warn("could not compute the identity key's fingerprint, so it is recorded empty", "tunnel", name, "err", err)
 		}
 		rec.IdentityKeyFP = fp
 	}
@@ -526,7 +526,7 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	}
 	rec.SetCert(info)
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
-		s.logger.Warn("registry cert record write failed", "tunnel", name, "err", err)
+		s.logger.Warn("could not save the new certificate in the tunnel's record; the phone still gets the certificate", "tunnel", name, "err", err)
 	}
 }
 
@@ -536,7 +536,7 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 	s.rec.Reject(reason, name, ip)
 	pkg, digest, err := claimedIdentity(req.AttestChain)
 	if err != nil {
-		s.logger.Debug("rejected-enrollment claimed identity unparseable (recorded empty)", "reason", reason, "src_ip", ip, "err", err)
+		s.logger.Debug("could not read the identity a refused enrollment or certificate request claimed, so it is recorded empty", "reason", reason, "src_ip", ip, "err", err)
 	}
 	ev := store.RejectedEnrollment{
 		TS:              s.now().UTC(),
@@ -551,7 +551,7 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 		ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := s.cfg.Evidence.PutRejectedEnrollment(ectx, ev); err != nil {
-			s.logger.Warn("rejected-enrollment evidence write failed", "reason", reason, "src_ip", ip, "err", err)
+			s.logger.Warn("could not save the evidence of a refused enrollment or certificate request, so the evidence is lost", "reason", reason, "src_ip", ip, "err", err)
 		}
 	}
 }
@@ -559,12 +559,12 @@ func (s *Service) recordRejection(ctx context.Context, ip, name, reason string, 
 func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		s.logger.Debug("unparseable peer address (refused)", "peer", ip, "err", err)
+		s.logger.Debug("refused an enrollment whose source address could not be read", "peer", ip, "err", err)
 		return &Error{Reason: "bad_source_ip"}
 	}
 	okMin, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
 	if err != nil {
-		s.logger.Debug("enroll rate check failed (allowing)", "window", "enroll-min", "ip", ip, "err", err)
+		s.logger.Debug("could not check the enrollment rate for this address, so the enrollment is allowed", "window", "enroll-min", "ip", ip, "err", err)
 	}
 	if err == nil && !okMin {
 		s.rec.Reject("enroll-limit", "", ip)
@@ -572,7 +572,7 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 	}
 	okHour, ra, err := s.cfg.Limiter.Allow(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err != nil {
-		s.logger.Debug("enroll rate check failed (allowing)", "window", "enroll-hour", "ip", ip, "err", err)
+		s.logger.Debug("could not check the enrollment rate for this address, so the enrollment is allowed", "window", "enroll-hour", "ip", ip, "err", err)
 	}
 	if err == nil && !okHour {
 		s.rec.Reject("enroll-limit", "", ip)
@@ -588,12 +588,12 @@ func (s *Service) enrollLimit(ctx context.Context, ip string) *Error {
 func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		s.logger.Debug("unparseable peer address (refused)", "peer", ip, "err", err)
+		s.logger.Debug("refused an enrollment whose source address could not be read", "peer", ip, "err", err)
 		return &Error{Reason: "bad_source_ip"}
 	}
 	overMin, ra, err := s.cfg.Limiter.Over(ctx, "enroll-min", addr, s.cfg.EnrollMinute, time.Minute)
 	if err != nil {
-		s.logger.Debug("enroll rate pre-check failed (allowing)", "window", "enroll-min", "ip", ip, "err", err)
+		s.logger.Debug("could not pre-check the enrollment rate for this address, so the request is allowed", "window", "enroll-min", "ip", ip, "err", err)
 	}
 	if err == nil && overMin {
 		s.rec.Reject("enroll-limit", "", ip)
@@ -601,7 +601,7 @@ func (s *Service) enrollLimitCheck(ctx context.Context, ip string) *Error {
 	}
 	overHour, ra, err := s.cfg.Limiter.Over(ctx, "enroll-hour", addr, s.cfg.EnrollHour, time.Hour)
 	if err != nil {
-		s.logger.Debug("enroll rate pre-check failed (allowing)", "window", "enroll-hour", "ip", ip, "err", err)
+		s.logger.Debug("could not pre-check the enrollment rate for this address, so the request is allowed", "window", "enroll-hour", "ip", ip, "err", err)
 	}
 	if err == nil && overHour {
 		s.rec.Reject("enroll-limit", "", ip)

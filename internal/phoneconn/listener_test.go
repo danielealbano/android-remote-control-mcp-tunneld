@@ -773,7 +773,7 @@ func TestServeControl_BindFailureLogging(t *testing.T) {
 			if rec.code() != http.StatusServiceUnavailable {
 				t.Fatalf("code = %d, want 503", rec.code())
 			}
-			if logged := strings.Contains(buf.String(), `msg="phone route bind failed"`); logged != tc.wantLog {
+			if logged := strings.Contains(buf.String(), `msg="could not register the phone's route; the phone is told to retry"`); logged != tc.wantLog {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
 			}
 		})

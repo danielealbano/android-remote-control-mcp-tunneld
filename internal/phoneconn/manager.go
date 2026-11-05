@@ -192,7 +192,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
 		defer cancel()
 		if err := m.router.Unbind(tctx, c.name, c.connID); err != nil { // owner-conditional
-			m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)
+			m.logger.Warn("could not remove the phone's route; it expires on its own", "tunnel", c.name, "err", err)
 		}
 		m.writeEvent(tctx, c, "end", c.closeReason())
 		m.rec.PhoneConnClose(c.closeReason())
@@ -212,7 +212,7 @@ func (m *Manager) abandon(ctx context.Context, c *conn, opened bool) {
 	tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownTimeout)
 	defer cancel()
 	if err := m.router.Unbind(tctx, c.name, c.connID); err != nil {
-		m.logger.Warn("route unbind failed (route expires by TTL)", "tunnel", c.name, "err", err)
+		m.logger.Warn("could not remove the phone's route; it expires on its own", "tunnel", c.name, "err", err)
 	}
 	if opened {
 		m.rec.PhoneConnClose(store.CloseError)
@@ -240,7 +240,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 				// partition to Valkey only) lets tunnel:{name} TTL-expire — public clients then get
 				// no-route while the phone still believes it is connected. Surface it, don't swallow it.
 				if ctx.Err() == nil {
-					m.logger.Warn("route heartbeat failed (route expires by TTL if this persists)",
+					m.logger.Warn("could not refresh the phone's route; it expires if this keeps failing",
 						"tunnel", c.name, "conn", c.connID, "err", err)
 				}
 				continue
@@ -256,7 +256,7 @@ func (m *Manager) heartbeatLoop(ctx context.Context, c *conn) {
 			case router.HeartbeatMissing:
 				// Best-effort self-heal: a transient error/loss here is retried on the next heartbeat tick.
 				if _, err := m.router.BindRouteIfAbsentOrOwner(ctx, c.name, m.nodeID, c.connID); err != nil && ctx.Err() == nil {
-					m.logger.Warn("route self-heal failed (retried on the next heartbeat)",
+					m.logger.Warn("could not restore the phone's missing route; retrying on the next refresh",
 						"tunnel", c.name, "conn", c.connID, "err", err)
 				}
 			}
@@ -326,7 +326,7 @@ func (m *Manager) sendMove(c *conn) {
 	}
 	if err != nil {
 		if !c.moveDue.Swap(true) {
-			m.logger.Warn("MOVE frame failed (retried while the drain lasts)", "tunnel", c.name, "conn", c.connID, "err", err)
+			m.logger.Warn("could not build the message telling the phone to move to another node; retrying while this node shuts down", "tunnel", c.name, "conn", c.connID, "err", err)
 		}
 		return
 	}
@@ -335,7 +335,7 @@ func (m *Manager) sendMove(c *conn) {
 		c.moveDue.Store(false)
 	default:
 		if !c.moveDue.Swap(true) {
-			m.logger.Warn("MOVE not queued: the send buffer is full (retried while the drain lasts)", "tunnel", c.name, "conn", c.connID)
+			m.logger.Warn("could not queue the message telling the phone to move: its send buffer is full; retrying while this node shuts down", "tunnel", c.name, "conn", c.connID)
 		}
 	}
 }
@@ -443,7 +443,7 @@ func (m *Manager) SendRenewNudge(name, nonceHex, ariWindow string) bool {
 	}
 	frame, err := wire.EncodeControl(wire.CtrlRenewNudge, wire.RenewNudgePayload{Nonce: nonceHex, ARIWindow: ariWindow})
 	if err != nil {
-		m.logger.Warn("renew nudge encode failed", "tunnel", name, "err", err)
+		m.logger.Warn("could not build the message asking the phone to renew its certificate, so it is not sent", "tunnel", name, "err", err)
 		return false
 	}
 	select {
@@ -472,7 +472,7 @@ func (m *Manager) writeEvent(ctx context.Context, c *conn, event, reason string)
 		ev.CloseReason = reason
 	}
 	if err := m.logs.PutConnLog(ctx, ev); err != nil {
-		m.logger.Warn("phone conn-log write failed", "tunnel", c.name, "event", event, "err", err)
+		m.logger.Warn("could not write the phone's connection log entry, so the entry is lost", "tunnel", c.name, "event", event, "err", err)
 	}
 }
 

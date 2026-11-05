@@ -63,7 +63,7 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 		lineNo := i + 1
 		kind, value, perr := ParseLine(raw)
 		if perr != nil {
-			log.Warn("skipping malformed ban line", "file", path, "line", lineNo, "err", perr)
+			log.Warn("skipped a ban file line that could not be understood", "file", path, "line", lineNo, "err", perr)
 			continue
 		}
 		if kind == "" {
@@ -74,7 +74,7 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 		case "ip":
 			addr, e := netip.ParseAddr(value)
 			if e != nil {
-				log.Warn("skipping invalid ip", "file", path, "line", lineNo, "value", value)
+				log.Warn("skipped an invalid IP address in a ban file", "file", path, "line", lineNo, "value", value)
 				continue
 			}
 			addr = addr.Unmap() // 4-in-6 (::ffff:a.b.c.d) → plain IPv4 so it matches unmapped lookups
@@ -83,12 +83,12 @@ func parseFile(path string, log *slog.Logger) (parsed, error) {
 		case "cidr":
 			pfx, e := netip.ParsePrefix(value)
 			if e != nil {
-				log.Warn("skipping invalid cidr", "file", path, "line", lineNo, "value", value)
+				log.Warn("skipped an invalid network range in a ban file", "file", path, "line", lineNo, "value", value)
 				continue
 			}
 			if a := pfx.Addr(); a.Is4In6() {
 				if pfx.Bits() < 96 {
-					log.Warn("skipping 4-in-6 cidr with prefix < /96 (not mappable to IPv4)", "file", path, "line", lineNo, "value", value)
+					log.Warn("skipped an IPv4-mapped IPv6 range shorter than /96 in a ban file: it cannot be mapped to IPv4", "file", path, "line", lineNo, "value", value)
 					continue
 				}
 				pfx = netip.PrefixFrom(a.Unmap(), pfx.Bits()-96)

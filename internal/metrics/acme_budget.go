@@ -68,7 +68,7 @@ func (s *acmeBudgetSource) warn(err error) {
 		s.suppressed++
 		return
 	}
-	s.logger.Warn("acme budget metrics unavailable for this scrape", "err", err, "suppressed_since_last_report", s.suppressed)
+	s.logger.Warn("issuance budget metrics are missing from this scrape", "err", err, "suppressed_since_last_report", s.suppressed)
 	s.warned, s.suppressed = time.Now(), 0
 }
 
@@ -78,7 +78,7 @@ func (s *acmeBudgetSource) reportSuppressed() {
 	if s.suppressed == 0 || time.Since(s.warned) < acmeBudgetWarnEvery {
 		return
 	}
-	s.logger.Warn("acme budget metrics: scrape errors since the last report", "count", s.suppressed)
+	s.logger.Warn("issuance budget metrics were missing from more scrapes since the last report", "count", s.suppressed)
 	s.warned, s.suppressed = time.Now(), 0
 }
 

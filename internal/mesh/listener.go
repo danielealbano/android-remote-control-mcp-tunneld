@@ -111,7 +111,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 	}
 	var req ControlRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
-		h.logger.Warn("mesh control request malformed", "err", err)
+		h.logger.Warn("refused a malformed request from another node", "err", err)
 		refuse(w, r, "bad control request", http.StatusBadRequest)
 		return
 	}
@@ -155,12 +155,12 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request) {
 		resp.Applied = h.control.FreeSlot(r.Context(), req.Tunnel)
 	}
 	if err != nil {
-		h.logger.Warn("mesh control op failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
+		h.logger.Warn("a request from another node failed, so that node gets an error answer", "op", req.Op, "tunnel", req.Tunnel, "err", err)
 		http.Error(w, req.Op+" failed", http.StatusBadGateway)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		h.logger.Debug("mesh control response write failed", "op", req.Op, "tunnel", req.Tunnel, "err", err)
+		h.logger.Debug("could not answer a request from another node, so that node may treat it as failed although it already ran here", "op", req.Op, "tunnel", req.Tunnel, "err", err)
 	}
 }

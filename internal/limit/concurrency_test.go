@@ -246,7 +246,7 @@ func TestLimiter_AcquireStream_RollbackFailureLogged(t *testing.T) {
 	if ok, err := l.AcquireStream(ctxT(t), name, "c", 2); err != nil || ok {
 		t.Fatalf("acquire over the cap with a failing rollback = (%v, %v), want a plain refusal", ok, err)
 	}
-	if !strings.Contains(buf.String(), `msg="stream-cap rollback failed (the member expires with its score)" tunnel=tunnel-rf`) {
+	if !strings.Contains(buf.String(), `msg="could not undo an open-connection slot; it expires on its own" tunnel=tunnel-rf`) {
 		t.Fatalf("the failed rollback must be logged; log = %q", buf.String())
 	}
 	if score, err := mr.ZScore(concKey(name), "c"); err != nil || score <= 0 {

@@ -85,7 +85,7 @@ func (r *RootSet) Refresh(ctx context.Context, every time.Duration) {
 			if pool, err := r.fetch(ctx); err == nil {
 				r.pool.Store(pool)
 			} else {
-				r.logger.Warn("attestation root refresh failed; keeping last-known-good pool (will retry)", "url", r.url, "err", err)
+				r.logger.Warn("could not refresh Google's attestation root certificates; keeping the ones fetched before, if any (without them every enrollment and certificate request is refused), and retrying", "url", r.url, "err", err)
 			}
 		}
 	}
@@ -176,7 +176,7 @@ func (s *StatusList) Refresh(ctx context.Context, every time.Duration) {
 			if snap, err := s.fetch(ctx); err == nil {
 				s.snap.Store(snap)
 			} else {
-				s.logger.Warn("attestation status refresh failed; keeping last-known-good snapshot (staleness gate will refuse once too old)", "url", s.url, "err", err)
+				s.logger.Warn("could not refresh the attestation revocation list; keeping the copy fetched before, if any, and retrying; enrollments and certificate requests are refused while there is no copy or it is too old", "url", s.url, "err", err)
 			}
 		}
 	}

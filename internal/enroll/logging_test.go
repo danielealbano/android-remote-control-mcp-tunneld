@@ -81,7 +81,7 @@ func TestClaimName_ReadFailuresAreLoggedAndJoined(t *testing.T) {
 	if !errors.Is(err, errClaimLost) || !errors.Is(err, errInjected) {
 		t.Fatalf("claimName = %v, want errClaimLost joined with the last read error", err)
 	}
-	if !strings.Contains(buf.String(), `msg="name claim read failed (trying another name)"`) {
+	if !strings.Contains(buf.String(), `msg="could not check whether a candidate name is free; the next candidate is tried if attempts remain"`) {
 		t.Fatalf("each failed candidate read must be logged; log = %q", buf.String())
 	}
 }
@@ -93,7 +93,7 @@ func TestEnroll_ClaimFailureLoggedAsUnavailable(t *testing.T) {
 	if ee == nil || ee.Reason != "name_unavailable" || !ee.Retryable {
 		t.Fatalf("Enroll = %+v, want a retryable name_unavailable", ee)
 	}
-	if !strings.Contains(buf.String(), `msg="enrollment name claim failed" ip=1.2.3.4`) {
+	if !strings.Contains(buf.String(), `msg="could not claim a name for the new phone; the request is refused and the phone can retry" ip=1.2.3.4`) {
 		t.Fatalf("the failed claim must be logged; log = %q", buf.String())
 	}
 }
@@ -106,7 +106,7 @@ func TestClaimName_WriteFailureLoggedAndRedrawn(t *testing.T) {
 	if err != nil || name == "" {
 		t.Fatalf("claimName = (%q, %v), want a claim on the next candidate", name, err)
 	}
-	if !strings.Contains(buf.String(), `msg="name claim write failed (name abandoned)"`) {
+	if !strings.Contains(buf.String(), `msg="could not save the claimed name, so it is abandoned"`) {
 		t.Fatalf("the abandoned candidate must be logged; log = %q", buf.String())
 	}
 }
@@ -123,7 +123,7 @@ func TestClaimName_WriteFailuresAreJoined(t *testing.T) {
 	if !errors.Is(err, errClaimLost) || !errors.Is(err, errInjected) || !strings.Contains(err.Error(), "enroll: claim write") {
 		t.Fatalf("claimName = %v, want errClaimLost joined with the wrapped write error", err)
 	}
-	if strings.Count(buf.String(), `msg="name claim write failed (name abandoned)"`) != 8 {
+	if strings.Count(buf.String(), `msg="could not save the claimed name, so it is abandoned"`) != 8 {
 		t.Fatalf("every abandoned candidate must be logged; log = %q", buf.String())
 	}
 }
@@ -142,7 +142,7 @@ func TestService_LogSignError(t *testing.T) {
 			logger, buf := captureLogger()
 			svc := &Service{logger: logger}
 			svc.logSignError("n", "1.2.3.4", tc.err)
-			logged := strings.Contains(buf.String(), `level=ERROR msg="identity certificate signing failed" tunnel=n ip=1.2.3.4`)
+			logged := strings.Contains(buf.String(), `level=ERROR msg="could not sign the phone's identity certificate; the request is refused and the phone can retry" tunnel=n ip=1.2.3.4`)
 			if logged != tc.wantLog {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
 			}
@@ -158,10 +158,10 @@ func TestIssue_FailuresAreLogged(t *testing.T) {
 		wantReason string
 		want       string
 	}{
-		{name: "nonce consume fails", failCmd: "del", wantReason: "internal", want: `msg="issuance nonce consume failed"`},
-		{name: "name record read fails", failGetAt: 1, wantReason: "internal", want: `msg="issuance name record read failed"`},
-		{name: "issuance lock acquire fails", failCmd: "set", wantReason: "internal", want: `msg="issuance lock or cap check failed"`},
-		{name: "record re-read fails", failGetAt: 2, want: `msg="name record re-read failed (using the record read earlier)"`},
+		{name: "nonce consume fails", failCmd: "del", wantReason: "internal", want: `msg="could not check the certificate request's one-time code; the request is refused and the phone can retry"`},
+		{name: "name record read fails", failGetAt: 1, wantReason: "internal", want: `msg="could not read the tunnel's record before issuing its certificate; the request is refused and the phone can retry"`},
+		{name: "issuance lock acquire fails", failCmd: "set", wantReason: "internal", want: `msg="could not take the tunnel's issuance lock or check its issuance limit; the request is refused and the phone can retry"`},
+		{name: "record re-read fails", failGetAt: 2, want: `msg="could not re-read the tunnel's record, so the copy read earlier is used"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,8 +229,10 @@ func TestClaimName_CancelledCallerIsSilent(t *testing.T) {
 			if _, err := svc.claimName(ctx, store.NameRecord{}); err == nil {
 				t.Fatal("a cancelled caller must not claim a name")
 			}
-			if strings.Contains(buf.String(), "name claim") {
-				t.Fatalf("a claim failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
+			for _, msg := range []string{"could not lock a candidate name", "could not check whether a candidate name is free", "could not save the claimed name"} {
+				if strings.Contains(buf.String(), msg) {
+					t.Fatalf("a claim failure caused by the caller's cancellation must not be logged; log = %q", buf.String())
+				}
 			}
 			if names.NameCount() != 0 {
 				t.Fatal("no name may be written for a cancelled caller")
@@ -343,7 +345,7 @@ func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 				return &faultyNames{Store: st, getErr: func(int64) error { return errInjected }}
 			},
 			wantEnrolled: earlier,
-			wantLog:      `msg="name record re-read failed (using the record read earlier)" tunnel=n`,
+			wantLog:      `msg="could not re-read the tunnel's record, so the copy read earlier is used" tunnel=n`,
 		},
 	}
 	for _, tc := range tests {
@@ -402,7 +404,7 @@ func TestRecordRejection_CallerGoneStillRecordsEvidence(t *testing.T) {
 	if len(st.Rejected) != 1 || st.Rejected[0].Reason != "attest-signer" {
 		t.Fatalf("evidence = %+v, want one attest-signer record although the caller had gone", st.Rejected)
 	}
-	if strings.Contains(buf.String(), "rejected-enrollment evidence write failed") {
+	if strings.Contains(buf.String(), "could not save the evidence of a refused enrollment or certificate request, so the evidence is lost") {
 		t.Fatalf("the evidence write must not fail; log = %q", buf.String())
 	}
 }
@@ -425,7 +427,7 @@ func TestRecordRejection_LogsUnparseableClaimedIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.recordRejection(context.Background(), "1.2.3.4", "", "attest-untrusted", Request{AttestChain: []*x509.Certificate{leaf}})
-	if !strings.Contains(buf.String(), `msg="rejected-enrollment claimed identity unparseable (recorded empty)" reason=attest-untrusted src_ip=1.2.3.4`) {
+	if !strings.Contains(buf.String(), `msg="could not read the identity a refused enrollment or certificate request claimed, so it is recorded empty" reason=attest-untrusted src_ip=1.2.3.4`) {
 		t.Fatalf("the unparseable KeyDescription must be logged; log = %q", buf.String())
 	}
 	if len(st.Rejected) != 1 || st.Rejected[0].ClaimedPackage != "" || st.Rejected[0].SignerDigestHex != "" {
@@ -462,11 +464,11 @@ func TestService_StepTimingsLoggedAtDebug(t *testing.T) {
 	var want []string
 	for _, s := range []string{"limit-check", "issue-nonce", "limit", "nonce", "attest", "claim-lock", "claim-get",
 		"claim-put", "claim", "sign"} {
-		want = append(want, `level=DEBUG msg="enroll step" step=`+s+" took=")
+		want = append(want, `level=DEBUG msg="enrollment step finished" step=`+s+" took=")
 	}
 	for _, s := range []string{"nonce", "attest", "registry-read", "issuance-lock", "sign", "acme", "issuance-record",
 		"registry-write", "issuance-unlock"} {
-		want = append(want, `level=DEBUG msg="issue step" step=`+s+" took=")
+		want = append(want, `level=DEBUG msg="certificate issuance step finished" step=`+s+" took=")
 	}
 	log := buf.String()
 	at := 0
@@ -492,7 +494,7 @@ func TestClaimName_LockFailuresAreLoggedAndJoined(t *testing.T) {
 	if !errors.Is(err, errClaimLost) || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("claimName = %v, want errClaimLost joined with the lock error", err)
 	}
-	if !strings.Contains(buf.String(), `msg="name claim lock failed (trying another name)"`) {
+	if !strings.Contains(buf.String(), `msg="could not lock a candidate name; the next candidate is tried if attempts remain"`) {
 		t.Fatalf("each failed lock must be logged; log = %q", buf.String())
 	}
 	if st.NameCount() != 0 {

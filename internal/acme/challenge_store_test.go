@@ -183,7 +183,7 @@ func TestChallengeStore_HTTPPutGetDelete(t *testing.T) {
 func TestChallengeStore_ErrorsWrapChallengeStore(t *testing.T) {
 	t.Parallel()
 	s, mr, _ := newTestChallengeStore(t)
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	ctx := context.Background()
 	_, certOK, certErr := s.TLSALPNCertificate(ctx, "a.example.test")
 	_, httpFound, httpErr := s.HTTPKeyAuth(ctx, "a.example.test", "tok")
@@ -300,12 +300,12 @@ func TestChallengeStore_LockSelf(t *testing.T) {
 
 	unreachableUnlock, ok, err := s.LockSelf(context.Background(), "control.example.test")
 	if err != nil || !ok {
-		t.Fatalf("lock before closing Valkey: ok=%v err=%v", ok, err)
+		t.Fatalf("lock before Valkey fails: ok=%v err=%v", ok, err)
 	}
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	start := time.Now()
 	if err := unreachableUnlock(); err == nil {
-		t.Fatal("unlock against an unreachable Valkey must fail")
+		t.Fatal("unlock against a failing Valkey must fail")
 	}
 	if elapsed := time.Since(start); elapsed > selfUnlockTimeout+time.Second {
 		t.Fatalf("unlock took %s, want at most %s", elapsed, selfUnlockTimeout+time.Second)

@@ -195,7 +195,7 @@ func TestConnRateAllow(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("allow = %v, want %v", got, tc.want)
 			}
-			if logged := strings.Contains(buf.String(), "conn-rate check failed"); logged != (tc.err != nil) {
+			if logged := strings.Contains(buf.String(), "could not check the connection rate on the plain HTTP port"); logged != (tc.err != nil) {
 				t.Fatalf("limiter error logged = %v, want %v; log = %q", logged, tc.err != nil, buf.String())
 			}
 			if f.scope != "conn-rate" || f.limit != 42 || f.window != time.Second {
@@ -259,7 +259,7 @@ func TestGuardListener_AcceptErrorBackoff(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Close during the backoff must end the accept loop, Wait took %s", elapsed)
 	}
-	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "acme-http accept failed") {
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "could not accept a new connection on the plain HTTP port") {
 		t.Fatalf("an unexpected accept error must be logged at Warn; log = %q", buf.String())
 	}
 }

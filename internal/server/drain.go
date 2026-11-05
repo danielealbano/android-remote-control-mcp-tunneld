@@ -53,14 +53,18 @@ type drainer struct {
 
 func (d *drainer) run(ctx context.Context) {
 	d.life.phase.Store(phaseStopping)
-	d.logger.Info("stopping: the health check answers 503", "predrain_wait", d.predrain)
+	d.logger.Info("stopping: the health check now reports this node as unavailable", "predrain_wait", d.predrain)
 	if !waitCtx(ctx, d.predrain) {
 		return
 	}
 	addrs := d.moveTargets(ctx)
 	d.life.phase.Store(phaseDraining)
 	d.phones.StartDrain(addrs)
-	d.logger.Info("draining: the phones are told to move", "targets", addrs, "phones", d.phones.LiveConns(), "grace", d.grace)
+	if len(addrs) == 0 {
+		d.logger.Info("draining: no other node is known, so the phones are not told where to move", "targets", addrs, "phones", d.phones.LiveConns(), "grace", d.grace)
+	} else {
+		d.logger.Info("draining: telling the phones to move to other nodes", "targets", addrs, "phones", d.phones.LiveConns(), "grace", d.grace)
+	}
 	deadline := time.NewTimer(d.grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(d.poll)
@@ -74,7 +78,7 @@ func (d *drainer) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
-			d.logger.Info("drain grace expired", "phones", d.phones.LiveConns(), "public_connections", d.edge.InFlightConns(),
+			d.logger.Info("the drain time ran out; stopping and closing what remains", "phones", d.phones.LiveConns(), "public_connections", d.edge.InFlightConns(),
 				"issuances", d.issues.InFlightIssues())
 			return
 		case <-tick.C:
@@ -88,7 +92,7 @@ func (d *drainer) moveTargets(ctx context.Context) []string {
 	defer cancel()
 	nodes, err := d.nodes.LiveNodes(lctx)
 	if err != nil {
-		d.logger.Warn("drain: node listing failed (no MOVE is sent; the phones reconnect when the drain ends)", "err", err)
+		d.logger.Warn("could not list the other nodes, so the phones are not told where to move; they reconnect when this node stops", "err", err)
 		return nil
 	}
 	var out []string

@@ -213,10 +213,10 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 	abandoned := false
 	logAbandoned := func(r result) {
 		if r.err != nil {
-			l.cfg.Logger.Warn("abandoned ACME order failed", "ca", l.cfg.CAID, "name", name, "err", r.err)
+			l.cfg.Logger.Warn("an order that was given up on failed later; nothing waits for it any more", "ca", l.cfg.CAID, "name", name, "err", r.err)
 			return
 		}
-		l.cfg.Logger.Warn("abandoned ACME order issued a certificate that was discarded", "ca", l.cfg.CAID, "name", name, "domains", r.res.Domains)
+		l.cfg.Logger.Warn("an order that was given up on still produced a certificate, which was thrown away", "ca", l.cfg.CAID, "name", name, "domains", r.res.Domains)
 	}
 	go func() {
 		defer report.Recover(ctx, l.cfg.Logger, "ACME order", func() {
@@ -270,7 +270,7 @@ func (l *legoClient) obtain(ctx context.Context, csr *x509.CertificateRequest, n
 		}
 		pemChain := adjacentChain(r.res.Certificate)
 		if issue := chainIssue(r.res.Certificate); issue != nil {
-			l.cfg.Logger.Warn("acme issued an incomplete chain", "ca", l.cfg.CAID, "name", name, "chain_certs", chainCertCount(pemChain), "err", issue)
+			l.cfg.Logger.Warn("the certificate authority returned a certificate chain that is incomplete or does not verify; it is used as is", "ca", l.cfg.CAID, "name", name, "chain_certs", chainCertCount(pemChain), "err", issue)
 		}
 		return pemChain, info, nil
 	}

@@ -111,8 +111,8 @@ func TestACMEBudgetCollector_ErrorKeepsScrape(t *testing.T) {
 		m.budgets.warned = m.budgets.warned.Add(-2 * acmeBudgetWarnEvery)
 		m.budgets.mu.Unlock()
 	}
-	const unavailable = `msg="acme budget metrics unavailable for this scrape"`
-	const pending = `msg="acme budget metrics: scrape errors since the last report"`
+	const unavailable = `msg="issuance budget metrics are missing from this scrape"`
+	const pending = `msg="issuance budget metrics were missing from more scrapes since the last report"`
 
 	fail.Store(true)
 	fams := gatherFamilies(t, m.Gatherer(context.Background()))
@@ -157,7 +157,7 @@ func TestACMEBudgetCollector_PanicIsContained(t *testing.T) {
 	if _, ok := fams["tunneld_acme_issue_total"]; !ok {
 		t.Fatal("a panicking budget source must keep the other families")
 	}
-	if out := logs.String(); !strings.Contains(out, "panic recovered") || !strings.Contains(out, `where="ACME budget metrics"`) {
+	if out := logs.String(); !strings.Contains(out, "recovered from a crash") || !strings.Contains(out, `where="ACME budget metrics"`) {
 		t.Fatalf("the panic must be logged; log = %q", out)
 	}
 }
@@ -215,7 +215,7 @@ func TestMetrics_Gatherer_BudgetCollectorRegistrationFailure(t *testing.T) {
 	if _, ok := fams["tunneld_acme_issue_total"]; !ok {
 		t.Fatal("a failed budget collector registration must keep the other families")
 	}
-	if n := strings.Count(logs.String(), `msg="acme budget metrics unavailable for this scrape"`); n != 1 {
+	if n := strings.Count(logs.String(), `msg="issuance budget metrics are missing from this scrape"`); n != 1 {
 		t.Fatalf("a failed budget collector registration must log one Warn; log = %q", logs.String())
 	}
 }

@@ -153,7 +153,7 @@ func (h *Handler) identity(r *http.Request) (phoneIdentity, bool) {
 	}
 	keyFP, err := ca.KeyFingerprint(leaf.PublicKey)
 	if err != nil {
-		h.mgr.logger.Warn("phone identity key fingerprint failed (logged empty)", "tunnel", cn, "err", err)
+		h.mgr.logger.Warn("could not compute the phone's identity key fingerprint, so it is logged empty", "tunnel", cn, "err", err)
 	}
 	return phoneIdentity{
 		name:  cn,
@@ -171,7 +171,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := peerIP(r)
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		h.mgr.logger.Debug("phone control unparseable peer address (refused)", "peer", ip, "err", err)
+		h.mgr.logger.Debug("refused a phone connection whose source address could not be read", "peer", ip, "err", err)
 		h.refuse(w, r, http.StatusBadRequest, map[string]any{"reason": "bad_source_ip", "retryable": false})
 		return
 	}
@@ -234,7 +234,7 @@ func (h *Handler) serveIssue(w http.ResponseWriter, r *http.Request, name string
 	}
 	deadline := time.Now().Add(h.issueDeadline)
 	if err := http.NewResponseController(w).SetReadDeadline(deadline); err != nil {
-		h.mgr.logger.Warn("issue request read deadline not set", "tunnel", name, "err", err)
+		h.mgr.logger.Warn("could not set the time limit for reading a certificate request, so it is read without that limit", "tunnel", name, "err", err)
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.issueBody))
 	if err != nil {
@@ -283,7 +283,7 @@ func (h *Handler) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		h.mgr.logger.Debug("phone control response write failed", "status", status, "err", err)
+		h.mgr.logger.Debug("could not send an answer to the phone; the phone may get an incomplete answer or none", "status", status, "err", err)
 	}
 }
 
@@ -339,7 +339,7 @@ func (h *Handler) serveControl(w http.ResponseWriter, r *http.Request, id phoneI
 	teardown, err := h.mgr.register(ctx, c)
 	if err != nil {
 		if ctx.Err() == nil {
-			h.mgr.logger.Warn("phone route bind failed", "tunnel", c.name, "conn", c.connID, "err", err)
+			h.mgr.logger.Warn("could not register the phone's route; the phone is told to retry", "tunnel", c.name, "conn", c.connID, "err", err)
 		}
 		http.Error(w, "bind failed (retry)", http.StatusServiceUnavailable)
 		return
@@ -382,7 +382,7 @@ func (h *Handler) runControl(ctx context.Context, w http.ResponseWriter, flusher
 			return
 		case frame := <-c.send:
 			if _, err := w.Write(frame); err != nil {
-				h.mgr.logger.Debug("phone control write failed", "tunnel", c.name, "conn", c.connID, "err", err)
+				h.mgr.logger.Debug("could not send a message to the phone, so its control connection is closed", "tunnel", c.name, "conn", c.connID, "err", err)
 				return
 			}
 			flusher.Flush()
@@ -398,11 +398,11 @@ func (h *Handler) runControl(ctx context.Context, w http.ResponseWriter, flusher
 			}
 			pf, err := wire.EncodeControl(wire.CtrlPing, nil) // nil payload cannot fail to marshal
 			if err != nil {
-				h.mgr.logger.Error("phone control PING encode failed", "tunnel", c.name, "conn", c.connID, "err", err)
+				h.mgr.logger.Error("could not build a keepalive message for the phone, so its control connection is closed", "tunnel", c.name, "conn", c.connID, "err", err)
 				return
 			}
 			if _, err := w.Write(pf); err != nil {
-				h.mgr.logger.Debug("phone control write failed", "tunnel", c.name, "conn", c.connID, "err", err)
+				h.mgr.logger.Debug("could not send a message to the phone, so its control connection is closed", "tunnel", c.name, "conn", c.connID, "err", err)
 				return
 			}
 			flusher.Flush()
@@ -417,16 +417,16 @@ func (h *Handler) refuseDraining(w http.ResponseWriter, name string) {
 	frame, err := h.mgr.moveFrame()
 	if err != nil {
 		if errors.Is(err, errNoMoveTarget) {
-			h.mgr.logger.Debug("phone control refused: the node is draining", "tunnel", name)
+			h.mgr.logger.Debug("refused a phone connection: this node is shutting down", "tunnel", name)
 		} else {
-			h.mgr.logger.Warn("phone control refused: the MOVE frame failed", "tunnel", name, "err", err)
+			h.mgr.logger.Warn("refused a phone connection: this node is shutting down and could not tell the phone where to move", "tunnel", name, "err", err)
 		}
 		http.Error(w, "draining", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(frame); err != nil {
-		h.mgr.logger.Debug("phone control MOVE write failed", "tunnel", name, "err", err)
+		h.mgr.logger.Debug("could not tell the phone to move to another node, so its connection is closed", "tunnel", name, "err", err)
 		return
 	}
 	if f, ok := w.(http.Flusher); ok {
@@ -441,7 +441,7 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 	for {
 		frame, err := readControlFrame(body)
 		if err != nil {
-			h.mgr.logger.Debug("phone control read ended", "tunnel", c.name, "conn", c.connID, "err", err)
+			h.mgr.logger.Debug("stopped reading from the phone's control connection, so it is closed", "tunnel", c.name, "conn", c.connID, "err", err)
 			// A wire-protocol violation (oversize frame) is distinct from a graceful EOF / transport
 			// close: attribute it to protocol-error so forensics can tell a misbehaving phone from an
 			// ordinary disconnect.
@@ -454,7 +454,7 @@ func (h *Handler) readPump(body io.Reader, c *conn) {
 		}
 		typ, _, derr := wire.DecodeControl(frame)
 		if derr != nil {
-			h.mgr.logger.Debug("phone control frame malformed", "tunnel", c.name, "conn", c.connID, "err", derr)
+			h.mgr.logger.Debug("the phone sent a malformed message, so its control connection is closed", "tunnel", c.name, "conn", c.connID, "err", derr)
 			c.close("protocol-error")
 			return
 		}

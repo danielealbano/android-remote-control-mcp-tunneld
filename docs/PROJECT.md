@@ -69,7 +69,7 @@ of the raw TCP connection.
   buckets per registered domain, account, name and request rate), so a CA is asked only when it has budget; a
   429 makes that account wait out its Retry-After cluster-wide. The phone holds the TLS private key;
   only CSRs leave it. Every successful issuance — phone cert, renewal or reserved-host cert — logs
-  `acme certificate issued` at Info with the issuing `ca`, the `name`, the `serial`, `not_after` and the
+  `certificate issued` at Info with the issuing `ca`, the `name`, the `serial`, `not_after` and the
   number of certificates in the chain (`chain_certs`).
 - **mTLS with role separation, NO public-side mutual auth.** The phone authenticates to tunneld with its
   identity cert over the outbound HTTP/2 control connection; replica↔replica mesh uses distinct
@@ -197,14 +197,16 @@ client-driven, no ranking; a malformed `cursor` or a non-positive/malformed `cou
 only), `GET /api/v1/admin/nodes` (the node registry), and the per-tunnel actions `POST /api/v1/admin/tunnels/{name}/reissue` (force a RENEW_NUDGE) and
 `POST /api/v1/admin/tunnels/{name}/terminate` (every node evicts its in-flight public splices, `close_reason=admin-terminate`, and the owner closes the phone control connection — ephemeral, the phone reconnects); reissue is routed to the owner node and terminate is sent to every node
 over the mesh `/api/v1/mesh/control` RPC (see `docs/PROTOCOL.md` §5). Cap-hit events are logged deduplicated (first hit per `(tunnel, reason)` immediately,
-then ≤1 summary/min) — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
+then ≤1 summary/min), each as a plain sentence naming the refusal and its reason; routine internet noise
+(`handshake-timeout`, `ban`, `conn-rate`, `acme-http-miss`) logs at Info, every other reason at Warn — EXCEPT `no-route`, whose tunnel value is attacker-controlled (raw SNI): it is
 metric + Debug-line only, never keying the dedup map, so it cannot flood the logs. Connection logs are
 spooled and uploaded per node (JSONL, see §5); `tunneld_connlog_dropped_total` counts every event lost to
 a full 5000-event queue, a failed local append, the 1 GiB spool cap, still being queued when
 `--shutdown-grace` expires, or arriving after shutdown. `tunneld_acme_budget_ratio{ca,account,budget}` is the
 remaining issuance budget (0–1) per CA account; `tunneld_acme_rate_limited_total{ca}` counts the CAs' 429 answers.
-At Debug level every ACME HTTP request logs `acme request` and every completed enrollment / issuance step logs
-`enroll step` / `issue step`, each with its duration, to diagnose slow enrollments (server-side processing only:
+At Debug level every ACME HTTP request logs its outcome (`the certificate authority answered a request`, `a request
+to the certificate authority failed; …` or `… was not sent; …`) and every completed enrollment / issuance step logs
+`enrollment step finished` / `certificate issuance step finished`, each with its duration, to diagnose slow enrollments (server-side processing only:
 the request-body transfer and the response write are not timed).
 Grafana provisioning (`deploy/grafana/`) ships six
 dashboards: Health (one red/green tile per check, grouped, with the failing-check count on top and two

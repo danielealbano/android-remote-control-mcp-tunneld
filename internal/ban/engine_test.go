@@ -154,7 +154,7 @@ func TestLoad_TunnelFingerprintLineSkipped(t *testing.T) {
 	if err := e.Load([]string{f}, "", nil, log); err != nil {
 		t.Fatalf("a leftover tunnel-fingerprint line must not fail the load: %v", err)
 	}
-	if !strings.Contains(buf.String(), `msg="skipping malformed ban line"`) || !strings.Contains(buf.String(), "line=1") {
+	if !strings.Contains(buf.String(), `msg="skipped a ban file line that could not be understood"`) || !strings.Contains(buf.String(), "line=1") {
 		t.Fatalf("the tunnel-fingerprint line must be warned and skipped; log = %q", buf.String())
 	}
 	if _, ok := e.MatchTunnel("abc"); !ok {
@@ -409,7 +409,7 @@ func TestParseFile_4in6ShortPrefixSkippedWithWarn(t *testing.T) {
 	if got, want := p.prefixes[0].prefix, netip.MustParsePrefix("1.2.3.0/24"); got != want {
 		t.Errorf("/120 4-in-6 must map to %v, got %v", want, got)
 	}
-	if !strings.Contains(buf.String(), "skipping 4-in-6 cidr") {
+	if !strings.Contains(buf.String(), "skipped an IPv4-mapped IPv6 range shorter than /96") {
 		t.Errorf("a warn must be logged for the skipped /64 entry; log = %q", buf.String())
 	}
 }

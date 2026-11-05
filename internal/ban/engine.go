@@ -80,13 +80,13 @@ func (e *Engine) build(files []string, csvPath string, required map[string]struc
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				if _, req := required[f]; req {
-					log.Error("required ban file vanished, keeping previous ban state", "file", f)
+					log.Error("a required ban file disappeared; keeping the previous bans", "file", f)
 					return nil, err // do NOT swap — a previously-loaded file MUST NOT silently unban
 				}
-				log.Warn("ban file absent, skipping (will load when it appears)", "file", f)
+				log.Warn("a ban file does not exist yet; it is loaded once it appears", "file", f)
 				continue
 			}
-			log.Warn("ban file read error, keeping previous ban state", "file", f, "err", err)
+			log.Warn("could not read a ban file; keeping the previous bans", "file", f, "err", err)
 			return nil, err // do NOT swap — preserve the previous snapshot
 		}
 		for _, ps := range p.prefixes {
@@ -106,7 +106,7 @@ func (e *Engine) build(files []string, csvPath string, required map[string]struc
 		switch {
 		case err == nil:
 			if skipped.Total() > 0 {
-				log.Warn("dbip csv rows skipped", "csv", csvPath, "malformed", skipped.Malformed,
+				log.Warn("skipped unreadable rows in the country database (DB-IP CSV)", "csv", csvPath, "malformed", skipped.Malformed,
 					"bad_address", skipped.BadAddress, "invalid_range", skipped.InvalidRange)
 			}
 			for cc, pfxs := range byCC {
@@ -117,14 +117,14 @@ func (e *Engine) build(files []string, csvPath string, required map[string]struc
 			}
 		case csvPath == "" || errors.Is(err, fs.ErrNotExist):
 			if _, req := required[csvPath]; req {
-				log.Error("required ban CSV vanished, keeping previous ban state", "csv", csvPath)
+				log.Error("the required country database (DB-IP CSV) disappeared; keeping the previous bans", "csv", csvPath)
 				return nil, err // do NOT swap — a previously-loaded CSV MUST NOT silently drop country bans
 			}
 			// First-deploy / geo-off: the CSV does not exist yet — skip country entries, keep ip/cidr.
-			log.Warn("country ban expansion skipped (CSV absent); ip/cidr bans still enforced", "csv", csvPath, "err", err)
+			log.Warn("country bans are not applied because the country database (DB-IP CSV) is missing; IP and network bans still apply", "csv", csvPath, "err", err)
 		default:
 			// A configured CSV is present but failed to parse: do NOT silently drop active geo bans.
-			log.Warn("country ban expansion failed on a present CSV; keeping previous snapshot", "csv", csvPath, "err", err)
+			log.Warn("could not turn the country bans into address ranges from the country database; keeping the previous bans", "csv", csvPath, "err", err)
 			return nil, err // preserve the previous snapshot (never swap in one missing the country layer)
 		}
 	}

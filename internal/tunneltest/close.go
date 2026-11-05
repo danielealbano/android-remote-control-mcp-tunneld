@@ -20,7 +20,7 @@ func CloseOrLog(t testing.TB, c io.Closer) {
 
 func CloseLogged(c io.Closer) {
 	if err := c.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-		Logger().Warn("close failed", "type", fmt.Sprintf("%T", c), "err", err)
+		Logger().Warn("could not close a test resource; the test continues", "type", fmt.Sprintf("%T", c), "err", err)
 	}
 }
 

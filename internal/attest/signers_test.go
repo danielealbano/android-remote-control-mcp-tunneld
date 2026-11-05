@@ -180,7 +180,7 @@ func TestSignerAllowlistLoadAndReloadLogged(t *testing.T) {
 		defer ch.mu.Unlock()
 		var out []string
 		for _, r := range ch.records {
-			if r.Level != slog.LevelInfo || r.Message != "signer allowlist loaded" {
+			if r.Level != slog.LevelInfo || r.Message != "app signer allowlist loaded" {
 				continue
 			}
 			var path string

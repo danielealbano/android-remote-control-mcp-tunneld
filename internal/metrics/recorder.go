@@ -67,14 +67,14 @@ func NewPromRecorder(m *Metrics, cl *caplog.Logger, sink TrafficSink, log *slog.
 // outside observ.RejectReasons is refused (logged as an error) so call sites cannot invent labels.
 func (p *PromRecorder) Reject(reason, tunnelName, clientIP string) {
 	if _, ok := knownRejectReasons[reason]; !ok {
-		p.log.Error("unregistered rejection reason refused", "reason", reason, "tunnel", tunnelName)
+		p.log.Error("did not count a rejection with an unknown reason (a bug in the code)", "reason", reason, "tunnel", tunnelName)
 		return
 	}
 	p.m.rejections.WithLabelValues(reason).Inc()
 	if reason == "no-route" {
 		// The tunnel value on this path is attacker-controlled (raw SNI / unrouted name): it must
 		// never key the dedup map or emit per-hit WARNs. Metric + debug-only line.
-		p.log.Debug("no-route rejection", "sni", tunnelName, "client_ip", clientIP)
+		p.log.Debug("refused a connection: it could not be passed to a phone or a pending certificate validation for this host name", "sni", tunnelName, "client_ip", clientIP)
 		return
 	}
 	p.caplog.Hit(tunnelName, reason, clientIP)
@@ -184,7 +184,7 @@ func (p *PromRecorder) flush(ctx context.Context) {
 		if err := p.traffic.AddTraffic(ctx, name, e.bytesIn, e.bytesOut); err != nil {
 			// Re-queue BOTH deltas for the next flush — a transient sink error never drops a counter write.
 			p.accum(name, func(a *aggEntry) { a.bytesIn += e.bytesIn; a.bytesOut += e.bytesOut })
-			p.log.Warn("tunnel traffic flush failed (delta re-queued)", "tunnel", name, "err", err)
+			p.log.Warn("could not save a tunnel's traffic counters; they are kept for the next save (lost if this happens at shutdown)", "tunnel", name, "err", err)
 		}
 	}
 }

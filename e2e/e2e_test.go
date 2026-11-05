@@ -890,7 +890,7 @@ func TestE2E_CrossNodeEviction(t *testing.T) {
 }
 
 func TestE2E_ChallengeAnsweredByPeerReplica(t *testing.T) {
-	const alpnServed, httpServed = "acme tls-alpn-01 challenge served", "acme http-01 challenge served"
+	const alpnServed, httpServed = "answered a certificate authority's TLS validation request", "answered a certificate authority's HTTP validation request"
 	tests := []struct {
 		method         string
 		served, unused string

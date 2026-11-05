@@ -21,7 +21,7 @@ func hostname(lookup func() (string, error), logger *slog.Logger) string {
 	h, err := lookup()
 	if err != nil || h == "" {
 		fallback := "node-" + newNodeID()[:6]
-		logger.Warn("OS hostname unavailable (using a random node name)", "fallback", fallback, "err", err)
+		logger.Warn("could not read the server's host name, so a random node name is used", "fallback", fallback, "err", err)
 		return fallback
 	}
 	return h

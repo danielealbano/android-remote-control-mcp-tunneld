@@ -375,7 +375,7 @@ func TestSpool_FailedUploadKeptRetriedAndLogged(t *testing.T) {
 	env := newSpool(t, dir, up, fastTicks()...)
 	waitFor(t, "the retried upload", func() bool { return len(up.snapshot()) == 1 })
 	waitFor(t, "the local delete", func() bool { return len(spoolFiles(t, dir)) == 0 })
-	if !strings.Contains(env.log.String(), `msg="conn-log upload failed (will retry)"`) ||
+	if !strings.Contains(env.log.String(), `msg="could not upload a connection log file; retrying"`) ||
 		!strings.Contains(env.log.String(), name) || !strings.Contains(env.log.String(), "s3 unavailable") {
 		t.Fatalf("the failed upload must be logged with the file and the error; log = %q", env.log.String())
 	}
@@ -396,7 +396,7 @@ func TestSpool_UnreadableFileDoesNotBlockNewer(t *testing.T) {
 	if !strings.HasSuffix(up.snapshot()[0].key, newer) {
 		t.Fatalf("the readable newer file must still upload, got %q", up.snapshot()[0].key)
 	}
-	if !strings.Contains(env.log.String(), `msg="conn-log spool I/O failed" op=open`) {
+	if !strings.Contains(env.log.String(), `msg="could not open a connection log file to upload it; it is tried again on the next pass" op=open`) {
 		t.Fatalf("the unreadable file must be logged; log = %q", env.log.String())
 	}
 	if err := os.Chmod(older, 0o600); err != nil {
@@ -422,7 +422,7 @@ func TestSpool_CapDropsWithOneWarnPerWindow(t *testing.T) {
 	if kept := int64(len(lines(t, mustRead(t, env.dir)))); fit == 20 || kept != fit {
 		t.Fatalf("events past the cap must be dropped and counted, fit=%d kept=%d drops=%d", fit, kept, env.drops.Load())
 	}
-	if n := strings.Count(env.log.String(), "conn-log spool full"); n != 1 {
+	if n := strings.Count(env.log.String(), "the connection log directory is full"); n != 1 {
 		t.Fatalf("the cap must be logged once per window, got %d", n)
 	}
 }
@@ -488,7 +488,7 @@ func TestSpool_RecoversTornAndEmptyPartFiles(t *testing.T) {
 	if !strings.HasSuffix(u.key, torn) || string(u.body) != `{"schema":1,"tunnel":"a"}`+"\n" {
 		t.Fatalf("the torn file must be truncated to its last newline, got %q %q", u.key, u.body)
 	}
-	if !strings.Contains(env.log.String(), `msg="conn-log spool recovered a torn last line (dropped)"`) {
+	if !strings.Contains(env.log.String(), `msg="dropped an incomplete last line in a connection log file left from an earlier run"`) {
 		t.Fatalf("the dropped bytes must be logged; log = %q", env.log.String())
 	}
 	waitFor(t, "an empty spool", func() bool { return len(spoolFiles(t, dir)) == 0 })
@@ -556,7 +556,7 @@ func TestSpool_ShutdownPastDeadlineKeepsFile(t *testing.T) {
 	if files := spoolFiles(t, dir); len(files) != 1 || !strings.HasSuffix(files[0], spoolReadySuffix) {
 		t.Fatalf("an un-uploaded file must stay on disk for the next start, got %v", files)
 	}
-	if !strings.Contains(env.log.String(), `msg="conn-log spool files left for the next start"`) {
+	if !strings.Contains(env.log.String(), `msg="connection log files are left to upload at the next start"`) {
 		t.Fatalf("the leftover must be logged; log = %q", env.log.String())
 	}
 }
@@ -611,6 +611,9 @@ func TestSpool_ShortAppendRepaired(t *testing.T) {
 	if env.drops.Load() != 1 {
 		t.Fatalf("the failed append must be counted, drops = %d", env.drops.Load())
 	}
+	if !strings.Contains(env.log.String(), `msg="could not write a connection log entry, so it is dropped" op=append`) {
+		t.Fatalf("the failed append must be logged; log = %q", env.log.String())
+	}
 }
 
 func TestSpool_UnrepairableAppendRotates(t *testing.T) {
@@ -646,7 +649,7 @@ func TestSpool_FailedFsyncStillRotatesAndUploads(t *testing.T) {
 	if len(up.snapshot()) != 1 {
 		t.Fatalf("a failed fsync must still rotate and upload, got %d uploads", len(up.snapshot()))
 	}
-	if !strings.Contains(env.log.String(), `op=fsync`) {
+	if !strings.Contains(env.log.String(), `msg="could not flush a connection log file to disk; it is still uploaded" op=fsync`) {
 		t.Fatalf("the fsync failure must be logged; log = %q", env.log.String())
 	}
 }
@@ -728,7 +731,7 @@ func TestSpool_DrainDeadlineDropsQueuedEventsAndStopsWriter(t *testing.T) {
 	if env.drops.Load() != 4 {
 		t.Fatalf("events still queued at the deadline must be counted as dropped, drops = %d", env.drops.Load())
 	}
-	if !strings.Contains(env.log.String(), `msg="conn-log events dropped at the shutdown deadline"`) ||
+	if !strings.Contains(env.log.String(), `msg="dropped connection log entries still queued when the shutdown time ran out"`) ||
 		!strings.Contains(env.log.String(), "events=4") {
 		t.Fatalf("the abandoned events must be logged with their count; log = %q", env.log.String())
 	}
@@ -756,7 +759,7 @@ func TestSpool_SuppressedIOErrorsAreSummarised(t *testing.T) {
 			clock.add(spoolIOLogEvery)
 		}
 		waitFor(t, "the suppressed summary", func() bool {
-			return strings.Contains(env.log.String(), `msg="conn-log spool I/O failures suppressed" count=1 last_op=fsync`)
+			return strings.Contains(env.log.String(), `msg="more connection log file errors happened and were not logged one by one" count=1 last_op=fsync`)
 		})
 	}
 }

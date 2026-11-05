@@ -171,7 +171,7 @@ func TestLoad_WarnsOnSkippedCSVRows(t *testing.T) {
 	if err := NewEngine().Load([]string{f}, csv, nil, log); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(buf.String(), `msg="dbip csv rows skipped"`) || !strings.Contains(buf.String(), "bad_address=1") {
+	if !strings.Contains(buf.String(), `msg="skipped unreadable rows in the country database (DB-IP CSV)"`) || !strings.Contains(buf.String(), "bad_address=1") {
 		t.Fatalf("skipped CSV rows must be logged with their counts; log = %q", buf.String())
 	}
 }

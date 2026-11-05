@@ -189,7 +189,7 @@ func TestConsumeNonce_ValkeyErrorIsInternal(t *testing.T) {
 	})
 	name := doEnroll(t, svc, idCSR)
 	nonce := mintNonce(t, svc)
-	mr.Close() // Valkey down → consumeNonce errors
+	mr.SetError("ERR valkey is down") // Valkey down → consumeNonce errors
 	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{Nonce: nonce, IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test")})
 	if ee == nil || ee.Reason != "internal" {
 		t.Fatalf("a Valkey error during nonce consume must be internal, got %v", ee)
@@ -223,7 +223,7 @@ func TestSignFailureRollsBack(t *testing.T) {
 	}{
 		{name: "caller still connected"},
 		{name: "caller gone after the claim", callerGone: true},
-		{name: "rollback fails", deleteErr: errInjected, wantNames: 1, wantLog: `msg="claim rollback failed (name orphaned in the registry)" tunnel=`},
+		{name: "rollback fails", deleteErr: errInjected, wantNames: 1, wantLog: `msg="could not release a claimed name after a failed enrollment; the name stays reserved in the registry" tunnel=`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -248,7 +248,7 @@ func TestSignFailureRollsBack(t *testing.T) {
 			}
 			logs := buf.String()
 			switch {
-			case tc.wantLog == "" && strings.Contains(logs, "claim rollback failed"):
+			case tc.wantLog == "" && strings.Contains(logs, "could not release a claimed name after a failed enrollment"):
 				t.Fatalf("a successful rollback must not log a failure; log = %q", logs)
 			case tc.wantLog != "" && (!strings.Contains(logs, tc.wantLog) || !strings.Contains(logs, errInjected.Error())):
 				t.Fatalf("the failed rollback must be logged with the tunnel and its cause; log = %q", logs)
@@ -434,7 +434,7 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 		{
 			name:    "phone gone after the issuance",
 			end:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			wantLog: `msg="issued certificate not recorded (requester gone)"`,
+			wantLog: `msg="a certificate was issued but not recorded because the phone stopped waiting for it"`,
 		},
 		{
 			name: "request deadline passed after the issuance",

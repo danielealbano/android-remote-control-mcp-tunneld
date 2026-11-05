@@ -627,12 +627,48 @@ func TestChain_LogsEachCAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`msg="acme CA order failed" ca=letsencrypt name=name class=rate-limited err="acme: rate limited: le refused the order"`,
-		`msg="acme CA order failed" ca=gts name=name class=transient err="acme: transient: gts unreachable"`,
+		`msg="the certificate authority did not issue the certificate; any remaining account or certificate authority that can take the order is tried" ca=letsencrypt name=name class=rate-limited err="acme: rate limited: le refused the order"`,
+		`msg="the certificate authority did not issue the certificate; any remaining account or certificate authority that can take the order is tried" ca=gts name=name class=transient err="acme: transient: gts unreachable"`,
 	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Fatalf("log is missing %s; log = %q", want, buf.String())
 		}
+	}
+}
+
+func TestChain_LogsWhetherTheIssuanceStops(t *testing.T) {
+	const tried = `msg="the certificate authority did not issue the certificate; any remaining account or certificate authority that can take the order is tried"`
+	const stops = `msg="the certificate authority did not issue the certificate; the issuance stops"`
+	t.Parallel()
+	tests := []struct {
+		name      string
+		err       error
+		want      string
+		wantTried bool
+	}{
+		{name: "a transient error tries the next account", err: transient(errors.New("connection reset")), want: tried, wantTried: true},
+		{name: "a panic tries the next account", err: panicked(errOrderPanicked), want: tried, wantTried: true},
+		{name: "a permanent error stops", err: permanent(errors.New("bad CSR")), want: stops},
+		{name: "a local error stops", err: local(localChallengeRetry, ErrChallengePending), want: stops},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			le := &fakeCA{caID: CALetsEncrypt, err: tc.err}
+			gts := &fakeCA{caID: CAGTS}
+			ch, _ := newChain(t, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))}, le, gts)
+			_, _, err := ch.Obtain(context.Background(), nil, "name")
+			if tc.wantTried && (err != nil || gts.calls != 1) {
+				t.Fatalf("Obtain = %v after %d GTS calls, want the next account tried and issuing", err, gts.calls)
+			}
+			if !tc.wantTried && (err == nil || gts.calls != 0) {
+				t.Fatalf("Obtain = %v after %d GTS calls, want the issuance stopped", err, gts.calls)
+			}
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Fatalf("want %s; log = %q", tc.want, buf.String())
+			}
+		})
 	}
 }
 
@@ -644,17 +680,17 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 		want []string
 	}{
 		{name: "failed order", err: transient(errors.New("down")), want: []string{
-			"acme CA cooldown check failed", "acme CA failure-streak bump failed", "acme CA cooldown write failed",
-			"acme budget reservation failed (trying the account)", "acme budget release failed (the reservation expires at its deadline)",
+			"could not check whether this certificate authority account is cooling down", "could not record another failure in a row for this account, so the backoff is set as after a first failure", "could not save this account's cooldown, so other attempts are not held back by it",
+			"could not reserve this account's issuance budget, so the account is tried anyway", "could not give back an unused issuance budget reservation; it is released automatically at its deadline",
 		}},
 		{name: "rate-limited order", err: rateLimited(time.Minute, errors.New("slow down")), want: []string{
-			"acme CA cooldown check failed", "acme CA cooldown write failed",
-			"acme budget reservation failed (trying the account)", "acme budget release failed (the reservation expires at its deadline)",
+			"could not check whether this certificate authority account is cooling down", "could not save this account's cooldown, so other attempts are not held back by it",
+			"could not reserve this account's issuance budget, so the account is tried anyway", "could not give back an unused issuance budget reservation; it is released automatically at its deadline",
 		}},
-		{name: "successful order", want: []string{"acme CA cooldown check failed", "acme CA failure-streak reset failed",
-			"acme budget reservation failed (trying the account)", "acme budget spend failed (the reservation expires at its deadline)"}},
+		{name: "successful order", want: []string{"could not check whether this certificate authority account is cooling down", "could not reset this account's count of failures in a row after a success; the old count expires on its own, and until then a new failure backs off longer",
+			"could not reserve this account's issuance budget, so the account is tried anyway", "could not record the issuance budget this order used; the reservation is released automatically at its deadline"}},
 		{name: "GTS order without a request-budget prepay", ca: CAGTS, want: []string{
-			"acme budget reservation failed (trying the account)", "acme 429 mark read failed (no prepay; requests draw on the shared budget)"}},
+			"could not reserve this account's issuance budget, so the account is tried anyway", "could not check whether the certificate authority recently rate-limited this account, so the order's requests use the shared request budget"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -662,7 +698,7 @@ func TestChain_LogsBookkeepingErrors(t *testing.T) {
 			mr := miniredis.RunT(t)
 			ch, _ := newChainOn(t, mr, ChainConfig{Logger: slog.New(slog.NewTextHandler(&buf, nil))},
 				&fakeCA{caID: cmp.Or(tc.ca, CALetsEncrypt), err: tc.err})
-			mr.Close()
+			mr.SetError("ERR valkey is down")
 			_, _, err := ch.Obtain(context.Background(), nil, "name")
 			if (err == nil) != (tc.err == nil) {
 				t.Fatalf("Obtain error = %v, want error %v", err, tc.err != nil)
@@ -723,14 +759,14 @@ func TestChain_LogsTheIssuingCA(t *testing.T) {
 			if err := tc.issue(context.Background(), ch); err != nil {
 				t.Fatal(err)
 			}
-			want := `level=INFO msg="acme certificate issued" ca=` + tc.wantCA + ` name=` + tc.wantNm + ` serial=01 not_after=`
+			want := `level=INFO msg="certificate issued" ca=` + tc.wantCA + ` name=` + tc.wantNm + ` serial=01 not_after=`
 			if !strings.Contains(buf.String(), want) {
 				t.Fatalf("log is missing %s; log = %q", want, buf.String())
 			}
 			if !strings.Contains(buf.String(), " chain_certs=2") {
 				t.Fatalf("log is missing chain_certs; log = %q", buf.String())
 			}
-			if n := strings.Count(buf.String(), `msg="acme certificate issued"`); n != 1 {
+			if n := strings.Count(buf.String(), `msg="certificate issued"`); n != 1 {
 				t.Fatalf("issuance logged %d times, want once; log = %q", n, buf.String())
 			}
 		})

@@ -86,14 +86,14 @@ func (r *Registry) LiveNodes(ctx context.Context) (map[string]NodeInfo, error) {
 		}
 		var info NodeInfo
 		if err := json.Unmarshal([]byte(s), &info); err != nil {
-			r.logger.Warn("malformed node registry entry skipped", "node", ids[i], "err", err)
+			r.logger.Warn("skipped an unreadable entry in the node list", "node", ids[i], "err", err)
 			continue
 		}
 		out[ids[i]] = info
 	}
 	if len(gone) > 0 {
 		if err := r.rdb.SRem(ctx, nodeSetKey, gone...).Err(); err != nil {
-			r.logger.Debug("expired node ids not pruned (retried on the next read)", "err", err)
+			r.logger.Debug("could not remove expired nodes from the node list; retrying on the next read", "err", err)
 		}
 	}
 	return out, nil
@@ -135,7 +135,7 @@ func (r *Registry) Nodes(ctx context.Context) (map[string]NodeInfo, error) {
 			}
 			var info NodeInfo
 			if err := json.Unmarshal([]byte(v), &info); err != nil {
-				r.logger.Warn("malformed node registry entry skipped", "key", k, "err", err)
+				r.logger.Warn("skipped an unreadable entry in the node list", "key", k, "err", err)
 				continue // skip a malformed value rather than failing the whole listing
 			}
 			out[k[len("node:"):]] = info

@@ -23,7 +23,7 @@ func TestHostname_FallsBackAndLogs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			got := hostname(func() (string, error) { return tc.host, tc.err }, slog.New(slog.NewTextHandler(&buf, nil)))
-			logged := strings.Contains(buf.String(), `msg="OS hostname unavailable (using a random node name)"`)
+			logged := strings.Contains(buf.String(), `msg="could not read the server's host name, so a random node name is used"`)
 			if logged != tc.wantLog {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLog, buf.String())
 			}

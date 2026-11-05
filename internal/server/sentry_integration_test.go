@@ -129,7 +129,7 @@ func TestIntegration_SentryReceivesTheRunsTracesAndLogs(t *testing.T) {
 			t.Errorf("no %q transaction reached Sentry; received:\n%s", tx, in.summary())
 		}
 	}
-	if !in.received(`"type":"log"`, "attestation root refresh failed") {
+	if !in.received(`"type":"log"`, "attestation root certificates; keeping the ones fetched before, if any") {
 		t.Error("the refresher's Warn line never reached Sentry as a log")
 	}
 }

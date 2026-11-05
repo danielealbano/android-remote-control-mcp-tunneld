@@ -127,7 +127,7 @@ func acmeLegoConfigs(cfg config.ServeCmd, chal *acme.ChallengeStore, logger *slo
 	if cfg.UsesChallenge(config.ChallengeDNS01) {
 		dnsProvider, err := acme.DNSProviderByName(cfg.ACMEDNSProvider)
 		if err != nil {
-			logger.Warn("acme dns provider unavailable (issuance degraded until configured)",
+			logger.Warn("the DNS provider for certificate validation is not available; certificates that need DNS validation cannot be issued until it is configured",
 				"provider", cfg.ACMEDNSProvider, "err", err)
 		} else {
 			for i := range cfgs {
@@ -211,20 +211,20 @@ func loadAccountKey(dir, caID string, logger *slog.Logger) (crypto.Signer, error
 	if gerr != nil {
 		// Absent-path generation failure stays NON-fatal: a nil key makes NewLegoClient self-generate an
 		// ephemeral account key. Only an existing-but-unreadable/unparseable key is fatal (above).
-		logger.Warn("acme account key generation failed; lego will use an ephemeral key", "ca", caID, "err", gerr)
+		logger.Warn("could not create a certificate authority account key, so a temporary one is used", "ca", caID, "err", gerr)
 		return nil, nil
 	}
 	if merr := os.MkdirAll(dir, 0o700); merr != nil {
-		logger.Warn("acme account dir create failed; using an ephemeral account key", "ca", caID, "err", merr)
+		logger.Warn("could not create the account key directory, so a temporary account key is used", "ca", caID, "err", merr)
 		return key, nil
 	}
 	der, merr := x509.MarshalECPrivateKey(key)
 	if merr != nil {
-		logger.Warn("acme account key encode failed; using an ephemeral account key", "ca", caID, "err", merr)
+		logger.Warn("could not encode the account key, so a temporary one is used", "ca", caID, "err", merr)
 		return key, nil
 	}
 	if werr := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); werr != nil {
-		logger.Warn("acme account key persist failed; using an ephemeral account key", "ca", caID, "err", werr)
+		logger.Warn("could not save the account key, so a temporary one is used", "ca", caID, "err", werr)
 	}
 	return key, nil
 }

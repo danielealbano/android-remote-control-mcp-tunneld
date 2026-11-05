@@ -871,7 +871,7 @@ func TestClient_DialPanicFailsTheCall(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if out := logs.String(); !strings.Contains(out, "panic recovered") || !strings.Contains(out, `where="mesh dial"`) {
+	if out := logs.String(); !strings.Contains(out, "recovered from a crash") || !strings.Contains(out, `where="mesh dial"`) {
 		t.Fatalf("the dial's panic must be logged, log = %q", out)
 	}
 }
@@ -1020,9 +1020,9 @@ func TestControl_LogsFailures(t *testing.T) {
 		wantCode int
 		want     string
 	}{
-		{name: "malformed request", body: "{", wantCode: http.StatusBadRequest, want: `msg="mesh control request malformed"`},
+		{name: "malformed request", body: "{", wantCode: http.StatusBadRequest, want: `msg="refused a malformed request from another node"`},
 		{name: "op fails", body: `{"op":"renew","tunnel":"t"}`, ctrlErr: errors.New("phone gone"), wantCode: http.StatusBadGateway,
-			want: `msg="mesh control op failed" op=renew tunnel=t err="phone gone"`},
+			want: `msg="a request from another node failed, so that node gets an error answer" op=renew tunnel=t err="phone gone"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

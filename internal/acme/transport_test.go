@@ -139,7 +139,7 @@ func TestBudgetTransport_PanicBecomesAnError(t *testing.T) {
 	if resp != nil || !errors.Is(err, report.ErrPanicked) || !flag.panicked() {
 		t.Fatalf("RoundTrip = %v, %v (flag %v); want no response, ErrPanicked and the request's panic flag set", resp, err, flag.panicked())
 	}
-	if !strings.Contains(h.logs.String(), `msg="panic recovered" where="ACME request"`) {
+	if !strings.Contains(h.logs.String(), `msg="recovered from a crash; only the affected work was stopped" where="ACME request"`) {
 		t.Fatalf("the panic must be logged; log = %q", h.logs.String())
 	}
 }
@@ -380,7 +380,7 @@ func TestBudgetTransport_429MarkWriteFailureBoundedAndLogged(t *testing.T) {
 			t.Fatalf("mark write %d: deadline %s, TTL %s; want within budgetOpTimeout (%s) and the transport's %s", i+1, bound, marks.ttls[i], budgetOpTimeout, h.bt.markTTL)
 		}
 	}
-	if want := `msg="acme account 429 mark write failed (running orders keep their prepaid requests)"`; !strings.Contains(h.logs.String(), want) {
+	if want := `msg="could not record that the certificate authority rate-limited this account, so running orders keep using the request budget they set aside"`; !strings.Contains(h.logs.String(), want) {
 		t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
 	}
 }
@@ -760,8 +760,8 @@ func TestBudgetTransport_ValkeyCallsBounded(t *testing.T) {
 	if ca.count() != 1 {
 		t.Fatal("the request must be sent")
 	}
-	for _, want := range []string{`msg="acme account wait-until check failed (request sent)"`, `msg="acme request budget unavailable (request sent)"`,
-		`msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the wait-until check failed" dropped=2`} {
+	for _, want := range []string{`msg="could not check whether this account must wait before its next request, so it is treated as not waiting"`, `msg="could not check the request budget, so the request is sent anyway"`,
+		`msg="an order dropped the part of the request budget it had set aside and not used yet" ca=gts account=gts-1 reason="the wait-until check failed" dropped=2`} {
 		if !strings.Contains(h.logs.String(), want) {
 			t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
 		}
@@ -815,7 +815,7 @@ func TestBudgetTransport_429EdgeCases(t *testing.T) {
 		if _, err := h.bt.rateLimited(ctx, resp, nil); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(h.logs.String(), `msg="acme 429 with an unparseable Retry-After (the default cooldown applies)"`) {
+		if !strings.Contains(h.logs.String(), `msg="the certificate authority rate-limited this account without a readable retry time, so the default cooldown applies"`) {
 			t.Fatalf("the bad header must be logged; log = %q", h.logs.String())
 		}
 		if cool, err := h.lim.CACooldown(ctx, acct.id); err != nil || cool != 2*time.Second {
@@ -947,7 +947,7 @@ func TestBudgetTransport_AbandonedDuringItsChecksNotSent(t *testing.T) {
 	if left, _ := tr.drainPrepaid(); left != 1 {
 		t.Fatalf("prepaid left %d, want the unit of the refused request given back", left)
 	}
-	if log := h.logs.String(); !strings.Contains(log, `msg="acme request" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
+	if log := h.logs.String(); !strings.Contains(log, `msg="a request to the certificate authority was not sent; the certificate order gets an error instead" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
 		!strings.Contains(log, "err=") || strings.Contains(log, "took=") {
 		t.Errorf("a request abandoned during its checks must log paced and err without took; log = %q", log)
 	}
@@ -960,26 +960,34 @@ func TestBudgetTransport_LogsEachRequestAtDebug(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	bare := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	gone := httptest.NewServer(http.NotFoundHandler())
-	gone.Close()
+	gone := startCAServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		tunneltest.CloseOrLog(t, conn)
+	})
 	b := testBudgets()
+	const answered = "the certificate authority answered a request"
 	tests := []struct {
 		name    string
 		tracked bool
 		method  string
 		url     string
 		want    []string
+		wantMsg string
 		wantRA  string
 		wantErr bool
 	}{
 		{name: "untracked", method: http.MethodGet, url: ok.srv.URL + "/directory",
-			want: []string{"method=GET", "path=/directory", "status=200", "retry_after=3", "paced=", "took="}, wantRA: "3"},
+			want: []string{"method=GET", "path=/directory", "status=200", "retry_after=3", "paced=", "took="}, wantMsg: answered, wantRA: "3"},
 		{name: "tracked", tracked: true, method: http.MethodPost, url: ok.srv.URL + "/new-order",
-			want: []string{"method=POST", "path=/new-order", "status=200", "retry_after=3", "paced=", "took="}, wantRA: "3"},
+			want: []string{"method=POST", "path=/new-order", "status=200", "retry_after=3", "paced=", "took="}, wantMsg: answered, wantRA: "3"},
 		{name: "tracked without the CA's Retry-After", tracked: true, method: http.MethodPost, url: bare.srv.URL + "/challenge/x",
-			want: []string{"method=POST", "path=/challenge/x", "status=200", `retry_after=""`, "paced=", "took="}, wantRA: "2"},
-		{name: "transport error", method: http.MethodGet, url: gone.URL + "/directory", wantErr: true,
-			want: []string{"method=GET", "path=/directory", "paced=", "took=", "err="}},
+			want: []string{"method=POST", "path=/challenge/x", "status=200", `retry_after=""`, "paced=", "took="}, wantMsg: answered, wantRA: "2"},
+		{name: "transport error", method: http.MethodGet, url: gone.srv.URL + "/directory", wantErr: true,
+			want: []string{"method=GET", "path=/directory", "paced=", "took=", "err="}, wantMsg: "a request to the certificate authority failed; the error is passed back to the certificate order"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -999,7 +1007,7 @@ func TestBudgetTransport_LogsEachRequestAtDebug(t *testing.T) {
 			}
 			line := ""
 			for _, l := range strings.Split(h.logs.String(), "\n") {
-				if strings.Contains(l, `msg="acme request"`) {
+				if strings.Contains(l, `msg="`+tc.wantMsg+`"`) {
 					line = l
 				}
 			}
@@ -1162,7 +1170,7 @@ func TestBudgetTransport_LogsUnsentRequests(t *testing.T) {
 				t.Fatal("nothing may be sent")
 			}
 			log := h.logs.String()
-			if !strings.Contains(log, `msg="acme request" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
+			if !strings.Contains(log, `msg="a request to the certificate authority was not sent; the certificate order gets an error instead" ca=letsencrypt account=local method=POST path=/new-order paced=`) ||
 				!strings.Contains(log, "err=") || strings.Contains(log, "took=") {
 				t.Errorf("an unsent request must log paced and err without took; log = %q", log)
 			}
@@ -1354,7 +1362,7 @@ func TestBudgetTransport_UsesPrepaidBeforeSharedBudget(t *testing.T) {
 		if left, _ := tr.drainPrepaid(); left != 0 {
 			t.Fatalf("prepaid left %d, want the balance dropped", left)
 		}
-		if want := `msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the account answered 429" dropped=2`; !strings.Contains(h.logs.String(), want) {
+		if want := `msg="an order dropped the part of the request budget it had set aside and not used yet" ca=gts account=gts-1 reason="the account answered 429" dropped=2`; !strings.Contains(h.logs.String(), want) {
 			t.Fatalf("log is missing %s; log = %q", want, h.logs.String())
 		}
 	})

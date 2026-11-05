@@ -41,7 +41,7 @@ func TestReservedMaybeRenew_LogsShouldRenewError(t *testing.T) {
 	rc := newTestReserved(dir, []string{host}, iss.obtain, failRenew, &fakeLocker{}, logger)
 	rc.loadCache(context.Background())
 	rc.maybeRenew(context.Background(), rc.hosts[host])
-	if !strings.Contains(buf.String(), "renewal check failed") {
+	if !strings.Contains(buf.String(), "could not check whether the server certificate needs renewing") {
 		t.Fatalf("a shouldRenew error must be logged at Warn; log = %q", buf.String())
 	}
 	if iss.callCount() != 0 {
@@ -437,7 +437,7 @@ func TestReservedCerts_LockErrorFailsOpen(t *testing.T) {
 	if iss.callCount() != 1 {
 		t.Fatalf("a lock error must still issue, got %d obtains", iss.callCount())
 	}
-	if !strings.Contains(buf.String(), "lock unavailable") {
+	if !strings.Contains(buf.String(), "could not take the lock for issuing the server certificate") {
 		t.Fatalf("a lock error must be logged at Warn; log = %q", buf.String())
 	}
 	if lock.unlockCount() != 0 {
@@ -459,7 +459,7 @@ func TestReservedCerts_LockBusyUntilWaitBudget(t *testing.T) {
 	if iss.callCount() != 0 {
 		t.Fatalf("a busy lock must not issue, got %d obtains", iss.callCount())
 	}
-	if !strings.Contains(buf.String(), "busy on another node") {
+	if !strings.Contains(buf.String(), "another node is issuing the server certificate") {
 		t.Fatalf("a busy lock must be logged at Info; log = %q", buf.String())
 	}
 }
@@ -474,7 +474,7 @@ func TestReservedCerts_LockErrorAfterWaitBudget(t *testing.T) {
 	if iss.callCount() != 0 {
 		t.Fatalf("an expired lock wait must not issue, got %d obtains", iss.callCount())
 	}
-	if !strings.Contains(buf.String(), "busy on another node") || strings.Contains(buf.String(), "level=WARN") {
+	if !strings.Contains(buf.String(), "another node is issuing the server certificate") || strings.Contains(buf.String(), "level=WARN") {
 		t.Fatalf("an expired lock wait must read as busy (Info, no Warn); log = %q", buf.String())
 	}
 }
@@ -490,7 +490,7 @@ func TestReservedCerts_AbandonedIssuanceKeepsLock(t *testing.T) {
 	if lock.unlockCount() != 0 {
 		t.Fatal("an issuance abandoned at its deadline must keep the lock until its TTL")
 	}
-	if !strings.Contains(buf.String(), "abandoned at its deadline") {
+	if !strings.Contains(buf.String(), "gave up issuing the server certificate at its time limit") {
 		t.Fatalf("an abandoned issuance must be logged at Warn; log = %q", buf.String())
 	}
 }
@@ -617,14 +617,14 @@ func TestReservedCerts_CacheLoadLogging(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(hd, "bundle.json"), []byte(`{"cert_pem":`), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, wantOK: false, wantWarn: "reserved-host cert bundle unparseable"},
+		}, wantOK: false, wantWarn: "the saved server certificate could not be parsed, so it is not used"},
 		{name: "corrupt legacy meta", seed: func(t *testing.T, dir string) {
 			certPEM, keyPEM, info := mintSelfCert(t, host, time.Now().Add(400*time.Hour))
 			seedCache(t, dir, host, certPEM, keyPEM, info)
 			if err := os.WriteFile(filepath.Join(dir, "self", host, "meta.json"), []byte("{"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, wantOK: true, wantWarn: "reserved-host legacy meta unparseable"},
+		}, wantOK: true, wantWarn: "the details saved with the old-format server certificate could not be parsed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

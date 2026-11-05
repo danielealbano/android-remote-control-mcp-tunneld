@@ -36,6 +36,9 @@ const (
 	spoolMaxNameTries = 1000
 	spoolUploadBase   = 30 * time.Second
 	spoolUploadRate   = 128 << 10
+
+	spoolRecoverFailed = "could not recover a connection log file left from an earlier run; it is tried again at the next start"
+	spoolEntryDropped  = "could not write a connection log entry, so it is dropped"
 )
 
 var spoolName = regexp.MustCompile(`^(\d{8}T\d{6}\.\d{9}Z)-([0-9a-f]+)\.jsonl(\.part)?$`)
@@ -219,7 +222,7 @@ func lockDir(dir string) (*os.File, error) {
 
 func (s *ConnLogSpool) releaseLock() {
 	if err := s.lock.Close(); err != nil {
-		s.logger.Warn("conn-log spool lock release failed", "dir", s.dir, "err", err)
+		s.logger.Warn("could not release the connection log directory lock cleanly; the system releases it at the latest when tunneld exits", "dir", s.dir, "err", err)
 	}
 }
 
@@ -237,7 +240,7 @@ func (s *ConnLogSpool) recoverSpool() error {
 		if m[3] == "" {
 			info, err := e.Info()
 			if err != nil {
-				s.ioWarn("stat", path, err)
+				s.ioWarn("could not read the size of a connection log file left from an earlier run; it is still uploaded but not counted toward the directory size limit", "stat", path, err)
 				continue
 			}
 			s.spooled.Add(info.Size())
@@ -251,27 +254,27 @@ func (s *ConnLogSpool) recoverSpool() error {
 func (s *ConnLogSpool) recoverPart(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		s.ioWarn("read", path, err)
+		s.ioWarn(spoolRecoverFailed, "read", path, err)
 		return
 	}
 	keep := bytes.LastIndexByte(data, '\n') + 1
 	if dropped := len(data) - keep; dropped > 0 {
-		s.logger.Warn("conn-log spool recovered a torn last line (dropped)", "file", path, "bytes", dropped)
+		s.logger.Warn("dropped an incomplete last line in a connection log file left from an earlier run", "file", path, "bytes", dropped)
 	}
 	if keep == 0 {
 		if err := os.Remove(path); err != nil {
-			s.ioWarn("remove", path, err)
+			s.ioWarn(spoolRecoverFailed, "remove", path, err)
 		}
 		return
 	}
 	if keep < len(data) {
 		if err := os.Truncate(path, int64(keep)); err != nil {
-			s.ioWarn("truncate", path, err)
+			s.ioWarn(spoolRecoverFailed, "truncate", path, err)
 			return
 		}
 	}
 	if err := os.Rename(path, strings.TrimSuffix(path, ".part")); err != nil {
-		s.ioWarn("rename", path, err)
+		s.ioWarn(spoolRecoverFailed, "rename", path, err)
 		return
 	}
 	s.spooled.Add(int64(keep))
@@ -311,7 +314,7 @@ func (s *ConnLogSpool) writer() {
 		case ev, ok := <-s.events:
 			if !ok {
 				if abandoned > 0 {
-					s.logger.Warn("conn-log events dropped at the shutdown deadline", "dir", s.dir, "events", abandoned)
+					s.logger.Warn("dropped connection log entries still queued when the shutdown time ran out", "dir", s.dir, "events", abandoned)
 				}
 				s.rotate(&w)
 				return
@@ -340,7 +343,7 @@ func (s *ConnLogSpool) append(w *activeFile, ev Event) {
 	line, err := json.Marshal(ev)
 	if err != nil {
 		s.onDrop(1)
-		s.ioWarn("encode", s.dir, err)
+		s.ioWarn(spoolEntryDropped, "encode", s.dir, err)
 		return
 	}
 	line = append(line, '\n')
@@ -356,16 +359,16 @@ func (s *ConnLogSpool) append(w *activeFile, ev Event) {
 	if w.f == nil {
 		if err := s.open(w, now); err != nil {
 			s.onDrop(1)
-			s.ioWarn("create", s.dir, err)
+			s.ioWarn(spoolEntryDropped, "create", s.dir, err)
 			return
 		}
 	}
 	n, err := s.writeFile(w.f, line)
 	if err != nil {
 		s.onDrop(1)
-		s.ioWarn("append", w.path, err)
+		s.ioWarn(spoolEntryDropped, "append", w.path, err)
 		if terr := s.truncateFile(w.f, w.size); terr != nil {
-			s.ioWarn("truncate", w.path, terr)
+			s.ioWarn("could not undo a failed connection log write, so the file is finished early and may end with an incomplete line", "truncate", w.path, terr)
 			s.spooled.Add(int64(n))
 			w.size += int64(n)
 			s.rotate(w)
@@ -416,22 +419,22 @@ func (s *ConnLogSpool) rotate(w *activeFile) {
 	}
 	if w.size == 0 {
 		if err := w.f.Close(); err != nil {
-			s.ioWarn("close", w.path, err)
+			s.ioWarn("could not close an empty connection log file cleanly; it is removed anyway", "close", w.path, err)
 		}
 		if err := os.Remove(w.path); err != nil {
-			s.ioWarn("remove", w.path, err)
+			s.ioWarn("could not remove an empty connection log file; it is removed at the next start", "remove", w.path, err)
 		}
 		*w = activeFile{}
 		return
 	}
 	if err := s.syncFile(w.f); err != nil {
-		s.ioWarn("fsync", w.path, err)
+		s.ioWarn("could not flush a connection log file to disk; it is still uploaded", "fsync", w.path, err)
 	}
 	if err := w.f.Close(); err != nil {
-		s.ioWarn("close", w.path, err)
+		s.ioWarn("could not close a connection log file cleanly; it is still uploaded", "close", w.path, err)
 	}
 	if err := os.Rename(w.path, strings.TrimSuffix(w.path, ".part")); err != nil {
-		s.ioWarn("rename", w.path, err)
+		s.ioWarn("could not mark a connection log file as ready to upload, so it is uploaded after the next start", "rename", w.path, err)
 	} else {
 		s.signalUpload()
 	}
@@ -485,7 +488,7 @@ func (s *ConnLogSpool) readyFiles() ([]string, error) {
 func (s *ConnLogSpool) pass() bool {
 	names, err := s.readyFiles()
 	if err != nil {
-		s.ioWarn("list", s.dir, err)
+		s.ioWarn("could not list the connection log files to upload; retrying", "list", s.dir, err)
 		return false
 	}
 	clean := true
@@ -508,33 +511,33 @@ func (s *ConnLogSpool) uploadFile(name string) (uploaded, failed bool) {
 	path := filepath.Join(s.dir, name)
 	key, err := spoolKey(name)
 	if err != nil {
-		s.ioWarn("key", path, err)
+		s.ioWarn("could not work out the upload name of a connection log file, so it is not uploaded and stays on disk", "key", path, err)
 		return false, false
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		s.ioWarn("open", path, err)
+		s.ioWarn("could not open a connection log file to upload it; it is tried again on the next pass", "open", path, err)
 		return false, false
 	}
 	info, err := f.Stat()
 	if err != nil {
-		s.ioWarn("stat", path, errors.Join(err, f.Close()))
+		s.ioWarn("could not read the size of a connection log file to upload it; it is tried again on the next pass", "stat", path, errors.Join(err, f.Close()))
 		return false, false
 	}
 	uctx, cancel := context.WithTimeout(s.upCtx, uploadTimeout(info.Size()))
 	err = s.up.PutConnLogFile(uctx, key, f, info.Size())
 	cancel()
 	if cerr := f.Close(); cerr != nil {
-		s.ioWarn("close", path, cerr)
+		s.ioWarn("could not close a connection log file after trying to upload it; the upload result is not affected", "close", path, cerr)
 	}
 	if err != nil {
 		if s.upCtx.Err() == nil {
-			s.logger.Warn("conn-log upload failed (will retry)", "file", path, "err", err)
+			s.logger.Warn("could not upload a connection log file; retrying", "file", path, "err", err)
 		}
 		return false, true
 	}
 	if err := os.Remove(path); err != nil {
-		s.ioWarn("remove", path, err)
+		s.ioWarn("could not remove an uploaded connection log file; it is uploaded again on the next pass, replacing the same object", "remove", path, err)
 		return false, false
 	}
 	s.spooled.Add(-info.Size())
@@ -563,11 +566,11 @@ func (s *ConnLogSpool) capWarn(now time.Time) {
 		return
 	}
 	s.capWarned = win
-	s.logger.Warn("conn-log spool full (dropping new events until uploads catch up)",
+	s.logger.Warn("the connection log directory is full; new entries are dropped until uploads catch up",
 		"dir", s.dir, "cap_bytes", s.maxBytes, "spooled_bytes", s.spooled.Load())
 }
 
-func (s *ConnLogSpool) ioWarn(op, path string, err error) {
+func (s *ConnLogSpool) ioWarn(msg, op, path string, err error) {
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
 	now := s.now()
@@ -576,7 +579,7 @@ func (s *ConnLogSpool) ioWarn(op, path string, err error) {
 		s.ioLastOp, s.ioLastPath, s.ioLastErr = op, path, err
 		return
 	}
-	s.logger.Warn("conn-log spool I/O failed", "op", op, "path", path, "err", err, "suppressed_since_last", s.ioSuppressed)
+	s.logger.Warn(msg, "op", op, "path", path, "err", err, "suppressed_since_last", s.ioSuppressed)
 	s.ioLast, s.ioSuppressed = now, 0
 }
 
@@ -587,7 +590,7 @@ func (s *ConnLogSpool) flushIOWarn(force bool) {
 	if s.ioSuppressed == 0 || (!force && now.Sub(s.ioLast) < spoolIOLogEvery) {
 		return
 	}
-	s.logger.Warn("conn-log spool I/O failures suppressed", "count", s.ioSuppressed,
+	s.logger.Warn("more connection log file errors happened and were not logged one by one", "count", s.ioSuppressed,
 		"last_op", s.ioLastOp, "last_path", s.ioLastPath, "last_err", s.ioLastErr)
 	s.ioLast, s.ioSuppressed = now, 0
 }
@@ -611,9 +614,9 @@ func (s *ConnLogSpool) Drain(ctx context.Context) {
 		<-s.uploaderDone
 		s.upCancel()
 		if names, err := s.readyFiles(); err != nil {
-			s.ioWarn("list", s.dir, err)
+			s.ioWarn("could not check for connection log files left to upload at shutdown; any that are left are uploaded after the next start", "list", s.dir, err)
 		} else if len(names) > 0 {
-			s.logger.Warn("conn-log spool files left for the next start", "dir", s.dir, "files", len(names))
+			s.logger.Warn("connection log files are left to upload at the next start", "dir", s.dir, "files", len(names))
 		}
 		s.flushIOWarn(true)
 		s.releaseLock()

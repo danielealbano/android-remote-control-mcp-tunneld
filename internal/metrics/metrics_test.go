@@ -191,7 +191,7 @@ func TestHealthz200WhenRedisUp(t *testing.T) {
 
 func TestHealthz503WhenRedisDown(t *testing.T) {
 	m, _, store, mr, rdb := setup(t)
-	mr.Close()
+	mr.SetError("ERR valkey is down")
 	h := Handler(m.Gatherer, rdb, store, &fakeNodeSrc{}, testLog())
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz", nil))
@@ -294,7 +294,7 @@ func TestRejectionIncrementsACMEHTTPMiss(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), `tunneld_rejections_total{reason="acme-http-miss"} 1`) {
 		t.Errorf("acme-http-miss counter not incremented:\n%s", rr.Body.String())
 	}
-	if strings.Contains(buf.String(), "unregistered rejection reason") {
+	if strings.Contains(buf.String(), "did not count a rejection with an unknown reason") {
 		t.Errorf("acme-http-miss must be a registered reason; log = %q", buf.String())
 	}
 }
@@ -385,16 +385,16 @@ func TestPromRecorder_Reject_NoRouteDebugOnly(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "no-route rejection") {
+	if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, "refused a connection: it could not be passed to a phone or a pending certificate validation for this host name") {
 		t.Fatalf("no-route must log a Debug line, got %q", out)
 	}
-	if strings.Contains(out, "level=WARN") || strings.Contains(out, "cap hit") {
+	if strings.Contains(out, "level=WARN") || strings.Contains(out, "refused a request: no-route") {
 		t.Fatalf("no-route must NOT hit caplog (no WARN cap-hit line), got %q", out)
 	}
 
 	// A different reason DOES go through caplog (control): it emits the WARN cap-hit line.
 	rec.Reject("stream-cap", "tunA", "203.0.113.8")
-	if !strings.Contains(buf.String(), "cap hit") {
+	if !strings.Contains(buf.String(), "refused a connection: the tunnel already has its maximum number of open connections") {
 		t.Fatal("a non-no-route reason must still be logged via caplog")
 	}
 }
@@ -449,13 +449,13 @@ func TestPromRecorder_FlushCapLogEmitsPending(t *testing.T) {
 
 	rec.Reject("stream-cap", "tunA", "1.1.1.1")
 	rec.Reject("stream-cap", "tunA", "1.1.1.2")
-	if strings.Contains(buf.String(), "cap hit summary") {
+	if strings.Contains(buf.String(), "refused connections repeatedly within one minute") {
 		t.Fatal("the pending summary must NOT be emitted before FlushCapLog")
 	}
 
 	rec.FlushCapLog()
 
-	if !strings.Contains(buf.String(), "cap hit summary") {
+	if !strings.Contains(buf.String(), "refused connections repeatedly within one minute: the tunnel already has its maximum number of open connections") {
 		t.Fatalf("FlushCapLog must emit the pending cap-hit summary, got %q", buf.String())
 	}
 }

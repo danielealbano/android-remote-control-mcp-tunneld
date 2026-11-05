@@ -47,7 +47,7 @@ func Handler(gather func(context.Context) prometheus.Gatherer, rdb redis.Univers
 		}
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte("ok")); err != nil {
-			log.Debug("healthz response write failed", "err", err)
+			log.Debug("could not send the health check answer; the checker may get an incomplete answer or none", "err", err)
 		}
 	})
 	// GET /api/v1/admin/tunnels/list?cursor=&count= → ONE SCAN step: {names, cursor}. No backend ranking;
@@ -76,7 +76,7 @@ func Handler(gather func(context.Context) prometheus.Gatherer, rdb redis.Univers
 		}
 		names, next, err := tunnelSrc.List(r.Context(), cursor, count)
 		if err != nil {
-			log.Warn("admin tunnels list failed", "err", err)
+			log.Warn("could not list the tunnels for an admin request, so the admin request fails", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -85,7 +85,7 @@ func Handler(gather func(context.Context) prometheus.Gatherer, rdb redis.Univers
 			Names  []string `json:"names"`
 			Cursor string   `json:"cursor"`
 		}{Names: names, Cursor: strconv.FormatUint(next, 10)}); err != nil {
-			log.Debug("admin tunnels list response write failed", "err", err)
+			log.Debug("could not send the tunnel list; the admin client may get an incomplete answer or none", "err", err)
 		}
 	})
 	// POST /api/v1/admin/tunnels/stats {names:[…]} → per-name merged stats (live tunnels only).
@@ -113,25 +113,25 @@ func Handler(gather func(context.Context) prometheus.Gatherer, rdb redis.Univers
 		}
 		stats, err := tunnelSrc.Stats(r.Context(), body.Names)
 		if err != nil {
-			log.Warn("admin tunnels stats failed", "err", err)
+			log.Warn("could not compute the tunnel statistics for an admin request, so the admin request fails", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(stats); err != nil {
-			log.Debug("admin tunnels stats response write failed", "err", err)
+			log.Debug("could not send the tunnel statistics; the admin client may get an incomplete answer or none", "err", err)
 		}
 	})
 	mux.HandleFunc("/api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Request) {
 		nodes, err := nodeSrc.Nodes(r.Context())
 		if err != nil {
-			log.Warn("admin nodes failed", "err", err)
+			log.Warn("could not list the nodes for an admin request, so the admin request fails", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(nodes); err != nil {
-			log.Debug("admin nodes response write failed", "err", err)
+			log.Debug("could not send the node list; the admin client may get an incomplete answer or none", "err", err)
 		}
 	})
 	return mux

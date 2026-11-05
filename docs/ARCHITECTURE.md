@@ -365,7 +365,9 @@ every CA in the chain declined). `tunneld_acme_cooldown_total{ca}` counts accoun
 `tunneld_acme_rate_limited_total{ca}` the CAs' 429 answers.
 
 Cap-hit logs are deduped via `internal/caplog` (first hit per `(tunnel, reason)` immediately, then ≤1
-summary/min) for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel value is
+summary/min), each as a plain sentence naming what was refused and why (for example `refused a connection: the
+client did not send a valid TLS greeting in time`). The reasons that are routine internet noise (`handshake-timeout`, `ban`,
+`conn-rate`, `acme-http-miss`) log at Info, every other reason at Warn. This holds for every reason EXCEPT `no-route`: a `no-route` rejection's tunnel value is
 attacker-controlled (raw SNI / unrouted name), so it is metric + Debug-line only — it never keys the
 dedup map nor emits a WARN, making log-flooding via that path impossible.
 
@@ -391,11 +393,13 @@ Errors the Go HTTP servers report themselves (e.g. a failed TLS handshake) go th
 the internet-facing enroll / control / `:80` servers (attacker-driven, like `no-route`), at Warn on the
 WireGuard-only mesh and internal servers.
 
-Enrollment and issuance timing is visible at Debug: every ACME HTTP request logs `acme request` (`ca`,
-`account`, `method`, `path`, `status`, the CA's `retry_after`, `paced` = the time the budget transport held it,
-`took` = the CA's answer time; a request the transport refuses or abandons before sending logs `paced` and `err`
-with no `took`, and a request whose send fails logs `paced`, `took` and `err` with no `status` or `retry_after`), and every completed step of the enrollment and issuance processing logs `enroll step` /
-`issue step` with its `step` and `took` — from the per-IP limit check (after the request body is read and
+Enrollment and issuance timing is visible at Debug: every ACME HTTP request the CA answers logs `the certificate
+authority answered a request` (`ca`, `account`, `method`, `path`, `status`, the CA's `retry_after`, `paced` = the time
+the budget transport held it, `took` = the CA's answer time); a request the transport refuses or abandons before
+sending logs `a request to the certificate authority was not sent; the certificate order gets an error instead` with `paced` and `err` and no `took`, and a request
+whose send fails logs `a request to the certificate authority failed; the error is passed back to the certificate order` with `paced`, `took` and `err`. Every completed
+step of the enrollment and issuance processing logs `enrollment step finished` / `certificate issuance step finished`
+with its `step` and `took` — from the per-IP limit check (after the request body is read and
 parsed) to the registry write and the issuance-lock release; the request-body transfer and the response write
 are not timed.
 

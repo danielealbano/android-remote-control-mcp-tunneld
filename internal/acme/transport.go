@@ -149,17 +149,17 @@ func (t *budgetTransport) send(req *http.Request, start time.Time, got **http.Re
 	}
 	took := t.now().Sub(sent)
 	if err != nil {
-		t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+		t.logger.Debug("a request to the certificate authority failed; the error is passed back to the certificate order", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
 			"paced", sent.Sub(start), "took", took, "err", err)
 		return nil, err
 	}
-	t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+	t.logger.Debug("the certificate authority answered a request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
 		"status", resp.StatusCode, "retry_after", resp.Header.Get("Retry-After"), "paced", sent.Sub(start), "took", took)
 	return resp, nil
 }
 
 func (t *budgetTransport) logUnsent(req *http.Request, start time.Time, err error) {
-	t.logger.Debug("acme request", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
+	t.logger.Debug("a request to the certificate authority was not sent; the certificate order gets an error instead", "ca", t.acct.ca, "account", t.acct.label, "method", req.Method, "path", req.URL.Path,
 		"paced", t.now().Sub(start), "err", err)
 }
 
@@ -211,7 +211,7 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) (bool, error
 		}
 		wait, err := t.take(ctx, bs)
 		if err != nil {
-			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+			t.logger.Warn("could not check the request budget, so the request is sent anyway", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 			return false, nil
 		}
 		if wait > 0 {
@@ -240,7 +240,7 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) (bool, error
 			if !known {
 				reason = "the wait-until check failed"
 			}
-			t.logger.Debug("acme order dropped its prepaid requests", "ca", t.acct.ca, "account", t.acct.label, "reason", reason, "dropped", n)
+			t.logger.Debug("an order dropped the part of the request budget it had set aside and not used yet", "ca", t.acct.ca, "account", t.acct.label, "reason", reason, "dropped", n)
 		}
 		charge := bs
 		key, paid := tr.usePrepaid()
@@ -249,7 +249,7 @@ func (t *budgetTransport) before(req *http.Request, tr *orderTrack) (bool, error
 		}
 		wait, err := t.take(ctx, charge)
 		if err != nil {
-			t.logger.Warn("acme request budget unavailable (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+			t.logger.Warn("could not check the request budget, so the request is sent anyway", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 			wait = 0
 		}
 		if wait <= 0 {
@@ -273,7 +273,7 @@ func (t *budgetTransport) waitState(ctx context.Context) (time.Duration, string,
 	defer cancel()
 	cool, mark, err := t.cooldowns.CAWaitState(octx, t.acct.id)
 	if err != nil {
-		t.logger.Warn("acme account wait-until check failed (request sent)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Warn("could not check whether this account must wait before its next request, so it is treated as not waiting", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 		return 0, "", false
 	}
 	return cool, mark, true
@@ -306,7 +306,7 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 	header := resp.Header.Get("Retry-After")
 	d, perr := retryAfter(header, t.now())
 	if perr != nil {
-		t.logger.Warn("acme 429 with an unparseable Retry-After (the default cooldown applies)", "ca", t.acct.ca, "account", t.acct.label, "err", perr)
+		t.logger.Warn("the certificate authority rate-limited this account without a readable retry time, so the default cooldown applies", "ca", t.acct.ca, "account", t.acct.label, "err", perr)
 	}
 	if d <= 0 {
 		d = t.cooldown
@@ -328,11 +328,11 @@ func (t *budgetTransport) rateLimited(ctx context.Context, resp *http.Response, 
 		Detail string `json:"detail"`
 	}
 	if err := json.Unmarshal(raw, &problem); err != nil {
-		t.logger.Debug("acme 429 body is not a problem document (no budget resync)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Debug("could not read the details of the certificate authority's rate-limit answer, so only the budgets that do not need them are adjusted (none for Let's Encrypt)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 	t.resync(ctx, t.budgets.resyncBuckets(t.acct, problem.Detail, tr), d)
 	t.markLimited(ctx)
-	t.logger.Warn("acme CA answered 429; the account waits", "ca", t.acct.ca, "account", t.acct.label, "retry_after", d, "detail", problem.Detail)
+	t.logger.Warn("the certificate authority rate-limited this account; the account waits before its next request", "ca", t.acct.ca, "account", t.acct.label, "retry_after", d, "detail", problem.Detail)
 	return resp, nil
 }
 
@@ -340,7 +340,7 @@ func (t *budgetTransport) setWaitUntil(ctx context.Context, d time.Duration) {
 	octx, cancel := context.WithTimeout(ctx, budgetOpTimeout)
 	defer cancel()
 	if err := t.cooldowns.SetCACooldown(octx, t.acct.id, d); err != nil {
-		t.logger.Warn("acme account wait-until write failed", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Warn("could not save how long this account must wait before its next request, so other requests are not held back by it", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 }
 
@@ -348,7 +348,7 @@ func (t *budgetTransport) markLimited(ctx context.Context) {
 	octx, cancel := context.WithTimeout(ctx, budgetOpTimeout)
 	defer cancel()
 	if err := t.cooldowns.MarkCALimited(octx, t.acct.id, t.markTTL); err != nil {
-		t.logger.Warn("acme account 429 mark write failed (running orders keep their prepaid requests)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Warn("could not record that the certificate authority rate-limited this account, so running orders keep using the request budget they set aside", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 }
 
@@ -356,7 +356,7 @@ func (t *budgetTransport) resync(ctx context.Context, bs []limit.Bucket, d time.
 	octx, cancel := context.WithTimeout(ctx, budgetOpTimeout)
 	defer cancel()
 	if err := t.requests.ResyncACME(octx, t.acct.ca, bs, d); err != nil {
-		t.logger.Warn("acme budget resync failed", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Warn("could not adjust the account's budget to the certificate authority's rate-limit answer, so it is not lowered", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 	}
 }
 
@@ -383,7 +383,7 @@ func (t *budgetTransport) observe(req *http.Request, resp *http.Response, tr *or
 		Finalize string `json:"finalize"`
 	}
 	if err := json.Unmarshal(raw, &order); err != nil {
-		t.logger.Debug("acme 201 body is not JSON (not an order)", "ca", t.acct.ca, "account", t.acct.label, "err", err)
+		t.logger.Debug("a certificate authority answer was not JSON, so it is not treated as an order", "ca", t.acct.ca, "account", t.acct.label, "err", err)
 		return resp, nil
 	}
 	if order.Finalize != "" {

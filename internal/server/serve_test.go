@@ -200,7 +200,7 @@ func TestCloseLogged(t *testing.T) {
 			var buf syncBuffer
 			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			closeLogged(logger, "probe", closerFunc(func() error { return tc.err }))
-			if logged := strings.Contains(buf.String(), `msg="close failed" what=probe`); logged != tc.wantLogged {
+			if logged := strings.Contains(buf.String(), `msg="could not close a connection or listener cleanly; it is not used again" what=probe`); logged != tc.wantLogged {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLogged, buf.String())
 			}
 		})
@@ -240,7 +240,7 @@ func TestShutdownLogged(t *testing.T) {
 			if err := <-served; !errors.Is(err, http.ErrServerClosed) {
 				t.Fatalf("Serve returned %v, want http.ErrServerClosed", err)
 			}
-			if logged := strings.Contains(buf.String(), `msg="server shutdown did not complete cleanly" which=probe`); logged != tc.wantLogged {
+			if logged := strings.Contains(buf.String(), `msg="a server did not finish shutting down cleanly; the shutdown continues and its remaining connections close when tunneld exits" which=probe`); logged != tc.wantLogged {
 				t.Fatalf("logged = %v, want %v; log = %q", logged, tc.wantLogged, buf.String())
 			}
 		})
@@ -548,7 +548,7 @@ func TestSpliceEvictor_EvictsLocallyAndBroadcasts(t *testing.T) {
 	if n != 1 {
 		t.Fatal("a node-listing failure must not skip the local eviction")
 	}
-	if !strings.Contains(buf.String(), "node listing failed") {
+	if !strings.Contains(buf.String(), "could not list the nodes to close a disconnected phone's connections, so the other nodes keep them until they notice the phone is gone") {
 		t.Fatalf("the node-listing failure must be logged; log = %q", buf.String())
 	}
 }

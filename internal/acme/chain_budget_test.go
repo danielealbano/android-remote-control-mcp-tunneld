@@ -354,7 +354,7 @@ func TestChain_SettleWithoutReservation(t *testing.T) {
 	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
 		t.Fatal(err)
 	}
-	if le.calls.Load() != 1 || !strings.Contains(ac.log.String(), `msg="acme budget reservation failed (trying the account)"`) {
+	if le.calls.Load() != 1 || !strings.Contains(ac.log.String(), `msg="could not reserve this account's issuance budget, so the account is tried anyway"`) {
 		t.Fatalf("a failed reservation must still try the account (calls %d); log = %q", le.calls.Load(), ac.log.String())
 	}
 	orders, name, domain := leBuckets(a, "p.example.test")
@@ -600,7 +600,7 @@ func TestChain_LiveNodesError(t *testing.T) {
 	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p"); err != nil {
 		t.Fatalf("with the node list unavailable only this node's reservations count: %v", err)
 	}
-	if le.calls.Load() != 1 || !strings.Contains(ac.log.String(), `msg="live node list unavailable (counting only this node's in-flight orders)"`) {
+	if le.calls.Load() != 1 || !strings.Contains(ac.log.String(), `msg="could not list the live nodes, so only this node's running orders are counted"`) {
 		t.Fatalf("calls %d; log = %q", le.calls.Load(), ac.log.String())
 	}
 }
@@ -611,14 +611,14 @@ func TestChain_OrderedLevelsError(t *testing.T) {
 	g1 := &trackingFake{caID: CAGTS, label: "gts-1", order: calls}
 	g2 := &trackingFake{caID: CAGTS, label: "gts-2", order: calls}
 	ac := newAccountChain(t, ChainConfig{}, acct(g1, "g1", time.Minute), acct(g2, "g2", time.Minute))
-	ac.mr.Close()
+	ac.mr.SetError("ERR valkey is down")
 	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p"); err != nil {
 		t.Fatal(err)
 	}
 	if got := calls.get(); !slices.Equal(got, []string{"gts-2"}) {
 		t.Fatalf("accounts tried %v, want the Rand-shuffled order (gts-2 first)", got)
 	}
-	if !strings.Contains(ac.log.String(), `msg="acme budget levels unavailable (accounts in random order)"`) {
+	if !strings.Contains(ac.log.String(), `msg="could not read how much issuance budget each account has left, so the accounts are tried in random order"`) {
 		t.Fatalf("log = %q", ac.log.String())
 	}
 }
@@ -816,7 +816,7 @@ func TestChain_SkipsAccountWithoutRequestBudget(t *testing.T) {
 	if got := ac.level(t, smallBudgets().gtsOrders(a)); got != 1 {
 		t.Fatalf("GTS order budget level = %v, want 1 (the reservation released)", got)
 	}
-	if !strings.Contains(ac.log.String(), `msg="acme account out of request budget (skipped)"`) {
+	if !strings.Contains(ac.log.String(), `msg="skipping a certificate authority account: its request budget is used up for now"`) {
 		t.Fatalf("the skip must be logged; log = %q", ac.log.String())
 	}
 }
@@ -841,7 +841,7 @@ func TestChain_SkippedAccountReleasesReservationAfterCallerGone(t *testing.T) {
 	if got := ac.level(t, smallBudgets().gtsOrders(a)); got != 1 {
 		t.Fatalf("GTS order budget level = %v, want 1 (the reservation released although the caller was gone)", got)
 	}
-	if strings.Contains(ac.log.String(), `msg="acme budget release failed`) {
+	if strings.Contains(ac.log.String(), `msg="could not give back an unused issuance budget reservation`) {
 		t.Fatalf("the release must not fail; log = %q", ac.log.String())
 	}
 }
@@ -980,7 +980,7 @@ func TestChain_FailureBeforeCallerGoneDuringSettleBacksOff(t *testing.T) {
 	if !slices.Contains(ac.rec.issues, "letsencrypt fail") {
 		t.Fatalf("issues = %v, want the CA failure recorded", ac.rec.issues)
 	}
-	if !strings.Contains(ac.log.String(), `msg="acme CA order failed" ca=letsencrypt`) {
+	if !strings.Contains(ac.log.String(), `msg="the certificate authority did not issue the certificate; any remaining account or certificate authority that can take the order is tried" ca=letsencrypt`) {
 		t.Fatalf("the CA failure must be logged; log = %q", ac.log.String())
 	}
 }
@@ -998,7 +998,7 @@ func TestChain_SuccessResetsFailureStreakAfterCallerGone(t *testing.T) {
 	if _, info, err := ac.ch.Obtain(ctx, nil, "p"); err != nil || info.CA != CALetsEncrypt {
 		t.Fatalf("Obtain = %+v, %v; want LE", info, err)
 	}
-	if strings.Contains(ac.log.String(), "acme CA failure-streak reset failed") {
+	if strings.Contains(ac.log.String(), "could not reset this account's count of failures in a row after a success; the old count expires on its own, and until then a new failure backs off longer") {
 		t.Fatalf("the streak reset must not fail; log = %q", ac.log.String())
 	}
 	assertNoCAFailureState(t, ac.lim, "le-1")
@@ -1088,7 +1088,7 @@ func TestChain_LogsPrepayRefundFailure(t *testing.T) {
 	if _, _, err := ac.ch.Obtain(context.Background(), nil, "p.example.test"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ac.log.String(), `msg="acme request budget refund failed (the budget refills on its own)"`) {
+	if !strings.Contains(ac.log.String(), `msg="could not refund the order's unused requests; the budget refills on its own"`) {
 		t.Fatalf("a failed refund must be logged; log = %q", ac.log.String())
 	}
 }
@@ -1105,7 +1105,7 @@ func TestChain_LogsPrepayFailureAndTriesTheAccount(t *testing.T) {
 	if gts.calls.Load() != 1 {
 		t.Fatal("an account whose prepay failed must still be asked")
 	}
-	if !strings.Contains(ac.log.String(), `msg="acme request budget prepay failed (trying the account)"`) {
+	if !strings.Contains(ac.log.String(), `msg="could not set aside the order's share of the request budget, so the account is tried anyway"`) {
 		t.Fatalf("a failed prepay must be logged; log = %q", ac.log.String())
 	}
 }
@@ -1125,8 +1125,8 @@ func TestChain_LogsReleaseFailureWhenSkippingWithoutRequestBudget(t *testing.T) 
 	if gts.calls.Load() != 0 {
 		t.Fatal("an account without request budget for a whole order must not be asked")
 	}
-	for _, want := range []string{`msg="acme budget release failed (the reservation expires at its deadline)"`,
-		`msg="acme account out of request budget (skipped)" ca=gts name=p.example.test retry_after=`} {
+	for _, want := range []string{`msg="could not give back an unused issuance budget reservation; it is released automatically at its deadline"`,
+		`msg="skipping a certificate authority account: its request budget is used up for now" ca=gts name=p.example.test retry_after=`} {
 		if !strings.Contains(ac.log.String(), want) {
 			t.Fatalf("log is missing %s; log = %q", want, ac.log.String())
 		}
@@ -1175,7 +1175,7 @@ func TestChain_DropsPrepaidAfterA429(t *testing.T) {
 			if got := ac.level(t, smallBudgets().gtsRequests(a)); got != tc.wantLevel {
 				t.Fatalf("GTS request budget level = %v, want %v", got, tc.wantLevel)
 			}
-			dropped := strings.Contains(ac.log.String(), `msg="acme order dropped its prepaid requests" ca=gts account=gts-1 reason="the account answered 429" dropped=9`)
+			dropped := strings.Contains(ac.log.String(), `msg="an order dropped the part of the request budget it had set aside and not used yet" ca=gts account=gts-1 reason="the account answered 429" dropped=9`)
 			if dropped != tc.wantDrop {
 				t.Fatalf("drop logged = %v, want %v; log = %q", dropped, tc.wantDrop, ac.log.String())
 			}
@@ -1201,7 +1201,7 @@ func TestChain_429MarkReadFailure(t *testing.T) {
 		if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 1 {
 			t.Fatalf("GTS request budget level = %v, want 1 (nothing prepaid)", got)
 		}
-		if !strings.Contains(ac.log.String(), `msg="acme 429 mark read failed (no prepay; requests draw on the shared budget)"`) {
+		if !strings.Contains(ac.log.String(), `msg="could not check whether the certificate authority recently rate-limited this account, so the order's requests use the shared request budget"`) {
 			t.Fatalf("the failed read must be logged; log = %q", ac.log.String())
 		}
 	})
@@ -1218,7 +1218,7 @@ func TestChain_429MarkReadFailure(t *testing.T) {
 		if got := ac.level(t, smallBudgets().gtsRequests(a)); got != 0.1 {
 			t.Fatalf("GTS request budget level = %v, want 0.1 (the 9 prepaid not refunded)", got)
 		}
-		if !strings.Contains(ac.log.String(), `msg="acme 429 mark read failed (refund skipped; the budget refills on its own)"`) {
+		if !strings.Contains(ac.log.String(), `msg="could not check whether the certificate authority recently rate-limited this account, so the order's unused requests are not refunded; the budget refills on its own"`) {
 			t.Fatalf("the failed read must be logged; log = %q", ac.log.String())
 		}
 	})
