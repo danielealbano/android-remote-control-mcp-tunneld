@@ -429,5 +429,5 @@ func classifyLego(err error) *IssuerError {
 }
 
 func SetLogOutput(w io.Writer) {
-	legolog.SetDefault(slog.New(slog.NewTextHandler(w, nil)))
+	legolog.SetDefault(slog.New(readableLegoHandler{slog.NewTextHandler(w, nil)}))
 }
