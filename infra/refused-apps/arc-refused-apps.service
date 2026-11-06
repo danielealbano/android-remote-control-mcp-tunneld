@@ -1,0 +1,12 @@
+[Unit]
+Description=Send the daily report of refused app enrollments
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tunneld/tunneld.env
+EnvironmentFile=/etc/tunneld/refused-apps.env
+ExecStart=/usr/local/sbin/arc-refused-apps
+TimeoutStartSec=120
+NoNewPrivileges=yes
