@@ -24,6 +24,9 @@ func TestParseKeyDescriptionFields(t *testing.T) {
 	if kd.Package != p.packageName {
 		t.Errorf("package = %q", kd.Package)
 	}
+	if kd.PackageVersion != 20011770 {
+		t.Errorf("package version = %d", kd.PackageVersion)
+	}
 	if kd.SecurityLevel != SecurityTrustedEnvironment {
 		t.Errorf("security level = %d", kd.SecurityLevel)
 	}

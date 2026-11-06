@@ -177,7 +177,7 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 	t.Helper()
 	// attestationApplicationId → OCTET STRING wrapper → context [709].
 	aaid := attestationApplicationID{
-		PackageInfos:     []attestationPackageInfo{{PackageName: []byte(p.packageName), Version: 1}},
+		PackageInfos:     []attestationPackageInfo{{PackageName: []byte(p.packageName), Version: 20011770}},
 		SignatureDigests: []asn1.RawValue{{FullBytes: mustMarshal(t, p.signerDigest)}},
 	}
 	aaidDER := mustMarshal(t, aaid)

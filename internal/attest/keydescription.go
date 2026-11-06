@@ -75,6 +75,7 @@ type KeyDescription struct {
 	SecurityLevel      int // attestationSecurityLevel
 	Challenge          []byte
 	Package            string
+	PackageVersion     int64
 	SignatureDigests   [][]byte
 	DeviceLocked       bool
 	VerifiedBootState  int
@@ -155,6 +156,7 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 			}
 			if len(aaid.PackageInfos) > 0 {
 				out.Package = string(aaid.PackageInfos[0].PackageName)
+				out.PackageVersion = aaid.PackageInfos[0].Version
 			}
 			for _, d := range aaid.SignatureDigests {
 				out.SignatureDigests = append(out.SignatureDigests, d.Bytes)
