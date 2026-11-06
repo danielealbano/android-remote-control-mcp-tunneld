@@ -409,6 +409,10 @@ first failure — then at most one summary per minute carrying the suppressed co
 a pending count is still reported once the failures stop (on the next record after the minute) and when
 the sinks are closed at shutdown.
 
+The ACME library (lego) logs through its own handler straight to stderr, outside the `--log` sinks. tunneld
+rewrites each of its messages on the issuance paths it uses as a plain sentence and keeps the library's level
+and fields (for example `received the certificate from the certificate authority` with `domains`).
+
 ## 9. Stopping a node: pre-drain, drain, shutdown
 
 A stop signal does not cut traffic at once: `Run` keeps every server, listener and scheduler running through a

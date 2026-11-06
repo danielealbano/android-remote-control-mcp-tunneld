@@ -130,6 +130,67 @@ func TestSetLogOutput_WritesToWriter(t *testing.T) {
 	}
 }
 
+func TestSetLogOutput_RewordsLibraryMessages(t *testing.T) {
+	prev := legolog.Default()
+	t.Cleanup(func() { legolog.SetDefault(prev) })
+	tests := []struct {
+		name string
+		log  func()
+		want []string
+		gone string
+	}{
+		{
+			name: "info line keeps its level and fields",
+			log: func() {
+				legolog.Info("Server responded with a certificate.", legolog.DomainsAttr([]string{"abc.example.test"}))
+			},
+			want: []string{"level=INFO", `msg="received the certificate from the certificate authority"`, "domains=abc.example.test"},
+			gone: "Server responded",
+		},
+		{
+			name: "warn line keeps its level and error",
+			log: func() {
+				legolog.Warn("tlsalpn01: cleaning up failed.", legolog.DomainAttr("abc.example.test"), legolog.ErrorAttr(errors.New("store down")))
+			},
+			want: []string{"level=WARN", `msg="could not remove the TLS-ALPN-01 validation answer after the check, so it is left in place"`, `error="store down"`},
+			gone: "cleaning up failed",
+		},
+		{
+			name: "logger with attributes still rewords",
+			log:  func() { legolog.Default().With(slog.String("ca", "letsencrypt")).Info("Use solver.") },
+			want: []string{`msg="chose how to prove control of the name to the certificate authority"`, "ca=letsencrypt"},
+			gone: "Use solver",
+		},
+		{
+			name: "logger with a group still rewords",
+			log:  func() { legolog.Default().WithGroup("chal").Info("Use solver.", slog.String("type", "tls-alpn-01")) },
+			want: []string{`msg="chose how to prove control of the name to the certificate authority"`, "chal.type=tls-alpn-01"},
+			gone: "Use solver",
+		},
+		{
+			name: "unknown message is kept",
+			log:  func() { legolog.Info("some other line.") },
+			want: []string{`msg="some other line."`},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			SetLogOutput(&buf)
+			tc.log()
+			got := buf.String()
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("log output %q does not contain %q", got, w)
+				}
+			}
+			if tc.gone != "" && strings.Contains(got, tc.gone) {
+				t.Errorf("log output %q still contains the library's wording %q", got, tc.gone)
+			}
+		})
+	}
+}
+
 func dnsOptionName(opt dns01.ChallengeOption) string {
 	return runtime.FuncForPC(reflect.ValueOf(opt).Pointer()).Name()
 }
