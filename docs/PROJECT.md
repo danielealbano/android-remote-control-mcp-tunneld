@@ -241,9 +241,11 @@ does nothing when its `last_report` date is already today. Otherwise it reads ev
 `rejected-enroll/` and adds the attempts not on the list yet: app id, time, source address, signing key, app version,
 and `verified` — the chain verified to a Google root before the refusal, the key is hardware-backed on a locked phone
 with verified boot, and no certificate of the chain is on Google's revocation list. It then sends one Telegram
-message listing the new attempts by day, or saying there were none (split into numbered parts above 4096
-characters), saves the list with today's date, and rewrites the node_exporter textfile `arc_refused_apps.prom`
-behind the Refused apps dashboard. The first run after missed days covers all of them. A failed run sends a message
+rich message with a table per app and signing key (day, time, source address, tries) of the new attempts, or
+saying there were none (split into numbered parts above Telegram's 500 blocks or 32768 characters per message),
+saves the list with today's date, and rewrites the node_exporter textfile `arc_refused_apps.prom` behind the
+Refused apps dashboard. App ids in `REFUSED_APPS_HIDE_APPS` stay on the list but are left out of the message and
+the textfile. The first run after missed days covers all of them. A failed run sends a message
 saying so and saves nothing, so the next node or the next day sends the report; a day without any message means no
 node ran. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
 `/etc/tunneld/refused-apps.env` (`refused-apps.env.example`). `infra/refused-apps/install.sh` installs it on every
