@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type fakeStore struct {
@@ -90,6 +91,7 @@ func (m *fakeMessenger) Send(_ context.Context, text string) error {
 }
 
 type harness struct {
+	hideApps  []string
 	store     *fakeStore
 	messages  *fakeMessenger
 	textfile  string
@@ -125,6 +127,7 @@ func (h *harness) job(t *testing.T) *job {
 		Node:     "n2",
 		Location: testZone,
 		Textfile: h.textfile,
+		HideApps: h.hideApps,
 		Logger:   h.discarded,
 	},
 		withClock(func() time.Time { return h.now }),
@@ -178,6 +181,33 @@ func TestJob_FirstRunReportsEverythingOnFile(t *testing.T) {
 	want := `arc_refused_app_attempts{app="dev.example.copy",key="3031323334353637383961626364656630313233343536373839616263646566",version="20011770",ip="198.51.100.7"} 1`
 	if !strings.Contains(string(prom), want+"\n") {
 		t.Fatalf("dashboard file lacks %s:\n%s", want, prom)
+	}
+}
+
+func TestJob_HiddenAppsStayOnFileButOutOfTheReportAndDashboard(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
+	h.hideApps = []string{"dev.example.own"}
+	own := goodChain()
+	own.app = "dev.example.own"
+	h.addRecord(t, "a.json", at(6, 21, 15), "198.51.100.7")
+	h.store.objects["rejected-enroll/b.json"] = evidenceJSON(t, evidence(t, at(6, 22, 0), "203.0.113.9", "attest-signer", own))
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.messages.texts) != 1 || !strings.Contains(h.messages.texts[0], "1 new attempt.") || strings.Contains(h.messages.texts[0], "dev.example.own") {
+		t.Fatalf("messages = %q, want only the attempt of the app that is not hidden", h.messages.texts)
+	}
+	l := h.store.list(t)
+	if len(l.Apps["dev.example.own"]) != 1 || len(l.Apps["dev.example.copy"]) != 1 {
+		t.Fatalf("stored list = %+v, want the hidden app kept on file", l)
+	}
+	prom, err := os.ReadFile(h.textfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(prom), "dev.example.own") || !strings.Contains(string(prom), `app="dev.example.copy"`) {
+		t.Fatalf("dashboard file = %s, want only the app that is not hidden", prom)
 	}
 }
 
@@ -251,7 +281,7 @@ func TestJob_ARunAfterMissedDaysCoversThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := h.messages.texts[0]
-	for _, want := range []string{"covers the 2 days in between.", "\nThu 5 Nov 2026\n", "\nFri 6 Nov 2026\n", "2 new attempts."} {
+	for _, want := range []string{"covers the 2 days in between.", "<td>Thu 5 Nov</td>", "<td>Fri 6 Nov</td>", "2 new attempts."} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report lacks %q:\n%s", want, text)
 		}
@@ -262,8 +292,11 @@ func TestJob_ALongReportGoesOutInNumberedParts(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
 	h.setList(t, attemptList{LastReport: "2026-11-06", Apps: map[string][]attempt{}})
-	for i := range 200 {
-		h.addRecord(t, "r"+strconv.Itoa(i)+".json", at(6, 10, 0).Add(time.Duration(i)*time.Second), "198.51.100."+strconv.Itoa(i))
+	ev := evidence(t, at(6, 10, 0), "", "attest-signer", goodChain())
+	for i := range 600 {
+		ev.TS = at(6, 10, 0).Add(time.Duration(i) * time.Second)
+		ev.SrcIP = "10.0." + strconv.Itoa(i/256) + "." + strconv.Itoa(i%256)
+		h.store.objects["rejected-enroll/r"+strconv.Itoa(i)+".json"] = evidenceJSON(t, ev)
 	}
 	if err := h.job(t).run(context.Background()); err != nil {
 		t.Fatal(err)
@@ -273,12 +306,18 @@ func TestJob_ALongReportGoesOutInNumberedParts(t *testing.T) {
 		t.Fatalf("got %d messages, want several parts", n)
 	}
 	for i, text := range h.messages.texts {
-		if !strings.HasPrefix(text, "Part "+strconv.Itoa(i+1)+" of "+strconv.Itoa(n)+"\n") || utf16Len(text) > telegramLimit {
-			t.Fatalf("part %d = %.80q (%d UTF-16 units)", i+1, text, utf16Len(text))
+		if !strings.HasPrefix(text, "<p>Part "+strconv.Itoa(i+1)+" of "+strconv.Itoa(n)) {
+			t.Fatalf("message %d = %.80q, want part %d of %d", i+1, text, i+1, n)
+		}
+		if utf8.RuneCountInString(text) > richMessageRunes || strings.Count(text, "<tr>") >= richMessageBlocks {
+			t.Fatalf("message %d is over Telegram's limits", i+1)
 		}
 	}
+	if got := strings.Count(strings.Join(h.messages.texts, ""), "<td>10.0."); got != 600 {
+		t.Fatalf("%d address rows, want each of the 600 once", got)
+	}
 	if len(h.pauses) != n-1 {
-		t.Fatalf("pauses = %d, want one between each of the %d parts", len(h.pauses), n)
+		t.Fatalf("pauses = %d, want one between each of the %d messages", len(h.pauses), n)
 	}
 }
 
@@ -396,6 +435,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 		{name: "location", mutate: func(c *jobConfig) { c.Location = nil }},
 		{name: "textfile", mutate: func(c *jobConfig) { c.Textfile = "" }},
 		{name: "logger", mutate: func(c *jobConfig) { c.Logger = nil }},
+		{name: "empty hidden app", mutate: func(c *jobConfig) { c.HideApps = []string{"dev.example.own", ""} }},
 		{name: "clock", mutate: func(*jobConfig) {}, opts: []jobOption{withClock(nil)}},
 		{name: "sleep", mutate: func(*jobConfig) {}, opts: []jobOption{withPause(time.Second, nil)}},
 	}

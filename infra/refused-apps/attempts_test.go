@@ -70,6 +70,19 @@ func TestToAttempt_UnreadableChainKeepsTheRecordFields(t *testing.T) {
 	}
 }
 
+func TestAttemptList_WithoutLeavesOutHiddenAppsAndKeepsTheOriginal(t *testing.T) {
+	t.Parallel()
+	a := attempt{At: at(6, 9, 0), IP: "198.51.100.7"}
+	l := attemptList{LastReport: "2026-11-06", Apps: map[string][]attempt{"dev.example.own": {a}, "dev.example.copy": {a}}}
+	got := l.without(map[string]bool{"dev.example.own": true})
+	if got.LastReport != "2026-11-06" || len(got.Apps) != 1 || len(got.Apps["dev.example.copy"]) != 1 {
+		t.Fatalf("without = %+v", got)
+	}
+	if len(l.Apps) != 2 {
+		t.Fatalf("the original list changed: %+v", l)
+	}
+}
+
 func TestAttemptList_AddSkipsKnownAttempts(t *testing.T) {
 	t.Parallel()
 	early := attempt{At: time.Unix(1_800_000_000, 5), IP: "198.51.100.7", Key: "aa", Version: 1}

@@ -3,7 +3,7 @@ set -eu
 
 usage() {
 	cat >&2 <<'USAGE'
-Usage: install.sh [--config FILE] [--binary FILE] [--timezone ZONE] [--telegram-token-file FILE] [--telegram-chat ID] [-- SSH_OPTION...]
+Usage: install.sh [--config FILE] [--binary FILE] [--timezone ZONE] [--telegram-token-file FILE] [--telegram-chat ID] [--hide-apps IDS] [-- SSH_OPTION...]
 
 Installs the daily refused-apps report on every node in the config file, one node at a time.
 Each config line is: <node> <ssh-target> <HH:MM>
@@ -15,6 +15,8 @@ Blank lines and lines starting with # are skipped.
   --timezone ZONE             time zone of the run times and the report, or REFUSED_APPS_TIMEZONE
   --telegram-token-file FILE  file holding the Telegram bot token, or REFUSED_APPS_TELEGRAM_TOKEN_FILE
   --telegram-chat ID          Telegram chat that receives the report, or REFUSED_APPS_TELEGRAM_CHAT
+  --hide-apps IDS             comma-separated app ids kept on the attempt list but left out of the report
+                              and the dashboard, or REFUSED_APPS_HIDE_APPS (optional)
 
 Everything after -- is passed to ssh.
 USAGE
@@ -27,10 +29,11 @@ binary=${REFUSED_APPS_BINARY:-}
 timezone=${REFUSED_APPS_TIMEZONE:-}
 token_file=${REFUSED_APPS_TELEGRAM_TOKEN_FILE:-}
 chat=${REFUSED_APPS_TELEGRAM_CHAT:-}
+hide_apps=${REFUSED_APPS_HIDE_APPS:-}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--config | --binary | --timezone | --telegram-token-file | --telegram-chat)
+	--config | --binary | --timezone | --telegram-token-file | --telegram-chat | --hide-apps)
 		[ $# -ge 2 ] || usage
 		case "$1" in
 		--config) config=$2 ;;
@@ -38,6 +41,7 @@ while [ $# -gt 0 ]; do
 		--timezone) timezone=$2 ;;
 		--telegram-token-file) token_file=$2 ;;
 		--telegram-chat) chat=$2 ;;
+		--hide-apps) hide_apps=$2 ;;
 		esac
 		shift 2
 		;;
@@ -71,6 +75,12 @@ case "${chat#-}" in
 	exit 1
 	;;
 esac
+case "$hide_apps" in
+*[!A-Za-z0-9_.,]* | ,* | *, | *,,*)
+	echo "hidden app list $hide_apps must be app ids separated by single commas" >&2
+	exit 1
+	;;
+esac
 token=$(tr -d '\r\n' < "$token_file")
 [ -n "$token" ] || {
 	echo "token file $token_file is empty" >&2
@@ -97,7 +107,7 @@ while read -r node target at <&3; do
 		echo "$node has no readable /etc/tunneld/tunneld.env, or does not accept $at in $timezone" >&2
 		exit 1
 	}
-	printf 'REFUSED_APPS_NODE=%s\nREFUSED_APPS_TIMEZONE=%s\nREFUSED_APPS_TELEGRAM_CHAT=%s\nREFUSED_APPS_TELEGRAM_TOKEN=%s\n' "$node" "$timezone" "$chat" "$token" |
+	printf 'REFUSED_APPS_NODE=%s\nREFUSED_APPS_TIMEZONE=%s\nREFUSED_APPS_TELEGRAM_CHAT=%s\nREFUSED_APPS_TELEGRAM_TOKEN=%s\nREFUSED_APPS_HIDE_APPS=%s\n' "$node" "$timezone" "$chat" "$token" "$hide_apps" |
 		ssh "$@" "$target" 'umask 077; cat > /etc/tunneld/refused-apps.env; chmod 600 /etc/tunneld/refused-apps.env'
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-refused-apps.service' < "$dir/arc-refused-apps.service"
 	printf '[Unit]\nDescription=Send the daily report of refused app enrollments at %s %s\n\n[Timer]\nOnCalendar=*-*-* %s:00 %s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n' "$at" "$timezone" "$at" "$timezone" |

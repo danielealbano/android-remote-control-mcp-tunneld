@@ -18,7 +18,7 @@ type telegramServer struct {
 	t        *testing.T
 	mu       sync.Mutex
 	answers  []func(http.ResponseWriter) error
-	requests []sendMessageRequest
+	requests []sendRichMessageRequest
 	paths    []string
 }
 
@@ -28,7 +28,7 @@ func (s *telegramServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	var req sendMessageRequest
+	var req sendRichMessageRequest
 	if err := json.Unmarshal(body, &req); err != nil || r.Header.Get("Content-Type") != "application/json" {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -46,10 +46,10 @@ func (s *telegramServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *telegramServer) seen() ([]sendMessageRequest, []string) {
+func (s *telegramServer) seen() ([]sendRichMessageRequest, []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]sendMessageRequest(nil), s.requests...), append([]string(nil), s.paths...)
+	return append([]sendRichMessageRequest(nil), s.requests...), append([]string(nil), s.paths...)
 }
 
 func answerWith(code int, body string) func(http.ResponseWriter) error {
@@ -78,17 +78,17 @@ func newTestTelegram(t *testing.T, srv *telegramServer, slept *[]time.Duration) 
 	return tg
 }
 
-func TestTelegram_SendPostsThePlainTextWithoutPreview(t *testing.T) {
+func TestTelegram_SendPostsARichMessageWithoutEntityDetection(t *testing.T) {
 	t.Parallel()
 	srv := &telegramServer{}
 	var slept []time.Duration
 	tg := newTestTelegram(t, srv, &slept)
-	if err := tg.Send(context.Background(), "hello"); err != nil {
+	if err := tg.Send(context.Background(), "<p>hello</p>"); err != nil {
 		t.Fatal(err)
 	}
-	want := sendMessageRequest{ChatID: 42, Text: "hello", LinkPreviewOptions: linkPreviewOptions{IsDisabled: true}}
+	want := sendRichMessageRequest{ChatID: 42, RichMessage: inputRichMessage{HTML: "<p>hello</p>", SkipEntityDetection: true}}
 	requests, paths := srv.seen()
-	if len(requests) != 1 || requests[0] != want || paths[0] != "/bot"+testBotToken+"/sendMessage" {
+	if len(requests) != 1 || requests[0] != want || paths[0] != "/bot"+testBotToken+"/sendRichMessage" {
 		t.Fatalf("requests = %+v at %v, want %+v", requests, paths, want)
 	}
 }

@@ -2,19 +2,26 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const (
-	dateLayout    = "2006-01-02"
-	dayLayout     = "Mon 2 Jan 2006"
-	timeLayout    = "15:04"
-	keyShown      = 12
-	retentionDays = 30
+	dateLayout     = "2006-01-02"
+	dayLayout      = "Mon 2 Jan 2006"
+	shortDayLayout = "Mon 2 Jan"
+	timeLayout     = "15:04"
+	keyShown       = 12
+	retentionDays  = 30
+	cellRunes      = 256
+	partRoom       = 32
+	tableStart     = "<table bordered striped compact>"
+	tableEnd       = "</table>"
 )
 
 type newAttempt struct {
@@ -30,53 +37,189 @@ type report struct {
 	fresh      []newAttempt
 }
 
-func (r report) text() (string, error) {
+type section struct {
+	heading string
+	note    string
+	columns []string
+	rows    [][]string
+}
+
+type messageLimits struct {
+	blocks int
+	runes  int
+}
+
+func (r report) messages(lim messageLimits) ([]string, error) {
+	intro, err := r.intro()
+	if err != nil {
+		return nil, err
+	}
+	return pack(intro, r.byApp(groupByDay(r.fresh, r.today.Location())), lim), nil
+}
+
+func (r report) intro() ([]string, error) {
 	loc := r.today.Location()
-	var b strings.Builder
-	fmt.Fprintf(&b, "Refused apps, report of %s from %s (times in %s).\n", r.today.Format(dayLayout), r.node, loc)
-	first := r.lastReport == ""
-	if first {
-		fmt.Fprintf(&b, "This is the first report, so it lists every refused attempt still on file. Refusal records are deleted after %d days.\n", retentionDays)
+	lines := []string{fmt.Sprintf("Refused apps, report of %s from %s (times in %s).", r.today.Format(dayLayout), r.node, loc)}
+	if r.first() {
+		lines = append(lines, fmt.Sprintf("This is the first report, so it lists every refused attempt still on file. Refusal records are deleted after %d days.", retentionDays))
 	} else {
 		last, err := time.ParseInLocation(dateLayout, r.lastReport, loc)
 		if err != nil {
-			return "", fmt.Errorf("read the date of the last report %q: %w", r.lastReport, err)
+			return nil, fmt.Errorf("read the date of the last report %q: %w", r.lastReport, err)
 		}
 		gap := daysBetween(last, r.today)
 		if gap > 1 {
-			fmt.Fprintf(&b, "The last report was sent on %s; this one also covers the %d %s in between.\n",
-				last.Format(dayLayout), gap-1, plural(gap-1, "day", "days"))
+			lines = append(lines, fmt.Sprintf("The last report was sent on %s; this one also covers the %d %s in between.",
+				last.Format(dayLayout), gap-1, plural(gap-1, "day", "days")))
 		}
 		if gap >= retentionDays {
-			fmt.Fprintf(&b, "Refusal records are deleted after %d days, so attempts made before %s may be missing.\n",
-				retentionDays, r.today.AddDate(0, 0, -retentionDays).Format(dayLayout))
+			lines = append(lines, fmt.Sprintf("Refusal records are deleted after %d days, so attempts made before %s may be missing.",
+				retentionDays, r.today.AddDate(0, 0, -retentionDays).Format(dayLayout)))
 		}
 	}
 	if len(r.fresh) == 0 {
-		b.WriteString("No new attempts.\n")
-		return b.String(), nil
+		return append(lines, "No new attempts."), nil
 	}
-	fmt.Fprintf(&b, "%d new %s.\n", len(r.fresh), plural(len(r.fresh), "attempt", "attempts"))
-	for _, day := range groupByDay(r.fresh, loc) {
-		fmt.Fprintf(&b, "\n%s\n", day.date.Format(dayLayout))
+	return append(lines, fmt.Sprintf("%d new %s.", len(r.fresh), plural(len(r.fresh), "attempt", "attempts"))), nil
+}
+
+func (r report) first() bool {
+	return r.lastReport == ""
+}
+
+func (r report) appName(name string) string {
+	s := clip(display(name), cellRunes)
+	if name == "" {
+		s = "(no app named in the attestation)"
+	}
+	if !r.first() && !r.known[name] {
+		s += " (first time seen)"
+	}
+	return s
+}
+
+func (r report) byApp(days []dayGroup) []section {
+	type appVariant struct {
+		app string
+		v   variant
+	}
+	loc := r.today.Location()
+	index := make(map[appVariant]int)
+	var sections []section
+	for _, day := range days {
 		for _, app := range day.apps {
-			name := display(app.name)
-			if app.name == "" {
-				name = "(no app named in the attestation)"
-			}
-			if !first && !r.known[app.name] {
-				name += " (first time seen)"
-			}
-			fmt.Fprintf(&b, "%s\n", name)
 			for _, v := range app.variants {
-				fmt.Fprintf(&b, "  %s\n", v.describe())
+				k := appVariant{app: app.name, v: v.variant}
+				i, ok := index[k]
+				if !ok {
+					i = len(sections)
+					index[k] = i
+					sections = append(sections, section{heading: r.appName(app.name), note: v.describe(), columns: []string{"Day", "Time", "IP", "Tries"}})
+				}
 				for _, src := range v.sources {
-					fmt.Fprintf(&b, "    %s\n", src.describe(loc))
+					sections[i].rows = append(sections[i].rows, []string{
+						day.date.Format(shortDayLayout), src.span(loc), clip(display(src.ip), cellRunes), strconv.Itoa(len(src.times)),
+					})
 				}
 			}
 		}
 	}
-	return b.String(), nil
+	return sections
+}
+
+func (s section) render() (head string, blocks int, rows []string) {
+	var b strings.Builder
+	b.WriteString("<h4>" + html.EscapeString(s.heading) + "</h4>")
+	blocks = 3
+	if s.note != "" {
+		b.WriteString("<p>" + html.EscapeString(s.note) + "</p>")
+		blocks++
+	}
+	b.WriteString(tableStart + "<tr>")
+	for _, c := range s.columns {
+		b.WriteString("<th>" + html.EscapeString(c) + "</th>")
+	}
+	b.WriteString("</tr>")
+	rows = make([]string, len(s.rows))
+	for i, row := range s.rows {
+		var rb strings.Builder
+		rb.WriteString("<tr>")
+		for _, c := range row {
+			rb.WriteString("<td>" + html.EscapeString(c) + "</td>")
+		}
+		rb.WriteString("</tr>")
+		rows[i] = rb.String()
+	}
+	return b.String(), blocks, rows
+}
+
+func pack(lead []string, sections []section, lim messageLimits) []string {
+	escaped := make([]string, len(lead))
+	for i, l := range lead {
+		escaped[i] = html.EscapeString(l)
+	}
+	intro := strings.Join(escaped, "<br>")
+	var bodies []string
+	var cur strings.Builder
+	var blocks, runes, chunks int
+	start := func() {
+		cur.Reset()
+		blocks, runes, chunks = 1, partRoom+utf8.RuneCountInString("<p></p>"), 0
+		if len(bodies) == 0 {
+			runes += utf8.RuneCountInString(intro)
+		}
+	}
+	flush := func() {
+		bodies = append(bodies, cur.String())
+		start()
+	}
+	start()
+	for _, s := range sections {
+		head, headBlocks, rows := s.render()
+		for len(rows) > 0 {
+			b := blocks + headBlocks
+			n := runes + utf8.RuneCountInString(head) + len(tableEnd)
+			k := 0
+			for k < len(rows) && b+1 <= lim.blocks && n+utf8.RuneCountInString(rows[k]) <= lim.runes {
+				b++
+				n += utf8.RuneCountInString(rows[k])
+				k++
+			}
+			if k == 0 {
+				if chunks > 0 {
+					flush()
+					continue
+				}
+				k = 1
+				b++
+				n += utf8.RuneCountInString(rows[0])
+			}
+			cur.WriteString(head)
+			for _, row := range rows[:k] {
+				cur.WriteString(row)
+			}
+			cur.WriteString(tableEnd)
+			blocks, runes = b, n
+			chunks++
+			rows = rows[k:]
+			if len(rows) > 0 {
+				flush()
+			}
+		}
+	}
+	bodies = append(bodies, cur.String())
+	msgs := make([]string, len(bodies))
+	for i, body := range bodies {
+		var first []string
+		if len(bodies) > 1 {
+			first = append(first, fmt.Sprintf("Part %d of %d", i+1, len(bodies)))
+		}
+		if i == 0 {
+			first = append(first, intro)
+		}
+		msgs[i] = "<p>" + strings.Join(first, "<br>") + "</p>" + body
+	}
+	return msgs
 }
 
 func daysBetween(from, to time.Time) int {
@@ -118,13 +261,13 @@ type sourceGroup struct {
 	times []time.Time
 }
 
-func (v variantGroup) describe() string {
+func (v variant) describe() string {
 	if v.key == "" && v.version == 0 {
 		return "no signing key or version in the attestation, not verified"
 	}
 	key := "no signing key"
 	if v.key != "" {
-		key = "key " + display(shorten(v.key, keyShown))
+		key = "key " + v.keyText()
 	}
 	state := "not verified"
 	if v.verified {
@@ -133,13 +276,20 @@ func (v variantGroup) describe() string {
 	return fmt.Sprintf("%s, version %d, %s", key, v.version, state)
 }
 
-func (s sourceGroup) describe(loc *time.Location) string {
-	first := s.times[0].In(loc).Format(timeLayout)
-	if len(s.times) == 1 {
-		return fmt.Sprintf("%s: 1 attempt at %s", display(s.ip), first)
+func (v variant) keyText() string {
+	if v.key == "" {
+		return "none"
 	}
+	return clip(display(v.key), keyShown)
+}
+
+func (s sourceGroup) span(loc *time.Location) string {
+	first := s.times[0].In(loc).Format(timeLayout)
 	last := s.times[len(s.times)-1].In(loc).Format(timeLayout)
-	return fmt.Sprintf("%s: %d attempts, %s to %s", display(s.ip), len(s.times), first, last)
+	if first == last {
+		return first
+	}
+	return first + "–" + last
 }
 
 func groupByDay(fresh []newAttempt, loc *time.Location) []dayGroup {
@@ -200,11 +350,11 @@ func groupByDay(fresh []newAttempt, loc *time.Location) []dayGroup {
 	return days
 }
 
-func shorten(s string, n int) string {
-	if len(s) <= n {
+func clip(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string([]rune(s)[:n]) + "…"
 }
 
 func display(s string) string {
@@ -214,54 +364,4 @@ func display(s string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(s, "\uFFFD"))
-}
-
-func splitMessage(text string, limit int) []string {
-	var parts []string
-	var cur strings.Builder
-	curLen := 0
-	flush := func() {
-		if s := strings.Trim(cur.String(), "\n"); s != "" {
-			parts = append(parts, s)
-		}
-		cur.Reset()
-		curLen = 0
-	}
-	for _, line := range strings.SplitAfter(text, "\n") {
-		for _, piece := range splitLine(line, limit) {
-			n := utf16Len(piece)
-			if curLen+n > limit {
-				flush()
-			}
-			cur.WriteString(piece)
-			curLen += n
-		}
-	}
-	flush()
-	return parts
-}
-
-func splitLine(line string, limit int) []string {
-	if utf16Len(line) <= limit {
-		return []string{line}
-	}
-	var pieces []string
-	start, n := 0, 0
-	for i, r := range line {
-		w := utf16.RuneLen(r)
-		if n+w > limit {
-			pieces = append(pieces, line[start:i])
-			start, n = i, 0
-		}
-		n += w
-	}
-	return append(pieces, line[start:])
-}
-
-func utf16Len(s string) int {
-	n := 0
-	for _, r := range s {
-		n += utf16.RuneLen(r)
-	}
-	return n
 }

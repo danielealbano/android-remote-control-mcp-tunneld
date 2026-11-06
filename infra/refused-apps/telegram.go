@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	telegramLimit      = 4096
+	richMessageBlocks  = 500
+	richMessageRunes   = 32768
 	telegramRetries    = 3
 	telegramMaxBackoff = 60 * time.Second
 )
@@ -70,14 +71,14 @@ func newTelegram(token string, chat int64, opts ...telegramOption) (*telegram, e
 	return t, nil
 }
 
-type sendMessageRequest struct {
-	ChatID             int64              `json:"chat_id"`
-	Text               string             `json:"text"`
-	LinkPreviewOptions linkPreviewOptions `json:"link_preview_options"`
+type sendRichMessageRequest struct {
+	ChatID      int64            `json:"chat_id"`
+	RichMessage inputRichMessage `json:"rich_message"`
 }
 
-type linkPreviewOptions struct {
-	IsDisabled bool `json:"is_disabled"`
+type inputRichMessage struct {
+	HTML                string `json:"html"`
+	SkipEntityDetection bool   `json:"skip_entity_detection"`
 }
 
 type telegramResponse struct {
@@ -88,8 +89,8 @@ type telegramResponse struct {
 	} `json:"parameters"`
 }
 
-func (t *telegram) Send(ctx context.Context, text string) error {
-	body, err := json.Marshal(sendMessageRequest{ChatID: t.chat, Text: text, LinkPreviewOptions: linkPreviewOptions{IsDisabled: true}})
+func (t *telegram) Send(ctx context.Context, html string) error {
+	body, err := json.Marshal(sendRichMessageRequest{ChatID: t.chat, RichMessage: inputRichMessage{HTML: html, SkipEntityDetection: true}})
 	if err != nil {
 		return fmt.Errorf("encode the Telegram message: %w", err)
 	}
@@ -108,7 +109,7 @@ func (t *telegram) Send(ctx context.Context, text string) error {
 }
 
 func (t *telegram) post(ctx context.Context, body []byte) (time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.api+"/bot"+t.token+"/sendMessage", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.api+"/bot"+t.token+"/sendRichMessage", bytes.NewReader(body))
 	if err != nil {
 		return 0, t.redact(fmt.Errorf("build the Telegram request: %w", err))
 	}

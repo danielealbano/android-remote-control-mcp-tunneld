@@ -60,6 +60,16 @@ func (l *attemptList) add(idx map[attemptID]bool, app string, a attempt) bool {
 	return true
 }
 
+func (l attemptList) without(hidden map[string]bool) attemptList {
+	out := attemptList{LastReport: l.LastReport, Apps: make(map[string][]attempt, len(l.Apps))}
+	for app, attempts := range l.Apps {
+		if !hidden[app] {
+			out.Apps[app] = attempts
+		}
+	}
+	return out
+}
+
 func (l *attemptList) count() int {
 	n := 0
 	for _, list := range l.Apps {

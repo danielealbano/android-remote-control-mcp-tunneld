@@ -62,6 +62,7 @@ has "install writes the second node's name" ssh_stdin 'REFUSED_APPS_NODE=n2'
 has "install writes the time zone" ssh_stdin 'REFUSED_APPS_TIMEZONE=Etc/UTC'
 has "install writes the chat" ssh_stdin 'REFUSED_APPS_TELEGRAM_CHAT=12345'
 has "install writes the token to the node" ssh_stdin 'REFUSED_APPS_TELEGRAM_TOKEN=sekret-token'
+has "install hides no app unless asked" ssh_stdin 'REFUSED_APPS_HIDE_APPS=$'
 hasnt "install keeps the token off the command line" ssh_args 'sekret-token'
 has "install gives the first node its run time" ssh_stdin 'OnCalendar=\*-\*-\* 11:00:00 Etc/UTC'
 has "install gives the second node its run time" ssh_stdin 'OnCalendar=\*-\*-\* 11:30:00 Etc/UTC'
@@ -83,6 +84,11 @@ has "install takes a negative group chat id" ssh_stdin 'REFUSED_APPS_TELEGRAM_CH
 all --timezone Etc/GMT+1 >/dev/null
 has "a command-line setting overrides the environment" ssh_stdin 'REFUSED_APPS_TIMEZONE=Etc/GMT+1'
 
+all --hide-apps dev.example.own,dev.example.own.debug >/dev/null
+has "install writes the hidden apps" ssh_stdin 'REFUSED_APPS_HIDE_APPS=dev.example.own,dev.example.own.debug$'
+REFUSED_APPS_HIDE_APPS=dev.example.own all >/dev/null
+has "install reads the hidden apps from the environment" ssh_stdin 'REFUSED_APPS_HIDE_APPS=dev.example.own$'
+
 refused() {
 	label=$1
 	shift
@@ -94,6 +100,9 @@ refused() {
 refused "install without a binary" install --config "$tmproot/nodes.conf" --timezone Etc/UTC --telegram-token-file "$tmproot/token" --telegram-chat 1
 refused "a time zone with shell characters" all --timezone "Etc/UTC';reboot'"
 refused "a chat id that is not a number" all --telegram-chat 12a
+refused "a hidden app list with shell characters" all --hide-apps 'dev.example.own;reboot'
+refused "a hidden app list with an empty entry" all --hide-apps dev.example.own,,dev.example.other
+refused "a hidden app list ending in a comma" all --hide-apps dev.example.own,
 refused "an empty chat id" all --telegram-chat -
 : > "$tmproot/empty-token"
 refused "an empty token file" all --telegram-token-file "$tmproot/empty-token"

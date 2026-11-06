@@ -14,7 +14,6 @@ import (
 const (
 	listKey        = "refused-apps/attempts.json"
 	evidencePrefix = "rejected-enroll/"
-	partHeaderRoom = 32
 )
 
 type objectStore interface {
@@ -24,7 +23,7 @@ type objectStore interface {
 }
 
 type messenger interface {
-	Send(ctx context.Context, text string) error
+	Send(ctx context.Context, html string) error
 }
 
 type revocationLoader func(ctx context.Context) (revocationList, error)
@@ -36,14 +35,16 @@ type jobConfig struct {
 	Node        string
 	Location    *time.Location
 	Textfile    string
+	HideApps    []string
 	Logger      *slog.Logger
 }
 
 type job struct {
 	jobConfig
-	now   func() time.Time
-	pause time.Duration
-	sleep func(context.Context, time.Duration) error
+	hidden map[string]bool
+	now    func() time.Time
+	pause  time.Duration
+	sleep  func(context.Context, time.Duration) error
 }
 
 type jobOption func(*job) error
@@ -85,7 +86,14 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 	case cfg.Logger == nil:
 		return nil, errors.New("the logger is missing")
 	}
-	j := &job{jobConfig: cfg, now: time.Now, pause: time.Second, sleep: sleepContext}
+	hidden := make(map[string]bool, len(cfg.HideApps))
+	for _, app := range cfg.HideApps {
+		if app == "" {
+			return nil, errors.New("the list of hidden apps has an empty entry")
+		}
+		hidden[app] = true
+	}
+	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext}
 	for _, opt := range opts {
 		if err := opt(j); err != nil {
 			return nil, err
@@ -119,6 +127,7 @@ func (j *job) run(ctx context.Context) error {
 	}
 	idx := list.index()
 	var fresh []newAttempt
+	hiddenAttempts := 0
 	for _, key := range keys {
 		body, err := j.Store.Get(ctx, key)
 		if errors.Is(err, errNotFound) {
@@ -132,15 +141,21 @@ func (j *job) run(ctx context.Context) error {
 			return fmt.Errorf("decode the refusal record %s: %w", key, err)
 		}
 		app, a := toAttempt(ev, revocations)
-		if list.add(idx, app, a) {
-			fresh = append(fresh, newAttempt{app: app, a: a})
+		if !list.add(idx, app, a) {
+			continue
 		}
+		if j.hidden[app] {
+			hiddenAttempts++
+			continue
+		}
+		fresh = append(fresh, newAttempt{app: app, a: a})
 	}
-	text, err := report{node: j.Node, today: today, lastReport: list.LastReport, known: known, fresh: fresh}.text()
+	msgs, err := report{node: j.Node, today: today, lastReport: list.LastReport, known: known, fresh: fresh}.
+		messages(messageLimits{blocks: richMessageBlocks, runes: richMessageRunes})
 	if err != nil {
 		return err
 	}
-	if err := j.send(ctx, text); err != nil {
+	if err := j.send(ctx, msgs); err != nil {
 		return fmt.Errorf("send the report: %w", err)
 	}
 	list.LastReport = day
@@ -151,10 +166,10 @@ func (j *job) run(ctx context.Context) error {
 	if err := j.Store.Put(ctx, listKey, body); err != nil {
 		return fmt.Errorf("the report was sent but the attempt list could not be saved, so the next run sends these attempts again: %w", err)
 	}
-	if err := writeTextfile(j.Textfile, list); err != nil {
+	if err := writeTextfile(j.Textfile, list.without(j.hidden)); err != nil {
 		return fmt.Errorf("write the dashboard file: %w", err)
 	}
-	j.Logger.Info("sent the refused-apps report", "node", j.Node, "day", day, "new_attempts", len(fresh), "attempts_on_file", list.count())
+	j.Logger.Info("sent the refused-apps report", "node", j.Node, "day", day, "messages", len(msgs), "new_attempts", len(fresh), "hidden_attempts", hiddenAttempts, "attempts_on_file", list.count())
 	return nil
 }
 
@@ -177,19 +192,15 @@ func (j *job) load(ctx context.Context) (attemptList, error) {
 	return list, nil
 }
 
-func (j *job) send(ctx context.Context, text string) error {
-	parts := splitMessage(text, telegramLimit-partHeaderRoom)
-	for i, part := range parts {
+func (j *job) send(ctx context.Context, msgs []string) error {
+	for i, msg := range msgs {
 		if i > 0 {
 			if err := j.sleep(ctx, j.pause); err != nil {
 				return err
 			}
 		}
-		if len(parts) > 1 {
-			part = fmt.Sprintf("Part %d of %d\n%s", i+1, len(parts), part)
-		}
-		if err := j.Messages.Send(ctx, part); err != nil {
-			return fmt.Errorf("part %d of %d: %w", i+1, len(parts), err)
+		if err := j.Messages.Send(ctx, msg); err != nil {
+			return fmt.Errorf("message %d of %d: %w", i+1, len(msgs), err)
 		}
 	}
 	return nil
