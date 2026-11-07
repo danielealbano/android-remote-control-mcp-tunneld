@@ -17,12 +17,14 @@ import (
 )
 
 const (
-	namesPrefix   = "names/"
-	parallelReads = 16
+	namesPrefix    = "names/"
+	parallelReads  = 16
+	clockSkew      = time.Hour
+	defaultTimeout = 100 * time.Second
 )
 
 type objectStore interface {
-	List(ctx context.Context, prefix string) ([]string, error)
+	ListObjects(ctx context.Context, prefix string) ([]bucket.Object, error)
 	Get(ctx context.Context, key string) ([]byte, error)
 }
 
@@ -35,9 +37,37 @@ type jobConfig struct {
 
 type job struct {
 	jobConfig
+	now     func() time.Time
+	timeout time.Duration
 }
 
-func newJob(cfg jobConfig) (*job, error) {
+type jobOption func(*job) error
+
+func withClock(now func() time.Time) jobOption {
+	return func(j *job) error {
+		if now == nil {
+			return errors.New("the clock is missing")
+		}
+		j.now = now
+		return nil
+	}
+}
+
+func withTimeout(d time.Duration) jobOption {
+	return func(j *job) error {
+		if d <= 0 {
+			return fmt.Errorf("the time limit %s is not positive", d)
+		}
+		j.timeout = d
+		return nil
+	}
+}
+
+type tally struct {
+	registered, listed, read int
+}
+
+func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 	switch {
 	case cfg.Store == nil:
 		return nil, errors.New("the object store is missing")
@@ -48,36 +78,55 @@ func newJob(cfg jobConfig) (*job, error) {
 	case cfg.Logger == nil:
 		return nil, errors.New("the logger is missing")
 	}
-	return &job{jobConfig: cfg}, nil
+	j := &job{jobConfig: cfg, now: time.Now, timeout: defaultTimeout}
+	for _, opt := range opts {
+		if err := opt(j); err != nil {
+			return nil, err
+		}
+	}
+	return j, nil
 }
 
 func (j *job) run(ctx context.Context) error {
-	registered, names, err := j.count(ctx)
+	cctx, cancel := context.WithTimeout(ctx, j.timeout)
+	defer cancel()
+	t, err := j.count(cctx)
 	if err != nil {
+		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("the count did not finish within %s: %w", j.timeout, err)
+		}
 		return removeTextfile(j.Textfile, err)
 	}
-	if err := writeTextfile(j.Textfile, registered); err != nil {
+	if err := writeTextfile(j.Textfile, t.registered, j.now()); err != nil {
 		return removeTextfile(j.Textfile, fmt.Errorf("write the dashboard file: %w", err))
 	}
-	j.Logger.Info("counted the registered phones for the dashboard", "registered", registered, "names_read", names,
-		"enrolled_since", j.EnrolledSince.Format(dateLayout), "textfile", j.Textfile)
+	j.Logger.Info("counted the registered phones for the dashboard", "registered", t.registered, "names_listed", t.listed,
+		"names_read", t.read, "enrolled_since", j.EnrolledSince.Format(dateLayout), "textfile", j.Textfile)
 	return nil
 }
 
-func (j *job) count(ctx context.Context) (registered, names int, err error) {
-	keys, err := j.Store.List(ctx, namesPrefix)
+func (j *job) count(ctx context.Context) (tally, error) {
+	objs, err := j.Store.ListObjects(ctx, namesPrefix)
 	if err != nil {
-		return 0, 0, fmt.Errorf("list the name registry: %w", err)
+		return tally{}, fmt.Errorf("list the name registry: %w", err)
 	}
+	oldest := j.EnrolledSince.Add(-clockSkew)
 	var n atomic.Int64
+	read := 0
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelReads)
-	for _, key := range keys {
+	for _, o := range objs {
+		if !o.LastModified.IsZero() && o.LastModified.Before(oldest) {
+			continue
+		}
+		read++
 		g.Go(func() (err error) {
-			defer report.Recover(gctx, j.Logger, "reading a name record", func() {
-				err = fmt.Errorf("reading the name record %s crashed", key)
+			rctx := report.WithScope(gctx)
+			report.SetAttrs(rctx, slog.String("key", o.Key))
+			defer report.Recover(rctx, j.Logger, "reading a name record", func() {
+				err = fmt.Errorf("reading the name record %s crashed", o.Key)
 			})
-			ok, err := j.counts(gctx, key)
+			ok, err := j.counts(rctx, o.Key)
 			if ok {
 				n.Add(1)
 			}
@@ -85,9 +134,9 @@ func (j *job) count(ctx context.Context) (registered, names int, err error) {
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return 0, 0, err
+		return tally{}, err
 	}
-	return int(n.Load()), len(keys), nil
+	return tally{registered: int(n.Load()), listed: len(objs), read: read}, nil
 }
 
 func (j *job) counts(ctx context.Context, key string) (bool, error) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +14,10 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
 
-const dateLayout = "2006-01-02"
+const (
+	dateLayout      = "2006-01-02"
+	defaultTextfile = "/var/lib/node_exporter/textfile_collector/arc_registered_phones.prom"
+)
 
 type cli struct {
 	EnrolledSince    string `name:"enrolled-since" env:"REGISTERED_PHONES_ENROLLED_SINCE" required:"" help:"First UTC day (YYYY-MM-DD) whose enrollments are counted."`
@@ -27,27 +31,48 @@ type cli struct {
 }
 
 func main() {
-	var c cli
-	kong.Parse(&c,
-		kong.Name("arc-registered-phones"),
-		kong.Description("Counts the phones enrolled since a day that got a certificate, for the dashboard."),
-		kong.UsageOnError(),
-	)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	code := execute(ctx, c, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	code := execute(ctx, os.Args[1:], slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	stop()
 	os.Exit(code)
 }
 
-func execute(ctx context.Context, c cli, logger *slog.Logger) int {
-	if err := runOnce(ctx, c, logger); err != nil {
-		logger.Error("could not count the registered phones, so this node's dashboard file was removed until the next run succeeds", "textfile", c.Textfile, "err", err)
+func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...jobOption) int {
+	var c cli
+	err := parseArgs(&c, args)
+	switch {
+	case err != nil && c.Textfile == "":
+		logger.Error("could not read the command line, so nothing was counted and no dashboard file was removed", "err", err)
 		return 1
+	case err != nil:
+		err = removeTextfile(c.Textfile, fmt.Errorf("read the settings: %w", err))
+	default:
+		err = runOnce(ctx, c, logger, opts...)
 	}
-	return 0
+	if err == nil {
+		return 0
+	}
+	msg := "could not count the registered phones, so this node's dashboard file was removed until the next run succeeds"
+	if errors.Is(err, errTextfileKept) {
+		msg = "could not count the registered phones, and this node's dashboard file could not be removed, so the dashboard keeps its old count until that count is two hours old"
+	}
+	logger.Error(msg, "textfile", c.Textfile, "err", err)
+	return 1
 }
 
-func runOnce(ctx context.Context, c cli, logger *slog.Logger) error {
+func parseArgs(c *cli, args []string) error {
+	p, err := kong.New(c,
+		kong.Name("arc-registered-phones"),
+		kong.Description("Counts the phones enrolled since a day that got a certificate, for the dashboard."),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = p.Parse(args)
+	return err
+}
+
+func runOnce(ctx context.Context, c cli, logger *slog.Logger, opts ...jobOption) error {
 	since, err := time.Parse(dateLayout, c.EnrolledSince)
 	if err != nil {
 		return removeTextfile(c.Textfile, fmt.Errorf("read the first counted day %q, which must be YYYY-MM-DD: %w", c.EnrolledSince, err))
@@ -60,7 +85,7 @@ func runOnce(ctx context.Context, c cli, logger *slog.Logger) error {
 		EnrolledSince: since,
 		Textfile:      c.Textfile,
 		Logger:        logger,
-	})
+	}, opts...)
 	if err != nil {
 		return removeTextfile(c.Textfile, err)
 	}

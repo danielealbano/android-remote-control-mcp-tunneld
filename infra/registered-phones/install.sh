@@ -69,8 +69,9 @@ while read -r node target extra <&3; do
 		echo "config line for $node needs <node> <ssh-target>" >&2
 		exit 1
 	fi
-	ssh "$@" "$target" 'test -r /etc/tunneld/tunneld.env' < /dev/null || {
-		echo "$node has no readable /etc/tunneld/tunneld.env" >&2
+	printf "test -r /etc/tunneld/tunneld.env && [ \"\$(date -u -d %s +%%F)\" = %s ]\n" "$since" "$since" |
+		ssh "$@" "$target" sh || {
+		echo "$node has no readable /etc/tunneld/tunneld.env, or $since is not a real day" >&2
 		exit 1
 	}
 	printf 'REGISTERED_PHONES_ENROLLED_SINCE=%s\n' "$since" |
