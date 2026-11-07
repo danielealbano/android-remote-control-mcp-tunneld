@@ -3,6 +3,7 @@ set -eu
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 FAILS=0
+unset REGISTERED_PHONES_CONFIG REGISTERED_PHONES_BINARY REGISTERED_PHONES_ENROLLED_SINCE
 tmproot="$(mktemp -d)"
 trap 'rm -rf "$tmproot"' EXIT
 
@@ -62,7 +63,7 @@ esac
 has "install checks the node has tunneld's settings" ssh_stdin 'test -r /etc/tunneld/tunneld.env'
 has "install checks the first counted day is a real day on the node" ssh_stdin 'date -u -d 2026-01-02 +%F)" = 2026-01-02 \]'
 has "install writes the first counted day" ssh_stdin '^REGISTERED_PHONES_ENROLLED_SINCE=2026-01-02$'
-has "install keeps the settings file private" ssh_args 'chmod 600 /etc/tunneld/registered-phones.env'
+has "install keeps the settings file private" ssh_args 'umask 077 && cat > /etc/tunneld/registered-phones.env && chmod 600 /etc/tunneld/registered-phones.env'
 has "install copies the service" ssh_stdin 'EnvironmentFile=/etc/tunneld/registered-phones.env'
 has "install copies the timer" ssh_stdin 'OnCalendar=hourly'
 has "install copies the binary" ssh_stdin 'binary-bytes'
@@ -84,20 +85,35 @@ has "a command-line setting overrides the environment" ssh_stdin '^REGISTERED_PH
 
 refused() {
 	label=$1
-	shift
+	want=$2
+	shift 2
 	rm -f "$tmproot/ssh_args"
-	if out="$("$@" 2>&1)"; then fail "$label must fail: $out"; else pass "$label fails"; fi
+	if out="$("$@" 2>&1)"; then
+		fail "$label must fail: $out"
+	else
+		case "$out" in
+		*"$want"*) pass "$label fails and says so" ;;
+		*) fail "$label must say \"$want\": $out" ;;
+		esac
+	fi
+	printf '  installer output: %s\n' "$out"
 	if [ -e "$tmproot/ssh_args" ]; then fail "$label must touch no node"; else pass "$label touches no node"; fi
 }
 
-refused "install without a binary" install --config "$tmproot/nodes.conf" --enrolled-since 2026-01-02
-refused "install without a first counted day" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-registered-phones"
-refused "a first counted day that is not YYYY-MM-DD" all --enrolled-since 2026-1-2
-refused "a first counted day with shell characters" all --enrolled-since "2026-01-02';reboot'"
+refused "install without a binary" "Usage: install.sh" install --config "$tmproot/nodes.conf" --enrolled-since 2026-01-02
+refused "install without a first counted day" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-registered-phones"
+refused "a first counted day that is not YYYY-MM-DD" "first counted day 2026-1-2 is not YYYY-MM-DD" all --enrolled-since 2026-1-2
+refused "a first counted day with shell characters" "is not YYYY-MM-DD" all --enrolled-since "2026-01-02';reboot'"
 printf 'n1\n' > "$tmproot/bad.conf"
-refused "a config line without an ssh target" all --config "$tmproot/bad.conf"
+refused "a config line without an ssh target" "config line for n1 needs <node> <ssh-target>" all --config "$tmproot/bad.conf"
 printf 'n1 root@198.51.100.1 11:00\n' > "$tmproot/extra.conf"
-refused "a config line with an extra field" all --config "$tmproot/extra.conf"
+refused "a config line with an extra field" "config line for n1 needs <node> <ssh-target>" all --config "$tmproot/extra.conf"
+printf 'n1 root@198.51.100.1\nn2 root@198.51.100.2' > "$tmproot/no-final-newline.conf"
+out="$(all --config "$tmproot/no-final-newline.conf" 2>&1)" || fail "a config without a final newline must install: $out"
+case "$out" in
+*"n2 installed, counted once, counts every hour"*) pass "a config without a final newline still installs its last node" ;;
+*) fail "a config without a final newline still installs its last node: $out" ;;
+esac
 
 out="$(STUB_SSH_FAIL_ON=root@198.51.100.1 all 2>&1 || true)"
 case "$out" in
