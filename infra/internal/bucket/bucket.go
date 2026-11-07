@@ -45,8 +45,25 @@ func New(cfg Config) *S3 {
 	return &S3{cli: cli, bucket: cfg.Bucket}
 }
 
+type Object struct {
+	Key          string
+	LastModified time.Time
+}
+
 func (b *S3) List(ctx context.Context, prefix string) ([]string, error) {
-	var keys []string
+	objs, err := b.ListObjects(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, len(objs))
+	for i, o := range objs {
+		keys[i] = o.Key
+	}
+	return keys, nil
+}
+
+func (b *S3) ListObjects(ctx context.Context, prefix string) ([]Object, error) {
+	var objs []Object
 	pages := s3.NewListObjectsV2Paginator(b.cli, &s3.ListObjectsV2Input{Bucket: &b.bucket, Prefix: aws.String(prefix)})
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
@@ -54,10 +71,10 @@ func (b *S3) List(ctx context.Context, prefix string) ([]string, error) {
 			return nil, fmt.Errorf("list %s: %w", prefix, err)
 		}
 		for _, obj := range page.Contents {
-			keys = append(keys, aws.ToString(obj.Key))
+			objs = append(objs, Object{Key: aws.ToString(obj.Key), LastModified: aws.ToTime(obj.LastModified)})
 		}
 	}
-	return keys, nil
+	return objs, nil
 }
 
 func (b *S3) Get(ctx context.Context, key string) (_ []byte, err error) {

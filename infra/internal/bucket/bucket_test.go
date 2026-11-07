@@ -1,4 +1,4 @@
-package bucket
+package bucket_test
 
 import (
 	"context"
@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
 
 type fakeS3 struct {
@@ -31,7 +34,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.URL.Query().Get("continuation-token") == "" {
-			write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>rejected-enroll/a.json</Key></Contents></ListBucketResult>`)
+			write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>rejected-enroll/a.json</Key><LastModified>2026-11-06T10:00:00.000Z</LastModified></Contents></ListBucketResult>`)
 			return
 		}
 		write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>rejected-enroll/b.json</Key></Contents></ListBucketResult>`)
@@ -54,12 +57,12 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func newTestBucket(t *testing.T) (*S3, *fakeS3) {
+func newTestBucket(t *testing.T) (*bucket.S3, *fakeS3) {
 	t.Helper()
 	f := &fakeS3{t: t, puts: map[string]string{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return New(Config{
+	return bucket.New(bucket.Config{
 		Endpoint: srv.URL, Region: "us-east-1", Bucket: "bucket", AccessKey: "k", SecretKey: "s", ForcePathStyle: true,
 	}), f
 }
@@ -76,6 +79,35 @@ func TestS3_ListFollowsEveryPage(t *testing.T) {
 	}
 }
 
+func TestS3_ListObjectsCarriesTheLastWriteTime(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBucket(t)
+	objs, err := b.ListObjects(context.Background(), "rejected-enroll/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []bucket.Object{
+		{Key: "rejected-enroll/a.json", LastModified: time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)},
+		{Key: "rejected-enroll/b.json"},
+	}
+	if len(objs) != len(want) {
+		t.Fatalf("objects = %v, want %v", objs, want)
+	}
+	for i := range want {
+		if objs[i].Key != want[i].Key || !objs[i].LastModified.Equal(want[i].LastModified) {
+			t.Fatalf("objects = %v, want %v", objs, want)
+		}
+	}
+}
+
+func TestS3_ListFailsWhenTheBucketRefuses(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBucket(t)
+	if _, err := b.List(context.Background(), "names/"); err == nil || !strings.Contains(err.Error(), "list names/") {
+		t.Fatalf("List = %v, want a list error", err)
+	}
+}
+
 func TestS3_Get(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBucket(t)
@@ -83,7 +115,7 @@ func TestS3_Get(t *testing.T) {
 	if err != nil || string(body) != `{"ts":"2026-11-06T10:00:00Z"}` {
 		t.Fatalf("Get = %q, %v", body, err)
 	}
-	if _, err := b.Get(context.Background(), "refused-apps/attempts.json"); !errors.Is(err, ErrNotFound) {
+	if _, err := b.Get(context.Background(), "refused-apps/attempts.json"); !errors.Is(err, bucket.ErrNotFound) {
 		t.Fatalf("a missing object = %v, want ErrNotFound", err)
 	}
 }
