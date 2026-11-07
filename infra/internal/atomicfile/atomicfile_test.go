@@ -1,4 +1,4 @@
-package textfile_test
+package atomicfile_test
 
 import (
 	"os"
@@ -6,26 +6,28 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/textfile"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
-func TestWrite_ReplacesTheFileReadableByAll(t *testing.T) {
+func TestWrite_ReplacesTheFileWithTheGivenMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "x.prom")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := textfile.Write(path, "x 1\n"); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || string(got) != "x 1\n" {
-		t.Fatalf("file = %q, %v", got, err)
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("mode = %v, %v, want 0644 so node_exporter can read it", info.Mode().Perm(), err)
+	for _, mode := range []os.FileMode{0o644, 0o600} {
+		if err := atomicfile.Write(path, []byte("x 1\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != "x 1\n" {
+			t.Fatalf("file = %q, %v", got, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("mode = %v, %v, want %v", info.Mode().Perm(), err, mode)
+		}
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
@@ -35,7 +37,7 @@ func TestWrite_ReplacesTheFileReadableByAll(t *testing.T) {
 
 func TestWrite_MissingDirectoryFails(t *testing.T) {
 	t.Parallel()
-	err := textfile.Write(filepath.Join(t.TempDir(), "missing", "x.prom"), "x 1\n")
+	err := atomicfile.Write(filepath.Join(t.TempDir(), "missing", "x.prom"), []byte("x 1\n"), 0o644)
 	if err == nil || !strings.Contains(err.Error(), "create a temporary file next to") {
 		t.Fatalf("Write = %v, want a create error", err)
 	}
@@ -48,7 +50,7 @@ func TestWrite_AFailedReplaceLeavesNoTemporaryFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(path, "inside"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	err := textfile.Write(path, "x 1\n")
+	err := atomicfile.Write(path, []byte("x 1\n"), 0o644)
 	if err == nil || !strings.Contains(err.Error(), "replace "+path) {
 		t.Fatalf("Write = %v, want a replace error", err)
 	}

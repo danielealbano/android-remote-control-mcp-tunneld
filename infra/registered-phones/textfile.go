@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/textfile"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 func metrics(registered int, countedAt time.Time) string {
@@ -16,5 +16,5 @@ func metrics(registered int, countedAt time.Time) string {
 }
 
 func writeTextfile(path string, registered int, countedAt time.Time) error {
-	return textfile.Write(path, metrics(registered, countedAt))
+	return atomicfile.Write(path, []byte(metrics(registered, countedAt)), 0o644)
 }

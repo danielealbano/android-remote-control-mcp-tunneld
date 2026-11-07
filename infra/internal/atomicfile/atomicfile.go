@@ -1,4 +1,4 @@
-package textfile
+package atomicfile
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-func Write(path, content string) (err error) {
+func Write(path string, data []byte, mode os.FileMode) (err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return fmt.Errorf("create a temporary file next to %s: %w", path, err)
@@ -19,10 +19,10 @@ func Write(path, content string) (err error) {
 			}
 		}
 	}()
-	if _, err := tmp.WriteString(content); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		return errors.Join(fmt.Errorf("write %s: %w", tmp.Name(), err), tmp.Close())
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		return errors.Join(fmt.Errorf("set the mode of %s: %w", tmp.Name(), err), tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {

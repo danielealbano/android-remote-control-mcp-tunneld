@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/textfile"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 type rowKey struct {
@@ -84,5 +84,5 @@ func labelValue(s string) string {
 }
 
 func writeTextfile(path string, list attemptList) error {
-	return textfile.Write(path, metrics(list))
+	return atomicfile.Write(path, []byte(metrics(list)), 0o644)
 }
