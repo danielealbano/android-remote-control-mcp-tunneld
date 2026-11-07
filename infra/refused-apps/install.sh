@@ -102,7 +102,7 @@ while read -r node target at <&3 || [ -n "$node" ]; do
 		exit 1
 		;;
 	esac
-	printf "test -r /etc/tunneld/tunneld.env && systemd-analyze calendar '*-*-* %s:00 %s' >/dev/null\n" "$at" "$timezone" |
+	printf "test -r /etc/tunneld/tunneld.env && systemd-analyze calendar '*-*-* %s:00 %s'\n" "$at" "$timezone" |
 		ssh "$@" "$target" sh || {
 		echo "$node has no readable /etc/tunneld/tunneld.env, or does not accept $at in $timezone" >&2
 		exit 1
