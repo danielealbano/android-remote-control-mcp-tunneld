@@ -16,18 +16,39 @@ import (
 	"time"
 )
 
+func envNames(typ reflect.Type) []string {
+	var out []string
+	for i := range typ.NumField() {
+		f := typ.Field(i)
+		if _, ok := f.Tag.Lookup("embed"); ok && f.Type.Kind() == reflect.Struct {
+			out = append(out, envNames(f.Type)...)
+			continue
+		}
+		for _, k := range strings.Split(f.Tag.Get("env"), ",") {
+			if k != "" {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
+}
+
 func isolateEnv(t *testing.T) {
 	t.Helper()
-	typ := reflect.TypeFor[cli]()
-	for i := range typ.NumField() {
-		for _, k := range strings.Split(typ.Field(i).Tag.Get("env"), ",") {
-			if k == "" {
-				continue
-			}
-			t.Setenv(k, "")
-			if err := os.Unsetenv(k); err != nil {
-				t.Fatal(err)
-			}
+	for _, k := range envNames(reflect.TypeFor[cli]()) {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestEnvNames_IncludesTheEmbeddedBucketSettings(t *testing.T) {
+	t.Parallel()
+	got := strings.Join(envNames(reflect.TypeFor[cli]()), ",")
+	for _, want := range []string{"REGISTERED_PHONES_ENROLLED_SINCE", "REGISTERED_PHONES_STATE_FILE", "TUNNELD_S3_BUCKET", "TUNNELD_S3_FORCE_PATH_STYLE"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("env names = %s, want %s among them", got, want)
 		}
 	}
 }

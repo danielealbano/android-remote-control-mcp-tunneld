@@ -19,19 +19,14 @@ import (
 const failureErrorRunes = 4096
 
 type cli struct {
-	Node             string   `name:"node" env:"REFUSED_APPS_NODE" required:"" help:"Name of this node in the messages."`
-	Timezone         string   `name:"timezone" env:"REFUSED_APPS_TIMEZONE" required:"" help:"Time zone of the report's days and times, for example UTC."`
-	TelegramToken    string   `name:"telegram-token" env:"REFUSED_APPS_TELEGRAM_TOKEN" required:"" help:"Telegram bot token (secret)."`
-	TelegramChat     int64    `name:"telegram-chat" env:"REFUSED_APPS_TELEGRAM_CHAT" required:"" help:"Telegram chat that receives the report."`
-	Textfile         string   `name:"textfile" env:"REFUSED_APPS_TEXTFILE" default:"/var/lib/node_exporter/textfile_collector/arc_refused_apps.prom" help:"node_exporter textfile the dashboard table reads."`
-	HideApps         []string `name:"hide-apps" env:"REFUSED_APPS_HIDE_APPS" help:"Comma-separated app ids kept on the attempt list but left out of the report and the dashboard."`
-	AttestStatusURL  string   `name:"attest-status-url" env:"REFUSED_APPS_ATTEST_STATUS_URL" default:"https://android.googleapis.com/attestation/status" help:"Google attestation revocation-status endpoint."`
-	S3Endpoint       string   `name:"s3-endpoint" env:"TUNNELD_S3_ENDPOINT" required:"" help:"S3 endpoint URL (tunneld's setting)."`
-	S3Region         string   `name:"s3-region" env:"TUNNELD_S3_REGION" default:"us-east-1" help:"S3 region (tunneld's setting)."`
-	S3Bucket         string   `name:"s3-bucket" env:"TUNNELD_S3_BUCKET" required:"" help:"Bucket holding the refusal records (tunneld's setting)."`
-	S3AccessKey      string   `name:"s3-access-key" env:"TUNNELD_S3_ACCESS_KEY" required:"" help:"S3 access key (secret, tunneld's setting)."`
-	S3SecretKey      string   `name:"s3-secret-key" env:"TUNNELD_S3_SECRET_KEY" required:"" help:"S3 secret key (secret, tunneld's setting)."`
-	S3ForcePathStyle bool     `name:"s3-force-path-style" env:"TUNNELD_S3_FORCE_PATH_STYLE" default:"true" negatable:"" help:"Path-style addressing (tunneld's setting)."`
+	Node            string          `name:"node" env:"REFUSED_APPS_NODE" required:"" help:"Name of this node in the messages."`
+	Timezone        string          `name:"timezone" env:"REFUSED_APPS_TIMEZONE" required:"" help:"Time zone of the report's days and times, for example UTC."`
+	TelegramToken   string          `name:"telegram-token" env:"REFUSED_APPS_TELEGRAM_TOKEN" required:"" help:"Telegram bot token (secret)."`
+	TelegramChat    int64           `name:"telegram-chat" env:"REFUSED_APPS_TELEGRAM_CHAT" required:"" help:"Telegram chat that receives the report."`
+	Textfile        string          `name:"textfile" env:"REFUSED_APPS_TEXTFILE" default:"/var/lib/node_exporter/textfile_collector/arc_refused_apps.prom" help:"node_exporter textfile the dashboard table reads."`
+	HideApps        []string        `name:"hide-apps" env:"REFUSED_APPS_HIDE_APPS" help:"Comma-separated app ids kept on the attempt list but left out of the report and the dashboard."`
+	AttestStatusURL string          `name:"attest-status-url" env:"REFUSED_APPS_ATTEST_STATUS_URL" default:"https://android.googleapis.com/attestation/status" help:"Google attestation revocation-status endpoint."`
+	S3              bucket.Settings `embed:""`
 }
 
 func main() {
@@ -72,12 +67,13 @@ func runOnce(ctx context.Context, c cli, tg messenger, logger *slog.Logger) erro
 	if err != nil {
 		return fmt.Errorf("load the time zone %q: %w", c.Timezone, err)
 	}
+	bcfg, err := c.S3.Config()
+	if err != nil {
+		return err
+	}
 	statusClient := &http.Client{Timeout: 30 * time.Second}
 	j, err := newJob(jobConfig{
-		Store: bucket.New(bucket.Config{
-			Endpoint: c.S3Endpoint, Region: c.S3Region, Bucket: c.S3Bucket,
-			AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, ForcePathStyle: c.S3ForcePathStyle,
-		}),
+		Store:    bucket.New(bcfg),
 		Messages: tg,
 		Revocations: func(ctx context.Context) (revocationList, error) {
 			return attest.NewStatusList(ctx, c.AttestStatusURL, statusClient, logger)

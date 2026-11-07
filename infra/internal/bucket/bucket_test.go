@@ -135,3 +135,32 @@ func TestS3_Put(t *testing.T) {
 		t.Fatal("a refused put must fail")
 	}
 }
+
+func TestSettings_Config(t *testing.T) {
+	t.Parallel()
+	valid := bucket.Settings{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", Bucket: "b", AccessKey: "k", SecretKey: "s", ForcePathStyle: true}
+	got, err := valid.Config()
+	if err != nil || got != (bucket.Config{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", Bucket: "b", AccessKey: "k", SecretKey: "s", ForcePathStyle: true}) {
+		t.Fatalf("Config = %+v, %v", got, err)
+	}
+	tests := []struct {
+		name   string
+		change func(*bucket.Settings)
+		want   string
+	}{
+		{name: "no endpoint", change: func(s *bucket.Settings) { s.Endpoint = "" }, want: "the setting --s3-endpoint (TUNNELD_S3_ENDPOINT) is empty"},
+		{name: "no bucket", change: func(s *bucket.Settings) { s.Bucket = "" }, want: "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty"},
+		{name: "no access key", change: func(s *bucket.Settings) { s.AccessKey = "" }, want: "the setting --s3-access-key (TUNNELD_S3_ACCESS_KEY) is empty"},
+		{name: "no secret key", change: func(s *bucket.Settings) { s.SecretKey = "" }, want: "the setting --s3-secret-key (TUNNELD_S3_SECRET_KEY) is empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := valid
+			tc.change(&s)
+			if _, err := s.Config(); err == nil || err.Error() != tc.want {
+				t.Fatalf("Config = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
