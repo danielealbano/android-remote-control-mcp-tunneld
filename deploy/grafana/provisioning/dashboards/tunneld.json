@@ -66,7 +66,7 @@
    },
    "gridPos": {
     "h": 4,
-    "w": 8,
+    "w": 6,
     "x": 0,
     "y": 1
    },
@@ -115,8 +115,8 @@
    },
    "gridPos": {
     "h": 4,
-    "w": 8,
-    "x": 8,
+    "w": 6,
+    "x": 6,
     "y": 1
    },
    "targets": [
@@ -164,8 +164,8 @@
    },
    "gridPos": {
     "h": 4,
-    "w": 8,
-    "x": 16,
+    "w": 6,
+    "x": 12,
     "y": 1
    },
    "targets": [
@@ -177,6 +177,55 @@
      },
      "expr": "sum(tunneld_streams_active{node=~\"$node\"})",
      "legendFormat": "streams",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 29,
+   "type": "stat",
+   "title": "Phones registered (total)",
+   "description": "Phones enrolled since the first counted day that got a certificate, renewed or not. Counted every hour from the name registry by the registered-phones job (infra/registered-phones); the node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_registered_phones)",
+     "legendFormat": "registered",
      "instant": true,
      "range": false
     }
