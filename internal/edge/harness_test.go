@@ -214,9 +214,13 @@ type fakeOpener struct {
 	mu        sync.Mutex
 	calls     []openCall
 	errByNode map[string]error
+	panicOpen bool
 }
 
 func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token, clientAddr string) error {
+	if o.panicOpen {
+		panic("open boom")
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token, clientAddr: clientAddr})

@@ -61,9 +61,6 @@ func TestAcceptLoop_PanicIsContainedToTheConnection(t *testing.T) {
 	if !conn.isClosed() {
 		t.Fatal("the panicking connection must be closed")
 	}
-	if te.e.RoutedConns() != 0 {
-		t.Fatalf("routed connections = %d, want 0", te.e.RoutedConns())
-	}
 	rep.Flush(context.Background())
 	events := tr.Events("")
 	if len(events) != 1 {
@@ -265,5 +262,34 @@ func TestAcceptLoop_ACMEChallengePanicCarriesTheClientHello(t *testing.T) {
 	}
 	if events[0].Tags["alpn"] != acmeTLS1Protocol {
 		t.Errorf("alpn tag = %q, want %q", events[0].Tags["alpn"], acmeTLS1Protocol)
+	}
+}
+
+func TestAcceptLoop_APanicAfterTheConnectionIsCountedReleasesTheDrainCount(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
+	cfg := baseConfig()
+	cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	te.opener.panicOpen = true
+	conn := newScriptConn("198.51.100.10", captureClientHello(t, "abcdef012345.example.test", "h2"))
+	ln := &scriptedListener{steps: []func() (net.Conn, error){
+		func() (net.Conn, error) { return conn, nil },
+		func() (net.Conn, error) { return nil, net.ErrClosed },
+	}}
+	te.e.acceptLoop(context.Background(), ln)
+	wctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	te.e.Wait(wctx)
+	if wctx.Err() != nil {
+		t.Fatal("the connection handler must return after its panic")
+	}
+	if n := te.e.RoutedConns(); n != 0 {
+		t.Fatalf("RoutedConns after a panic in the dial-back open = %d, want 0", n)
+	}
+	if !strings.Contains(logs.String(), `msg="recovered from a crash; only the affected work was stopped" where="public connection"`) ||
+		!strings.Contains(logs.String(), `panic="open boom"`) {
+		t.Fatalf("the panic in the dial-back open must be logged; log = %q", logs.String())
 	}
 }
