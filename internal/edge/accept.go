@@ -204,7 +204,12 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
+	stopClose := context.AfterFunc(ctx, func() { closeLogged(e.cfg.Logger, "unrouted public client", conn) })
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
+	if !stopClose() {
+		e.cfg.Logger.Debug("closed a public connection that had not been routed yet, because this node is stopping", "ip", ip)
+		return
+	}
 	if err != nil {
 		e.cfg.Logger.Debug("could not read the client's TLS greeting, so the connection is refused", "ip", ip, "err", err)
 		e.rec.Reject("handshake-timeout", "", ip)

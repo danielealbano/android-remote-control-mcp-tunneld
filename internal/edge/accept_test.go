@@ -204,11 +204,16 @@ func (c *readSignalConn) Read(p []byte) (int, error) {
 
 func runAccepted(t *testing.T, te *testEdge, conn net.Conn) {
 	t.Helper()
+	runAcceptedCtx(t, context.Background(), te, conn)
+}
+
+func runAcceptedCtx(t *testing.T, ctx context.Context, te *testEdge, conn net.Conn) {
+	t.Helper()
 	ln := &scriptedListener{steps: []func() (net.Conn, error){
 		func() (net.Conn, error) { return conn, nil },
 		func() (net.Conn, error) { return nil, net.ErrClosed },
 	}}
-	te.e.acceptLoop(context.Background(), ln)
+	te.e.acceptLoop(ctx, ln)
 }
 
 func waitHandlers(t *testing.T, te *testEdge) {
@@ -236,6 +241,34 @@ func TestEdge_RoutedConns_IgnoresAConnectionStillSendingItsClientHello(t *testin
 	}
 	tunneltest.CloseOrLog(t, conn)
 	waitHandlers(t, te)
+}
+
+func TestEdge_HandleConn_ClosesAnUnroutedConnectionWhenTheNodeStops(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
+	cfg := baseConfig()
+	cfg.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	te := newTestEdge(t, cfg, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := &readSignalConn{scriptConn: newScriptConn("198.51.100.22", nil), reading: make(chan struct{})}
+	runAcceptedCtx(t, ctx, te, conn)
+	select {
+	case <-conn.reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started reading the ClientHello")
+	}
+	cancel()
+	waitHandlers(t, te)
+	if !conn.isClosed() {
+		t.Fatal("a connection still sending its ClientHello must be closed when the node stops")
+	}
+	if containsStr(te.rec.rejectReasons(), "handshake-timeout") {
+		t.Fatalf("a connection closed because the node stops is not a handshake timeout, rejects=%v", te.rec.rejectReasons())
+	}
+	if !strings.Contains(logs.String(), "closed a public connection that had not been routed yet, because this node is stopping") {
+		t.Fatalf("logs = %s", logs.String())
+	}
 }
 
 func TestEdge_RoutedConns_IgnoresAConnectionWhileItsRouteIsLookedUp(t *testing.T) {

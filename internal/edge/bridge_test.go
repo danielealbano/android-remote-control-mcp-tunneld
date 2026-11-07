@@ -848,3 +848,25 @@ func TestEdge_RoutedConns_StopsCountingAConnectionWhosePhoneCannotBeReached(t *t
 		t.Fatalf("RoutedConns after the refusal = %d, want 0", n)
 	}
 }
+
+func TestEdge_RoutedConns_IgnoresAConnectionRefusedAtTheStreamCap(t *testing.T) {
+	t.Parallel()
+	cfg := baseConfig()
+	cfg.Concurrent = 2
+	te := newTestEdge(t, cfg, nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	fillSlots(t, te, cfg.Concurrent)
+	var during atomic.Int64
+	during.Store(-1)
+	te.slots.free = func(context.Context, string) bool {
+		during.Store(te.e.RoutedConns())
+		return false
+	}
+	waitDone(t, runTunnel(te, newScriptConn("198.51.100.88", nil), capSNI), 5*time.Second)
+	if got := during.Load(); got != 0 {
+		t.Fatalf("RoutedConns while the stream cap is checked = %d, want 0", got)
+	}
+	if !containsStr(te.rec.rejectReasons(), "stream-cap") || te.e.RoutedConns() != 0 {
+		t.Fatalf("rejects=%v RoutedConns=%d, want a stream-cap refusal and 0", te.rec.rejectReasons(), te.e.RoutedConns())
+	}
+}

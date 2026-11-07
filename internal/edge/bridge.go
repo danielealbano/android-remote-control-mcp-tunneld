@@ -185,8 +185,6 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
-	e.routed.Add(1)
-	defer e.routed.Add(-1)
 
 	// Admission-time quota gate: an exhausted day/week window refuses every NEW stream (in-flight
 	// streams are closed by the splice's Charge accounting). A control-plane error fails open,
@@ -232,6 +230,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		})
 	}
 	defer releaseSlot()
+	e.routed.Add(1)
+	defer e.routed.Add(-1)
 
 	// Open the far side. On failure take ONE fresh route lookup — the route may have re-bound to a new
 	// owner/connID while we held stale values (one fresh route lookup + retry, then
