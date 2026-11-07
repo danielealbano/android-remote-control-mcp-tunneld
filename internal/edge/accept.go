@@ -204,7 +204,10 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
-	stopClose := context.AfterFunc(ctx, func() { closeLogged(e.cfg.Logger, "unrouted public client", conn) })
+	stopClose := context.AfterFunc(ctx, func() {
+		defer report.Recover(ctx, e.cfg.Logger, "unrouted public client close", func() {})
+		closeLogged(e.cfg.Logger, "unrouted public client", conn)
+	})
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
 	if !stopClose() {
 		e.cfg.Logger.Debug("closed a public connection that had not been routed yet, because this node is stopping", "ip", ip)
