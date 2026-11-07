@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 func TestMetrics_Format(t *testing.T) {
@@ -21,7 +23,7 @@ func TestMetrics_Format(t *testing.T) {
 func TestWriteTextfile_WritesTheCount(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
-	if err := writeTextfile(path, 7, testNow); err != nil {
+	if err := writeTextfile(atomicfile.Write, path, 7, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != metrics(7, testNow) {

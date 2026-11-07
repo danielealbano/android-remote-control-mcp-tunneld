@@ -47,6 +47,17 @@ type job struct {
 	now    func() time.Time
 	pause  time.Duration
 	sleep  func(context.Context, time.Duration) error
+	write  fileWriter
+}
+
+func withWriter(write fileWriter) jobOption {
+	return func(j *job) error {
+		if write == nil {
+			return errors.New("the file writer is missing")
+		}
+		j.write = write
+		return nil
+	}
 }
 
 type jobOption func(*job) error
@@ -95,7 +106,7 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 		}
 		hidden[app] = true
 	}
-	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext}
+	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext, write: atomicfile.Write}
 	for _, opt := range opts {
 		if err := opt(j); err != nil {
 			return nil, err
@@ -168,7 +179,7 @@ func (j *job) run(ctx context.Context) error {
 	if err := j.Store.Put(ctx, listKey, body); err != nil {
 		return fmt.Errorf("the report was sent but the attempt list could not be saved, so the next run sends these attempts again: %w", err)
 	}
-	if err := writeTextfile(j.Textfile, list.without(j.hidden)); err != nil {
+	if err := writeTextfile(j.write, j.Textfile, list.without(j.hidden)); err != nil {
 		if !errors.Is(err, atomicfile.ErrNotFlushed) {
 			return fmt.Errorf("write the dashboard file: %w", err)
 		}

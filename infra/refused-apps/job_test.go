@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
 
@@ -106,6 +110,7 @@ type harness struct {
 	now      time.Time
 	revoked  revokedSerials
 	logger   *slog.Logger
+	opts     []jobOption
 }
 
 func newHarness(t *testing.T, now time.Time) *harness {
@@ -135,11 +140,13 @@ func (h *harness) job(t *testing.T) *job {
 		HideApps: h.hideApps,
 		Logger:   h.logger,
 	},
-		withClock(func() time.Time { return h.now }),
-		withPause(time.Second, func(_ context.Context, d time.Duration) error {
-			h.pauses = append(h.pauses, d)
-			return nil
-		}),
+		append([]jobOption{
+			withClock(func() time.Time { return h.now }),
+			withPause(time.Second, func(_ context.Context, d time.Duration) error {
+				h.pauses = append(h.pauses, d)
+				return nil
+			}),
+		}, h.opts...)...,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -273,6 +280,34 @@ func TestJob_AQuietDayStillSendsAMessage(t *testing.T) {
 	}
 	if h.store.list(t).LastReport != "2026-11-07" {
 		t.Fatal("the day was not marked as reported")
+	}
+}
+
+func TestJob_AnUnflushedDashboardFileIsAWarningNotAFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
+	var logs bytes.Buffer
+	h.logger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil))
+	h.opts = []jobOption{withWriter(func(path string, data []byte, mode os.FileMode) error {
+		if err := atomicfile.Write(path, data, mode); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: test flush failure", atomicfile.ErrNotFlushed)
+	})}
+	h.setList(t, attemptList{LastReport: "2026-11-06", Apps: map[string][]attempt{}})
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatalf("run = %v, want success", err)
+	}
+	if len(h.messages.texts) != 1 || h.store.list(t).LastReport != "2026-11-07" {
+		t.Fatalf("messages = %q, want the report sent and the day marked", h.messages.texts)
+	}
+	if _, err := os.Stat(h.textfile); err != nil {
+		t.Fatalf("the dashboard file must be written: %v", err)
+	}
+	for _, want := range []string{"wrote the refused-apps dashboard file but could not flush it to disk, so a crash could lose it until the next report", "sent the refused-apps report"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs = %s, want %q", logs.String(), want)
+		}
 	}
 }
 

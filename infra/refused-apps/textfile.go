@@ -2,10 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
-
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 type rowKey struct {
@@ -83,6 +82,8 @@ func labelValue(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(strings.ToValidUTF8(s, "\uFFFD"))
 }
 
-func writeTextfile(path string, list attemptList) error {
-	return atomicfile.Write(path, []byte(metrics(list)), 0o644)
+type fileWriter func(path string, data []byte, mode os.FileMode) error
+
+func writeTextfile(write fileWriter, path string, list attemptList) error {
+	return write(path, []byte(metrics(list)), 0o644)
 }

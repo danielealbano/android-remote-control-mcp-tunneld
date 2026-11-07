@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 func TestMetrics_OneSeriesPerAppKeyVersionAndAddress(t *testing.T) {
@@ -55,7 +57,7 @@ func TestWriteTextfile_ReplacesTheFileReadableByAll(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := attemptList{Apps: map[string][]attempt{"dev.example.copy": {{At: time.Unix(1_800_000_000, 0), IP: "198.51.100.7", Key: "aa"}}}}
-	if err := writeTextfile(path, list); err != nil {
+	if err := writeTextfile(atomicfile.Write, path, list); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(path)
@@ -83,7 +85,7 @@ func TestWriteTextfile_ReplacesTheFileReadableByAll(t *testing.T) {
 
 func TestWriteTextfile_MissingDirectoryFails(t *testing.T) {
 	t.Parallel()
-	if err := writeTextfile(filepath.Join(t.TempDir(), "missing", "x.prom"), attemptList{}); err == nil {
+	if err := writeTextfile(atomicfile.Write, filepath.Join(t.TempDir(), "missing", "x.prom"), attemptList{}); err == nil {
 		t.Fatal("writing into a missing directory must fail")
 	}
 }

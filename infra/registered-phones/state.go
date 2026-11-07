@@ -115,7 +115,7 @@ func (j *job) saveState(ctx context.Context, s state) error {
 		return fmt.Errorf("encode the state: %w", err)
 	}
 	var errs []error
-	if err := atomicfile.Write(j.StateFile, body, 0o600); err != nil {
+	if err := j.write(j.StateFile, body, 0o600); err != nil {
 		if !errors.Is(err, atomicfile.ErrNotFlushed) {
 			errs = append(errs, fmt.Errorf("save the state on this node: %w", err))
 		} else {

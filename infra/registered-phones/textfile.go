@@ -2,9 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
-
-	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 )
 
 func metrics(registered int, countedAt time.Time) string {
@@ -15,6 +14,8 @@ func metrics(registered int, countedAt time.Time) string {
 		registered, countedAt.Unix())
 }
 
-func writeTextfile(path string, registered int, countedAt time.Time) error {
-	return atomicfile.Write(path, []byte(metrics(registered, countedAt)), 0o644)
+type fileWriter func(path string, data []byte, mode os.FileMode) error
+
+func writeTextfile(write fileWriter, path string, registered int, countedAt time.Time) error {
+	return write(path, []byte(metrics(registered, countedAt)), 0o644)
 }

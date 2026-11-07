@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -72,6 +73,9 @@ func (f *fakeStore) ListObjects(_ context.Context, prefix string) ([]bucket.Obje
 }
 
 func (f *fakeStore) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	if strings.HasPrefix(key, namesPrefix) {
 		f.reads = append(f.reads, key)
@@ -537,6 +541,55 @@ func TestJob_Run_ReportsEveryRecordThatFailed(t *testing.T) {
 	h.assertOldTextfileKept(t)
 }
 
+func unflushedFor(target string) fileWriter {
+	return func(path string, data []byte, mode os.FileMode) error {
+		if err := atomicfile.Write(path, data, mode); err != nil {
+			return err
+		}
+		if path == target {
+			return fmt.Errorf("%w: test flush failure", atomicfile.ErrNotFlushed)
+		}
+		return nil
+	}
+}
+
+func TestJob_Run_AnUnflushedDashboardFileIsAWarningNotAFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.job = h.newJob(t, withWriter(unflushedFor(h.textfile)))
+	h.store.putName(t, "fresh", testNow.Add(-time.Hour), testNow.Add(-time.Hour), "gts")
+	if err := h.job.run(context.Background()); err != nil {
+		t.Fatalf("run = %v, want success", err)
+	}
+	h.assertTextfile(t, 1)
+	for _, want := range []string{"wrote this node's dashboard file but could not flush it to disk, so a crash could lose it until the next run",
+		"counted the registered phones for the dashboard"} {
+		if !strings.Contains(h.logs.String(), want) {
+			t.Fatalf("logs = %s, want %q", h.logs.String(), want)
+		}
+	}
+}
+
+func TestJob_Run_AnUnflushedNodeStateIsAWarningAndTheBucketCopyIsSaved(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.job = h.newJob(t, withWriter(unflushedFor(h.stateFile)))
+	h.store.putName(t, "fresh", testNow.Add(-time.Hour), testNow.Add(-time.Hour), "gts")
+	if err := h.job.run(context.Background()); err != nil {
+		t.Fatalf("run = %v, want success", err)
+	}
+	if s := h.bucketState(t); names(s) != "fresh" {
+		t.Fatalf("bucket state = %+v", s)
+	}
+	if s := h.nodeState(t); names(s) != "fresh" {
+		t.Fatalf("node state = %+v", s)
+	}
+	h.assertTextfile(t, 1)
+	if !strings.Contains(h.logs.String(), "saved this node's copy of the state but could not flush it to disk, so a crash could lose it; the bucket copy is saved next") {
+		t.Fatalf("logs = %s", h.logs.String())
+	}
+}
+
 func TestJob_Run_ABucketSaveFailureKeepsTheNewStateOnTheNode(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -699,6 +752,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 		{name: "no logger", change: func(c *jobConfig) { c.Logger = nil }, want: "the logger is missing"},
 		{name: "no clock", change: func(*jobConfig) {}, opts: []jobOption{withClock(nil)}, want: "the clock is missing"},
 		{name: "no time limit", change: func(*jobConfig) {}, opts: []jobOption{withTimeout(0)}, want: "the time limit 0s is not positive"},
+		{name: "no file writer", change: func(*jobConfig) {}, opts: []jobOption{withWriter(nil)}, want: "the file writer is missing"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

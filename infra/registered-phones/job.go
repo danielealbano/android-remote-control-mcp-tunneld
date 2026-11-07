@@ -45,6 +45,7 @@ type job struct {
 	jobConfig
 	now     func() time.Time
 	timeout time.Duration
+	write   fileWriter
 }
 
 type jobOption func(*job) error
@@ -55,6 +56,16 @@ func withClock(now func() time.Time) jobOption {
 			return errors.New("the clock is missing")
 		}
 		j.now = now
+		return nil
+	}
+}
+
+func withWriter(write fileWriter) jobOption {
+	return func(j *job) error {
+		if write == nil {
+			return errors.New("the file writer is missing")
+		}
+		j.write = write
 		return nil
 	}
 }
@@ -86,7 +97,7 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 	case cfg.Logger == nil:
 		return nil, errors.New("the logger is missing")
 	}
-	j := &job{jobConfig: cfg, now: time.Now, timeout: defaultTimeout}
+	j := &job{jobConfig: cfg, now: time.Now, timeout: defaultTimeout, write: atomicfile.Write}
 	for _, opt := range opts {
 		if err := opt(j); err != nil {
 			return nil, err
@@ -119,7 +130,7 @@ func (j *job) update(ctx context.Context) error {
 	if err := j.saveState(ctx, s); err != nil {
 		return err
 	}
-	if err := writeTextfile(j.Textfile, len(s.Names), j.now()); err != nil {
+	if err := writeTextfile(j.write, j.Textfile, len(s.Names), j.now()); err != nil {
 		if !errors.Is(err, atomicfile.ErrNotFlushed) {
 			return fmt.Errorf("write the dashboard file: %w", err)
 		}
@@ -141,7 +152,7 @@ func (j *job) count(ctx context.Context, s *state) (tally, error) {
 		errs  []error
 	)
 	read := 0
-	g, gctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(parallelReads)
 	for _, o := range objs {
 		name := strings.TrimPrefix(o.Key, namesPrefix)
@@ -157,13 +168,13 @@ func (j *job) count(ctx context.Context, s *state) (tally, error) {
 		read++
 		g.Go(func() (err error) {
 			defer func() {
-				if err != nil && (gctx.Err() == nil || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+				if err != nil && (ctx.Err() == nil || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
 				}
 			}()
-			rctx := report.WithScope(gctx)
+			rctx := report.WithScope(ctx)
 			report.SetAttrs(rctx, slog.String("key", o.Key))
 			defer report.RecoverWith(rctx, j.Logger, "reading a name record", crashedMsg, func() {
 				err = fmt.Errorf("reading the name record %s crashed", o.Key)
