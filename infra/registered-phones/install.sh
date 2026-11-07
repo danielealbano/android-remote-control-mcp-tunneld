@@ -71,7 +71,7 @@ while read -r node target extra <&3; do
 	fi
 	printf "test -r /etc/tunneld/tunneld.env && [ \"\$(date -u -d %s +%%F)\" = %s ]\n" "$since" "$since" |
 		ssh "$@" "$target" sh || {
-		echo "$node has no readable /etc/tunneld/tunneld.env, or $since is not a real day" >&2
+		echo "$node: ssh failed, /etc/tunneld/tunneld.env is not readable there, or $since is not a real day" >&2
 		exit 1
 	}
 	printf 'REGISTERED_PHONES_ENROLLED_SINCE=%s\n' "$since" |
@@ -79,8 +79,12 @@ while read -r node target extra <&3; do
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.service' < "$dir/arc-registered-phones.service"
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.timer' < "$dir/arc-registered-phones.timer"
 	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-registered-phones.new && chmod 755 /usr/local/sbin/arc-registered-phones.new && mv /usr/local/sbin/arc-registered-phones.new /usr/local/sbin/arc-registered-phones' < "$binary"
-	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-registered-phones.timer && systemctl start arc-registered-phones.service' < /dev/null || {
-		echo "$node: the first count failed; journalctl -u arc-registered-phones on the node says why" >&2
+	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-registered-phones.timer' < /dev/null || {
+		echo "$node: ssh failed, or systemd could not enable the hourly timer" >&2
+		exit 1
+	}
+	ssh "$@" "$target" 'systemctl start arc-registered-phones.service' < /dev/null || {
+		echo "$node: ssh failed, or the first count failed; journalctl -u arc-registered-phones on the node says why" >&2
 		exit 1
 	}
 	echo "$node installed, counted once, counts every hour"
