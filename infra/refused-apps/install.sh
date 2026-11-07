@@ -87,7 +87,7 @@ token=$(tr -d '\r\n' < "$token_file")
 	exit 1
 }
 
-while read -r node target at <&3; do
+while read -r node target at <&3 || [ -n "$node" ]; do
 	case "$node" in
 	'' | \#*) continue ;;
 	esac
@@ -108,7 +108,10 @@ while read -r node target at <&3; do
 		exit 1
 	}
 	printf 'REFUSED_APPS_NODE=%s\nREFUSED_APPS_TIMEZONE=%s\nREFUSED_APPS_TELEGRAM_CHAT=%s\nREFUSED_APPS_TELEGRAM_TOKEN=%s\nREFUSED_APPS_HIDE_APPS=%s\n' "$node" "$timezone" "$chat" "$token" "$hide_apps" |
-		ssh "$@" "$target" 'umask 077; cat > /etc/tunneld/refused-apps.env; chmod 600 /etc/tunneld/refused-apps.env'
+		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/refused-apps.env && chmod 600 /etc/tunneld/refused-apps.env' || {
+		echo "$node: ssh failed, or /etc/tunneld/refused-apps.env could not be written there; the install stops here, so the nodes after it are not touched" >&2
+		exit 1
+	}
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-refused-apps.service' < "$dir/arc-refused-apps.service"
 	printf '[Unit]\nDescription=Send the daily report of refused app enrollments at %s %s\n\n[Timer]\nOnCalendar=*-*-* %s:00 %s\nAccuracySec=1s\n\n[Install]\nWantedBy=timers.target\n' "$at" "$timezone" "$at" "$timezone" |
 		ssh "$@" "$target" 'cat > /etc/systemd/system/arc-refused-apps.timer'

@@ -184,5 +184,30 @@ case "$out" in
 esac
 hasnt "a failed node leaves the next node untouched" ssh_args 'root@198.51.100.2'
 
+install_shown() {
+	if out="$(install "$@" 2>&1)"; then status=0; else status=$?; fi
+	printf '%s\n' "$out" | sed 's/^/  installer: /'
+}
+
+printf 'n1 root@198.51.100.1 10.0.0.1\nn2 root@198.51.100.2 10.0.0.2' > "$tmproot/no-final-newline.conf"
+install_shown --config "$tmproot/no-final-newline.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/token"
+case "$status:$out" in
+0:*"n2 installed"*) pass "a config without a final newline still installs its last node" ;;
+*) fail "a config without a final newline still installs its last node" ;;
+esac
+
+for step in 'cat > /etc/tunneld/status-report.env|/etc/tunneld/status-report.env' 'cat > /usr/local/sbin/arc-status-report|/usr/local/sbin/arc-status-report'; do
+	STUB_SSH_FAIL_ON=${step%%|*}
+	export STUB_SSH_FAIL_ON
+	install_shown --config "$tmproot/nodes.conf" --url https://ingest.example.test/metrics --token-file "$tmproot/token"
+	unset STUB_SSH_FAIL_ON
+	case "$status:$out" in
+	0:*) fail "a failed write of ${step#*|} must stop the install" ;;
+	*"n1: ssh failed, or ${step#*|} could not be written there; the install stops here, so the nodes after it are not touched"*) pass "a failed write of ${step#*|} stops the install and says so" ;;
+	*) fail "a failed write of ${step#*|} stops the install and says so" ;;
+	esac
+	hasnt "a failed write of ${step#*|} leaves the next node untouched" ssh_args 'root@198.51.100.2'
+done
+
 [ "$FAILS" = 0 ] || { echo "$FAILS failed"; exit 1; }
 echo "all passed"

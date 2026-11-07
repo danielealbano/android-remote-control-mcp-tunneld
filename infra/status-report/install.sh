@@ -60,7 +60,7 @@ token=$(tr -d '\r\n' < "$token_file")
 	exit 1
 }
 
-while read -r node target host <&3; do
+while read -r node target host <&3 || [ -n "$node" ]; do
 	case "$node" in
 	'' | \#*) continue ;;
 	esac
@@ -69,10 +69,16 @@ while read -r node target host <&3; do
 		exit 1
 	fi
 	printf 'STATUS_NODE=%s\nSTATUS_HOST=%s\nSTATUS_URL=%s\nSTATUS_TOKEN=%s\n' "$node" "$host" "$url" "$token" |
-		ssh "$@" "$target" 'umask 077; cat > /etc/tunneld/status-report.env; chmod 600 /etc/tunneld/status-report.env'
+		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/status-report.env && chmod 600 /etc/tunneld/status-report.env' || {
+		echo "$node: ssh failed, or /etc/tunneld/status-report.env could not be written there; the install stops here, so the nodes after it are not touched" >&2
+		exit 1
+	}
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-status-report.service' < "$dir/arc-status-report.service"
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-status-report.timer' < "$dir/arc-status-report.timer"
-	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-status-report; chmod 755 /usr/local/sbin/arc-status-report' < "$dir/arc-status-report.sh"
+	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-status-report && chmod 755 /usr/local/sbin/arc-status-report' < "$dir/arc-status-report.sh" || {
+		echo "$node: ssh failed, or /usr/local/sbin/arc-status-report could not be written there; the install stops here, so the nodes after it are not touched" >&2
+		exit 1
+	}
 	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-status-report.timer && systemctl start arc-status-report.service' < /dev/null
 	echo "$node installed"
 done 3< "$config"
