@@ -1,0 +1,144 @@
+{
+ "uid": "refused-apps",
+ "title": "Refused apps",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "refresh": "5m",
+ "tags": [
+  "tunneld"
+ ],
+ "templating": {
+  "list": []
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "table",
+   "title": "Refused apps",
+   "description": "One row per app, signing key, app version and source address of the refused enrollments on file, written once a day by the refused-apps report (docs/PROJECT.md §6). The list is permanent: rows stay after the refusal records expire.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 24,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (app, key, version, ip) (arc_refused_app_attempts)",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "min by (app, key, version, ip) (arc_refused_app_first_seen_timestamp_seconds) * 1000",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max by (app, key, version, ip) (arc_refused_app_last_seen_timestamp_seconds) * 1000",
+     "legendFormat": "",
+     "instant": true,
+     "range": false,
+     "format": "table"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "indexByName": {
+       "app": 0,
+       "version": 1,
+       "key": 2,
+       "ip": 3,
+       "Value #A": 4,
+       "Value #B": 5,
+       "Value #C": 6
+      },
+      "renameByName": {
+       "ip": "address",
+       "Value #A": "attempts",
+       "Value #B": "first seen",
+       "Value #C": "last seen"
+      }
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "first seen"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "dateTimeAsIso"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "last seen"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "dateTimeAsIso"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "last seen",
+      "desc": true
+     }
+    ]
+   }
+  }
+ ]
+}

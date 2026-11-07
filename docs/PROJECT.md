@@ -186,7 +186,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `s3:ListBucket` on the bucket, without which a missing key answers 403 instead of 404): name registry
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), tunnel
-  content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules.
+  content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
+  refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, with no
+  rule; tunneld never reads or writes it.
 
 ## 6. Observability
 
@@ -208,14 +210,16 @@ At Debug level every ACME HTTP request logs its outcome (`the certificate author
 to the certificate authority failed; …` or `… was not sent; …`) and every completed enrollment / issuance step logs
 `enrollment step finished` / `certificate issuance step finished`, each with its duration, to diagnose slow enrollments (server-side processing only:
 the request-body transfer and the response write are not timed).
-Grafana provisioning (`deploy/grafana/`) ships six
+Grafana provisioning (`deploy/grafana/`) ships seven
 dashboards: Health (one red/green tile per check, grouped, with the failing-check count on top and two
 `eth0` traffic charts per node: the 24 h average as a percentage of the 90 Mbit/s limit and the last minute as a
 percentage of the 150 Mbit/s limit), Nodes overview and Node detail (`node_exporter`, the podman exporter, WireGuard
-handshake and ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), and tunneld overview and detail.
+handshake and ban-list ages), Valkey and Sentinel (the Redis/Valkey exporter), tunneld overview and detail, and
+Refused apps (the refused-apps report's table, below).
 They expect every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey
 exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timestamp_seconds`,
-`wireguard_peer_{receive,transmit}_bytes_total` and `banlist_file_mtime_timestamp_seconds{file}`, and — for
+`wireguard_peer_{receive,transmit}_bytes_total`, `banlist_file_mtime_timestamp_seconds{file}` and
+`arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}`, and — for
 Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
 for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.
@@ -228,6 +232,24 @@ Valkey pool timeouts, real ACME failures and issuances happened since the last r
 failure (`tunneld_acme_issue_total{result="rate-limited"}`). The values per node live in
 `/etc/tunneld/status-report.env` (`status-report.env.example`). `infra/status-report/install.sh` installs it on every
 node in a config file; its settings come from the command line or the environment (`--help` lists them).
+
+The refused-apps report (`infra/refused-apps/`, built with `make refused-apps`) keeps a permanent list of refused
+enrollments, so a copy of the app that tried to enroll stays on file after its 30-day refusal records expire. A
+systemd timer runs it once a day on two or more nodes, each at its own time and at least 30 minutes after the one
+before, so no lock is needed: the first run of the day does the work. A run reads `refused-apps/attempts.json` and
+does nothing when its `last_report` date is already today. Otherwise it reads every refusal record under
+`rejected-enroll/` and adds the attempts not on the list yet: app id, time, source address, signing key, app version,
+and `verified` — the chain verified to a Google root before the refusal, the key is hardware-backed on a locked phone
+with verified boot, and no certificate of the chain is on Google's revocation list. It then sends one Telegram
+rich message with a table per app and signing key (day, time, source address, tries) of the new attempts, or
+saying there were none (split into numbered parts above Telegram's 500 blocks or 32768 characters per message),
+saves the list with today's date, and rewrites the node_exporter textfile `arc_refused_apps.prom` behind the
+Refused apps dashboard. App ids in `REFUSED_APPS_HIDE_APPS` stay on the list but are left out of the message and
+the textfile. The first run after missed days covers all of them. A failed run sends a message
+saying so and saves nothing, so the next node or the next day sends the report; a day without any message means no
+node ran. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
+`/etc/tunneld/refused-apps.env` (`refused-apps.env.example`). `infra/refused-apps/install.sh` installs it on every
+node in a config file (`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
