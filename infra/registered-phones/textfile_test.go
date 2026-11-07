@@ -9,7 +9,7 @@ import (
 
 func TestMetrics_Format(t *testing.T) {
 	t.Parallel()
-	want := "# HELP arc_registered_phones Phones enrolled since the first counted day that got a certificate, renewed or not.\n" +
+	want := "# HELP arc_registered_phones Phones enrolled since the first counted day that got a certificate, renewed or not, kept even when their name record is gone.\n" +
 		"# TYPE arc_registered_phones gauge\narc_registered_phones 34\n" +
 		"# HELP arc_registered_phones_counted_timestamp_seconds Time of the count in arc_registered_phones.\n" +
 		"# TYPE arc_registered_phones_counted_timestamp_seconds gauge\narc_registered_phones_counted_timestamp_seconds 1794052800\n"

@@ -8,7 +8,7 @@ import (
 )
 
 func metrics(registered int, countedAt time.Time) string {
-	return fmt.Sprintf("# HELP arc_registered_phones Phones enrolled since the first counted day that got a certificate, renewed or not.\n"+
+	return fmt.Sprintf("# HELP arc_registered_phones Phones enrolled since the first counted day that got a certificate, renewed or not, kept even when their name record is gone.\n"+
 		"# TYPE arc_registered_phones gauge\narc_registered_phones %d\n"+
 		"# HELP arc_registered_phones_counted_timestamp_seconds Time of the count in arc_registered_phones.\n"+
 		"# TYPE arc_registered_phones_counted_timestamp_seconds gauge\narc_registered_phones_counted_timestamp_seconds %d\n",

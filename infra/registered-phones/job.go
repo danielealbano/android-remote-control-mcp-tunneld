@@ -6,7 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -16,7 +17,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-const crashedMsg = "reading a name record crashed, so this count stops and the dashboard file is not updated"
+const crashedMsg = "reading a name record crashed, so this run stops and neither the state nor the dashboard file is updated"
 
 const (
 	namesPrefix    = "names/"
@@ -28,11 +29,13 @@ const (
 type objectStore interface {
 	ListObjects(ctx context.Context, prefix string) ([]bucket.Object, error)
 	Get(ctx context.Context, key string) ([]byte, error)
+	Put(ctx context.Context, key string, body []byte) error
 }
 
 type jobConfig struct {
 	Store         objectStore
 	EnrolledSince time.Time
+	StateFile     string
 	Textfile      string
 	Logger        *slog.Logger
 }
@@ -66,7 +69,7 @@ func withTimeout(d time.Duration) jobOption {
 }
 
 type tally struct {
-	registered, listed, read int
+	listed, read, added int
 }
 
 func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
@@ -75,6 +78,8 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 		return nil, errors.New("the object store is missing")
 	case cfg.EnrolledSince.IsZero():
 		return nil, errors.New("the first counted day is missing")
+	case cfg.StateFile == "":
+		return nil, errors.New("the state file path is empty")
 	case cfg.Textfile == "":
 		return nil, errors.New("the dashboard file path is empty")
 	case cfg.Logger == nil:
@@ -92,33 +97,56 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 func (j *job) run(ctx context.Context) error {
 	cctx, cancel := context.WithTimeout(ctx, j.timeout)
 	defer cancel()
-	t, err := j.count(cctx)
+	err := j.update(cctx)
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("the run did not finish within %s: %w", j.timeout, err)
+	}
+	return err
+}
+
+func (j *job) update(ctx context.Context) error {
+	start := j.now()
+	s, err := j.loadState(ctx)
 	if err != nil {
-		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("the count did not finish within %s: %w", j.timeout, err)
-		}
 		return err
 	}
-	if err := writeTextfile(j.Textfile, t.registered, j.now()); err != nil {
+	t, err := j.count(ctx, &s)
+	if err != nil {
+		return err
+	}
+	s.ReadFrom = start.Add(-clockSkew)
+	if err := j.saveState(ctx, s); err != nil {
+		return err
+	}
+	if err := writeTextfile(j.Textfile, len(s.Names), j.now()); err != nil {
 		return fmt.Errorf("write the dashboard file: %w", err)
 	}
-	j.Logger.Info("counted the registered phones for the dashboard", "registered", t.registered, "names_listed", t.listed,
-		"names_read", t.read, "enrolled_since", j.EnrolledSince.Format(dateLayout), "textfile", j.Textfile)
+	j.Logger.Info("counted the registered phones for the dashboard", "registered", len(s.Names), "new", t.added,
+		"names_listed", t.listed, "names_read", t.read, "enrolled_since", s.EnrolledSince, "read_from", s.ReadFrom, "textfile", j.Textfile)
 	return nil
 }
 
-func (j *job) count(ctx context.Context) (tally, error) {
+func (j *job) count(ctx context.Context, s *state) (tally, error) {
 	objs, err := j.Store.ListObjects(ctx, namesPrefix)
 	if err != nil {
 		return tally{}, fmt.Errorf("list the name registry: %w", err)
 	}
-	oldest := j.EnrolledSince.Add(-clockSkew)
-	var n atomic.Int64
+	var (
+		mu    sync.Mutex
+		found = map[string]time.Time{}
+	)
 	read := 0
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelReads)
 	for _, o := range objs {
-		if !o.LastModified.IsZero() && o.LastModified.Before(oldest) {
+		name := strings.TrimPrefix(o.Key, namesPrefix)
+		if name == "" {
+			continue
+		}
+		if _, counted := s.Names[name]; counted {
+			continue
+		}
+		if !o.LastModified.IsZero() && o.LastModified.Before(s.ReadFrom) {
 			continue
 		}
 		read++
@@ -128,9 +156,11 @@ func (j *job) count(ctx context.Context) (tally, error) {
 			defer report.RecoverWith(rctx, j.Logger, "reading a name record", crashedMsg, func() {
 				err = fmt.Errorf("reading the name record %s crashed", o.Key)
 			})
-			ok, err := j.counts(rctx, o.Key)
+			enrolled, ok, err := j.counts(rctx, o.Key)
 			if ok {
-				n.Add(1)
+				mu.Lock()
+				found[name] = enrolled
+				mu.Unlock()
 			}
 			return err
 		})
@@ -138,20 +168,23 @@ func (j *job) count(ctx context.Context) (tally, error) {
 	if err := g.Wait(); err != nil {
 		return tally{}, err
 	}
-	return tally{registered: int(n.Load()), listed: len(objs), read: read}, nil
+	for name, enrolled := range found {
+		s.Names[name] = enrolled
+	}
+	return tally{listed: len(objs), read: read, added: len(found)}, nil
 }
 
-func (j *job) counts(ctx context.Context, key string) (bool, error) {
+func (j *job) counts(ctx context.Context, key string) (time.Time, bool, error) {
 	body, err := j.Store.Get(ctx, key)
 	if errors.Is(err, bucket.ErrNotFound) {
-		return false, nil
+		return time.Time{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read the name record %s: %w", key, err)
+		return time.Time{}, false, fmt.Errorf("read the name record %s: %w", key, err)
 	}
 	var rec store.NameRecord
 	if err := json.Unmarshal(body, &rec); err != nil {
-		return false, fmt.Errorf("decode the name record %s: %w", key, err)
+		return time.Time{}, false, fmt.Errorf("decode the name record %s: %w", key, err)
 	}
-	return rec.CA != "" && !rec.EnrolledAt.Before(j.EnrolledSince), nil
+	return rec.EnrolledAt, rec.CA != "" && !rec.EnrolledAt.Before(j.EnrolledSince), nil
 }

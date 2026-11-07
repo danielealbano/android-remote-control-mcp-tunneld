@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,17 +39,31 @@ func TestParseArgs_TheFirstDayFromTheEnvironmentAndTheDefaultTextfile(t *testing
 	if err := parseArgs(&c, []string{"--s3-endpoint=http://127.0.0.1:1", "--s3-bucket=b", "--s3-access-key=k", "--s3-secret-key=s"}); err != nil {
 		t.Fatal(err)
 	}
-	if c.EnrolledSince != "2026-11-06" || c.Textfile != defaultTextfile {
+	if c.EnrolledSince != "2026-11-06" || c.Textfile != defaultTextfile || c.StateFile != defaultStateFile {
 		t.Fatalf("cli = %+v", c)
 	}
-	field, ok := reflect.TypeFor[cli]().FieldByName("Textfile")
-	if !ok || field.Tag.Get("default") != defaultTextfile {
-		t.Fatalf("the textfile flag default %q must equal defaultTextfile %q", field.Tag.Get("default"), defaultTextfile)
+	for field, want := range map[string]string{"Textfile": defaultTextfile, "StateFile": defaultStateFile} {
+		f, ok := reflect.TypeFor[cli]().FieldByName(field)
+		if !ok || f.Tag.Get("default") != want {
+			t.Fatalf("the %s flag default %q must equal %q", field, f.Tag.Get("default"), want)
+		}
 	}
 }
 
-func registryServer(t *testing.T) *httptest.Server {
+type registry struct {
+	mu    sync.Mutex
+	state []byte
+}
+
+func (g *registry) savedState() []byte {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.state
+}
+
+func registryServer(t *testing.T) (*httptest.Server, *registry) {
 	t.Helper()
+	g := &registry{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		write := func(code int, body string) {
 			w.WriteHeader(code)
@@ -66,22 +81,35 @@ func registryServer(t *testing.T) *httptest.Server {
 			write(http.StatusOK, `{"schema":1,"enrolled_at":"2026-11-07T10:00:00Z","ca":"letsencrypt","cert":{"serial":"01"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/bucket/names/b":
 			write(http.StatusOK, `{"schema":1,"enrolled_at":"2026-11-07T11:00:00Z","ca":""}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/bucket/registered-phones/state.json":
+			write(http.StatusNotFound, `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`)
+		case r.Method == http.MethodPut && r.URL.Path == "/bucket/registered-phones/state.json":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				write(http.StatusBadRequest, err.Error())
+				return
+			}
+			g.mu.Lock()
+			g.state = body
+			g.mu.Unlock()
+			write(http.StatusOK, "")
 		default:
 			write(http.StatusForbidden, "<Error><Code>AccessDenied</Code></Error>")
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, g
 }
 
 func cliArgs(since, textfile, endpoint string, extra ...string) []string {
-	return append([]string{"--enrolled-since=" + since, "--textfile=" + textfile, "--s3-endpoint=" + endpoint,
+	return append([]string{"--enrolled-since=" + since, "--textfile=" + textfile,
+		"--state-file=" + filepath.Join(filepath.Dir(textfile), "state.json"), "--s3-endpoint=" + endpoint,
 		"--s3-region=us-east-1", "--s3-bucket=bucket", "--s3-access-key=k", "--s3-secret-key=s"}, extra...)
 }
 
 func TestExecute_CountsTheRegistry(t *testing.T) {
 	isolateEnv(t)
-	srv := registryServer(t)
+	srv, reg := registryServer(t)
 	textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
 	var logs bytes.Buffer
 	code := execute(context.Background(), cliArgs("2026-11-06", textfile, srv.URL), capturedLog(&logs), withClock(func() time.Time { return testNow }))
@@ -91,14 +119,21 @@ func TestExecute_CountsTheRegistry(t *testing.T) {
 	if got, err := os.ReadFile(textfile); err != nil || string(got) != metrics(1, testNow) {
 		t.Fatalf("textfile = %q, %v", got, err)
 	}
-	if !strings.Contains(logs.String(), "registered=1 names_listed=3 names_read=2") {
+	if !strings.Contains(logs.String(), "registered=1 new=1 names_listed=3 names_read=2") {
 		t.Fatalf("logs = %s", logs.String())
+	}
+	saved, err := decodeState(reg.savedState(), "saved in the test bucket")
+	if err != nil || names(saved) != "a" {
+		t.Fatalf("saved state = %+v, %v", saved, err)
+	}
+	if node, err := os.ReadFile(filepath.Join(filepath.Dir(textfile), "state.json")); err != nil || !bytes.Equal(node, reg.savedState()) {
+		t.Fatalf("the node copy must match the bucket copy: %q, %v", node, err)
 	}
 }
 
 func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
 	isolateEnv(t)
-	srv := registryServer(t)
+	srv, _ := registryServer(t)
 	tests := []struct {
 		name string
 		args func(textfile string) []string
@@ -107,7 +142,7 @@ func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
 		{name: "a first day that is not a date", args: func(tf string) []string { return cliArgs("2026-13-01", tf, srv.URL) },
 			want: `read the first counted day \"2026-13-01\"`},
 		{name: "the bucket refuses", args: func(tf string) []string { return cliArgs("2026-11-06", tf, srv.URL+"/denied") },
-			want: "list the name registry"},
+			want: "read the state from the bucket"},
 		{name: "a required setting is missing", args: func(tf string) []string {
 			return []string{"--enrolled-since=2026-11-06", "--textfile=" + tf, "--s3-endpoint=" + srv.URL, "--s3-access-key=k", "--s3-secret-key=s"}
 		}, want: "read the settings: missing flags: --s3-bucket"},
@@ -132,6 +167,7 @@ func TestExecute_ABadSettingFromTheEnvironmentLeavesTheDashboardFileAsItWas(t *t
 	}{
 		{name: "an invalid value", env: map[string]string{"TUNNELD_S3_FORCE_PATH_STYLE": "maybe"}, want: "TUNNELD_S3_FORCE_PATH_STYLE"},
 		{name: "an empty dashboard file path", env: map[string]string{"REGISTERED_PHONES_TEXTFILE": ""}, want: "the dashboard file path is empty"},
+		{name: "an empty state file path", env: map[string]string{"REGISTERED_PHONES_STATE_FILE": ""}, want: "the state file path is empty"},
 		{name: "an empty endpoint", env: map[string]string{"TUNNELD_S3_ENDPOINT": ""}, want: "the setting --s3-endpoint (TUNNELD_S3_ENDPOINT) is empty"},
 		{name: "an empty bucket", env: map[string]string{"TUNNELD_S3_BUCKET": ""}, want: "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty"},
 		{name: "an empty access key", env: map[string]string{"TUNNELD_S3_ACCESS_KEY": ""}, want: "the setting --s3-access-key (TUNNELD_S3_ACCESS_KEY) is empty"},
@@ -143,7 +179,8 @@ func TestExecute_ABadSettingFromTheEnvironmentLeavesTheDashboardFileAsItWas(t *t
 			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
 			env := map[string]string{
 				"REGISTERED_PHONES_ENROLLED_SINCE": "2026-11-06", "REGISTERED_PHONES_TEXTFILE": textfile,
-				"TUNNELD_S3_ENDPOINT": "http://127.0.0.1:1", "TUNNELD_S3_BUCKET": "b", "TUNNELD_S3_ACCESS_KEY": "k", "TUNNELD_S3_SECRET_KEY": "s",
+				"REGISTERED_PHONES_STATE_FILE": filepath.Join(filepath.Dir(textfile), "state.json"),
+				"TUNNELD_S3_ENDPOINT":          "http://127.0.0.1:1", "TUNNELD_S3_BUCKET": "b", "TUNNELD_S3_ACCESS_KEY": "k", "TUNNELD_S3_SECRET_KEY": "s",
 			}
 			for k, v := range tc.env {
 				env[k] = v

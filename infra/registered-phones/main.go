@@ -14,13 +14,15 @@ import (
 )
 
 const (
-	dateLayout      = "2006-01-02"
-	defaultTextfile = "/var/lib/node_exporter/textfile_collector/arc_registered_phones.prom"
+	dateLayout       = "2006-01-02"
+	defaultTextfile  = "/var/lib/node_exporter/textfile_collector/arc_registered_phones.prom"
+	defaultStateFile = "/var/lib/arc-registered-phones/state.json"
 )
 
 type cli struct {
 	EnrolledSince    string `name:"enrolled-since" env:"REGISTERED_PHONES_ENROLLED_SINCE" required:"" help:"First UTC day (YYYY-MM-DD) whose enrollments are counted."`
 	Textfile         string `name:"textfile" env:"REGISTERED_PHONES_TEXTFILE" default:"/var/lib/node_exporter/textfile_collector/arc_registered_phones.prom" help:"node_exporter textfile the dashboard box reads."`
+	StateFile        string `name:"state-file" env:"REGISTERED_PHONES_STATE_FILE" default:"/var/lib/arc-registered-phones/state.json" help:"This node's copy of the state (the bucket holds the shared one)."`
 	S3Endpoint       string `name:"s3-endpoint" env:"TUNNELD_S3_ENDPOINT" required:"" help:"S3 endpoint URL (tunneld's setting)."`
 	S3Region         string `name:"s3-region" env:"TUNNELD_S3_REGION" default:"us-east-1" help:"S3 region (tunneld's setting)."`
 	S3Bucket         string `name:"s3-bucket" env:"TUNNELD_S3_BUCKET" required:"" help:"Bucket holding the name registry (tunneld's setting)."`
@@ -54,7 +56,7 @@ func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...jo
 func parseArgs(c *cli, args []string) error {
 	p, err := kong.New(c,
 		kong.Name("arc-registered-phones"),
-		kong.Description("Counts the phones enrolled since a day that got a certificate, for the dashboard."),
+		kong.Description("Keeps the count of the phones enrolled since a day that got a certificate, for the dashboard."),
 	)
 	if err != nil {
 		return err
@@ -84,6 +86,7 @@ func runOnce(ctx context.Context, c cli, logger *slog.Logger, opts ...jobOption)
 			AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, ForcePathStyle: c.S3ForcePathStyle,
 		}),
 		EnrolledSince: since,
+		StateFile:     c.StateFile,
 		Textfile:      c.Textfile,
 		Logger:        logger,
 	}, opts...)
