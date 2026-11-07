@@ -15,7 +15,24 @@ import (
 	"time"
 )
 
+func isolateEnv(t *testing.T) {
+	t.Helper()
+	typ := reflect.TypeFor[cli]()
+	for i := range typ.NumField() {
+		for _, k := range strings.Split(typ.Field(i).Tag.Get("env"), ",") {
+			if k == "" {
+				continue
+			}
+			t.Setenv(k, "")
+			if err := os.Unsetenv(k); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestParseArgs_TheFirstDayFromTheEnvironmentAndTheDefaultTextfile(t *testing.T) {
+	isolateEnv(t)
 	t.Setenv("REGISTERED_PHONES_ENROLLED_SINCE", "2026-11-06")
 	var c cli
 	if err := parseArgs(&c, []string{"--s3-endpoint=http://127.0.0.1:1", "--s3-bucket=b", "--s3-access-key=k", "--s3-secret-key=s"}); err != nil {
@@ -63,7 +80,7 @@ func cliArgs(since, textfile, endpoint string, extra ...string) []string {
 }
 
 func TestExecute_CountsTheRegistry(t *testing.T) {
-	t.Parallel()
+	isolateEnv(t)
 	srv := registryServer(t)
 	textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
 	var logs bytes.Buffer
@@ -80,7 +97,7 @@ func TestExecute_CountsTheRegistry(t *testing.T) {
 }
 
 func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
-	t.Parallel()
+	isolateEnv(t)
 	srv := registryServer(t)
 	tests := []struct {
 		name string
@@ -101,7 +118,6 @@ func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
 			assertFailureKeepsTheFile(t, textfile, func(logger *slog.Logger) int { return execute(context.Background(), tc.args(textfile), logger) }, tc.want)
 		})
@@ -123,6 +139,7 @@ func TestExecute_ABadSettingFromTheEnvironmentLeavesTheDashboardFileAsItWas(t *t
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
 			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
 			env := map[string]string{
 				"REGISTERED_PHONES_ENROLLED_SINCE": "2026-11-06", "REGISTERED_PHONES_TEXTFILE": textfile,
