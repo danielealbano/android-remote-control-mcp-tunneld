@@ -382,6 +382,40 @@ func TestJob_Run_StartsFromTheBucketCopyWhenTheNodeHasNone(t *testing.T) {
 	}
 }
 
+func TestJob_Run_AcceptsAStoredStateWithoutNames(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.store.objects[stateKey] = []byte(`{"enrolled_since":"2026-11-06","read_from":"2026-11-07T09:00:00Z"}`)
+	h.store.putName(t, "fresh", testNow.Add(-time.Hour), testNow.Add(-time.Hour), "gts")
+	if err := h.job.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	h.assertTextfile(t, 1)
+	if s := h.bucketState(t); names(s) != "fresh" {
+		t.Fatalf("state = %+v", s)
+	}
+}
+
+func TestJob_Run_AnUnreadableNodeCopyStopsTheRunAndChangesNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.store.putState(t, state{EnrolledSince: "2026-11-06", ReadFrom: testNow.Add(-2 * time.Hour), Names: map[string]time.Time{"a": testSince}})
+	before, _ := h.store.stateBody()
+	h.store.putName(t, "fresh", testNow.Add(-time.Hour), testNow.Add(-time.Hour), "gts")
+	if err := os.MkdirAll(h.stateFile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.writeOldTextfile(t)
+	err := h.job.run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "read this node's copy of the state") {
+		t.Fatalf("run = %v, want the node read error", err)
+	}
+	if after, _ := h.store.stateBody(); !bytes.Equal(after, before) {
+		t.Fatalf("the bucket copy must stay as it was: %q", after)
+	}
+	h.assertOldTextfileKept(t)
+}
+
 func TestJob_Run_RefusesABadStateAndChangesNothing(t *testing.T) {
 	t.Parallel()
 	other := mustJSON(t, state{EnrolledSince: "2026-10-01", ReadFrom: testNow.Add(-time.Hour), Names: map[string]time.Time{"a": testSince}})
