@@ -249,6 +249,15 @@ func Recover(ctx context.Context, logger *slog.Logger, what string, onPanic func
 	onPanic()
 }
 
+func RecoverWith(ctx context.Context, logger *slog.Logger, what, msg string, onPanic func()) {
+	v := recover()
+	if v == nil {
+		return
+	}
+	handlePanic(ctx, logger, what, v, msg)
+	onPanic()
+}
+
 func Crash(ctx context.Context, logger *slog.Logger, what string) {
 	v := recover()
 	if v == nil {

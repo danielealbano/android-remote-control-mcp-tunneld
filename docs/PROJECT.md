@@ -219,7 +219,8 @@ Refused apps (the refused-apps report's table, below).
 They expect every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey
 exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timestamp_seconds`,
 `wireguard_peer_{receive,transmit}_bytes_total`, `banlist_file_mtime_timestamp_seconds{file}` and
-`arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}`, and — for
+`arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}` and
+`arc_registered_phones` / `arc_registered_phones_counted_timestamp_seconds`, and — for
 Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
 for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.
@@ -250,6 +251,23 @@ saying so and saves nothing, so the next node or the next day sends the report; 
 node ran. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
 `/etc/tunneld/refused-apps.env` (`refused-apps.env.example`). `infra/refused-apps/install.sh` installs it on every
 node in a config file (`--help` lists its settings).
+
+The registered-phones count (`infra/registered-phones/`, built with `make registered-phones`) fills the Phones
+registered box of the tunneld overview: the phones enrolled since a first counted day that got a certificate,
+renewed or not. A systemd timer runs it every hour on one or more nodes. A run lists `names/` and reads, 16 at a
+time, every name record last written no earlier than one hour before `REGISTERED_PHONES_ENROLLED_SINCE` (a UTC day,
+`YYYY-MM-DD`): a record is first written when its phone enrolls, so one last written before that was enrolled
+before the day, and the hour covers clock differences between the nodes and the bucket. It counts the records
+with an issuing CA and an `enrolled_at` on or after the day, and rewrites the node_exporter textfile
+`arc_registered_phones.prom` with the count and its time (`arc_registered_phones_counted_timestamp_seconds`). A
+run that fails, or does not finish within 100 s, logs why and leaves the textfile as it was. The box shows the
+largest count across the nodes whose count is less than two hours old, so a count that stops being renewed — a
+failing run, or a job that no longer runs — drops off the box within two hours, and the box is empty only when no
+node has a newer one. It only reads the bucket. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env`
+(`TUNNELD_S3_*`), the first counted day from `/etc/tunneld/registered-phones.env`
+(`registered-phones.env.example`). `infra/registered-phones/install.sh` checks on each node that the day is a real
+calendar day, then installs it on every node in a config file and runs it once on each (`--help` lists its
+settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
