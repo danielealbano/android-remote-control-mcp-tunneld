@@ -543,6 +543,33 @@ func TestRecover_NoPanicDoesNothing(t *testing.T) {
 	}
 }
 
+func TestRecoverWith_LogsTheGivenMessage(t *testing.T) {
+	t.Parallel()
+	var logs syncBuffer
+	called := false
+	func() {
+		defer report.RecoverWith(context.Background(), textLogger(&logs), "test work", "the test work crashed, so it stops", func() { called = true })
+		panic("boom")
+	}()
+	if !called {
+		t.Fatal("onPanic must run")
+	}
+	out := logs.String()
+	t.Log(out)
+	for _, want := range []string{`msg="the test work crashed, so it stops"`, `where="test work"`, "panic=boom", "stack="} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log = %q, want %q", out, want)
+		}
+	}
+	calledAgain := false
+	func() {
+		defer report.RecoverWith(context.Background(), textLogger(&logs), "test work", "unused", func() { calledAgain = true })
+	}()
+	if calledAgain {
+		t.Fatal("onPanic must not run without a panic")
+	}
+}
+
 func TestCrash_ReportsFlushesAndPanicsAgain(t *testing.T) {
 	t.Parallel()
 	rep, tr := newEnabled(t, 0)
