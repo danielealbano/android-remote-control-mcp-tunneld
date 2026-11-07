@@ -330,8 +330,8 @@ and `image`; releases run from `.github/workflows/release.yml` on `v*` tags.
   ctx; the mesh/edge/flusher goroutines on the serving ctx; a stop runs the pre-drain → the drain (MOVE) →
   the serving-ctx cancel → raw-`:443` listener close → server shutdowns → schedulers/watchers unwind (see
   `docs/ARCHITECTURE.md` §9).
-- **Every goroutine, HTTP handler and TLS callback has a panic guard** (`internal/report`): `report.Recover` for
-  per-connection and per-request work, `report.Crash` for background workers, `Reporter.Handler` around every HTTP
+- **Every goroutine, HTTP handler and TLS callback has a panic guard** (`internal/report`): `report.Recover` (or
+  `report.RecoverWith`, with the caller's own log message) for per-connection and per-request work, `report.Crash` for background workers, `Reporter.Handler` around every HTTP
   server, `report.GetCertificate` / `GetClientCertificate` / `VerifyConnection` around TLS callbacks. A new goroutine
   or callback MUST get one (see `docs/ARCHITECTURE.md` §8).
 - **Config via kong flags + `TUNNELD_*` env twins** (`config.EnvTwins`), validated fail-fast in
