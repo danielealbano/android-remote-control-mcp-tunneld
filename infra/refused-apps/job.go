@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
@@ -168,7 +169,10 @@ func (j *job) run(ctx context.Context) error {
 		return fmt.Errorf("the report was sent but the attempt list could not be saved, so the next run sends these attempts again: %w", err)
 	}
 	if err := writeTextfile(j.Textfile, list.without(j.hidden)); err != nil {
-		return fmt.Errorf("write the dashboard file: %w", err)
+		if !errors.Is(err, atomicfile.ErrNotFlushed) {
+			return fmt.Errorf("write the dashboard file: %w", err)
+		}
+		j.Logger.Warn("wrote the refused-apps dashboard file but could not flush it to disk, so a crash could lose it until the next report", "node", j.Node, "textfile", j.Textfile, "err", err)
 	}
 	j.Logger.Info("sent the refused-apps report", "node", j.Node, "day", day, "messages", len(msgs), "new_attempts", len(fresh), "hidden_attempts", hiddenAttempts, "attempts_on_file", list.count())
 	return nil

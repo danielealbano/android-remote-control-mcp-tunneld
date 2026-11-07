@@ -1,6 +1,7 @@
 package atomicfile_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,8 @@ func TestWrite_ReplacesTheFileWithTheGivenMode(t *testing.T) {
 func TestWrite_MissingDirectoryFails(t *testing.T) {
 	t.Parallel()
 	err := atomicfile.Write(filepath.Join(t.TempDir(), "missing", "x.prom"), []byte("x 1\n"), 0o644)
-	if err == nil || !strings.Contains(err.Error(), "create a temporary file next to") {
-		t.Fatalf("Write = %v, want a create error", err)
+	if err == nil || !strings.Contains(err.Error(), "to flush the file to disk") || errors.Is(err, atomicfile.ErrNotFlushed) {
+		t.Fatalf("Write = %v, want a directory open error", err)
 	}
 }
 
@@ -57,5 +58,35 @@ func TestWrite_AFailedReplaceLeavesNoTemporaryFile(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "x.prom" {
 		t.Fatalf("the temporary file must be removed: %v, %v", entries, err)
+	}
+}
+
+func TestWrite_ADirectoryThatCannotBeOpenedFailsBeforeTheFileIsReplaced(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory without read permission")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.prom")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Errorf("restore the directory mode: %v", err)
+		}
+	})
+	err := atomicfile.Write(path, []byte("new"), 0o644)
+	if err == nil || !strings.Contains(err.Error(), "to flush the file to disk") || errors.Is(err, atomicfile.ErrNotFlushed) {
+		t.Fatalf("Write = %v, want a directory open error", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "old" {
+		t.Fatalf("the file must stay as it was: %q, %v", got, err)
 	}
 }

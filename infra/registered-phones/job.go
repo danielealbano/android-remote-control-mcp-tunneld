@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -119,7 +120,10 @@ func (j *job) update(ctx context.Context) error {
 		return err
 	}
 	if err := writeTextfile(j.Textfile, len(s.Names), j.now()); err != nil {
-		return fmt.Errorf("write the dashboard file: %w", err)
+		if !errors.Is(err, atomicfile.ErrNotFlushed) {
+			return fmt.Errorf("write the dashboard file: %w", err)
+		}
+		j.Logger.Warn("wrote this node's dashboard file but could not flush it to disk, so a crash could lose it until the next run", "textfile", j.Textfile, "err", err)
 	}
 	j.Logger.Info("counted the registered phones for the dashboard", "registered", len(s.Names), "new", t.added,
 		"names_listed", t.listed, "names_read", t.read, "enrolled_since", s.EnrolledSince, "read_from", s.ReadFrom, "textfile", j.Textfile)

@@ -116,7 +116,12 @@ func (j *job) saveState(ctx context.Context, s state) error {
 	}
 	var errs []error
 	if err := atomicfile.Write(j.StateFile, body, 0o600); err != nil {
-		errs = append(errs, fmt.Errorf("save the state on this node: %w", err))
+		if !errors.Is(err, atomicfile.ErrNotFlushed) {
+			errs = append(errs, fmt.Errorf("save the state on this node: %w", err))
+		} else {
+			j.Logger.Warn("saved this node's copy of the state but could not flush it to disk, so a crash could lose it; the bucket copy is saved next",
+				"state_file", j.StateFile, "err", err)
+		}
 	}
 	if err := j.Store.Put(ctx, stateKey, body); err != nil {
 		errs = append(errs, fmt.Errorf("save the state in the bucket: %w", err))
