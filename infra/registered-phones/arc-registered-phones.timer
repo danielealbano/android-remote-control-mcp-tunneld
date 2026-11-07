@@ -1,0 +1,8 @@
+[Unit]
+Description=Count the registered phones for the dashboard every hour
+
+[Timer]
+OnCalendar=hourly
+
+[Install]
+WantedBy=timers.target
