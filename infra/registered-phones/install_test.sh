@@ -31,10 +31,10 @@ SHIM
 chmod +x "$bindir/ssh"
 
 cat > "$tmproot/nodes.conf" <<'CONF'
-# node ssh-target
+# node ssh-target MM
 
-n1 root@198.51.100.1
-n2 root@198.51.100.2
+n1 root@198.51.100.1 00
+n2 root@198.51.100.2 30
 CONF
 printf 'binary-bytes\n' > "$tmproot/arc-registered-phones"
 
@@ -84,7 +84,7 @@ expect_fail() {
 
 expect_ok "install succeeds on every node" all -- -o BatchMode=yes
 case "$out" in
-*"n1 installed, counted once, counts every hour"*"n2 installed, counted once, counts every hour"*) pass "install reaches every node in order, past comments and blanks" ;;
+*"n1 installed, counted once, counts every hour at minute 00"*"n2 installed, counted once, counts every hour at minute 30"*) pass "install reaches every node in order, past comments and blanks" ;;
 *) fail "install reaches every node in order" ;;
 esac
 has "install checks the node has tunneld's settings" ssh_stdin 'test -r /etc/tunneld/tunneld.env'
@@ -92,7 +92,8 @@ has "install checks the first counted day is a real day on the node" ssh_stdin '
 has "install writes the first counted day" ssh_stdin '^REGISTERED_PHONES_ENROLLED_SINCE=2026-01-02$'
 has "install keeps the settings file private" ssh_args 'umask 077 && cat > /etc/tunneld/registered-phones.env && chmod 600 /etc/tunneld/registered-phones.env'
 has "install copies the service" ssh_stdin 'EnvironmentFile=/etc/tunneld/registered-phones.env'
-has "install copies the timer" ssh_stdin 'OnCalendar=hourly'
+has "install gives the first node its minute" ssh_stdin 'OnCalendar=\*-\*-\* \*:00:00'
+has "install gives the second node its minute" ssh_stdin 'OnCalendar=\*-\*-\* \*:30:00'
 has "install copies the binary" ssh_stdin 'binary-bytes'
 has "install replaces the binary in one step" ssh_args 'mv /usr/local/sbin/arc-registered-phones.new /usr/local/sbin/arc-registered-phones'
 has "install enables the timer" ssh_args 'enable --now arc-registered-phones.timer'
@@ -120,14 +121,20 @@ refused "install without a first counted day" "Usage: install.sh" install --conf
 refused "a first counted day that is not YYYY-MM-DD" "first counted day 2026-1-2 is not YYYY-MM-DD" all --enrolled-since 2026-1-2
 refused "a first counted day with shell characters" "is not YYYY-MM-DD" all --enrolled-since "2026-01-02';reboot'"
 printf 'n1\n' > "$tmproot/bad.conf"
-refused "a config line without an ssh target" "config line for n1 needs <node> <ssh-target>" all --config "$tmproot/bad.conf"
-printf 'n1 root@198.51.100.1 11:00\n' > "$tmproot/extra.conf"
-refused "a config line with an extra field" "config line for n1 needs <node> <ssh-target>" all --config "$tmproot/extra.conf"
+refused "a config line without an ssh target" "config line for n1 needs <node> <ssh-target> <MM>" all --config "$tmproot/bad.conf"
+printf 'n1 root@198.51.100.1\n' > "$tmproot/no-minute.conf"
+refused "a config line without a minute" "config line for n1 needs <node> <ssh-target> <MM>" all --config "$tmproot/no-minute.conf"
+printf 'n1 root@198.51.100.1 00 x\n' > "$tmproot/extra.conf"
+refused "a config line with an extra field" "config line for n1 needs <node> <ssh-target> <MM>" all --config "$tmproot/extra.conf"
+printf 'n1 root@198.51.100.1 60\n' > "$tmproot/bad-minute.conf"
+refused "a minute that is not MM" "run minute 60 for n1 is not MM (00-59)" all --config "$tmproot/bad-minute.conf"
+printf 'n1 root@198.51.100.1 *\n' > "$tmproot/glob-minute.conf"
+refused "a minute with shell characters" "is not MM (00-59)" all --config "$tmproot/glob-minute.conf"
 
-printf 'n1 root@198.51.100.1\nn2 root@198.51.100.2' > "$tmproot/no-final-newline.conf"
+printf 'n1 root@198.51.100.1 00\nn2 root@198.51.100.2 30' > "$tmproot/no-final-newline.conf"
 expect_ok "a config without a final newline installs" all --config "$tmproot/no-final-newline.conf"
 case "$out" in
-*"n2 installed, counted once, counts every hour"*) pass "a config without a final newline still installs its last node" ;;
+*"n2 installed, counted once, counts every hour at minute 30"*) pass "a config without a final newline still installs its last node" ;;
 *) fail "a config without a final newline still installs its last node" ;;
 esac
 
