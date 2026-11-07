@@ -104,7 +104,7 @@ while read -r node target at <&3 || [ -n "$node" ]; do
 	esac
 	printf "test -r /etc/tunneld/tunneld.env && systemd-analyze calendar '*-*-* %s:00 %s'\n" "$at" "$timezone" |
 		ssh "$@" "$target" sh || {
-		echo "$node has no readable /etc/tunneld/tunneld.env, or does not accept $at in $timezone" >&2
+		echo "$node: ssh failed, /etc/tunneld/tunneld.env is not readable there, or it does not accept $at in $timezone; the install stops here, so the nodes after it are not touched" >&2
 		exit 1
 	}
 	printf 'REFUSED_APPS_NODE=%s\nREFUSED_APPS_TIMEZONE=%s\nREFUSED_APPS_TELEGRAM_CHAT=%s\nREFUSED_APPS_TELEGRAM_TOKEN=%s\nREFUSED_APPS_HIDE_APPS=%s\n' "$node" "$timezone" "$chat" "$token" "$hide_apps" |

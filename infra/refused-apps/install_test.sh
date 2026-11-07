@@ -150,7 +150,7 @@ case "$out" in
 esac
 
 export STUB_SSH_FAIL_ON=root@198.51.100.1
-expect_fail "a failed node stops the install and says so" "n1 has no readable /etc/tunneld/tunneld.env, or does not accept 11:00 in Etc/UTC" all
+expect_fail "a failed node stops the install and says so" "n1: ssh failed, /etc/tunneld/tunneld.env is not readable there, or it does not accept 11:00 in Etc/UTC; the install stops here, so the nodes after it are not touched" all
 hasnt "a failed node leaves the next node untouched" ssh_args 'root@198.51.100.2'
 export STUB_SSH_FAIL_ON='cat > /etc/tunneld/refused-apps.env'
 expect_fail "a settings file that cannot be written stops the install and says so" \
