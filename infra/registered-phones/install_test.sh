@@ -47,11 +47,11 @@ all() {
 }
 
 has() {
-	if grep -q -- "$3" "$tmproot/$2" 2>/dev/null; then pass "$1"; else fail "$1"; fi
+	if [ -f "$tmproot/$2" ] && grep -q -- "$3" "$tmproot/$2"; then pass "$1"; else fail "$1"; fi
 }
 
 hasnt() {
-	if grep -q -- "$3" "$tmproot/$2" 2>/dev/null; then fail "$1"; else pass "$1"; fi
+	if [ -f "$tmproot/$2" ] && grep -q -- "$3" "$tmproot/$2"; then fail "$1"; else pass "$1"; fi
 }
 
 out="$(all -- -o BatchMode=yes)"
@@ -71,22 +71,22 @@ has "install enables the timer" ssh_args 'enable --now arc-registered-phones.tim
 has "install runs the count once" ssh_args 'start arc-registered-phones.service'
 has "install passes the options after -- to ssh" ssh_args '-o BatchMode=yes root@198.51.100.2'
 
-if REGISTERED_PHONES_CONFIG="$tmproot/nodes.conf" REGISTERED_PHONES_BINARY="$tmproot/arc-registered-phones" \
-	REGISTERED_PHONES_ENROLLED_SINCE=2026-03-04 install >/dev/null; then
+if out="$(REGISTERED_PHONES_CONFIG="$tmproot/nodes.conf" REGISTERED_PHONES_BINARY="$tmproot/arc-registered-phones" \
+	REGISTERED_PHONES_ENROLLED_SINCE=2026-03-04 install 2>&1)"; then
 	pass "install reads its settings from the environment"
 else
-	fail "install reads its settings from the environment"
+	fail "install reads its settings from the environment: $out"
 fi
 has "install writes the day from the environment" ssh_stdin '^REGISTERED_PHONES_ENROLLED_SINCE=2026-03-04$'
 
-REGISTERED_PHONES_ENROLLED_SINCE=2026-03-04 all --enrolled-since 2026-05-06 >/dev/null
+out="$(REGISTERED_PHONES_ENROLLED_SINCE=2026-03-04 all --enrolled-since 2026-05-06 2>&1)" || fail "the install with an overriding day must succeed: $out"
 has "a command-line setting overrides the environment" ssh_stdin '^REGISTERED_PHONES_ENROLLED_SINCE=2026-05-06$'
 
 refused() {
 	label=$1
 	shift
 	rm -f "$tmproot/ssh_args"
-	if "$@" >/dev/null 2>&1; then fail "$label must fail"; else pass "$label fails"; fi
+	if out="$("$@" 2>&1)"; then fail "$label must fail: $out"; else pass "$label fails"; fi
 	if [ -e "$tmproot/ssh_args" ]; then fail "$label must touch no node"; else pass "$label touches no node"; fi
 }
 
@@ -99,7 +99,7 @@ refused "a config line without an ssh target" all --config "$tmproot/bad.conf"
 printf 'n1 root@198.51.100.1 11:00\n' > "$tmproot/extra.conf"
 refused "a config line with an extra field" all --config "$tmproot/extra.conf"
 
-out="$(STUB_SSH_FAIL_ON=root@198.51.100.1 all 2>/dev/null || true)"
+out="$(STUB_SSH_FAIL_ON=root@198.51.100.1 all 2>&1 || true)"
 case "$out" in
 *"installed"*) fail "a failed node must stop the install: $out" ;;
 *) pass "a failed node stops the install" ;;
@@ -108,15 +108,22 @@ hasnt "a failed node leaves the next node untouched" ssh_args 'root@198.51.100.2
 
 out="$(STUB_SSH_FAIL_STDIN='date -u -d 2026-02-30' all --enrolled-since 2026-02-30 2>&1 || true)"
 case "$out" in
-*"n1 has no readable /etc/tunneld/tunneld.env, or 2026-02-30 is not a real day"*) pass "a day the node does not know stops the install and says so" ;;
+*"n1: ssh failed, /etc/tunneld/tunneld.env is not readable there, or 2026-02-30 is not a real day"*) pass "a day the node does not know stops the install and says so" ;;
 *) fail "a day the node does not know stops the install and says so: $out" ;;
 esac
 hasnt "a day the node does not know writes no settings" ssh_stdin 'REGISTERED_PHONES_ENROLLED_SINCE='
 hasnt "a day the node does not know leaves the next node untouched" ssh_args 'root@198.51.100.2'
 
-out="$(STUB_SSH_FAIL_ON='start arc-registered-phones.service' all 2>&1 || true)"
+out="$(STUB_SSH_FAIL_ON='enable --now arc-registered-phones.timer' all 2>&1 || true)"
 case "$out" in
-*"n1: the first count failed"*) pass "a failed first count stops the install and says so" ;;
+*"n1: ssh failed, or systemd could not enable the hourly timer"*) pass "a timer that cannot be enabled stops the install and says so" ;;
+*) fail "a timer that cannot be enabled stops the install and says so: $out" ;;
+esac
+hasnt "a timer that cannot be enabled runs no count" ssh_args 'start arc-registered-phones.service'
+
+out="$(STUB_SSH_FAIL_ON='systemctl start arc-registered-phones.service' all 2>&1 || true)"
+case "$out" in
+*"n1: ssh failed, or the first count failed; journalctl -u arc-registered-phones on the node says why"*) pass "a failed first count stops the install and says so" ;;
 *) fail "a failed first count stops the install and says so: $out" ;;
 esac
 hasnt "a failed first count leaves the next node untouched" ssh_args 'root@198.51.100.2'
