@@ -64,6 +64,16 @@ func parseArgs(c *cli, args []string) error {
 }
 
 func runOnce(ctx context.Context, c cli, logger *slog.Logger, opts ...jobOption) error {
+	for _, s := range []struct{ setting, value string }{
+		{"--s3-endpoint (TUNNELD_S3_ENDPOINT)", c.S3Endpoint},
+		{"--s3-bucket (TUNNELD_S3_BUCKET)", c.S3Bucket},
+		{"--s3-access-key (TUNNELD_S3_ACCESS_KEY)", c.S3AccessKey},
+		{"--s3-secret-key (TUNNELD_S3_SECRET_KEY)", c.S3SecretKey},
+	} {
+		if s.value == "" {
+			return fmt.Errorf("the setting %s is empty", s.setting)
+		}
+	}
 	since, err := time.Parse(dateLayout, c.EnrolledSince)
 	if err != nil {
 		return fmt.Errorf("read the first counted day %q, which must be YYYY-MM-DD: %w", c.EnrolledSince, err)
