@@ -94,9 +94,14 @@ func (f *fakeStore) Get(ctx context.Context, key string) ([]byte, error) {
 
 func (f *fakeStore) putName(t *testing.T, name string, enrolled, written time.Time, ca string) {
 	t.Helper()
+	f.putNameValidUntil(t, name, enrolled, written, ca, enrolled.Add(160*time.Hour))
+}
+
+func (f *fakeStore) putNameValidUntil(t *testing.T, name string, enrolled, written time.Time, ca string, notAfter time.Time) {
+	t.Helper()
 	rec := store.NameRecord{Schema: 1, EnrolledAt: enrolled}
 	if ca != "" {
-		rec.SetCert(store.CertInfo{CA: ca, Serial: "01", NotBefore: enrolled, NotAfter: enrolled.Add(160 * time.Hour)})
+		rec.SetCert(store.CertInfo{CA: ca, Serial: "01", NotBefore: enrolled, NotAfter: notAfter})
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {
@@ -154,7 +159,7 @@ func TestJob_Run_CountsCertifiedNamesEnrolledSinceTheDay(t *testing.T) {
 	h := newHarness(t)
 	h.store.putName(t, "atday", testSince, testSince, "letsencrypt")
 	h.store.putName(t, "later", testSince.Add(26*time.Hour), testSince.Add(26*time.Hour), "gts")
-	h.store.putName(t, "expired", testSince.Add(time.Hour), testSince.Add(time.Hour), "zerossl")
+	h.store.putNameValidUntil(t, "expired", testSince.Add(time.Hour), testSince.Add(time.Hour), "zerossl", testNow.Add(-time.Hour))
 	h.store.putName(t, "before", testSince.Add(-time.Nanosecond), testSince.Add(-time.Nanosecond), "letsencrypt")
 	h.store.putName(t, "nocert", testSince.Add(time.Hour), testSince.Add(time.Hour), "")
 	h.store.getErr[namesPrefix+"gone"] = bucket.ErrNotFound
@@ -208,7 +213,7 @@ func TestJob_Run_AFailureLeavesTheDashboardFileAsItWas(t *testing.T) {
 		name    string
 		setup   func(t *testing.T, f *fakeStore)
 		want    string
-		wantLog string
+		wantLog []string
 	}{
 		{name: "the list fails", setup: func(_ *testing.T, f *fakeStore) { f.listErr = errors.New("list down") }, want: "list the name registry: list down"},
 		{name: "a read fails", setup: func(t *testing.T, f *fakeStore) {
@@ -227,7 +232,7 @@ func TestJob_Run_AFailureLeavesTheDashboardFileAsItWas(t *testing.T) {
 				}
 				return nil
 			}
-		}, want: "reading the name record names/ok crashed", wantLog: "key=names/ok"},
+		}, want: "reading the name record names/ok crashed", wantLog: []string{`msg="` + crashedMsg + `"`, "key=names/ok", "panic=boom"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,8 +245,10 @@ func TestJob_Run_AFailureLeavesTheDashboardFileAsItWas(t *testing.T) {
 				t.Fatalf("run = %v, want an error containing %q", err, tc.want)
 			}
 			h.assertOldTextfileKept(t)
-			if !strings.Contains(h.logs.String(), tc.wantLog) {
-				t.Fatalf("logs = %s, want %q", h.logs.String(), tc.wantLog)
+			for _, want := range tc.wantLog {
+				if !strings.Contains(h.logs.String(), want) {
+					t.Fatalf("logs = %s, want %q", h.logs.String(), want)
+				}
 			}
 		})
 	}

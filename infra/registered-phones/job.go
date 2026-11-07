@@ -16,6 +16,8 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
+const crashedMsg = "reading a name record crashed, so this count stops and the dashboard file is not updated"
+
 const (
 	namesPrefix    = "names/"
 	parallelReads  = 16
@@ -123,7 +125,7 @@ func (j *job) count(ctx context.Context) (tally, error) {
 		g.Go(func() (err error) {
 			rctx := report.WithScope(gctx)
 			report.SetAttrs(rctx, slog.String("key", o.Key))
-			defer report.Recover(rctx, j.Logger, "reading a name record", func() {
+			defer report.RecoverWith(rctx, j.Logger, "reading a name record", crashedMsg, func() {
 				err = fmt.Errorf("reading the name record %s crashed", o.Key)
 			})
 			ok, err := j.counts(rctx, o.Key)

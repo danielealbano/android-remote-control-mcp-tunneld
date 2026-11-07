@@ -116,15 +116,25 @@ func TestExecute_ABadSettingFromTheEnvironmentLeavesTheDashboardFileAsItWas(t *t
 	}{
 		{name: "an invalid value", env: map[string]string{"TUNNELD_S3_FORCE_PATH_STYLE": "maybe"}, want: "TUNNELD_S3_FORCE_PATH_STYLE"},
 		{name: "an empty dashboard file path", env: map[string]string{"REGISTERED_PHONES_TEXTFILE": ""}, want: "the dashboard file path is empty"},
+		{name: "an empty endpoint", env: map[string]string{"TUNNELD_S3_ENDPOINT": ""}, want: "the setting --s3-endpoint (TUNNELD_S3_ENDPOINT) is empty"},
+		{name: "an empty bucket", env: map[string]string{"TUNNELD_S3_BUCKET": ""}, want: "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty"},
+		{name: "an empty access key", env: map[string]string{"TUNNELD_S3_ACCESS_KEY": ""}, want: "the setting --s3-access-key (TUNNELD_S3_ACCESS_KEY) is empty"},
+		{name: "an empty secret key", env: map[string]string{"TUNNELD_S3_SECRET_KEY": ""}, want: "the setting --s3-secret-key (TUNNELD_S3_SECRET_KEY) is empty"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
+			env := map[string]string{
+				"REGISTERED_PHONES_ENROLLED_SINCE": "2026-11-06", "REGISTERED_PHONES_TEXTFILE": textfile,
+				"TUNNELD_S3_ENDPOINT": "http://127.0.0.1:1", "TUNNELD_S3_BUCKET": "b", "TUNNELD_S3_ACCESS_KEY": "k", "TUNNELD_S3_SECRET_KEY": "s",
+			}
 			for k, v := range tc.env {
+				env[k] = v
+			}
+			for k, v := range env {
 				t.Setenv(k, v)
 			}
-			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
-			args := []string{"--enrolled-since=2026-11-06", "--s3-endpoint=http://127.0.0.1:1", "--s3-bucket=b", "--s3-access-key=k", "--s3-secret-key=s"}
-			assertFailureKeepsTheFile(t, textfile, func(logger *slog.Logger) int { return execute(context.Background(), args, logger) }, tc.want)
+			assertFailureKeepsTheFile(t, textfile, func(logger *slog.Logger) int { return execute(context.Background(), nil, logger) }, tc.want)
 		})
 	}
 }
