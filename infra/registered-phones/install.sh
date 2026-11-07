@@ -61,6 +61,11 @@ case "$since" in
 	;;
 esac
 
+stop() {
+	echo "$1; the install stops here, so the nodes after it are not touched" >&2
+	exit 1
+}
+
 while read -r node target extra <&3 || [ -n "$node" ]; do
 	case "$node" in
 	'' | \#*) continue ;;
@@ -70,22 +75,20 @@ while read -r node target extra <&3 || [ -n "$node" ]; do
 		exit 1
 	fi
 	printf "test -r /etc/tunneld/tunneld.env && [ \"\$(date -u -d %s +%%F)\" = %s ]\n" "$since" "$since" |
-		ssh "$@" "$target" sh || {
-		echo "$node: ssh failed, /etc/tunneld/tunneld.env is not readable there, or $since is not a real day" >&2
-		exit 1
-	}
+		ssh "$@" "$target" sh ||
+		stop "$node: ssh failed, /etc/tunneld/tunneld.env is not readable there, or $since is not a real day"
 	printf 'REGISTERED_PHONES_ENROLLED_SINCE=%s\n' "$since" |
-		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/registered-phones.env && chmod 600 /etc/tunneld/registered-phones.env'
-	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.service' < "$dir/arc-registered-phones.service"
-	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.timer' < "$dir/arc-registered-phones.timer"
-	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-registered-phones.new && chmod 755 /usr/local/sbin/arc-registered-phones.new && mv /usr/local/sbin/arc-registered-phones.new /usr/local/sbin/arc-registered-phones' < "$binary"
-	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-registered-phones.timer' < /dev/null || {
-		echo "$node: ssh failed, or systemd could not enable the hourly timer" >&2
-		exit 1
-	}
-	ssh "$@" "$target" 'systemctl start arc-registered-phones.service' < /dev/null || {
-		echo "$node: ssh failed, or the first count failed; journalctl -u arc-registered-phones on the node says why" >&2
-		exit 1
-	}
+		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/registered-phones.env && chmod 600 /etc/tunneld/registered-phones.env' ||
+		stop "$node: ssh failed, or /etc/tunneld/registered-phones.env could not be written there"
+	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.service' < "$dir/arc-registered-phones.service" ||
+		stop "$node: ssh failed, or the service unit could not be written there"
+	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.timer' < "$dir/arc-registered-phones.timer" ||
+		stop "$node: ssh failed, or the timer unit could not be written there"
+	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-registered-phones.new && chmod 755 /usr/local/sbin/arc-registered-phones.new && mv /usr/local/sbin/arc-registered-phones.new /usr/local/sbin/arc-registered-phones' < "$binary" ||
+		stop "$node: ssh failed, or the binary could not be installed there"
+	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-registered-phones.timer' < /dev/null ||
+		stop "$node: ssh failed, or systemd could not enable the hourly timer"
+	ssh "$@" "$target" 'systemctl start arc-registered-phones.service' < /dev/null ||
+		stop "$node: ssh failed, or the first count failed; journalctl -u arc-registered-phones on the node says why"
 	echo "$node installed, counted once, counts every hour"
 done 3< "$config"
