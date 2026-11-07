@@ -274,7 +274,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `e2e` | `e2e/`: testcontainers harness + scenarios; the `support/` test apps + `fixtures/` they drive |
 | `staging` | `staging/`: real-CA staging tier (LE / GTS staging through the reverse SSH tunnel) |
 | `deploy` | `deploy/`: compose, MinIO/Valkey, observability provisioning, fetcher |
-| `scripts` | `deploy/scripts/` + `scripts/` + `infra/`: fetch/gen-ca/dev-tooling scripts, the status-board reporter, the refused-apps report |
+| `scripts` | `deploy/scripts/` + `scripts/` + `infra/`: fetch/gen-ca/dev-tooling scripts, the status-board reporter, the refused-apps report, the registered-phones count |
 | `ci` | `.github/workflows/` |
 | `make` | `Makefile` |
 | `docs` | `docs/` (PROJECT, ARCHITECTURE, PROTOCOL, plans) + `README.md` |
@@ -301,13 +301,14 @@ The `Makefile` is the authoritative command surface:
 - `make test-soak-app` — the adb-gated soak-app tests (`-tags=e2e,soak`, `-run '^TestE2E_SoakApp'`; needs Docker + one adb device); NOT a default gate — never run by `test-e2e`, `test-all` or CI
 - `make test-staging` — `-tags=staging` suite (`-race`; real `server.Run` against Let's Encrypt staging + GTS staging through a reverse SSH tunnel; skips without `TUNNELD_STAGING_SSH_KEY`; needs Docker)
 - `make test-all` — `test-unit` + `test-integration` + `test-e2e` + `test-staging`
-- `make test-scripts` — POSIX harnesses for the `deploy/scripts/` fetch/gen-ca scripts, the `scripts/` generator, the `infra/status-report/` reporter and the `infra/refused-apps/` installer
+- `make test-scripts` — POSIX harnesses for the `deploy/scripts/` fetch/gen-ca scripts, the `scripts/` generator, the `infra/status-report/` reporter and the `infra/refused-apps/` and `infra/registered-phones/` installers
 - `make compose-config` — validates `deploy/docker-compose.yml` (placeholder env from
   `deploy/.env.example`)
 - `make mermaid-check` — validate all Mermaid blocks in `README.md` + `docs/` via `mmdc`
 - `make third-party-licenses` — generate `THIRD_PARTY_LICENSES.txt` (gitignored) from the binary's dependency set
 - `make tidy` — `go mod tidy`
 - `make refused-apps` — `bin/arc-refused-apps`, the daily refused-apps report (`docs/PROJECT.md` §6)
+- `make registered-phones` — `bin/arc-registered-phones`, the hourly count behind the overview's Phones registered box (`docs/PROJECT.md` §6)
 - `make tunnel-app` / `make soak-app` — run the app's JVM unit tests (`testDebugUnitTest`) and build its APK fixture (into `fixtures/tunnel-app/` / `fixtures/soak-app/`); `make soak-client` — the soak load client (`docs/PROJECT.md` §7)
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
