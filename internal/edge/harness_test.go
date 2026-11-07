@@ -215,9 +215,13 @@ type fakeOpener struct {
 	calls     []openCall
 	errByNode map[string]error
 	panicOpen bool
+	onOpen    func()
 }
 
 func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token, clientAddr string) error {
+	if o.onOpen != nil {
+		o.onOpen()
+	}
 	if o.panicOpen {
 		panic("open boom")
 	}

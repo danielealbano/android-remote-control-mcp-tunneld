@@ -838,12 +838,18 @@ func TestEdge_RoutedConns_CountsAConnectionThatReachedAPhoneUntilItEnds(t *testi
 	}
 }
 
-func TestEdge_RoutedConns_StopsCountingAConnectionWhosePhoneCannotBeReached(t *testing.T) {
+func TestEdge_RoutedConns_CountsAPendingDialBackAndStopsWhenThePhoneCannotBeReached(t *testing.T) {
 	t.Parallel()
 	te := newTestEdge(t, baseConfig(), nil)
 	te.rtr.set("node-a", "conn-1", true, nil)
 	te.opener.errByNode["node-a"] = errors.New("phone unreachable")
+	var during atomic.Int64
+	during.Store(-1)
+	te.opener.onOpen = func() { during.Store(te.e.RoutedConns()) }
 	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.87", nil), ClientHelloInfo{SNI: capSNI})
+	if got := during.Load(); got != 1 {
+		t.Fatalf("RoutedConns while the dial-back is being opened = %d, want 1: a pending dial-back must hold the drain", got)
+	}
 	if n := te.e.RoutedConns(); n != 0 {
 		t.Fatalf("RoutedConns after the refusal = %d, want 0", n)
 	}
