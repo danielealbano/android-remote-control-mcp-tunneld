@@ -259,8 +259,10 @@ registered box of the tunneld overview: the phones enrolled since a first counte
 state, `registered-phones/state.json` in the bucket: the first counted day, a read-from time, and every counted
 name with its enrollment time. The state only grows, so a counted name stays counted even after its name record is
 purged, and the tool never deletes it. Each node also keeps the last state it saved, in
-`/var/lib/arc-registered-phones/state.json` (mode 0600). A systemd timer runs it every hour on one or more nodes,
-each at its own minute and at least 30 minutes apart, so two runs never update the state at once. A run merges the
+`/var/lib/arc-registered-phones/state.json` (mode 0600). A systemd timer runs it every hour on one or two nodes,
+each at its own minute at least 30 minutes apart, so their hourly runs do not update the state at the same moment;
+if two runs ever overlap (the count the installer starts runs at install time), the next run's merge of the bucket
+and node copies puts back a name the later save left out. A run merges the
 bucket copy and its node copy (names from both, reading again from the older read-from time); when the bucket copy
 is missing it starts from the node copy and logs a warning, and it starts a new state only when neither exists. A
 copy that cannot be decoded, or that counts from another day than the one configured, stops the run without
@@ -279,8 +281,9 @@ hours old, so a count that stops being renewed — a failing run, or a job that 
 within two hours, and the box is empty only when no node has a newer one. The bucket settings come from tunneld's
 own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is refused), the first counted day from
 `/etc/tunneld/registered-phones.env` (`registered-phones.env.example`). `infra/registered-phones/install.sh`
-checks on each node that the day is a real calendar day, then installs it on every node in a config file, each
-with its run minute, and runs it once on each (`--help` lists its settings).
+first checks the whole config file (a bad line, no node, or two run minutes less than 30 minutes apart installs
+nothing), then checks on each node that the day is a real calendar day, installs it there with its run minute and
+runs it once (`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
@@ -330,7 +333,8 @@ client cannot force or suppress one. Tunnel traffic is never sent. Without a DSN
   `--listen` port, so every public port must equal its listen port (no port-changing NAT or port mapping).
 - **Stopping a node**: a stop signal runs a pre-drain (`--predrain-wait`, default 0: the node's
   `GET https://<enroll-host>/api/v1/health` answers `503`, everything else is served), then a drain of at most
-  `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, in-flight connections finish), then the
+  `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, public connections that reached a phone
+  finish; one still sending its ClientHello does not hold the drain), then the
   shutdown (`--shutdown-grace`), then, with `--sentry-dsn`, at most 5 s to send the last Sentry events — see
   `docs/PROTOCOL.md` §7. The service manager's stop timeout (podman
   `StopTimeout`, compose `stop_grace_period`) must exceed their sum, with a margin, or the process is killed

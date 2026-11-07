@@ -446,8 +446,10 @@ the replaced connection: it stays open until the shutdown, so the splices opened
 node and on the others (their per-splice route check keeps them while this node is registered, §2). New control
 connections get `MOVE` without a bind, or `503` without a target; the two enroll routes and `/api/v1/issue` answer `503`
 `draining`; dial-backs and public connections are served. The drain lasts `--limit-conn-idle` + 5 s at most, and
-ends as soon as the node holds no phone control connection and no public connection and runs no issuance
-(`POST /api/v1/issue`, an ACME order); a replaced connection counts until the drain ends, because the node cannot
+ends as soon as the node holds no phone control connection and no public connection to a phone (one whose route
+was found: dial-back pending or spliced) and runs no issuance (`POST /api/v1/issue`, an ACME order). A public
+connection still sending its ClientHello, or being refused, does not hold the drain: internet scanners keep reaching
+`:443`, and such a connection is closed when the node stops. A replaced connection counts until the drain ends, because the node cannot
 see the splices opened through it on the other nodes, so a node that held a phone drains for the full time. A
 `MOVE` that cannot be queued (the connection's send buffer is full) is retried at every drain poll. An errgroup failure during
 the pre-drain or the drain cancels the serving context at once.
