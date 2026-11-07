@@ -814,3 +814,37 @@ func TestEdge_DrainReleasesTheSlotAndLogsTheEnd(t *testing.T) {
 		t.Fatalf("the end event must be logged on the connection's context without its cancellation: value=%v err=%v", ends[0].Value(drainCtxKey{}), ends[0].Err())
 	}
 }
+
+func TestEdge_RoutedConns_CountsAConnectionThatReachedAPhoneUntilItEnds(t *testing.T) {
+	t.Parallel()
+	te := newTestEdge(t, baseConfig(), nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		te.e.handleTunnel(ctx, newScriptConn("198.51.100.86", nil), ClientHelloInfo{SNI: capSNI})
+		close(done)
+	}()
+	phone := waitPhone(t, te, 0)
+	defer tunneltest.CloseOrLog(t, phone)
+	if n := te.e.RoutedConns(); n != 1 {
+		t.Fatalf("RoutedConns during the splice = %d, want 1: a connection to a phone must hold the drain", n)
+	}
+	cancel()
+	waitDone(t, done, 5*time.Second)
+	if n := te.e.RoutedConns(); n != 0 {
+		t.Fatalf("RoutedConns after the splice = %d, want 0", n)
+	}
+}
+
+func TestEdge_RoutedConns_StopsCountingAConnectionWhosePhoneCannotBeReached(t *testing.T) {
+	t.Parallel()
+	te := newTestEdge(t, baseConfig(), nil)
+	te.rtr.set("node-a", "conn-1", true, nil)
+	te.opener.errByNode["node-a"] = errors.New("phone unreachable")
+	te.e.handleTunnel(context.Background(), newScriptConn("198.51.100.87", nil), ClientHelloInfo{SNI: capSNI})
+	if n := te.e.RoutedConns(); n != 0 {
+		t.Fatalf("RoutedConns after the refusal = %d, want 0", n)
+	}
+}

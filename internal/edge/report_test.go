@@ -61,8 +61,8 @@ func TestAcceptLoop_PanicIsContainedToTheConnection(t *testing.T) {
 	if !conn.isClosed() {
 		t.Fatal("the panicking connection must be closed")
 	}
-	if te.e.InFlightConns() != 0 {
-		t.Fatalf("in-flight connections = %d, want 0", te.e.InFlightConns())
+	if te.e.RoutedConns() != 0 {
+		t.Fatalf("routed connections = %d, want 0", te.e.RoutedConns())
 	}
 	rep.Flush(context.Background())
 	events := tr.Events("")

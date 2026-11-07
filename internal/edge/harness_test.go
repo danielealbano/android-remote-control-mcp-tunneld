@@ -106,6 +106,7 @@ type fakeRouter struct {
 	nodeErr   error
 
 	panicLookup bool
+	onLookup    func()
 }
 
 func (r *fakeRouter) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
@@ -127,6 +128,9 @@ func (r *fakeRouter) setNodes(live map[string]bool, err error) {
 }
 
 func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, bool, error) {
+	if r.onLookup != nil {
+		r.onLookup()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lookups++

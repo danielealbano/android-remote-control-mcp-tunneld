@@ -127,10 +127,8 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 		}
 		delay = 0
 		e.wg.Add(1)
-		e.handling.Add(1)
 		go func() {
 			defer e.wg.Done()
-			defer e.handling.Add(-1)
 			cctx := report.WithScope(ctx)
 			defer report.Recover(cctx, e.cfg.Logger, "public connection", func() { closeLogged(e.cfg.Logger, "public client", conn) })
 			report.SetAttrs(cctx, report.ClientAttrs(conn.RemoteAddr().String())...)

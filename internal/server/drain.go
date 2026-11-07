@@ -26,7 +26,7 @@ type drainPhones interface {
 }
 
 type drainEdge interface {
-	InFlightConns() int64
+	RoutedConns() int64
 }
 
 type drainIssues interface {
@@ -70,15 +70,15 @@ func (d *drainer) run(ctx context.Context) {
 	tick := time.NewTicker(d.poll)
 	defer tick.Stop()
 	for {
-		if d.phones.LiveConns() == 0 && d.edge.InFlightConns() == 0 && d.issues.InFlightIssues() == 0 {
-			d.logger.Info("drain finished: no phone connection, no public connection and no issuance left")
+		if d.phones.LiveConns() == 0 && d.edge.RoutedConns() == 0 && d.issues.InFlightIssues() == 0 {
+			d.logger.Info("drain finished: no phone connection, no public connection to a phone and no issuance left")
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
-			d.logger.Info("the drain time ran out; stopping and closing what remains", "phones", d.phones.LiveConns(), "public_connections", d.edge.InFlightConns(),
+			d.logger.Info("the drain time ran out; stopping and closing what remains", "phones", d.phones.LiveConns(), "public_connections_to_phones", d.edge.RoutedConns(),
 				"issuances", d.issues.InFlightIssues())
 			return
 		case <-tick.C:

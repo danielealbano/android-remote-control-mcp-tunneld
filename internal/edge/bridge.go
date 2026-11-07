@@ -185,6 +185,8 @@ func (e *Edge) handleTunnel(ctx context.Context, client net.Conn, info ClientHel
 		closeLogged(e.cfg.Logger, "public client", client)
 		return
 	}
+	e.routed.Add(1)
+	defer e.routed.Add(-1)
 
 	// Admission-time quota gate: an exhausted day/week window refuses every NEW stream (in-flight
 	// streams are closed by the splice's Charge accounting). A control-plane error fails open,
