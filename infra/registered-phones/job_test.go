@@ -523,6 +523,20 @@ func TestJob_Run_AFailureLeavesTheStateAndTheDashboardFileAsTheyWere(t *testing.
 	}
 }
 
+func TestJob_Run_ReportsEveryRecordThatFailed(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.store.getErr[namesPrefix+"bad1"] = errors.New("read down one")
+	h.store.objects[namesPrefix+"junk"] = []byte("{")
+	h.writeOldTextfile(t)
+	err := h.job.run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "read the name record names/bad1: read down one") ||
+		!strings.Contains(err.Error(), "decode the name record names/junk") {
+		t.Fatalf("run = %v, want both failed records", err)
+	}
+	h.assertOldTextfileKept(t)
+}
+
 func TestJob_Run_ABucketSaveFailureKeepsTheNewStateOnTheNode(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

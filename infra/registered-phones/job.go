@@ -134,6 +134,7 @@ func (j *job) count(ctx context.Context, s *state) (tally, error) {
 	var (
 		mu    sync.Mutex
 		found = map[string]time.Time{}
+		errs  []error
 	)
 	read := 0
 	g, gctx := errgroup.WithContext(ctx)
@@ -151,6 +152,13 @@ func (j *job) count(ctx context.Context, s *state) (tally, error) {
 		}
 		read++
 		g.Go(func() (err error) {
+			defer func() {
+				if err != nil && (gctx.Err() == nil || !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)) {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}()
 			rctx := report.WithScope(gctx)
 			report.SetAttrs(rctx, slog.String("key", o.Key))
 			defer report.RecoverWith(rctx, j.Logger, "reading a name record", crashedMsg, func() {
@@ -166,7 +174,12 @@ func (j *job) count(ctx context.Context, s *state) (tally, error) {
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return tally{}, err
+		mu.Lock()
+		defer mu.Unlock()
+		if len(errs) == 0 {
+			return tally{}, err
+		}
+		return tally{}, errors.Join(errs...)
 	}
 	for name, enrolled := range found {
 		s.Names[name] = enrolled
