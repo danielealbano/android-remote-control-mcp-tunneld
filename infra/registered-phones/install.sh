@@ -8,8 +8,9 @@ Usage: install.sh [--config FILE] [--binary FILE] [--enrolled-since YYYY-MM-DD] 
 Installs the hourly registered-phones count on every node in the config file, one node at a time,
 and runs it once on each.
 Each config line is: <node> <ssh-target> <MM>
-MM is the minute of every hour the node runs at; give the nodes minutes at least 30 apart, so they
-never update the shared state at the same time.
+MM is the minute of every hour the node runs at. The minutes must be at least 30 minutes apart (so at
+most two nodes), so their hourly runs do not update the shared state at the same moment.
+The whole config file is checked before any node is touched.
 Blank lines and lines starting with # are skipped.
 
   --config FILE               config file, or REGISTERED_PHONES_CONFIG
@@ -68,20 +69,40 @@ stop() {
 	exit 1
 }
 
+refuse() {
+	echo "$1; nothing was installed" >&2
+	exit 1
+}
+
+seen=""
 while read -r node target minute extra <&3 || [ -n "$node" ]; do
 	case "$node" in
 	'' | \#*) continue ;;
 	esac
 	if [ -z "$target" ] || [ -z "$minute" ] || [ -n "$extra" ]; then
-		echo "config line for $node needs <node> <ssh-target> <MM>" >&2
-		exit 1
+		refuse "config line for $node needs <node> <ssh-target> <MM>"
 	fi
 	case "$minute" in
 	[0-5][0-9]) ;;
-	*)
-		echo "run minute $minute for $node is not MM (00-59)" >&2
-		exit 1
-		;;
+	*) refuse "run minute $minute for $node is not MM (00-59)" ;;
+	esac
+	for other in $seen; do
+		a=${minute#0}
+		b=${other##*:}
+		b=${b#0}
+		gap=$((a > b ? a - b : b - a))
+		[ "$gap" -le 30 ] || gap=$((60 - gap))
+		if [ "$gap" -lt 30 ]; then
+			refuse "$node (minute $minute) and ${other%%:*} (minute ${other##*:}) run less than 30 minutes apart, so they could update the shared state at the same time"
+		fi
+	done
+	seen="$seen $node:$minute"
+done 3< "$config"
+[ -n "$seen" ] || refuse "config file $config names no node"
+
+while read -r node target minute extra <&3 || [ -n "$node" ]; do
+	case "$node" in
+	'' | \#*) continue ;;
 	esac
 	printf "test -r /etc/tunneld/tunneld.env && [ \"\$(date -u -d %s +%%F)\" = %s ]\n" "$since" "$since" |
 		ssh "$@" "$target" sh ||
