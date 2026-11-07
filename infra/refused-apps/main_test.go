@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"io"
 	"log/slog"
 	"net/http/httptest"
 	"reflect"
@@ -84,7 +83,7 @@ func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 		Textfile: "/nonexistent/x.prom"}
 	done := make(chan int, 1)
 	go func() {
-		done <- execute(ctx, c, slog.New(slog.NewTextHandler(io.Discard, nil)), withTelegramAPI(ts.URL))
+		done <- execute(ctx, c, testLog(), withTelegramAPI(ts.URL))
 	}()
 	select {
 	case code := <-done:
