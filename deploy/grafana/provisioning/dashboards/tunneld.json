@@ -206,7 +206,7 @@
    "id": 29,
    "type": "stat",
    "title": "Phones registered (total)",
-   "description": "Phones enrolled since the first counted day that got a certificate, renewed or not. Counted every hour from the name registry by the registered-phones job (infra/registered-phones); the node filter does not apply.",
+   "description": "Phones enrolled since the first counted day that got a certificate, renewed or not. Counted every hour from the name registry by the registered-phones job (infra/registered-phones); empty when no node has a count newer than two hours. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -224,7 +224,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "max(arc_registered_phones)",
+     "expr": "max(arc_registered_phones and (time() - arc_registered_phones_counted_timestamp_seconds < 7200))",
      "legendFormat": "registered",
      "instant": true,
      "range": false
