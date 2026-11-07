@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
 
 type fakeStore struct {
@@ -50,7 +52,7 @@ func (s *fakeStore) Get(_ context.Context, key string) ([]byte, error) {
 	}
 	b, ok := s.objects[key]
 	if !ok {
-		return nil, errNotFound
+		return nil, bucket.ErrNotFound
 	}
 	return b, nil
 }
@@ -405,7 +407,7 @@ func TestJob_ARecordGoneSinceTheListingIsSkipped(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
 	h.addRecord(t, "a.json", at(6, 9, 0), "198.51.100.7")
-	h.store.getErr["rejected-enroll/a.json"] = errNotFound
+	h.store.getErr["rejected-enroll/a.json"] = bucket.ErrNotFound
 	if err := h.job(t).run(context.Background()); err != nil {
 		t.Fatal(err)
 	}

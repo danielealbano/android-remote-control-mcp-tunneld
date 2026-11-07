@@ -1,4 +1,4 @@
-package main
+package bucket
 
 import (
 	"bytes"
@@ -18,9 +18,9 @@ import (
 
 const maxObjectBytes = 64 << 20
 
-var errNotFound = errors.New("object not found")
+var ErrNotFound = errors.New("object not found")
 
-type bucketConfig struct {
+type Config struct {
 	Endpoint       string
 	Region         string
 	Bucket         string
@@ -29,12 +29,12 @@ type bucketConfig struct {
 	ForcePathStyle bool
 }
 
-type s3Bucket struct {
+type S3 struct {
 	cli    *s3.Client
 	bucket string
 }
 
-func newS3Bucket(cfg bucketConfig) *s3Bucket {
+func New(cfg Config) *S3 {
 	cli := s3.New(s3.Options{
 		Region:       cfg.Region,
 		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
@@ -42,10 +42,10 @@ func newS3Bucket(cfg bucketConfig) *s3Bucket {
 		UsePathStyle: cfg.ForcePathStyle,
 		HTTPClient:   awshttp.NewBuildableClient().WithTimeout(30 * time.Second),
 	})
-	return &s3Bucket{cli: cli, bucket: cfg.Bucket}
+	return &S3{cli: cli, bucket: cfg.Bucket}
 }
 
-func (b *s3Bucket) List(ctx context.Context, prefix string) ([]string, error) {
+func (b *S3) List(ctx context.Context, prefix string) ([]string, error) {
 	var keys []string
 	pages := s3.NewListObjectsV2Paginator(b.cli, &s3.ListObjectsV2Input{Bucket: &b.bucket, Prefix: aws.String(prefix)})
 	for pages.HasMorePages() {
@@ -60,11 +60,11 @@ func (b *s3Bucket) List(ctx context.Context, prefix string) ([]string, error) {
 	return keys, nil
 }
 
-func (b *s3Bucket) Get(ctx context.Context, key string) (_ []byte, err error) {
+func (b *S3) Get(ctx context.Context, key string) (_ []byte, err error) {
 	out, err := b.cli.GetObject(ctx, &s3.GetObjectInput{Bucket: &b.bucket, Key: aws.String(key)})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, errNotFound
+			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("get %s: %w", key, err)
 	}
@@ -83,7 +83,7 @@ func (b *s3Bucket) Get(ctx context.Context, key string) (_ []byte, err error) {
 	return body, nil
 }
 
-func (b *s3Bucket) Put(ctx context.Context, key string, body []byte) error {
+func (b *S3) Put(ctx context.Context, key string, body []byte) error {
 	_, err := b.cli.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      &b.bucket,
 		Key:         aws.String(key),

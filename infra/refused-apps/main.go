@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
 )
 
@@ -73,7 +74,7 @@ func runOnce(ctx context.Context, c cli, tg messenger, logger *slog.Logger) erro
 	}
 	statusClient := &http.Client{Timeout: 30 * time.Second}
 	j, err := newJob(jobConfig{
-		Store: newS3Bucket(bucketConfig{
+		Store: bucket.New(bucket.Config{
 			Endpoint: c.S3Endpoint, Region: c.S3Region, Bucket: c.S3Bucket,
 			AccessKey: c.S3AccessKey, SecretKey: c.S3SecretKey, ForcePathStyle: c.S3ForcePathStyle,
 		}),

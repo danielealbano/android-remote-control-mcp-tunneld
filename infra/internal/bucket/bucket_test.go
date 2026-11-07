@@ -1,4 +1,4 @@
-package main
+package bucket
 
 import (
 	"context"
@@ -54,17 +54,17 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func newTestBucket(t *testing.T) (*s3Bucket, *fakeS3) {
+func newTestBucket(t *testing.T) (*S3, *fakeS3) {
 	t.Helper()
 	f := &fakeS3{t: t, puts: map[string]string{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return newS3Bucket(bucketConfig{
+	return New(Config{
 		Endpoint: srv.URL, Region: "us-east-1", Bucket: "bucket", AccessKey: "k", SecretKey: "s", ForcePathStyle: true,
 	}), f
 }
 
-func TestS3Bucket_ListFollowsEveryPage(t *testing.T) {
+func TestS3_ListFollowsEveryPage(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBucket(t)
 	keys, err := b.List(context.Background(), "rejected-enroll/")
@@ -76,19 +76,19 @@ func TestS3Bucket_ListFollowsEveryPage(t *testing.T) {
 	}
 }
 
-func TestS3Bucket_Get(t *testing.T) {
+func TestS3_Get(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBucket(t)
 	body, err := b.Get(context.Background(), "rejected-enroll/a.json")
 	if err != nil || string(body) != `{"ts":"2026-11-06T10:00:00Z"}` {
 		t.Fatalf("Get = %q, %v", body, err)
 	}
-	if _, err := b.Get(context.Background(), "refused-apps/attempts.json"); !errors.Is(err, errNotFound) {
-		t.Fatalf("a missing object = %v, want errNotFound", err)
+	if _, err := b.Get(context.Background(), "refused-apps/attempts.json"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a missing object = %v, want ErrNotFound", err)
 	}
 }
 
-func TestS3Bucket_Put(t *testing.T) {
+func TestS3_Put(t *testing.T) {
 	t.Parallel()
 	b, f := newTestBucket(t)
 	if err := b.Put(context.Background(), "refused-apps/attempts.json", []byte(`{"apps":{}}`)); err != nil {

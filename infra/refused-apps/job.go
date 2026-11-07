@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -130,7 +131,7 @@ func (j *job) run(ctx context.Context) error {
 	hiddenAttempts := 0
 	for _, key := range keys {
 		body, err := j.Store.Get(ctx, key)
-		if errors.Is(err, errNotFound) {
+		if errors.Is(err, bucket.ErrNotFound) {
 			continue
 		}
 		if err != nil {
@@ -175,7 +176,7 @@ func (j *job) run(ctx context.Context) error {
 
 func (j *job) load(ctx context.Context) (attemptList, error) {
 	body, err := j.Store.Get(ctx, listKey)
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, bucket.ErrNotFound) {
 		j.Logger.Info("no attempt list is stored yet, so this run starts a new one", "node", j.Node, "key", listKey)
 		return attemptList{Apps: map[string][]attempt{}}, nil
 	}
