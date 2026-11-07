@@ -187,8 +187,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
-  refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, with no
-  rule; tunneld never reads or writes it.
+  refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, and the
+  registered-phones count (§6) its state as `registered-phones/state.json`, both with no rule; tunneld never reads
+  or writes them.
 
 ## 6. Observability
 
@@ -253,21 +254,33 @@ node ran. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env`
 node in a config file (`--help` lists its settings).
 
 The registered-phones count (`infra/registered-phones/`, built with `make registered-phones`) fills the Phones
-registered box of the tunneld overview: the phones enrolled since a first counted day that got a certificate,
-renewed or not. A systemd timer runs it every hour on one or more nodes. A run lists `names/` and reads, 16 at a
-time, every name record last written no earlier than one hour before `REGISTERED_PHONES_ENROLLED_SINCE` (a UTC day,
-`YYYY-MM-DD`): a record is first written when its phone enrolls, so one last written before that was enrolled
-before the day, and the hour covers clock differences between the nodes and the bucket. It counts the records
-with an issuing CA and an `enrolled_at` on or after the day, and rewrites the node_exporter textfile
-`arc_registered_phones.prom` with the count and its time (`arc_registered_phones_counted_timestamp_seconds`). A
-run that fails, or does not finish within 100 s, logs why and leaves the textfile as it was. The box shows the
-largest count across the nodes whose count is less than two hours old, so a count that stops being renewed — a
-failing run, or a job that no longer runs — drops off the box within two hours, and the box is empty only when no
-node has a newer one. It only reads the bucket. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env`
-(`TUNNELD_S3_*`), the first counted day from `/etc/tunneld/registered-phones.env`
-(`registered-phones.env.example`). `infra/registered-phones/install.sh` checks on each node that the day is a real
-calendar day, then installs it on every node in a config file and runs it once on each (`--help` lists its
-settings).
+registered box of the tunneld overview: the phones enrolled since a first counted day
+(`REGISTERED_PHONES_ENROLLED_SINCE`, a UTC day, `YYYY-MM-DD`) that got a certificate, renewed or not. It keeps a
+state, `registered-phones/state.json` in the bucket: the first counted day, a read-from time, and every counted
+name with its enrollment time. The state only grows, so a counted name stays counted even after its name record is
+purged, and the tool never deletes it. Each node also keeps the last state it saved, in
+`/var/lib/arc-registered-phones/state.json` (mode 0600). A systemd timer runs it every hour on one or more nodes,
+each at its own minute and at least 30 minutes apart, so two runs never update the state at once. A run merges the
+bucket copy and its node copy (names from both, reading again from the older read-from time); when the bucket copy
+is missing it starts from the node copy and logs a warning, and it starts a new state only when neither exists. A
+copy that cannot be decoded, or that counts from another day than the one configured, stops the run without
+changing anything. The run then lists `names/` and reads, 16 at a time, only the records of names it has not
+counted yet that were last written no earlier than the read-from time; a counted name stays counted, so it is
+never read again. It adds those with an issuing CA and an `enrolled_at` on or after the day, sets the read-from
+time to one hour before the run started (the hour covers clock differences between the nodes and the bucket),
+saves the state on the node and then in the bucket, and rewrites the node_exporter textfile
+`arc_registered_phones.prom` with the number of counted names and the time of the count
+(`arc_registered_phones_counted_timestamp_seconds`). A new state reads from one hour before the first counted day:
+a record is first written when its phone enrolls, so a record last written before that was enrolled before the
+day. A run that fails, or does not finish within 100 s, logs why and leaves the textfile as it was; the state is
+changed only by a run that read the registry without an error (the node copy is still saved when the bucket save
+fails, and the other way round). The box shows the largest count across the nodes whose count is less than two
+hours old, so a count that stops being renewed — a failing run, or a job that no longer runs — drops off the box
+within two hours, and the box is empty only when no node has a newer one. The bucket settings come from tunneld's
+own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is refused), the first counted day from
+`/etc/tunneld/registered-phones.env` (`registered-phones.env.example`). `infra/registered-phones/install.sh`
+checks on each node that the day is a real calendar day, then installs it on every node in a config file, each
+with its run minute, and runs it once on each (`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
