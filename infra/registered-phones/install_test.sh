@@ -19,7 +19,13 @@ if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
 	*"$STUB_SSH_FAIL_ON"*) exit 1 ;;
 	esac
 fi
-cat >> "$STUB_DIR/ssh_stdin"
+input=$(cat)
+printf '%s\n' "$input" >> "$STUB_DIR/ssh_stdin"
+if [ -n "${STUB_SSH_FAIL_STDIN:-}" ]; then
+	case "$input" in
+	*"$STUB_SSH_FAIL_STDIN"*) exit 1 ;;
+	esac
+fi
 SHIM
 chmod +x "$bindir/ssh"
 
@@ -53,7 +59,8 @@ case "$out" in
 *"n1 installed, counted once, counts every hour"*"n2 installed, counted once, counts every hour"*) pass "install reaches every node in order, past comments and blanks" ;;
 *) fail "install reaches every node in order: $out" ;;
 esac
-has "install checks the node has tunneld's settings" ssh_args 'test -r /etc/tunneld/tunneld.env'
+has "install checks the node has tunneld's settings" ssh_stdin 'test -r /etc/tunneld/tunneld.env'
+has "install checks the first counted day is a real day on the node" ssh_stdin 'date -u -d 2026-01-02 +%F)" = 2026-01-02 \]'
 has "install writes the first counted day" ssh_stdin '^REGISTERED_PHONES_ENROLLED_SINCE=2026-01-02$'
 has "install keeps the settings file private" ssh_args 'chmod 600 /etc/tunneld/registered-phones.env'
 has "install copies the service" ssh_stdin 'EnvironmentFile=/etc/tunneld/registered-phones.env'
@@ -98,6 +105,14 @@ case "$out" in
 *) pass "a failed node stops the install" ;;
 esac
 hasnt "a failed node leaves the next node untouched" ssh_args 'root@198.51.100.2'
+
+out="$(STUB_SSH_FAIL_STDIN='date -u -d 2026-02-30' all --enrolled-since 2026-02-30 2>&1 || true)"
+case "$out" in
+*"n1 has no readable /etc/tunneld/tunneld.env, or 2026-02-30 is not a real day"*) pass "a day the node does not know stops the install and says so" ;;
+*) fail "a day the node does not know stops the install and says so: $out" ;;
+esac
+hasnt "a day the node does not know writes no settings" ssh_stdin 'REGISTERED_PHONES_ENROLLED_SINCE='
+hasnt "a day the node does not know leaves the next node untouched" ssh_args 'root@198.51.100.2'
 
 out="$(STUB_SSH_FAIL_ON='start arc-registered-phones.service' all 2>&1 || true)"
 case "$out" in
