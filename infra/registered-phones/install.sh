@@ -61,7 +61,7 @@ case "$since" in
 	;;
 esac
 
-while read -r node target extra <&3; do
+while read -r node target extra <&3 || [ -n "$node" ]; do
 	case "$node" in
 	'' | \#*) continue ;;
 	esac
@@ -75,7 +75,7 @@ while read -r node target extra <&3; do
 		exit 1
 	}
 	printf 'REGISTERED_PHONES_ENROLLED_SINCE=%s\n' "$since" |
-		ssh "$@" "$target" 'umask 077; cat > /etc/tunneld/registered-phones.env; chmod 600 /etc/tunneld/registered-phones.env'
+		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/registered-phones.env && chmod 600 /etc/tunneld/registered-phones.env'
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.service' < "$dir/arc-registered-phones.service"
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-registered-phones.timer' < "$dir/arc-registered-phones.timer"
 	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-registered-phones.new && chmod 755 /usr/local/sbin/arc-registered-phones.new && mv /usr/local/sbin/arc-registered-phones.new /usr/local/sbin/arc-registered-phones' < "$binary"
