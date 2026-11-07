@@ -142,10 +142,10 @@ func (h *harness) writeOldTextfile(t *testing.T) {
 	}
 }
 
-func (h *harness) assertTextfileGone(t *testing.T) {
+func (h *harness) assertOldTextfileKept(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat(h.textfile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the old dashboard file must be removed, stat = %v", err)
+	if got, err := os.ReadFile(h.textfile); err != nil || string(got) != metrics(99, testNow.Add(-time.Hour)) {
+		t.Fatalf("a failed run must leave the dashboard file as it was: %q, %v", got, err)
 	}
 }
 
@@ -202,7 +202,7 @@ func TestJob_Run_AnEmptyRegistryCountsZero(t *testing.T) {
 	}
 }
 
-func TestJob_Run_AFailureRemovesTheDashboardFile(t *testing.T) {
+func TestJob_Run_AFailureLeavesTheDashboardFileAsItWas(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
@@ -239,7 +239,7 @@ func TestJob_Run_AFailureRemovesTheDashboardFile(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("run = %v, want an error containing %q", err, tc.want)
 			}
-			h.assertTextfileGone(t)
+			h.assertOldTextfileKept(t)
 			if !strings.Contains(h.logs.String(), tc.wantLog) {
 				t.Fatalf("logs = %s, want %q", h.logs.String(), tc.wantLog)
 			}
@@ -260,7 +260,7 @@ func TestJob_Run_ATimeLimitEndsTheCountAndSaysSo(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "the count did not finish within 20ms") {
 		t.Fatalf("run = %v, want the time-limit error", err)
 	}
-	h.assertTextfileGone(t)
+	h.assertOldTextfileKept(t)
 }
 
 func TestJob_Run_ACancelledRunIsNotCalledATimeout(t *testing.T) {
@@ -286,13 +286,12 @@ func TestJob_Run_AnUnwritableDashboardFileFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = j.run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "write the dashboard file") || errors.Is(err, errTextfileKept) {
-		t.Fatalf("run = %v, want a write error with nothing left to remove", err)
+	if err := j.run(context.Background()); err == nil || !strings.Contains(err.Error(), "write the dashboard file") {
+		t.Fatalf("run = %v, want a write error", err)
 	}
 }
 
-func TestJob_Run_AnUnremovableDashboardFileIsReported(t *testing.T) {
+func TestJob_Run_AFailedReplaceLeavesNoTemporaryFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "arc_registered_phones.prom")
@@ -303,9 +302,8 @@ func TestJob_Run_AnUnremovableDashboardFileIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = j.run(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "write the dashboard file") || !errors.Is(err, errTextfileKept) {
-		t.Fatalf("run = %v, want the write error and the failed removal", err)
+	if err := j.run(context.Background()); err == nil || !strings.Contains(err.Error(), "write the dashboard file") {
+		t.Fatalf("run = %v, want a write error", err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {

@@ -93,12 +93,12 @@ func (j *job) run(ctx context.Context) error {
 	t, err := j.count(cctx)
 	if err != nil {
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			err = fmt.Errorf("the count did not finish within %s: %w", j.timeout, err)
+			return fmt.Errorf("the count did not finish within %s: %w", j.timeout, err)
 		}
-		return removeTextfile(j.Textfile, err)
+		return err
 	}
 	if err := writeTextfile(j.Textfile, t.registered, j.now()); err != nil {
-		return removeTextfile(j.Textfile, fmt.Errorf("write the dashboard file: %w", err))
+		return fmt.Errorf("write the dashboard file: %w", err)
 	}
 	j.Logger.Info("counted the registered phones for the dashboard", "registered", t.registered, "names_listed", t.listed,
 		"names_read", t.read, "enrolled_since", j.EnrolledSince.Format(dateLayout), "textfile", j.Textfile)

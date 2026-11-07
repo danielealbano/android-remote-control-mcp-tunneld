@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -37,27 +36,19 @@ func main() {
 	os.Exit(code)
 }
 
+const failedMsg = "the registered-phones count failed, so this node's dashboard file was not updated; the dashboard ignores counts more than two hours old"
+
 func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...jobOption) int {
 	var c cli
-	err := parseArgs(&c, args)
-	switch {
-	case err != nil && c.Textfile == "":
-		logger.Error("could not read the command line, so nothing was counted and no dashboard file was removed", "err", err)
+	if err := parseArgs(&c, args); err != nil {
+		logger.Error(failedMsg, "err", fmt.Errorf("read the settings: %w", err))
 		return 1
-	case err != nil:
-		err = removeTextfile(c.Textfile, fmt.Errorf("read the settings: %w", err))
-	default:
-		err = runOnce(ctx, c, logger, opts...)
 	}
-	if err == nil {
-		return 0
+	if err := runOnce(ctx, c, logger, opts...); err != nil {
+		logger.Error(failedMsg, "textfile", c.Textfile, "err", err)
+		return 1
 	}
-	msg := "could not count the registered phones, so this node's dashboard file was removed until the next run succeeds"
-	if errors.Is(err, errTextfileKept) {
-		msg = "could not count the registered phones, and this node's dashboard file could not be removed, so the dashboard keeps its old count until that count is two hours old"
-	}
-	logger.Error(msg, "textfile", c.Textfile, "err", err)
-	return 1
+	return 0
 }
 
 func parseArgs(c *cli, args []string) error {
@@ -75,7 +66,7 @@ func parseArgs(c *cli, args []string) error {
 func runOnce(ctx context.Context, c cli, logger *slog.Logger, opts ...jobOption) error {
 	since, err := time.Parse(dateLayout, c.EnrolledSince)
 	if err != nil {
-		return removeTextfile(c.Textfile, fmt.Errorf("read the first counted day %q, which must be YYYY-MM-DD: %w", c.EnrolledSince, err))
+		return fmt.Errorf("read the first counted day %q, which must be YYYY-MM-DD: %w", c.EnrolledSince, err)
 	}
 	j, err := newJob(jobConfig{
 		Store: bucket.New(bucket.Config{
@@ -87,7 +78,7 @@ func runOnce(ctx context.Context, c cli, logger *slog.Logger, opts ...jobOption)
 		Logger:        logger,
 	}, opts...)
 	if err != nil {
-		return removeTextfile(c.Textfile, err)
+		return err
 	}
 	return j.run(ctx)
 }

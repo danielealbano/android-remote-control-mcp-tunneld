@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,7 +79,7 @@ func TestExecute_CountsTheRegistry(t *testing.T) {
 	}
 }
 
-func TestExecute_AFailureLogsAndRemovesTheDashboardFile(t *testing.T) {
+func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
 	t.Parallel()
 	srv := registryServer(t)
 	tests := []struct {
@@ -94,89 +94,55 @@ func TestExecute_AFailureLogsAndRemovesTheDashboardFile(t *testing.T) {
 		{name: "a required setting is missing", args: func(tf string) []string {
 			return []string{"--enrolled-since=2026-11-06", "--textfile=" + tf, "--s3-endpoint=" + srv.URL, "--s3-access-key=k", "--s3-secret-key=s"}
 		}, want: "read the settings: missing flags: --s3-bucket"},
+		{name: "an unknown flag", args: func(tf string) []string { return cliArgs("2026-11-06", tf, srv.URL, "--colour") },
+			want: "read the settings: unknown flag --colour"},
+		{name: "a flag with an invalid value", args: func(tf string) []string { return cliArgs("2026-11-06", tf, srv.URL, "--s3-force-path-style=maybe") },
+			want: "read the settings: --s3-force-path-style"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
-			if err := os.WriteFile(textfile, []byte(metrics(5, testNow)), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			var logs bytes.Buffer
-			if code := execute(context.Background(), tc.args(textfile), capturedLog(&logs)); code != 1 {
-				t.Fatalf("exit code = %d, want 1", code)
-			}
-			if _, err := os.Stat(textfile); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("the old dashboard file must be removed, stat = %v; logs %s", err, logs.String())
-			}
-			if !strings.Contains(logs.String(), "could not count the registered phones, so this node's dashboard file was removed") ||
-				!strings.Contains(logs.String(), tc.want) {
-				t.Fatalf("logs = %s, want %q", logs.String(), tc.want)
-			}
+			assertFailureKeepsTheFile(t, textfile, func(logger *slog.Logger) int { return execute(context.Background(), tc.args(textfile), logger) }, tc.want)
 		})
 	}
 }
 
-func TestExecute_AnInvalidSettingFromTheEnvironmentRemovesTheDashboardFile(t *testing.T) {
-	textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
+func TestExecute_ABadSettingFromTheEnvironmentLeavesTheDashboardFileAsItWas(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "an invalid value", env: map[string]string{"TUNNELD_S3_FORCE_PATH_STYLE": "maybe"}, want: "TUNNELD_S3_FORCE_PATH_STYLE"},
+		{name: "an empty dashboard file path", env: map[string]string{"REGISTERED_PHONES_TEXTFILE": ""}, want: "the dashboard file path is empty"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
+			args := []string{"--enrolled-since=2026-11-06", "--s3-endpoint=http://127.0.0.1:1", "--s3-bucket=b", "--s3-access-key=k", "--s3-secret-key=s"}
+			assertFailureKeepsTheFile(t, textfile, func(logger *slog.Logger) int { return execute(context.Background(), args, logger) }, tc.want)
+		})
+	}
+}
+
+func assertFailureKeepsTheFile(t *testing.T, textfile string, run func(*slog.Logger) int, want string) {
+	t.Helper()
 	if err := os.WriteFile(textfile, []byte(metrics(5, testNow)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("REGISTERED_PHONES_TEXTFILE", textfile)
-	t.Setenv("TUNNELD_S3_FORCE_PATH_STYLE", "maybe")
 	var logs bytes.Buffer
-	args := []string{"--enrolled-since=2026-11-06", "--s3-endpoint=http://127.0.0.1:1", "--s3-bucket=b", "--s3-access-key=k", "--s3-secret-key=s"}
-	if code := execute(context.Background(), args, capturedLog(&logs)); code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code := run(capturedLog(&logs)); code != 1 {
+		t.Fatalf("exit code = %d, want 1; logs %s", code, logs.String())
 	}
-	if _, err := os.Stat(textfile); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the old dashboard file must be removed, stat = %v; logs %s", err, logs.String())
+	if !strings.Contains(logs.String(), "the registered-phones count failed, so this node's dashboard file was not updated; the dashboard ignores counts more than two hours old") ||
+		!strings.Contains(logs.String(), want) {
+		t.Fatalf("logs = %s, want %q", logs.String(), want)
 	}
-}
-
-func TestExecute_AnUnreadableCommandLineCountsNothingAndRemovesNothing(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		extra string
-		want  string
-	}{
-		{name: "an unknown flag", extra: "--colour", want: "unknown flag --colour"},
-		{name: "a flag with an invalid value", extra: "--s3-force-path-style=maybe", want: "--s3-force-path-style"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
-			if err := os.WriteFile(textfile, []byte(metrics(5, testNow)), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			var logs bytes.Buffer
-			if code := execute(context.Background(), cliArgs("2026-11-06", textfile, "http://127.0.0.1:1", tc.extra), capturedLog(&logs)); code != 1 {
-				t.Fatalf("exit code = %d, want 1", code)
-			}
-			if !strings.Contains(logs.String(), "could not read the command line, so nothing was counted and no dashboard file was removed") ||
-				!strings.Contains(logs.String(), tc.want) {
-				t.Fatalf("logs = %s, want %q", logs.String(), tc.want)
-			}
-			if got, err := os.ReadFile(textfile); err != nil || string(got) != metrics(5, testNow) {
-				t.Fatalf("a run that read no settings must leave the file alone: %q, %v", got, err)
-			}
-		})
-	}
-}
-
-func TestExecute_AnUnremovableDashboardFileIsLoggedAsKept(t *testing.T) {
-	t.Parallel()
-	textfile := filepath.Join(t.TempDir(), "arc_registered_phones.prom")
-	if err := os.MkdirAll(filepath.Join(textfile, "inside"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var logs bytes.Buffer
-	if code := execute(context.Background(), cliArgs("2026-13-01", textfile, "http://127.0.0.1:1"), capturedLog(&logs)); code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
-	}
-	if !strings.Contains(logs.String(), "this node's dashboard file could not be removed, so the dashboard keeps its old count until that count is two hours old") {
-		t.Fatalf("logs = %s", logs.String())
+	if got, err := os.ReadFile(textfile); err != nil || string(got) != metrics(5, testNow) {
+		t.Fatalf("a failed run must leave the dashboard file as it was: %q, %v", got, err)
 	}
 }

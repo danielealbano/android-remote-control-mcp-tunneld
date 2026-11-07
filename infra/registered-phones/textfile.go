@@ -1,15 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/textfile"
 )
-
-var errTextfileKept = errors.New("the old dashboard file could not be removed")
 
 func metrics(registered int, countedAt time.Time) string {
 	return fmt.Sprintf("# HELP arc_registered_phones Phones enrolled since the first counted day that got a certificate, renewed or not.\n"+
@@ -21,11 +17,4 @@ func metrics(registered int, countedAt time.Time) string {
 
 func writeTextfile(path string, registered int, countedAt time.Time) error {
 	return textfile.Write(path, metrics(registered, countedAt))
-}
-
-func removeTextfile(path string, cause error) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return errors.Join(cause, fmt.Errorf("%w: %w", errTextfileKept, err))
-	}
-	return cause
 }
