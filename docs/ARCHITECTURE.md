@@ -328,7 +328,8 @@ recovers a panic into an error. A panic in the ACME budget transport, the lazy C
 becomes an error wrapping `report.ErrPanicked`; the transport also marks a flag on the build's or attempt's context,
 because lego can wrap a request error without keeping its chain. Either way the chain records no failure and no backoff
 for that account and moves on to the next one (Retry-After 30 s when every account panicked). Goroutines defer `report.Recover` (per-connection and per-request work: the panic is logged and
-sent, then a callback closes that connection or ends that work) or `report.Crash` (background workers: logged,
+sent, then a callback closes that connection or ends that work; `report.RecoverWith` does the same with the caller's own
+log message) or `report.Crash` (background workers: logged,
 sent, flushed, then the panic continues and the process exits). Each public connection runs in its own scope (`report.WithScope`:
 a cloned hub with a fresh trace id, plus identifiers kept on the context even without Sentry) that grows as the edge
 learns the client address, the tunnel, the ClientHello fields and the connection id; the panic log line carries
