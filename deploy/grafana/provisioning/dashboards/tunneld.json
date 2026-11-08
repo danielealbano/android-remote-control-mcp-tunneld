@@ -56,6 +56,55 @@
    "panels": []
   },
   {
+   "id": 29,
+   "type": "stat",
+   "title": "Phones registered (total)",
+   "description": "Phones enrolled since the first counted day that got a certificate, renewed or not. Counted every hour from the name registry by the registered-phones job (infra/registered-phones); empty when no node has a count newer than two hours. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_registered_phones and (time() - arc_registered_phones_counted_timestamp_seconds < 7200))",
+     "legendFormat": "registered",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
    "id": 2,
    "type": "stat",
    "title": "Phones connected (total)",
@@ -67,7 +116,7 @@
    "gridPos": {
     "h": 4,
     "w": 6,
-    "x": 0,
+    "x": 6,
     "y": 1
    },
    "targets": [
@@ -116,7 +165,7 @@
    "gridPos": {
     "h": 4,
     "w": 6,
-    "x": 6,
+    "x": 12,
     "y": 1
    },
    "targets": [
@@ -165,7 +214,7 @@
    "gridPos": {
     "h": 4,
     "w": 6,
-    "x": 12,
+    "x": 18,
     "y": 1
    },
    "targets": [
@@ -203,19 +252,19 @@
    }
   },
   {
-   "id": 29,
-   "type": "stat",
-   "title": "Phones registered (total)",
-   "description": "Phones enrolled since the first counted day that got a certificate, renewed or not. Counted every hour from the name registry by the registered-phones job (infra/registered-phones); empty when no node has a count newer than two hours. The node filter does not apply.",
+   "id": 30,
+   "type": "timeseries",
+   "title": "Phones registered",
+   "description": "The count from the Phones registered box over time: phones enrolled since the first counted day that got a certificate, renewed or not. It is counted every hour; a gap means no node had a count newer than two hours. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
-    "h": 4,
+    "h": 8,
     "w": 6,
-    "x": 18,
-    "y": 1
+    "x": 0,
+    "y": 5
    },
    "targets": [
     {
@@ -225,30 +274,34 @@
       "uid": "prometheus"
      },
      "expr": "max(arc_registered_phones and (time() - arc_registered_phones_counted_timestamp_seconds < 7200))",
-     "legendFormat": "registered",
-     "instant": true,
-     "range": false
+     "legendFormat": "registered"
     }
    ],
    "fieldConfig": {
     "defaults": {
-     "unit": "short"
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
     },
     "overrides": []
    },
    "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ],
-     "fields": "",
-     "values": false
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
     },
-    "colorMode": "value",
-    "graphMode": "none",
-    "textMode": "value_and_name",
-    "justifyMode": "auto",
-    "orientation": "auto"
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
    }
   },
   {
@@ -262,8 +315,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 0,
+    "w": 6,
+    "x": 6,
     "y": 5
    },
    "targets": [
@@ -316,8 +369,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 8,
+    "w": 6,
+    "x": 12,
     "y": 5
    },
    "targets": [
@@ -370,8 +423,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 16,
+    "w": 6,
+    "x": 18,
     "y": 5
    },
    "targets": [
