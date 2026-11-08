@@ -102,9 +102,9 @@ type Edge struct {
 	enrollLn  *chanListener
 	controlLn *chanListener
 
-	clients  atomic.Int64
-	handling atomic.Int64
-	now      func() time.Time
+	clients atomic.Int64
+	routed  atomic.Int64
+	now     func() time.Time
 
 	wg sync.WaitGroup
 
@@ -161,7 +161,7 @@ func New(cfg Config, ban func(netip.Addr) bool,
 	}
 }
 
-func (e *Edge) InFlightConns() int64 { return e.handling.Load() }
+func (e *Edge) RoutedConns() int64 { return e.routed.Load() }
 
 // EnrollListener / ControlListener are the reserved-SNI listeners for the enroll + control HTTP servers.
 func (e *Edge) EnrollListener() net.Listener  { return e.enrollLn }

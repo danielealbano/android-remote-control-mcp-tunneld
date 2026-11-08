@@ -433,8 +433,9 @@ A node told to stop (`SIGTERM` or `SIGINT`) goes through three phases:
    - dial-backs are accepted and public connections are served as usual: one that reaches this node reaches its
      phone through the node that now owns the route, and the phone dials back to this node.
 
-   The drain ends sooner once the node holds no phone control connection and no public connection, and runs no
-   `POST /api/v1/issue`. A connection a phone moved away from stays held until the drain ends (the node cannot see
+   The drain ends sooner once the node holds no phone control connection and no public connection to a phone
+   (dial-back pending or spliced), and runs no `POST /api/v1/issue`; a public connection still sending its ClientHello,
+   or being refused, does not hold it. A connection a phone moved away from stays held until the drain ends (the node cannot see
    the splices opened through it on the other nodes), so a node that held a phone drains for the full time.
 3. **Shutdown** (`--shutdown-grace`): the node closes its remaining phone control connections (the splices opened
    through them end on every node, §3) and public connections, and exits.

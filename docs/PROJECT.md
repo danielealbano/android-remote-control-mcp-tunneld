@@ -187,8 +187,9 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
-  refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, with no
-  rule; tunneld never reads or writes it.
+  refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, and the
+  registered-phones count (§6) its state as `registered-phones/state.json`, both with no rule; tunneld never reads
+  or writes them.
 
 ## 6. Observability
 
@@ -219,7 +220,8 @@ Refused apps (the refused-apps report's table, below).
 They expect every Prometheus target to carry a `node` label (and `service="valkey"|"sentinel"` on the Valkey
 exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timestamp_seconds`,
 `wireguard_peer_{receive,transmit}_bytes_total`, `banlist_file_mtime_timestamp_seconds{file}` and
-`arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}`, and — for
+`arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}` and
+`arc_registered_phones` / `arc_registered_phones_counted_timestamp_seconds`, and — for
 Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
 for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.
@@ -250,6 +252,38 @@ saying so and saves nothing, so the next node or the next day sends the report; 
 node ran. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
 `/etc/tunneld/refused-apps.env` (`refused-apps.env.example`). `infra/refused-apps/install.sh` installs it on every
 node in a config file (`--help` lists its settings).
+
+The registered-phones count (`infra/registered-phones/`, built with `make registered-phones`) fills the Phones
+registered box of the tunneld overview: the phones enrolled since a first counted day
+(`REGISTERED_PHONES_ENROLLED_SINCE`, a UTC day, `YYYY-MM-DD`) that got a certificate, renewed or not. It keeps a
+state, `registered-phones/state.json` in the bucket: the first counted day, a read-from time, and every counted
+name with its enrollment time. The state only grows, so a counted name stays counted even after its name record is
+purged, and the tool never deletes it. Each node also keeps the last state it saved, in
+`/var/lib/arc-registered-phones/state.json` (mode 0600). A systemd timer runs it every hour on one or two nodes,
+each at its own minute at least 30 minutes apart, so their hourly runs do not update the state at the same moment;
+if two runs ever overlap (the count the installer starts runs at install time), the next run's merge of the bucket
+and node copies puts back a name the later save left out. A run merges the
+bucket copy and its node copy (names from both, reading again from the older read-from time); when the bucket copy
+is missing it starts from the node copy and logs a warning, and it starts a new state only when neither exists. A
+copy that cannot be decoded, or that counts from another day than the one configured, stops the run without
+changing anything. The run then lists `names/` and reads, 16 at a time, only the records of names it has not
+counted yet that were last written no earlier than the read-from time; a counted name stays counted, so it is
+never read again. It adds those with an issuing CA and an `enrolled_at` on or after the day, sets the read-from
+time to one hour before the run started (the hour covers clock differences between the nodes and the bucket),
+saves the state on the node and then in the bucket, and rewrites the node_exporter textfile
+`arc_registered_phones.prom` with the number of counted names and the time of the count
+(`arc_registered_phones_counted_timestamp_seconds`). A new state reads from one hour before the first counted day:
+a record is first written when its phone enrolls, so a record last written before that was enrolled before the
+day. A run that fails, or does not finish within 100 s, logs why and leaves the textfile as it was; the state is
+changed only by a run that read the registry without an error (the node copy is still saved when the bucket save
+fails, and the other way round). The box shows the largest count across the nodes whose count is less than two
+hours old, so a count that stops being renewed — a failing run, or a job that no longer runs — drops off the box
+within two hours, and the box is empty only when no node has a newer one. The bucket settings come from tunneld's
+own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is refused), the first counted day from
+`/etc/tunneld/registered-phones.env` (`registered-phones.env.example`). `infra/registered-phones/install.sh`
+first checks the whole config file (a bad line, no node, or two run minutes less than 30 minutes apart installs
+nothing), then checks on each node that the day is a real calendar day, installs it there with its run minute and
+runs it once (`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
@@ -299,7 +333,8 @@ client cannot force or suppress one. Tunnel traffic is never sent. Without a DSN
   `--listen` port, so every public port must equal its listen port (no port-changing NAT or port mapping).
 - **Stopping a node**: a stop signal runs a pre-drain (`--predrain-wait`, default 0: the node's
   `GET https://<enroll-host>/api/v1/health` answers `503`, everything else is served), then a drain of at most
-  `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, in-flight connections finish), then the
+  `--limit-conn-idle` + 5 s (the phones are moved to the other nodes, public connections that reached a phone
+  finish; one still sending its ClientHello does not hold the drain), then the
   shutdown (`--shutdown-grace`), then, with `--sentry-dsn`, at most 5 s to send the last Sentry events — see
   `docs/PROTOCOL.md` §7. The service manager's stop timeout (podman
   `StopTimeout`, compose `stop_grace_period`) must exceed their sum, with a margin, or the process is killed

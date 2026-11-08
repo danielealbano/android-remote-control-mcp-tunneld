@@ -6,12 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
 
 func TestCLI_HideAppsFromTheEnvironment(t *testing.T) {
@@ -49,7 +51,7 @@ func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 	t.Cleanup(ts.Close)
 	var logs bytes.Buffer
 	c := cli{Node: "n2", Timezone: "Not/AZone", TelegramToken: testBotToken, TelegramChat: 42}
-	code := execute(context.Background(), c, slog.New(slog.NewTextHandler(&logs, nil)), withTelegramAPI(ts.URL))
+	code := execute(context.Background(), c, slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil)), withTelegramAPI(ts.URL))
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -63,10 +65,26 @@ func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 	}
 }
 
+func TestExecute_AnEmptyBucketSettingFailsTheRunAndSaysSo(t *testing.T) {
+	t.Parallel()
+	srv := &telegramServer{t: t}
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	c := cli{Node: "n2", Timezone: "UTC", TelegramToken: testBotToken, TelegramChat: 42,
+		S3: bucket.Settings{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", AccessKey: "k", SecretKey: "s"}}
+	if code := execute(context.Background(), c, testLog(), withTelegramAPI(ts.URL)); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	requests, _ := srv.seen()
+	if len(requests) != 1 || !strings.Contains(requests[0].RichMessage.HTML, "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty") {
+		t.Fatalf("messages = %+v", requests)
+	}
+}
+
 func TestExecute_WithoutTelegramItOnlyLogs(t *testing.T) {
 	t.Parallel()
 	var logs bytes.Buffer
-	code := execute(context.Background(), cli{Node: "n2", Timezone: "UTC"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	code := execute(context.Background(), cli{Node: "n2", Timezone: "UTC"}, slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil)))
 	if code != 1 || !strings.Contains(logs.String(), "because Telegram is not set up") {
 		t.Fatalf("exit code %d, logs %s", code, logs.String())
 	}
@@ -80,11 +98,11 @@ func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	c := cli{Node: "n2", Timezone: "UTC", TelegramToken: testBotToken, TelegramChat: 42,
-		S3Endpoint: "http://127.0.0.1:1", S3Region: "us-east-1", S3Bucket: "bucket", S3AccessKey: "k", S3SecretKey: "s",
+		S3:       bucket.Settings{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", Bucket: "bucket", AccessKey: "k", SecretKey: "s"},
 		Textfile: "/nonexistent/x.prom"}
 	done := make(chan int, 1)
 	go func() {
-		done <- execute(ctx, c, slog.New(slog.NewTextHandler(io.Discard, nil)), withTelegramAPI(ts.URL))
+		done <- execute(ctx, c, testLog(), withTelegramAPI(ts.URL))
 	}()
 	select {
 	case code := <-done:

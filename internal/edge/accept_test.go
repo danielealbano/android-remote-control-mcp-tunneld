@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,43 +191,100 @@ func TestEdge_AcceptLoop_LogsAcceptFailure(t *testing.T) {
 	}
 }
 
-func TestEdge_InFlightConns_CountsFromAcceptUntilTheHandlerReturns(t *testing.T) {
+type readSignalConn struct {
+	*scriptConn
+	reading chan struct{}
+	once    sync.Once
+}
+
+func (c *readSignalConn) Read(p []byte) (int, error) {
+	c.once.Do(func() { close(c.reading) })
+	return c.scriptConn.Read(p)
+}
+
+func runAccepted(t *testing.T, te *testEdge, conn net.Conn) {
+	t.Helper()
+	runAcceptedCtx(t, context.Background(), te, conn)
+}
+
+func runAcceptedCtx(t *testing.T, ctx context.Context, te *testEdge, conn net.Conn) {
+	t.Helper()
+	ln := &scriptedListener{steps: []func() (net.Conn, error){
+		func() (net.Conn, error) { return conn, nil },
+		func() (net.Conn, error) { return nil, net.ErrClosed },
+	}}
+	te.e.acceptLoop(ctx, ln)
+}
+
+func waitHandlers(t *testing.T, te *testEdge) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	te.e.Wait(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("the connection handler did not return")
+	}
+}
+
+func TestEdge_RoutedConns_IgnoresAConnectionStillSendingItsClientHello(t *testing.T) {
+	t.Parallel()
+	te := newTestEdge(t, baseConfig(), nil)
+	conn := &readSignalConn{scriptConn: newScriptConn("198.51.100.20", nil), reading: make(chan struct{})}
+	runAccepted(t, te, conn)
+	select {
+	case <-conn.reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started reading the ClientHello")
+	}
+	if n := te.e.RoutedConns(); n != 0 {
+		t.Fatalf("a connection still sending its ClientHello must not hold the drain, RoutedConns = %d", n)
+	}
+	tunneltest.CloseOrLog(t, conn)
+	waitHandlers(t, te)
+}
+
+func TestEdge_HandleConn_ClosesAnUnroutedConnectionWhenTheNodeStops(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
 	cfg := baseConfig()
-	cfg.HandshakeTimeout = 30 * time.Second
+	cfg.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	te := newTestEdge(t, cfg, nil)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := &readSignalConn{scriptConn: newScriptConn("198.51.100.22", nil), reading: make(chan struct{})}
+	runAcceptedCtx(t, ctx, te, conn)
+	select {
+	case <-conn.reading:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started reading the ClientHello")
 	}
-	done := make(chan struct{})
-	go func() {
-		te.e.acceptLoop(context.Background(), ln)
-		close(done)
-	}()
-	t.Cleanup(func() {
-		tunneltest.CloseOrLog(t, ln)
-		<-done
-	})
-	waitConns := func(want int64) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for te.e.InFlightConns() != want {
-			if time.Now().After(deadline) {
-				t.Fatalf("InFlightConns = %d, want %d", te.e.InFlightConns(), want)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+	cancel()
+	waitHandlers(t, te)
+	if !conn.isClosed() {
+		t.Fatal("a connection still sending its ClientHello must be closed when the node stops")
 	}
-	waitConns(0)
-	client, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
+	if containsStr(te.rec.rejectReasons(), "handshake-timeout") {
+		t.Fatalf("a connection closed because the node stops is not a handshake timeout, rejects=%v", te.rec.rejectReasons())
 	}
-	waitConns(1)
-	time.Sleep(100 * time.Millisecond)
-	if n := te.e.InFlightConns(); n != 1 {
-		t.Fatalf("a connection still sending its ClientHello must stay counted, InFlightConns = %d", n)
+	if !strings.Contains(logs.String(), "closed a public connection that had not been routed yet, because this node is stopping") {
+		t.Fatalf("logs = %s", logs.String())
 	}
-	tunneltest.CloseOrLog(t, client)
-	waitConns(0)
+}
+
+func TestEdge_RoutedConns_IgnoresAConnectionWhileItsRouteIsLookedUp(t *testing.T) {
+	t.Parallel()
+	te := newTestEdge(t, baseConfig(), nil)
+	var during atomic.Int64
+	during.Store(-1)
+	te.rtr.onLookup = func() { during.Store(te.e.RoutedConns()) }
+	te.rtr.set("", "", false, nil)
+	conn := newScriptConn("198.51.100.21", captureClientHello(t, capSNI, "h2"))
+	runAccepted(t, te, conn)
+	waitHandlers(t, te)
+	if got := during.Load(); got != 0 {
+		t.Fatalf("RoutedConns during the route lookup = %d, want 0", got)
+	}
+	if n := te.e.RoutedConns(); n != 0 {
+		t.Fatalf("a connection without a route must not stay counted, RoutedConns = %d", n)
+	}
 }

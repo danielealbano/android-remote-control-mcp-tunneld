@@ -1,0 +1,14 @@
+[Unit]
+Description=Count the registered phones for the dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tunneld/tunneld.env
+EnvironmentFile=/etc/tunneld/registered-phones.env
+ExecStart=/usr/local/sbin/arc-registered-phones
+StateDirectory=arc-registered-phones
+StateDirectoryMode=0700
+TimeoutStartSec=120
+NoNewPrivileges=yes

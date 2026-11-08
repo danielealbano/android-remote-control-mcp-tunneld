@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -15,7 +17,14 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 )
+
+func testLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 type fakeStore struct {
 	mu      sync.Mutex
@@ -50,7 +59,7 @@ func (s *fakeStore) Get(_ context.Context, key string) ([]byte, error) {
 	}
 	b, ok := s.objects[key]
 	if !ok {
-		return nil, errNotFound
+		return nil, bucket.ErrNotFound
 	}
 	return b, nil
 }
@@ -91,27 +100,28 @@ func (m *fakeMessenger) Send(_ context.Context, text string) error {
 }
 
 type harness struct {
-	hideApps  []string
-	store     *fakeStore
-	messages  *fakeMessenger
-	textfile  string
-	loads     int
-	loadErr   error
-	pauses    []time.Duration
-	now       time.Time
-	revoked   revokedSerials
-	discarded *slog.Logger
+	hideApps []string
+	store    *fakeStore
+	messages *fakeMessenger
+	textfile string
+	loads    int
+	loadErr  error
+	pauses   []time.Duration
+	now      time.Time
+	revoked  revokedSerials
+	logger   *slog.Logger
+	opts     []jobOption
 }
 
 func newHarness(t *testing.T, now time.Time) *harness {
 	t.Helper()
 	return &harness{
-		store:     &fakeStore{objects: map[string][]byte{}, getErr: map[string]error{}},
-		messages:  &fakeMessenger{},
-		textfile:  filepath.Join(t.TempDir(), "arc_refused_apps.prom"),
-		now:       now,
-		revoked:   revokedSerials{},
-		discarded: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:    &fakeStore{objects: map[string][]byte{}, getErr: map[string]error{}},
+		messages: &fakeMessenger{},
+		textfile: filepath.Join(t.TempDir(), "arc_refused_apps.prom"),
+		now:      now,
+		revoked:  revokedSerials{},
+		logger:   testLog(),
 	}
 }
 
@@ -128,13 +138,15 @@ func (h *harness) job(t *testing.T) *job {
 		Location: testZone,
 		Textfile: h.textfile,
 		HideApps: h.hideApps,
-		Logger:   h.discarded,
+		Logger:   h.logger,
 	},
-		withClock(func() time.Time { return h.now }),
-		withPause(time.Second, func(_ context.Context, d time.Duration) error {
-			h.pauses = append(h.pauses, d)
-			return nil
-		}),
+		append([]jobOption{
+			withClock(func() time.Time { return h.now }),
+			withPause(time.Second, func(_ context.Context, d time.Duration) error {
+				h.pauses = append(h.pauses, d)
+				return nil
+			}),
+		}, h.opts...)...,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -268,6 +280,34 @@ func TestJob_AQuietDayStillSendsAMessage(t *testing.T) {
 	}
 	if h.store.list(t).LastReport != "2026-11-07" {
 		t.Fatal("the day was not marked as reported")
+	}
+}
+
+func TestJob_AnUnflushedDashboardFileIsAWarningNotAFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
+	var logs bytes.Buffer
+	h.logger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil))
+	h.opts = []jobOption{withWriter(func(path string, data []byte, mode os.FileMode) error {
+		if err := atomicfile.Write(path, data, mode); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: test flush failure", atomicfile.ErrNotFlushed)
+	})}
+	h.setList(t, attemptList{LastReport: "2026-11-06", Apps: map[string][]attempt{}})
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatalf("run = %v, want success", err)
+	}
+	if len(h.messages.texts) != 1 || h.store.list(t).LastReport != "2026-11-07" {
+		t.Fatalf("messages = %q, want the report sent and the day marked", h.messages.texts)
+	}
+	if _, err := os.Stat(h.textfile); err != nil {
+		t.Fatalf("the dashboard file must be written: %v", err)
+	}
+	for _, want := range []string{"wrote the refused-apps dashboard file but could not flush it to disk, so a crash could lose it until the next report", "sent the refused-apps report"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs = %s, want %q", logs.String(), want)
+		}
 	}
 }
 
@@ -405,7 +445,7 @@ func TestJob_ARecordGoneSinceTheListingIsSkipped(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, time.Date(2026, 11, 7, 11, 0, 0, 0, testZone))
 	h.addRecord(t, "a.json", at(6, 9, 0), "198.51.100.7")
-	h.store.getErr["rejected-enroll/a.json"] = errNotFound
+	h.store.getErr["rejected-enroll/a.json"] = bucket.ErrNotFound
 	if err := h.job(t).run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +460,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 		return jobConfig{
 			Store: &fakeStore{}, Messages: &fakeMessenger{},
 			Revocations: func(context.Context) (revocationList, error) { return revokedSerials{}, nil },
-			Node:        "n1", Location: testZone, Textfile: "/x.prom", Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Node:        "n1", Location: testZone, Textfile: "/x.prom", Logger: testLog(),
 		}
 	}
 	tests := []struct {

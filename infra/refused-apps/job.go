@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -45,6 +47,17 @@ type job struct {
 	now    func() time.Time
 	pause  time.Duration
 	sleep  func(context.Context, time.Duration) error
+	write  fileWriter
+}
+
+func withWriter(write fileWriter) jobOption {
+	return func(j *job) error {
+		if write == nil {
+			return errors.New("the file writer is missing")
+		}
+		j.write = write
+		return nil
+	}
 }
 
 type jobOption func(*job) error
@@ -93,7 +106,7 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 		}
 		hidden[app] = true
 	}
-	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext}
+	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext, write: atomicfile.Write}
 	for _, opt := range opts {
 		if err := opt(j); err != nil {
 			return nil, err
@@ -130,7 +143,7 @@ func (j *job) run(ctx context.Context) error {
 	hiddenAttempts := 0
 	for _, key := range keys {
 		body, err := j.Store.Get(ctx, key)
-		if errors.Is(err, errNotFound) {
+		if errors.Is(err, bucket.ErrNotFound) {
 			continue
 		}
 		if err != nil {
@@ -166,8 +179,11 @@ func (j *job) run(ctx context.Context) error {
 	if err := j.Store.Put(ctx, listKey, body); err != nil {
 		return fmt.Errorf("the report was sent but the attempt list could not be saved, so the next run sends these attempts again: %w", err)
 	}
-	if err := writeTextfile(j.Textfile, list.without(j.hidden)); err != nil {
-		return fmt.Errorf("write the dashboard file: %w", err)
+	if err := writeTextfile(j.write, j.Textfile, list.without(j.hidden)); err != nil {
+		if !errors.Is(err, atomicfile.ErrNotFlushed) {
+			return fmt.Errorf("write the dashboard file: %w", err)
+		}
+		j.Logger.Warn("wrote the refused-apps dashboard file but could not flush it to disk, so a crash could lose it until the next report", "node", j.Node, "textfile", j.Textfile, "err", err)
 	}
 	j.Logger.Info("sent the refused-apps report", "node", j.Node, "day", day, "messages", len(msgs), "new_attempts", len(fresh), "hidden_attempts", hiddenAttempts, "attempts_on_file", list.count())
 	return nil
@@ -175,7 +191,7 @@ func (j *job) run(ctx context.Context) error {
 
 func (j *job) load(ctx context.Context) (attemptList, error) {
 	body, err := j.Store.Get(ctx, listKey)
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, bucket.ErrNotFound) {
 		j.Logger.Info("no attempt list is stored yet, so this run starts a new one", "node", j.Node, "key", listKey)
 		return attemptList{Apps: map[string][]attempt{}}, nil
 	}

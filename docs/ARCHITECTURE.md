@@ -328,7 +328,8 @@ recovers a panic into an error. A panic in the ACME budget transport, the lazy C
 becomes an error wrapping `report.ErrPanicked`; the transport also marks a flag on the build's or attempt's context,
 because lego can wrap a request error without keeping its chain. Either way the chain records no failure and no backoff
 for that account and moves on to the next one (Retry-After 30 s when every account panicked). Goroutines defer `report.Recover` (per-connection and per-request work: the panic is logged and
-sent, then a callback closes that connection or ends that work) or `report.Crash` (background workers: logged,
+sent, then a callback closes that connection or ends that work; `report.RecoverWith` does the same with the caller's own
+log message) or `report.Crash` (background workers: logged,
 sent, flushed, then the panic continues and the process exits). Each public connection runs in its own scope (`report.WithScope`:
 a cloned hub with a fresh trace id, plus identifiers kept on the context even without Sentry) that grows as the edge
 learns the client address, the tunnel, the ClientHello fields and the connection id; the panic log line carries
@@ -445,8 +446,10 @@ the replaced connection: it stays open until the shutdown, so the splices opened
 node and on the others (their per-splice route check keeps them while this node is registered, §2). New control
 connections get `MOVE` without a bind, or `503` without a target; the two enroll routes and `/api/v1/issue` answer `503`
 `draining`; dial-backs and public connections are served. The drain lasts `--limit-conn-idle` + 5 s at most, and
-ends as soon as the node holds no phone control connection and no public connection and runs no issuance
-(`POST /api/v1/issue`, an ACME order); a replaced connection counts until the drain ends, because the node cannot
+ends as soon as the node holds no phone control connection and no public connection to a phone (one that passed
+its route, quota and stream-cap checks: dial-back pending or spliced) and runs no issuance (`POST /api/v1/issue`, an ACME order). A public
+connection still sending its ClientHello, or being refused, does not hold the drain: internet scanners keep reaching
+`:443`, and such a connection is closed when the node stops. A replaced connection counts until the drain ends, because the node cannot
 see the splices opened through it on the other nodes, so a node that held a phone drains for the full time. A
 `MOVE` that cannot be queued (the connection's send buffer is full) is retried at every drain poll. An errgroup failure during
 the pre-drain or the drain cancels the serving context at once.

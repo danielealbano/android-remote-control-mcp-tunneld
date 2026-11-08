@@ -44,7 +44,7 @@ func (f *fakeDrainPhones) drain() (bool, []string, bool) {
 
 type fakeDrainEdge struct{ tunnels, issues atomic.Int64 }
 
-func (f *fakeDrainEdge) InFlightConns() int64  { return f.tunnels.Load() }
+func (f *fakeDrainEdge) RoutedConns() int64    { return f.tunnels.Load() }
 func (f *fakeDrainEdge) InFlightIssues() int64 { return f.issues.Load() }
 
 func newTestDrainer(nodes liveNodeLister, predrain, grace time.Duration) (*drainer, *fakeDrainPhones, *fakeDrainEdge) {

@@ -106,6 +106,7 @@ type fakeRouter struct {
 	nodeErr   error
 
 	panicLookup bool
+	onLookup    func()
 }
 
 func (r *fakeRouter) LookupNode(_ context.Context, nodeID string) (string, bool, error) {
@@ -127,6 +128,9 @@ func (r *fakeRouter) setNodes(live map[string]bool, err error) {
 }
 
 func (r *fakeRouter) LookupRoute(context.Context, string) (string, string, bool, error) {
+	if r.onLookup != nil {
+		r.onLookup()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lookups++
@@ -210,9 +214,17 @@ type fakeOpener struct {
 	mu        sync.Mutex
 	calls     []openCall
 	errByNode map[string]error
+	panicOpen bool
+	onOpen    func()
 }
 
 func (o *fakeOpener) Open(_ context.Context, nodeID, name, connID, token, clientAddr string) error {
+	if o.onOpen != nil {
+		o.onOpen()
+	}
+	if o.panicOpen {
+		panic("open boom")
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.calls = append(o.calls, openCall{nodeID: nodeID, name: name, connID: connID, token: token, clientAddr: clientAddr})

@@ -127,10 +127,8 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 		}
 		delay = 0
 		e.wg.Add(1)
-		e.handling.Add(1)
 		go func() {
 			defer e.wg.Done()
-			defer e.handling.Add(-1)
 			cctx := report.WithScope(ctx)
 			defer report.Recover(cctx, e.cfg.Logger, "public connection", func() { closeLogged(e.cfg.Logger, "public client", conn) })
 			report.SetAttrs(cctx, report.ClientAttrs(conn.RemoteAddr().String())...)
@@ -206,7 +204,15 @@ func (e *Edge) handleConn(ctx context.Context, conn net.Conn) {
 		}
 	}()
 
+	stopClose := context.AfterFunc(ctx, func() {
+		defer report.Recover(ctx, e.cfg.Logger, "unrouted public client close", func() {})
+		closeLogged(e.cfg.Logger, "unrouted public client", conn)
+	})
 	info, pc, err := peekClientHello(conn, e.cfg.HandshakeTimeout)
+	if !stopClose() {
+		e.cfg.Logger.Debug("closed a public connection that had not been routed yet, because this node is stopping", "ip", ip)
+		return
+	}
 	if err != nil {
 		e.cfg.Logger.Debug("could not read the client's TLS greeting, so the connection is refused", "ip", ip, "err", err)
 		e.rec.Reject("handshake-timeout", "", ip)
