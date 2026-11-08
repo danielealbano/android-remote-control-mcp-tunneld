@@ -252,6 +252,59 @@
    }
   },
   {
+   "id": 30,
+   "type": "timeseries",
+   "title": "Phones registered",
+   "description": "The count from the Phones registered box over time: phones enrolled since the first counted day that got a certificate, renewed or not. It is counted every hour; a gap means no node had a count newer than two hours. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 0,
+    "y": 5
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_registered_phones and (time() - arc_registered_phones_counted_timestamp_seconds < 7200))",
+     "legendFormat": "registered"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
    "id": 5,
    "type": "timeseries",
    "title": "Phones connected",
@@ -262,8 +315,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 0,
+    "w": 6,
+    "x": 6,
     "y": 5
    },
    "targets": [
@@ -316,8 +369,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 8,
+    "w": 6,
+    "x": 12,
     "y": 5
    },
    "targets": [
@@ -370,8 +423,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 8,
-    "x": 16,
+    "w": 6,
+    "x": 18,
     "y": 5
    },
    "targets": [
