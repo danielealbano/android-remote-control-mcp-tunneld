@@ -22,5 +22,12 @@ func (s Settings) Config() (Config, error) {
 			return Config{}, fmt.Errorf("the setting %s is empty", v.setting)
 		}
 	}
-	return Config(s), nil
+	return Config{
+		Endpoint:       s.Endpoint,
+		Region:         s.Region,
+		Bucket:         s.Bucket,
+		AccessKey:      s.AccessKey,
+		SecretKey:      s.SecretKey,
+		ForcePathStyle: s.ForcePathStyle,
+	}, nil
 }
