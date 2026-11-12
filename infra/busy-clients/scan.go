@@ -166,7 +166,14 @@ func (j *job) readLog(ctx context.Context, key string, from, to time.Time, skip 
 			malformed++
 			continue
 		}
-		if ev.Event != "start" || ev.Type != "public" || ev.TSStart.Before(from) || ev.TSStart.After(to) {
+		if ev.Event != "start" || ev.Type != "public" {
+			continue
+		}
+		if ev.TSStart.IsZero() || ev.Tunnel == "" {
+			malformed++
+			continue
+		}
+		if ev.TSStart.Before(from) || ev.TSStart.After(to) {
 			continue
 		}
 		addr, err := netip.ParseAddr(ev.SrcIP)

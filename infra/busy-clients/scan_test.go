@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -178,17 +179,26 @@ func TestJob_ScanBadNamesAndLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := logKey(testNow.Add(-5*time.Minute), "0123456789abcdef")
-	h.store.objects[key] = []byte("not json\n\n{}\nnull\n" + `{"event":"open","type":"public"}` + "\n" + `{"event":"start","type":"relay"}` + "\n" + badIP + "\n" + good + "\n")
+	noTime, err := jsonLine(publicStart("192.0.2.7", "t1", "", time.Time{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noTunnel, err := jsonLine(publicStart("192.0.2.7", "", "", testNow.Add(-time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.store.objects[key] = []byte("not json\n\n{}\nnull\n" + `{"event":"open","type":"public"}` + "\n" + `{"event":"start","type":"relay"}` + "\n" +
+		badIP + "\n" + noTime + "\n" + noTunnel + "\n" + good + "\n")
 	usages, tl, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.store.read(badName) || tl.malformed != 6 || tl.connections != 1 || usages["192.0.2.7"] == nil {
+	if h.store.read(badName) || tl.malformed != 8 || tl.connections != 1 || usages["192.0.2.7"] == nil || len(usages["192.0.2.7"].tunnels) != 1 {
 		t.Fatalf("tally %+v, usages %+v, reads %v", tl, usages, h.store.gets)
 	}
 	logs := h.logs.String()
 	if !strings.Contains(logs, "does not start with its time") || !strings.Contains(logs, badName) ||
-		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=6") {
+		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=8") {
 		t.Fatalf("logs = %s", logs)
 	}
 }
@@ -282,5 +292,64 @@ func TestJob_ScanAnEarlierEventLaterInTheFile(t *testing.T) {
 	if u == nil || u.lookup != netip.MustParseAddr("2001:db8:1:2::9") || !u.first.Equal(testNow.Add(-50*time.Minute)) ||
 		!u.last.Equal(testNow.Add(-10*time.Minute)) {
 		t.Fatalf("usage = %+v", u)
+	}
+}
+
+func TestMerge(t *testing.T) {
+	t.Parallel()
+	early := &usage{address: "2001:db8:1:2::/64", lookup: netip.MustParseAddr("2001:db8:1:2::9"), connections: 2,
+		tunnels: map[string]struct{}{"t1": {}}, fingerprints: map[string]struct{}{"f1": {}},
+		first: testNow.Add(-5 * time.Hour), last: testNow.Add(-4 * time.Hour)}
+	late := &usage{address: "2001:db8:1:2::/64", lookup: netip.MustParseAddr("2001:db8:1:2::5"), connections: 3,
+		tunnels: map[string]struct{}{"t2": {}}, fingerprints: map[string]struct{}{"f2": {}},
+		first: testNow.Add(-2 * time.Hour), last: testNow.Add(-time.Hour)}
+	clone := func(u *usage) *usage {
+		c := *u
+		c.tunnels = maps.Clone(u.tunnels)
+		c.fingerprints = maps.Clone(u.fingerprints)
+		return &c
+	}
+	tests := []struct {
+		name        string
+		first, then *usage
+	}{
+		{name: "the earlier file merged first", first: early, then: late},
+		{name: "the later file merged first", first: late, then: early},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			total := map[string]*usage{}
+			merge(total, map[string]*usage{tc.first.address: clone(tc.first)})
+			merge(total, map[string]*usage{tc.then.address: clone(tc.then)})
+			u := total["2001:db8:1:2::/64"]
+			if u.connections != 5 || !reflect.DeepEqual(u.tunnels, map[string]struct{}{"t1": {}, "t2": {}}) ||
+				!reflect.DeepEqual(u.fingerprints, map[string]struct{}{"f1": {}, "f2": {}}) ||
+				!u.first.Equal(early.first) || u.lookup != early.lookup || !u.last.Equal(late.last) {
+				t.Fatalf("merged = %+v", u)
+			}
+		})
+	}
+}
+
+func TestJob_ScanReportsARealReadErrorAmongCancelledReads(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	broken := h.store.addLog(t, testNow.Add(-time.Hour), publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute)))
+	h.store.addLog(t, testNow.Add(-2*time.Hour), publicStart("192.0.2.8", "t1", "", testNow.Add(-90*time.Minute)))
+	h.store.addLog(t, testNow.Add(-3*time.Hour), publicStart("192.0.2.9", "t1", "", testNow.Add(-150*time.Minute)))
+	h.store.getErr[broken] = errors.New("read broke")
+	h.store.getHook = func(ctx context.Context, key string) error {
+		if key == broken {
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, _, err := h.job(t).scan(ctx, testNow.Add(-window), testNow, emptySet(t))
+	if err == nil || !strings.Contains(err.Error(), "read broke") || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want only the real read error", err)
 	}
 }
