@@ -219,6 +219,21 @@ func TestJob_ALaterPartFailingKeepsTheSentParts(t *testing.T) {
 	}
 }
 
+func TestJob_AFailedSaveAfterAPartStopsTheAlert(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	manyBusy(t, h, 600)
+	h.store.putErr = errors.New("broke")
+	err := h.job(t).run(context.Background())
+	if err == nil || !strings.HasPrefix(err.Error(), "part 1 of ") ||
+		!strings.Contains(err.Error(), "of the alert was sent but its addresses could not be saved, so the next run sends them again: broke") {
+		t.Fatalf("err = %v", err)
+	}
+	if sent := h.messages.sent(); len(sent) != 1 || !strings.HasPrefix(sent[0], "<p>Part 1 of ") {
+		t.Fatalf("sent %d messages, want only the first part", len(sent))
+	}
+}
+
 func TestJob_APauseCutShortKeepsTheSentParts(t *testing.T) {
 	t.Parallel()
 	h := newHarness()

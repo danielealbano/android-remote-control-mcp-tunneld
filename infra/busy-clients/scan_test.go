@@ -286,10 +286,12 @@ func TestJob_ScanLongLines(t *testing.T) {
 		name            string
 		line            string
 		wantConnections int
+		wantMalformed   int
 		wantErr         bool
 	}{
 		{name: "a line above bufio's 64 KiB default is counted", line: longLine, wantConnections: 1},
-		{name: "a line over the 1 MiB limit fails the run", line: strings.Repeat("x", maxLineBytes+1), wantErr: true},
+		{name: "a line just under 1 MiB is read", line: strings.Repeat("x", maxLineBytes-1), wantMalformed: 1},
+		{name: "a line of 1 MiB fails the run", line: strings.Repeat("x", maxLineBytes), wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -304,7 +306,7 @@ func TestJob_ScanLongLines(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || tl.connections != tc.wantConnections {
+			if err != nil || tl.connections != tc.wantConnections || tl.malformed != tc.wantMalformed {
 				t.Fatalf("tally %+v, err %v", tl, err)
 			}
 		})
