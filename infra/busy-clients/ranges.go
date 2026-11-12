@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"regexp"
@@ -27,7 +28,7 @@ type openAIList struct {
 	} `json:"prefixes"`
 }
 
-func loadRanges(ctx context.Context, client *http.Client, openAI []string, anthropic string) ([]netip.Prefix, error) {
+func loadRanges(ctx context.Context, client *http.Client, logger *slog.Logger, openAI []string, anthropic string) ([]netip.Prefix, error) {
 	if len(openAI) == 0 {
 		return nil, errors.New("no OpenAI address list is set")
 	}
@@ -74,15 +75,35 @@ func loadRanges(ctx context.Context, client *http.Client, openAI []string, anthr
 	found := len(all)
 	for _, m := range codeElement.FindAllStringSubmatch(page[start:end], -1) {
 		for _, s := range strings.Fields(m[1]) {
-			if pfx, err := netip.ParsePrefix(s); err == nil {
-				all = append(all, pfx.Masked())
+			pfx, err := parseRange(s)
+			if err != nil {
+				logger.Warn("the outbound section of the Anthropic address page holds a value that is neither an address nor a range, so it is not left out",
+					"page", anthropic, "value", s, "err", err)
+				continue
 			}
+			all = append(all, pfx)
 		}
 	}
 	if len(all) == found {
 		return nil, fmt.Errorf("the outbound section of the Anthropic address page %s lists no range", anthropic)
 	}
 	return all, nil
+}
+
+func parseRange(s string) (netip.Prefix, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap()
+	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
 func fetch(ctx context.Context, client *http.Client, url string) (_ []byte, err error) {

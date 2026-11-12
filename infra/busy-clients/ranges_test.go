@@ -14,7 +14,7 @@ import (
 const testPage = `<html><h1>IP addresses</h1><p><code>aws-external-anthropic.example.test</code></p>` +
 	`<h2 id="inbound-ip-addresses">Inbound IP addresses</h2><p><code>203.0.113.0/24</code></p>` +
 	`<h2 id="outbound-ip-addresses">Outbound IP addresses</h2><h3>IPv4</h3><p><code>192.0.2.128/25</code></p>` +
-	`<pre><code>198.51.100.0/26 198.51.100.64/26</code></pre><p><code>not-a-range.example.test</code></p>` +
+	`<pre><code>198.51.100.0/26 198.51.100.64/26</code></pre><p><code>not-a-range.example.test</code></p><p><code>192.0.2.200</code></p>` +
 	`<h3>IPv6</h3><p><code>2001:db8:1::1/48</code></p>` +
 	`<h3 id="phased-out-ip-addresses">Phased out IP addresses</h3><pre><code>203.0.113.9/32</code></pre></html>`
 
@@ -39,16 +39,21 @@ func TestLoadRanges_ReadsBothSources(t *testing.T) {
 		"/user.json":       `{"prefixes":[{"ipv4Prefix":"198.51.100.7/32"}]}`,
 		"/page":            testPage,
 	}, nil)
-	got, err := loadRanges(context.Background(), &http.Client{Timeout: 5 * time.Second}, []string{base + "/connectors.json", base + "/user.json"}, base+"/page")
+	logs := &logBuffer{}
+	got, err := loadRanges(context.Background(), &http.Client{Timeout: 5 * time.Second}, testLogger(logs), []string{base + "/connectors.json", base + "/user.json"}, base+"/page")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var want []netip.Prefix
-	for _, p := range []string{"192.0.2.0/24", "2001:db8::/32", "198.51.100.7/32", "192.0.2.128/25", "198.51.100.0/26", "198.51.100.64/26", "2001:db8:1::/48"} {
+	for _, p := range []string{"192.0.2.0/24", "2001:db8::/32", "198.51.100.7/32", "192.0.2.128/25", "198.51.100.0/26", "198.51.100.64/26", "192.0.2.200/32", "2001:db8:1::/48"} {
 		want = append(want, netip.MustParsePrefix(p))
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ranges = %v\nwant     %v", got, want)
+	}
+	if !strings.Contains(logs.String(), "neither an address nor a range") || !strings.Contains(logs.String(), "value=not-a-range.example.test") ||
+		strings.Contains(logs.String(), "aws-external") || strings.Contains(logs.String(), "203.0.113.9") {
+		t.Fatalf("logs = %s, want a warning for the one value of the outbound section that is not a range", logs.String())
 	}
 }
 
@@ -102,7 +107,7 @@ func TestLoadRanges_Failures(t *testing.T) {
 			if tc.noPage {
 				page = ""
 			}
-			_, err := loadRanges(context.Background(), &http.Client{Timeout: 5 * time.Second}, openAI, page)
+			_, err := loadRanges(context.Background(), &http.Client{Timeout: 5 * time.Second}, testLogger(&logBuffer{}), openAI, page)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), tc.wantNamed) {
 				t.Fatalf("err = %v, want one containing %q and %q", err, tc.wantErr, tc.wantNamed)
 			}

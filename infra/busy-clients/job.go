@@ -125,20 +125,11 @@ func parseExclude(entries []string) ([]netip.Prefix, error) {
 		if e == "" {
 			return nil, errors.New("the exclude list has an empty entry")
 		}
-		if strings.Contains(e, "/") {
-			p, err := netip.ParsePrefix(e)
-			if err != nil {
-				return nil, fmt.Errorf("the excluded entry %q is not an address or a CIDR range: %w", e, err)
-			}
-			out = append(out, p.Masked())
-			continue
-		}
-		a, err := netip.ParseAddr(e)
+		p, err := parseRange(e)
 		if err != nil {
 			return nil, fmt.Errorf("the excluded entry %q is not an address or a CIDR range: %w", e, err)
 		}
-		a = a.Unmap()
-		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		out = append(out, p)
 	}
 	return out, nil
 }
