@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram/telegramtest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
 func envNames(typ reflect.Type) []string {
@@ -186,5 +191,140 @@ func TestExecute_AnEmptyBucketSettingFailsTheRunAndSaysSo(t *testing.T) {
 	requests, _ := srv.Seen()
 	if len(requests) != 1 || !strings.Contains(requests[0].RichMessage.HTML, "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty") {
 		t.Fatalf("messages = %+v", requests)
+	}
+}
+
+type fakeBucket struct {
+	mu    sync.Mutex
+	logs  map[string][]byte
+	state []byte
+}
+
+func (b *fakeBucket) saved() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.state
+}
+
+func bucketServer(t *testing.T, b *fakeBucket) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write := func(code int, body string) {
+			w.WriteHeader(code)
+			if _, err := io.WriteString(w, body); err != nil {
+				t.Errorf("write the S3 answer: %v", err)
+			}
+		}
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		key := strings.TrimPrefix(r.URL.Path, "/bucket/")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/bucket":
+			var list strings.Builder
+			list.WriteString(`<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated>`)
+			for k := range b.logs {
+				if strings.HasPrefix(k, r.URL.Query().Get("prefix")) {
+					list.WriteString("<Contents><Key>" + k + "</Key></Contents>")
+				}
+			}
+			list.WriteString("</ListBucketResult>")
+			write(http.StatusOK, list.String())
+		case r.Method == http.MethodGet && key == stateKey:
+			if b.state == nil {
+				write(http.StatusNotFound, `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message></Error>`)
+				return
+			}
+			write(http.StatusOK, string(b.state))
+		case r.Method == http.MethodGet && b.logs[key] != nil:
+			write(http.StatusOK, string(b.logs[key]))
+		case r.Method == http.MethodPut && key == stateKey:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				write(http.StatusBadRequest, err.Error())
+				return
+			}
+			b.state = body
+			write(http.StatusOK, "")
+		default:
+			write(http.StatusForbidden, "<Error><Code>AccessDenied</Code></Error>")
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestExecute_AlertsEndToEnd(t *testing.T) {
+	isolateEnv(t)
+	now := time.Now().UTC()
+	at := now.Add(-time.Hour)
+	var events []store.Event
+	events = append(events, busy("198.51.100.1", 4, 1, at)...)
+	events = append(events, busy("198.51.100.2", 3, 2, at)...)
+	events = append(events, busy("198.51.100.3", 3, 1, at)...)
+	events = append(events, busy("198.51.100.4", 2, 2, at)...)
+	events = append(events, busy("192.0.2.5", 10, 5, at)...)
+	events = append(events, busy("198.51.100.200", 10, 5, at)...)
+	events = append(events, busy("203.0.113.9", 10, 5, at)...)
+	var log strings.Builder
+	for _, ev := range events {
+		line, err := jsonLine(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log.WriteString(line + "\n")
+	}
+	b := &fakeBucket{logs: map[string][]byte{logKey(now.Add(-2*time.Hour), "0123456789abcdef"): []byte(log.String())}}
+	s3 := bucketServer(t, b)
+	sources := rangeServer(t, map[string]string{
+		"/chatgpt.json": `{"prefixes":[{"ipv4Prefix":"192.0.2.0/24"}]}`,
+		"/page":         `<h2 id="outbound-ip-addresses">Outbound</h2><p><code>198.51.100.192/26</code></p><h3 id="phased-out-ip-addresses">Phased out</h3>`,
+	}, nil)
+	srv, api := telegramServer(t)
+	logs := &logBuffer{}
+	args := requiredArgs("--s3-endpoint", s3, "--s3-bucket", "bucket", "--daily-hour", "0", "--connections", "4", "--spread-connections", "3",
+		"--spread-tunnels", "2", "--exclude", "203.0.113.9", "--openai-ranges", sources+"/chatgpt.json", "--anthropic-ranges", sources+"/page")
+	if code := execute(context.Background(), args, testLogger(logs), telegram.WithAPI(api)); code != 0 {
+		t.Fatalf("exit code = %d, want 0; logs %s", code, logs.String())
+	}
+	after := time.Now().UTC()
+	requests, _ := srv.Seen()
+	if len(requests) != 2 {
+		t.Fatalf("messages = %+v, want the alert and the daily line", requests)
+	}
+	alertHTML := requests[0].RichMessage.HTML
+	first, second := strings.Index(alertHTML, ">198.51.100.1<"), strings.Index(alertHTML, ">198.51.100.2<")
+	if !strings.Contains(alertHTML, "2 new addresses") || first < 0 || second < 0 || first > second {
+		t.Fatalf("alert = %s", alertHTML)
+	}
+	for _, left := range []string{"198.51.100.3", "198.51.100.4", "192.0.2.5", "198.51.100.200", "203.0.113.9"} {
+		if strings.Contains(alertHTML, left) {
+			t.Fatalf("the alert names %s: %s", left, alertHTML)
+		}
+	}
+	if !strings.HasPrefix(requests[1].RichMessage.HTML, "<p>The busy-clients check is running (from n2): 2 addresses alerted in the last 24 hours, 2 on file.</p>") {
+		t.Fatalf("daily line = %s", requests[1].RichMessage.HTML)
+	}
+	var saved alertedList
+	if err := json.Unmarshal(b.saved(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Addresses) != 2 || saved.LastDaily != now.Format(dateLayout) && saved.LastDaily != after.Format(dateLayout) {
+		t.Fatalf("saved = %+v", saved)
+	}
+}
+
+func TestExecute_AFailureMessageThatCannotBeSentIsLogged(t *testing.T) {
+	isolateEnv(t)
+	srv := &telegramtest.Server{T: t, Answers: []func(http.ResponseWriter) error{
+		telegramtest.AnswerWith(http.StatusBadRequest, `{"ok":false,"description":"Bad Request: chat not found"}`),
+	}}
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	logs := &logBuffer{}
+	if code := execute(context.Background(), requiredArgs("--timezone", "Not/AZone"), testLogger(logs), telegram.WithAPI(ts.URL)); code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(logs.String(), "could not send the message about the failed check") || !strings.Contains(logs.String(), "chat not found") {
+		t.Fatalf("logs = %s", logs.String())
 	}
 }

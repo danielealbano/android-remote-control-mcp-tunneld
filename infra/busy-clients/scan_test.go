@@ -56,13 +56,22 @@ func TestDayPrefixes(t *testing.T) {
 
 func TestAddressOf(t *testing.T) {
 	t.Parallel()
-	if got := addressOf(netip.MustParseAddr("192.0.2.7")); got != "192.0.2.7" {
-		t.Fatalf("IPv4 key = %q", got)
+	tests := []struct {
+		name string
+		addr string
+		want string
+	}{
+		{name: "an IPv4 address is its own key", addr: "192.0.2.7", want: "192.0.2.7"},
+		{name: "an IPv6 address is keyed by its /64", addr: "2001:db8:1:2::5", want: "2001:db8:1:2::/64"},
+		{name: "another address of the same /64 has the same key", addr: "2001:db8:1:2:ffff::1", want: "2001:db8:1:2::/64"},
 	}
-	a := addressOf(netip.MustParseAddr("2001:db8:1:2::5"))
-	b := addressOf(netip.MustParseAddr("2001:db8:1:2:ffff::1"))
-	if a != "2001:db8:1:2::/64" || b != a {
-		t.Fatalf("IPv6 keys = %q and %q, want both 2001:db8:1:2::/64", a, b)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := addressOf(netip.MustParseAddr(tc.addr)); got != tc.want {
+				t.Fatalf("addressOf(%s) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -223,5 +232,51 @@ func TestJob_ScanSkipsALogGoneSinceTheListing(t *testing.T) {
 	}
 	if !h.store.read(gone) || tl.files != 2 || usages["192.0.2.7"] == nil {
 		t.Fatalf("tally %+v, usages %+v", tl, usages)
+	}
+}
+
+func TestJob_ScanStoppedByItsTimeLimit(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.addLog(t, testNow.Add(-time.Hour), publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute)))
+	h.store.addLog(t, testNow.Add(-2*time.Hour), publicStart("192.0.2.8", "t1", "", testNow.Add(-90*time.Minute)))
+	h.store.getHook = func(ctx context.Context, _ string) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, _, err := h.job(t).scan(ctx, testNow.Add(-window), testNow, emptySet(t))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want the time limit", err)
+	}
+}
+
+func TestJob_ScanALineOverTheLimit(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	key := logKey(testNow.Add(-time.Hour), "0123456789abcdef")
+	h.store.objects[key] = []byte(strings.Repeat("x", maxLineBytes+1) + "\n")
+	_, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+	if err == nil || !strings.Contains(err.Error(), "read the lines of the connection log "+key) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestJob_ScanAnEarlierEventLaterInTheFile(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.addLog(t, testNow.Add(-time.Hour),
+		publicStart("2001:db8:1:2::5", "t1", "", testNow.Add(-10*time.Minute)),
+		publicStart("2001:db8:1:2::9", "t1", "", testNow.Add(-50*time.Minute)),
+	)
+	usages, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := usages["2001:db8:1:2::/64"]
+	if u == nil || u.lookup != netip.MustParseAddr("2001:db8:1:2::9") || !u.first.Equal(testNow.Add(-50*time.Minute)) ||
+		!u.last.Equal(testNow.Add(-10*time.Minute)) {
+		t.Fatalf("usage = %+v", u)
 	}
 }
