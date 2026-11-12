@@ -162,6 +162,10 @@ func (j *job) readLog(ctx context.Context, key string, from, to time.Time, skip 
 			malformed++
 			continue
 		}
+		if ev.Event != "start" && ev.Event != "end" || ev.Type != "public" && ev.Type != "phone" {
+			malformed++
+			continue
+		}
 		if ev.Event != "start" || ev.Type != "public" || ev.TSStart.Before(from) || ev.TSStart.After(to) {
 			continue
 		}

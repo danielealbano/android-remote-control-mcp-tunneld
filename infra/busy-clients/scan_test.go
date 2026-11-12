@@ -89,6 +89,7 @@ func TestJob_ScanCountsPublicStartsInTheWindow(t *testing.T) {
 		end, phone,
 		publicStart("198.51.100.4", "t1", "", testNow.Add(-20*time.Minute)),
 		publicStart("192.0.2.7", "t3", "f3", from.Add(-time.Minute)),
+		publicStart("192.0.2.7", "t4", "f4", testNow.Add(time.Minute)),
 	)
 	h.store.addLog(t, testNow.Add(-30*time.Minute), publicStart("192.0.2.7", "t1", "f1", testNow.Add(-10*time.Minute)))
 	usages, tl, err := h.job(t).scan(context.Background(), from, testNow, emptySet(t))
@@ -177,17 +178,17 @@ func TestJob_ScanBadNamesAndLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := logKey(testNow.Add(-5*time.Minute), "0123456789abcdef")
-	h.store.objects[key] = []byte("not json\n\n" + badIP + "\n" + good + "\n")
+	h.store.objects[key] = []byte("not json\n\n{}\nnull\n" + `{"event":"open","type":"public"}` + "\n" + `{"event":"start","type":"relay"}` + "\n" + badIP + "\n" + good + "\n")
 	usages, tl, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.store.read(badName) || tl.malformed != 2 || tl.connections != 1 || usages["192.0.2.7"] == nil {
+	if h.store.read(badName) || tl.malformed != 6 || tl.connections != 1 || usages["192.0.2.7"] == nil {
 		t.Fatalf("tally %+v, usages %+v, reads %v", tl, usages, h.store.gets)
 	}
 	logs := h.logs.String()
 	if !strings.Contains(logs, "does not start with its time") || !strings.Contains(logs, badName) ||
-		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=2") {
+		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=6") {
 		t.Fatalf("logs = %s", logs)
 	}
 }
