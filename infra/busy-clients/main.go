@@ -79,10 +79,21 @@ func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...te
 	return 0
 }
 
-func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) error {
-	loc, err := time.LoadLocation(c.Timezone)
+func loadZone(name string) (*time.Location, error) {
+	if name == "" || name == "Local" {
+		return nil, fmt.Errorf("the time zone %q is not a named zone such as UTC or Europe/Zurich", name)
+	}
+	loc, err := time.LoadLocation(name)
 	if err != nil {
-		return fmt.Errorf("load the time zone %q: %w", c.Timezone, err)
+		return nil, fmt.Errorf("load the time zone %q: %w", name, err)
+	}
+	return loc, nil
+}
+
+func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) error {
+	loc, err := loadZone(c.Timezone)
+	if err != nil {
+		return err
 	}
 	bcfg, err := c.S3.Config()
 	if err != nil {
@@ -93,7 +104,7 @@ func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) er
 		Store:    bucket.New(bcfg),
 		Messages: msgs,
 		Ranges: func(ctx context.Context) ([]netip.Prefix, error) {
-			return loadRanges(ctx, client, c.OpenAIRanges, c.AnthropicRanges)
+			return loadRanges(ctx, client, logger.With("node", c.Node), c.OpenAIRanges, c.AnthropicRanges)
 		},
 		Exclude:   c.Exclude,
 		Rule:      rule{connections: c.Connections, spreadConnections: c.SpreadConnections, spreadTunnels: c.SpreadTunnels},

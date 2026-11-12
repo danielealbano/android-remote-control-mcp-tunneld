@@ -119,6 +119,36 @@ func TestParseArgs_ExcludeFromTheEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadZone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		zone    string
+		wantErr string
+	}{
+		{name: "UTC", zone: "UTC"},
+		{name: "a named zone", zone: "Europe/Zurich"},
+		{name: "an empty zone", zone: "", wantErr: `the time zone "" is not a named zone`},
+		{name: "the local zone", zone: "Local", wantErr: `the time zone "Local" is not a named zone`},
+		{name: "an unknown zone", zone: "Not/AZone", wantErr: `load the time zone "Not/AZone"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			loc, err := loadZone(tc.zone)
+			if tc.wantErr == "" {
+				if err != nil || loc.String() != tc.zone {
+					t.Fatalf("loadZone(%q) = %v, %v", tc.zone, loc, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 	isolateEnv(t)
 	srv, api := telegramServer(t)
