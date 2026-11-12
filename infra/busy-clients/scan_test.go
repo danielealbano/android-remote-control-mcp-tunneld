@@ -1,0 +1,227 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"net/netip"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestFileStart(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		key    string
+		want   time.Time
+		wantOK bool
+	}{
+		{name: "a tunneld file name", key: "tunnel-logs/2026/11/12/20261112T125530.080167786Z-c8809dcef89970cb.jsonl", want: time.Date(2026, 11, 12, 12, 55, 30, 80167786, time.UTC), wantOK: true},
+		{name: "no node part", key: "tunnel-logs/2026/11/12/20261112T125530.080167786Z.jsonl"},
+		{name: "not a time", key: "tunnel-logs/2026/11/12/yesterday-c8809dcef89970cb.jsonl"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := fileStart(tc.key)
+			if ok != tc.wantOK || !got.Equal(tc.want) {
+				t.Fatalf("fileStart(%q) = %v, %v; want %v, %v", tc.key, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestDayPrefixes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		from, to time.Time
+		want     []string
+	}{
+		{name: "a window across UTC midnight", from: time.Date(2026, 11, 11, 23, 50, 0, 0, time.UTC), to: testNow, want: []string{"tunnel-logs/2026/11/11/", "tunnel-logs/2026/11/12/"}},
+		{name: "a window inside one UTC day", from: time.Date(2026, 11, 12, 1, 0, 0, 0, time.UTC), to: testNow, want: []string{"tunnel-logs/2026/11/12/"}},
+		{name: "days are UTC days whatever the zone", from: time.Date(2026, 11, 12, 0, 30, 0, 0, testZone), to: time.Date(2026, 11, 12, 13, 0, 0, 0, testZone), want: []string{"tunnel-logs/2026/11/11/", "tunnel-logs/2026/11/12/"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dayPrefixes(tc.from, tc.to); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("dayPrefixes = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddressOf(t *testing.T) {
+	t.Parallel()
+	if got := addressOf(netip.MustParseAddr("192.0.2.7")); got != "192.0.2.7" {
+		t.Fatalf("IPv4 key = %q", got)
+	}
+	a := addressOf(netip.MustParseAddr("2001:db8:1:2::5"))
+	b := addressOf(netip.MustParseAddr("2001:db8:1:2:ffff::1"))
+	if a != "2001:db8:1:2::/64" || b != a {
+		t.Fatalf("IPv6 keys = %q and %q, want both 2001:db8:1:2::/64", a, b)
+	}
+}
+
+func TestJob_ScanCountsPublicStartsInTheWindow(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	from := testNow.Add(-window)
+	end := publicStart("192.0.2.7", "t1", "f1", testNow.Add(-39*time.Minute))
+	end.Event = "end"
+	phone := publicStart("192.0.2.7", "t1", "f1", testNow.Add(-30*time.Minute))
+	phone.Type = "phone"
+	h.store.addLog(t, testNow.Add(-time.Hour),
+		publicStart("192.0.2.7", "t1", "f1", testNow.Add(-50*time.Minute)),
+		publicStart("192.0.2.7", "t2", "f2", testNow.Add(-40*time.Minute)),
+		end, phone,
+		publicStart("198.51.100.4", "t1", "", testNow.Add(-20*time.Minute)),
+		publicStart("192.0.2.7", "t3", "f3", from.Add(-time.Minute)),
+	)
+	h.store.addLog(t, testNow.Add(-30*time.Minute), publicStart("192.0.2.7", "t1", "f1", testNow.Add(-10*time.Minute)))
+	usages, tl, err := h.job(t).scan(context.Background(), from, testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tl != (tally{files: 2, connections: 4}) {
+		t.Fatalf("tally = %+v", tl)
+	}
+	a := usages["192.0.2.7"]
+	if a == nil || a.connections != 3 || !reflect.DeepEqual(a.tunnels, map[string]struct{}{"t1": {}, "t2": {}}) ||
+		!reflect.DeepEqual(a.fingerprints, map[string]struct{}{"f1": {}, "f2": {}}) ||
+		!a.first.Equal(testNow.Add(-50*time.Minute)) || !a.last.Equal(testNow.Add(-10*time.Minute)) {
+		t.Fatalf("usage of 192.0.2.7 = %+v", a)
+	}
+	b := usages["198.51.100.4"]
+	if b == nil || b.connections != 1 || len(b.fingerprints) != 0 || len(usages) != 2 {
+		t.Fatalf("usages = %+v", usages)
+	}
+}
+
+func TestJob_ScanMergesAnIPv6Slash64(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.addLog(t, testNow.Add(-time.Hour), publicStart("2001:db8:1:2::5", "t1", "f1", testNow.Add(-30*time.Minute)))
+	h.store.addLog(t, testNow.Add(-2*time.Hour), publicStart("2001:db8:1:2::9", "t2", "f1", testNow.Add(-100*time.Minute)))
+	usages, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := usages["2001:db8:1:2::/64"]
+	if len(usages) != 1 || u == nil || u.connections != 2 || len(u.tunnels) != 2 ||
+		u.lookup != netip.MustParseAddr("2001:db8:1:2::9") || !u.first.Equal(testNow.Add(-100*time.Minute)) {
+		t.Fatalf("usages = %+v", usages)
+	}
+}
+
+func TestJob_ScanSkipsLeftOutAddresses(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.addLog(t, testNow.Add(-time.Hour),
+		publicStart("192.0.2.9", "t1", "", testNow.Add(-50*time.Minute)),
+		publicStart("198.51.100.7", "t1", "", testNow.Add(-50*time.Minute)),
+		publicStart("198.51.100.8", "t1", "", testNow.Add(-50*time.Minute)),
+		publicStart("::ffff:192.0.2.10", "t1", "", testNow.Add(-50*time.Minute)),
+	)
+	usages, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t, "192.0.2.0/24", "198.51.100.7/32"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usages) != 1 || usages["198.51.100.8"] == nil {
+		t.Fatalf("usages = %+v, want only 198.51.100.8", usages)
+	}
+}
+
+func TestJob_ScanReadsOnlyFilesOfTheWindow(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	from := testNow.Add(-window)
+	tooOld := h.store.addLog(t, from.Add(-11*time.Minute), publicStart("192.0.2.7", "t1", "", from.Add(-6*time.Minute)))
+	inMargin := h.store.addLog(t, from.Add(-9*time.Minute), publicStart("192.0.2.7", "t1", "", from.Add(time.Second)))
+	future := h.store.addLog(t, testNow.Add(time.Minute), publicStart("192.0.2.7", "t1", "", testNow))
+	usages, tl, err := h.job(t).scan(context.Background(), from, testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.store.read(tooOld) || h.store.read(future) || !h.store.read(inMargin) {
+		t.Fatalf("reads = %v", h.store.gets)
+	}
+	if tl.files != 1 || usages["192.0.2.7"] == nil || usages["192.0.2.7"].connections != 1 {
+		t.Fatalf("tally %+v, usages %+v", tl, usages)
+	}
+}
+
+func TestJob_ScanBadNamesAndLines(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	badName := "tunnel-logs/2026/11/12/garbage.jsonl"
+	h.store.objects[badName] = []byte("{}\n")
+	good, err := jsonLine(publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	badIP, err := jsonLine(publicStart("not-an-ip", "t1", "", testNow.Add(-time.Minute)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := logKey(testNow.Add(-5*time.Minute), "0123456789abcdef")
+	h.store.objects[key] = []byte("not json\n\n" + badIP + "\n" + good + "\n")
+	usages, tl, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.store.read(badName) || tl.malformed != 2 || tl.connections != 1 || usages["192.0.2.7"] == nil {
+		t.Fatalf("tally %+v, usages %+v, reads %v", tl, usages, h.store.gets)
+	}
+	logs := h.logs.String()
+	if !strings.Contains(logs, "does not start with its time") || !strings.Contains(logs, badName) ||
+		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=2") {
+		t.Fatalf("logs = %s", logs)
+	}
+}
+
+func TestJob_ScanFailures(t *testing.T) {
+	t.Parallel()
+	key := logKey(testNow.Add(-time.Hour), "0123456789abcdef")
+	tests := []struct {
+		name    string
+		setup   func(h *harness)
+		wantErr string
+	}{
+		{name: "the listing fails", setup: func(h *harness) { h.store.listErr = errors.New("listing broke") }, wantErr: "list the connection logs under tunnel-logs/2026/11/11/: listing broke"},
+		{name: "a read fails", setup: func(h *harness) { h.store.getErr[key] = errors.New("read broke") }, wantErr: "read the connection log " + key + ": read broke"},
+		{name: "a read panics", setup: func(h *harness) {
+			h.store.getHook = func(context.Context, string) error { panic("boom") }
+		}, wantErr: "reading the connection log " + key + " crashed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			h.store.addLog(t, testNow.Add(-time.Hour), publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute)))
+			tc.setup(h)
+			_, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestJob_ScanSkipsALogGoneSinceTheListing(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	gone := logKey(testNow.Add(-time.Hour), "fedcba9876543210")
+	h.store.listed = []string{gone}
+	h.store.addLog(t, testNow.Add(-2*time.Hour), publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute)))
+	usages, tl, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.store.read(gone) || tl.files != 2 || usages["192.0.2.7"] == nil {
+		t.Fatalf("tally %+v, usages %+v", tl, usages)
+	}
+}

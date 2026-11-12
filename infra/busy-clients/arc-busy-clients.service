@@ -1,0 +1,12 @@
+[Unit]
+Description=Alert on client addresses with unusually many tunnel connections
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tunneld/tunneld.env
+EnvironmentFile=/etc/tunneld/busy-clients.env
+ExecStart=/usr/local/sbin/arc-busy-clients
+TimeoutStartSec=150
+NoNewPrivileges=yes
