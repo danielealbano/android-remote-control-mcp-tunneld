@@ -58,7 +58,7 @@ jobs:
       - name: shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh infra/status-report/*.sh infra/refused-apps/*.sh infra/registered-phones/*.sh
+          shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh infra/status-report/*.sh infra/refused-apps/*.sh infra/registered-phones/*.sh infra/busy-clients/*.sh
       - name: script tests
         run: make test-scripts
       - name: third-party licenses
