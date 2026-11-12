@@ -274,14 +274,40 @@ func TestJob_ScanStoppedByItsTimeLimit(t *testing.T) {
 	}
 }
 
-func TestJob_ScanALineOverTheLimit(t *testing.T) {
+func TestJob_ScanLongLines(t *testing.T) {
 	t.Parallel()
-	h := newHarness()
-	key := logKey(testNow.Add(-time.Hour), "0123456789abcdef")
-	h.store.objects[key] = []byte(strings.Repeat("x", maxLineBytes+1) + "\n")
-	_, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
-	if err == nil || !strings.Contains(err.Error(), "read the lines of the connection log "+key) {
-		t.Fatalf("err = %v", err)
+	long := publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Minute))
+	long.SNI = strings.Repeat("a", 100<<10)
+	longLine, err := jsonLine(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name            string
+		line            string
+		wantConnections int
+		wantErr         bool
+	}{
+		{name: "a line above bufio's 64 KiB default is counted", line: longLine, wantConnections: 1},
+		{name: "a line over the 1 MiB limit fails the run", line: strings.Repeat("x", maxLineBytes+1), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness()
+			key := logKey(testNow.Add(-time.Hour), "0123456789abcdef")
+			h.store.objects[key] = []byte(tc.line + "\n")
+			_, tl, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "read the lines of the connection log "+key) {
+					t.Fatalf("err = %v", err)
+				}
+				return
+			}
+			if err != nil || tl.connections != tc.wantConnections {
+				t.Fatalf("tally %+v, err %v", tl, err)
+			}
+		})
 	}
 }
 
