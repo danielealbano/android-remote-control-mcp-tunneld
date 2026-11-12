@@ -82,6 +82,21 @@ func TestJob_SortsByConnectionsThenAddress(t *testing.T) {
 	}
 }
 
+func TestJob_AlertTimesAreInTheZone(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.addLog(t, testNow.Add(-2*time.Hour), append(busy("192.0.2.7", 499, 1, time.Date(2026, 11, 11, 13, 0, 0, 0, time.UTC)),
+		publicStart("192.0.2.7", "t0", "fp", time.Date(2026, 11, 12, 11, 30, 0, 0, time.UTC)))...)
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sent := h.messages.sent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "in the 24 hours up to Thu 12 Nov 13:00 (times in TEST)") ||
+		!strings.Contains(sent[0], "<td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td>") {
+		t.Fatalf("messages = %q", sent)
+	}
+}
+
 func TestJob_NothingNewSendsNothing(t *testing.T) {
 	t.Parallel()
 	h := newHarness()
@@ -405,6 +420,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 		{name: "an empty exclude entry", change: func(c *jobConfig) { c.Exclude = []string{"192.0.2.1", ""} }},
 		{name: "an exclude entry that is not an address", change: func(c *jobConfig) { c.Exclude = []string{"example.test"} }},
 		{name: "an exclude entry that is not a range", change: func(c *jobConfig) { c.Exclude = []string{"192.0.2.0/33"} }},
+		{name: "an IPv4-mapped IPv6 exclude range", change: func(c *jobConfig) { c.Exclude = []string{"::ffff:192.0.2.0/120"} }},
 		{name: "no clock", change: func(*jobConfig) {}, opts: []jobOption{withClock(nil)}},
 		{name: "no sleep function", change: func(*jobConfig) {}, opts: []jobOption{withPause(time.Second, nil)}},
 		{name: "a time limit that is not positive", change: func(*jobConfig) {}, opts: []jobOption{withTimeout(0)}},

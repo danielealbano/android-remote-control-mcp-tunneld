@@ -96,6 +96,9 @@ func parseRange(s string) (netip.Prefix, error) {
 		if err != nil {
 			return netip.Prefix{}, err
 		}
+		if p.Addr().Is4In6() {
+			return netip.Prefix{}, fmt.Errorf("%s is an IPv4-mapped IPv6 range, which never matches the IPv4 addresses it maps; write it as an IPv4 range", s)
+		}
 		return p.Masked(), nil
 	}
 	a, err := netip.ParseAddr(s)
