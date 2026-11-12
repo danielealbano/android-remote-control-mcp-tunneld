@@ -301,17 +301,20 @@ not be reported). An address is flagged at 500 or more connections, or 100 or mo
 (`BUSY_CLIENTS_CONNECTIONS`, `BUSY_CLIENTS_SPREAD_CONNECTIONS`, `BUSY_CLIENTS_SPREAD_TUNNELS`). Flagged addresses not
 alerted before go out in one Telegram rich message, a table sorted by connections — the address linking to its
 ipinfo.io page, connections, tunnels (a count, never names), first and last connection and the number of TLS
-fingerprints — split into numbered parts like the refused-apps report; they are then added to
-`busy-clients/alerted.json` in the bucket and never sent again. The first run of each day at or after
+fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are added to
+`busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run cut
+short goes on with the others at the next run. The first run of each day at or after
 `BUSY_CLIENTS_DAILY_HOUR` (in `BUSY_CLIENTS_TIMEZONE`) also sends one line saying the check is running and how many
 addresses it alerted in the last 24 hours, and records the day in the same file, so a day without that line means no
 run got that far. A run with nothing new and no daily line due sends nothing and writes nothing. A failed run (it has
-120 s) sends a message saying so when its Telegram settings could be read; when an alert or the daily line went out
-but the save failed, the next run sends it again. A line of a log that is not a connection event is logged as a
+120 s) sends a message saying so; a setting that cannot be read (missing or malformed) or a Telegram that is not set up
+is only logged, and the missing daily line shows it. When a part of the alert or the daily line went out but its save
+failed, the next run sends it again. A line of a log that is not a connection event is logged as a
 warning and skipped. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the
 rest from `/etc/tunneld/busy-clients.env` (`busy-clients.env.example`). `infra/busy-clients/install.sh` first checks
 the whole config file (a bad line, no node, or two run minutes less than 30 minutes apart installs nothing), then
-installs it on each node with its run minute and runs it once (`--help` lists its settings).
+installs it on each node with its run minute, runs it once, and enables the hourly timer only when that check
+succeeds: a failed first check leaves the timer disabled there and stops the install (`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
