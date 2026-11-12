@@ -1,4 +1,4 @@
-package telegram
+package telegram_test
 
 import (
 	"slices"
@@ -6,12 +6,19 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 )
 
-func testSection(name string, rows int) Section {
-	s := Section{Heading: name, Note: "note", Columns: []string{"A", "B"}}
+const (
+	tableStart = "<table bordered striped compact>"
+	tableEnd   = "</table>"
+)
+
+func testSection(name string, rows int) telegram.Section {
+	s := telegram.Section{Heading: name, Note: "note", Columns: []string{"A", "B"}}
 	for i := range rows {
-		s.Rows = append(s.Rows, []Cell{Text(name), Text("row" + strconv.Itoa(i))})
+		s.Rows = append(s.Rows, []telegram.Cell{telegram.Text(name), telegram.Text("row" + strconv.Itoa(i))})
 	}
 	return s
 }
@@ -20,25 +27,25 @@ func TestPack(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		sections []Section
-		lim      Limits
+		sections []telegram.Section
+		lim      telegram.Limits
 		want     int
 	}{
-		{name: "a report without attempts is the intro alone", lim: Limits{Blocks: 500, Runes: 32768}, want: 1},
-		{name: "everything that fits is one message", sections: []Section{testSection("x", 3), testSection("y", 3)}, lim: Limits{Blocks: 500, Runes: 32768}, want: 1},
-		{name: "too many rows split by blocks", sections: []Section{testSection("x", 30)}, lim: Limits{Blocks: 15, Runes: 32768}, want: 3},
-		{name: "too much text splits by characters", sections: []Section{testSection("x", 30)}, lim: Limits{Blocks: 500, Runes: 600}, want: 3},
-		{name: "a section that no longer fits starts the next message", sections: []Section{testSection("x", 8), testSection("y", 8)}, lim: Limits{Blocks: 15, Runes: 32768}, want: 2},
-		{name: "a row larger than a message still goes out alone", sections: []Section{testSection("x", 2)}, lim: Limits{Blocks: 500, Runes: 10}, want: 2},
+		{name: "a report without attempts is the intro alone", lim: telegram.Limits{Blocks: 500, Runes: 32768}, want: 1},
+		{name: "everything that fits is one message", sections: []telegram.Section{testSection("x", 3), testSection("y", 3)}, lim: telegram.Limits{Blocks: 500, Runes: 32768}, want: 1},
+		{name: "too many rows split by blocks", sections: []telegram.Section{testSection("x", 30)}, lim: telegram.Limits{Blocks: 15, Runes: 32768}, want: 3},
+		{name: "too much text splits by characters", sections: []telegram.Section{testSection("x", 30)}, lim: telegram.Limits{Blocks: 500, Runes: 600}, want: 3},
+		{name: "a section that no longer fits starts the next message", sections: []telegram.Section{testSection("x", 8), testSection("y", 8)}, lim: telegram.Limits{Blocks: 15, Runes: 32768}, want: 2},
+		{name: "a row larger than a message still goes out alone", sections: []telegram.Section{testSection("x", 2)}, lim: telegram.Limits{Blocks: 500, Runes: 10}, want: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msgs, counts := PackRows([]string{"intro"}, tc.sections, tc.lim)
+			msgs, counts := telegram.PackRows([]string{"intro"}, tc.sections, tc.lim)
 			if len(msgs) != tc.want || len(counts) != len(msgs) {
 				t.Fatalf("got %d messages and %d row counts, want %d: %q", len(msgs), len(counts), tc.want, msgs)
 			}
-			if plain := Pack([]string{"intro"}, tc.sections, tc.lim); !slices.Equal(plain, msgs) {
+			if plain := telegram.Pack([]string{"intro"}, tc.sections, tc.lim); !slices.Equal(plain, msgs) {
 				t.Fatalf("Pack and PackRows disagree: %q vs %q", plain, msgs)
 			}
 			total, packed := 0, 0
@@ -91,8 +98,8 @@ func TestPack(t *testing.T) {
 
 func TestPack_EscapesEveryValue(t *testing.T) {
 	t.Parallel()
-	s := Section{Heading: "<b>h</b>", Note: "a & b", Columns: []string{"<th>"}, Rows: [][]Cell{{Text("</td><script>")}}}
-	msgs := Pack([]string{"<i>intro</i>"}, []Section{s}, Limits{Blocks: 500, Runes: 32768})
+	s := telegram.Section{Heading: "<b>h</b>", Note: "a & b", Columns: []string{"<th>"}, Rows: [][]telegram.Cell{{telegram.Text("</td><script>")}}}
+	msgs := telegram.Pack([]string{"<i>intro</i>"}, []telegram.Section{s}, telegram.Limits{Blocks: 500, Runes: 32768})
 	want := "<p>&lt;i&gt;intro&lt;/i&gt;</p><h4>&lt;b&gt;h&lt;/b&gt;</h4><p>a &amp; b</p>" + tableStart +
 		"<tr><th>&lt;th&gt;</th></tr><tr><td>&lt;/td&gt;&lt;script&gt;</td></tr>" + tableEnd
 	if len(msgs) != 1 || msgs[0] != want {
@@ -102,8 +109,8 @@ func TestPack_EscapesEveryValue(t *testing.T) {
 
 func TestPack_LinkCell(t *testing.T) {
 	t.Parallel()
-	s := Section{Heading: "h", Columns: []string{"A", "B"}, Rows: [][]Cell{{{Text: "<a>", URL: `https://x.test/?a=1&b="2"`}, Text("plain")}}}
-	msgs := Pack([]string{"intro"}, []Section{s}, Limits{Blocks: 500, Runes: 32768})
+	s := telegram.Section{Heading: "h", Columns: []string{"A", "B"}, Rows: [][]telegram.Cell{{{Text: "<a>", URL: `https://x.test/?a=1&b="2"`}, telegram.Text("plain")}}}
+	msgs := telegram.Pack([]string{"intro"}, []telegram.Section{s}, telegram.Limits{Blocks: 500, Runes: 32768})
 	want := "<p>intro</p><h4>h</h4>" + tableStart + "<tr><th>A</th><th>B</th></tr>" +
 		`<tr><td><a href="https://x.test/?a=1&amp;b=&#34;2&#34;">&lt;a&gt;</a></td><td>plain</td></tr>` + tableEnd
 	if len(msgs) != 1 || msgs[0] != want {
@@ -125,8 +132,8 @@ func TestClip(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Clip(tc.in, 3); got != tc.want {
-				t.Fatalf("Clip(%q, 3) = %q, want %q", tc.in, got, tc.want)
+			if got := telegram.Clip(tc.in, 3); got != tc.want {
+				t.Fatalf("telegram.Clip(%q, 3) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -146,8 +153,8 @@ func TestDisplay(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := Display(tc.in); got != tc.want {
-				t.Fatalf("Display(%q) = %q, want %q", tc.in, got, tc.want)
+			if got := telegram.Display(tc.in); got != tc.want {
+				t.Fatalf("telegram.Display(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
