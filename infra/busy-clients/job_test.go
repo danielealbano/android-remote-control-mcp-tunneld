@@ -359,6 +359,9 @@ func TestJob_Failures(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
+			if strings.Contains(err.Error(), "did not finish within") {
+				t.Fatalf("a failure within the time limit says it ran out of time: %v", err)
+			}
 			if h.store.puts != tc.wantPuts {
 				t.Fatalf("puts = %d, want %d", h.store.puts, tc.wantPuts)
 			}

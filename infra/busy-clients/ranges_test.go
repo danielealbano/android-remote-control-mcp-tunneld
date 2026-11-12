@@ -51,7 +51,8 @@ func TestLoadRanges_ReadsBothSources(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ranges = %v\nwant     %v", got, want)
 	}
-	if !strings.Contains(logs.String(), "neither an address nor a range") || !strings.Contains(logs.String(), "value=not-a-range.example.test") ||
+	if !strings.Contains(logs.String(), `level=WARN msg="the outbound section of the Anthropic address page holds a value that is neither an address nor a range`) ||
+		!strings.Contains(logs.String(), "value=not-a-range.example.test") ||
 		strings.Contains(logs.String(), "aws-external") || strings.Contains(logs.String(), "203.0.113.9") {
 		t.Fatalf("logs = %s, want a warning for the one value of the outbound section that is not a range", logs.String())
 	}
@@ -65,6 +66,7 @@ func TestLoadRanges_Failures(t *testing.T) {
 	tests := []struct {
 		name      string
 		list      string
+		second    string
 		listCode  int
 		page      string
 		noOpenAI  bool
@@ -79,6 +81,7 @@ func TestLoadRanges_Failures(t *testing.T) {
 		{name: "a list that is not JSON", list: "<html>", page: testPage, wantErr: "decode the OpenAI address list", wantNamed: "/list.json"},
 		{name: "a list entry that is not a range", list: `{"prefixes":[{"ipv4Prefix":"999.1.1.1/8"}]}`, page: testPage, wantErr: `read the range "999.1.1.1/8"`, wantNamed: "/list.json"},
 		{name: "a list without range", list: `{"prefixes":[]}`, page: testPage, wantErr: "has no range", wantNamed: "/list.json"},
+		{name: "a second list without range", list: goodList, second: `{"prefixes":[]}`, page: testPage, wantErr: "has no range", wantNamed: "/second.json"},
 		{name: "a page without the outbound heading", list: goodList, page: phasedOut, wantErr: "has no outbound section followed by the phased-out one", wantNamed: "/page"},
 		{name: "a page without the phased-out heading", list: goodList, page: outbound, wantErr: "has no outbound section followed by the phased-out one", wantNamed: "/page"},
 		{name: "the headings in the wrong order", list: goodList, page: phasedOut + outbound, wantErr: "has no outbound section followed by the phased-out one", wantNamed: "/page"},
@@ -93,13 +96,16 @@ func TestLoadRanges_Failures(t *testing.T) {
 			if tc.listCode != 0 {
 				codes["/list.json"] = tc.listCode
 			}
-			base := rangeServer(t, map[string]string{"/list.json": tc.list, "/page": tc.page}, codes)
+			base := rangeServer(t, map[string]string{"/list.json": tc.list, "/second.json": tc.second, "/page": tc.page}, codes)
 			if tc.closed {
 				ts := httptest.NewServer(http.NotFoundHandler())
 				ts.Close()
 				base = ts.URL
 			}
 			openAI := []string{base + "/list.json"}
+			if tc.second != "" {
+				openAI = append(openAI, base+"/second.json")
+			}
 			if tc.noOpenAI {
 				openAI = nil
 			}

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -197,8 +199,8 @@ func TestJob_ScanBadNamesAndLines(t *testing.T) {
 		t.Fatalf("tally %+v, usages %+v, reads %v", tl, usages, h.store.gets)
 	}
 	logs := h.logs.String()
-	if !strings.Contains(logs, "does not start with its time") || !strings.Contains(logs, badName) ||
-		!strings.Contains(logs, "lines that are not connection events") || !strings.Contains(logs, "lines=8") {
+	if !strings.Contains(logs, `level=WARN msg="a connection log has a name that does not start with its time`) || !strings.Contains(logs, badName) ||
+		!strings.Contains(logs, `level=WARN msg="a connection log has lines that are not connection events`) || !strings.Contains(logs, "lines=8") {
 		t.Fatalf("logs = %s", logs)
 	}
 }
@@ -207,15 +209,16 @@ func TestJob_ScanFailures(t *testing.T) {
 	t.Parallel()
 	key := logKey(testNow.Add(-time.Hour), "0123456789abcdef")
 	tests := []struct {
-		name    string
-		setup   func(h *harness)
-		wantErr string
+		name     string
+		setup    func(h *harness)
+		wantErr  string
+		wantLogs []string
 	}{
 		{name: "the listing fails", setup: func(h *harness) { h.store.listErr = errors.New("listing broke") }, wantErr: "list the connection logs under tunnel-logs/2026/11/11/: listing broke"},
 		{name: "a read fails", setup: func(h *harness) { h.store.getErr[key] = errors.New("read broke") }, wantErr: "read the connection log " + key + ": read broke"},
 		{name: "a read panics", setup: func(h *harness) {
 			h.store.getHook = func(context.Context, string) error { panic("boom") }
-		}, wantErr: "reading the connection log " + key + " crashed"},
+		}, wantErr: "reading the connection log " + key + " crashed", wantLogs: []string{"level=ERROR", `msg="` + crashedMsg + `"`, "key=" + key, "panic=boom"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -226,6 +229,11 @@ func TestJob_ScanFailures(t *testing.T) {
 			_, _, err := h.job(t).scan(context.Background(), testNow.Add(-window), testNow, emptySet(t))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			for _, want := range tc.wantLogs {
+				if !strings.Contains(h.logs.String(), want) {
+					t.Fatalf("logs = %s, want %q in them", h.logs.String(), want)
+				}
 			}
 		})
 	}
@@ -244,7 +252,7 @@ func TestJob_ScanSkipsALogGoneSinceTheListing(t *testing.T) {
 	if !h.store.read(gone) || tl.files != 2 || usages["192.0.2.7"] == nil {
 		t.Fatalf("tally %+v, usages %+v", tl, usages)
 	}
-	if logs := h.logs.String(); !strings.Contains(logs, "a connection log listed for this run is no longer in the bucket") || !strings.Contains(logs, gone) {
+	if logs := h.logs.String(); !strings.Contains(logs, `level=WARN msg="a connection log listed for this run is no longer in the bucket`) || !strings.Contains(logs, gone) {
 		t.Fatalf("logs = %s", logs)
 	}
 }
@@ -351,5 +359,49 @@ func TestJob_ScanReportsARealReadErrorAmongCancelledReads(t *testing.T) {
 	_, _, err := h.job(t).scan(ctx, testNow.Add(-window), testNow, emptySet(t))
 	if err == nil || !strings.Contains(err.Error(), "read broke") || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want only the real read error", err)
+	}
+}
+
+func TestJob_ScanReadsUpToTheParallelLimitAtOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	for i := range 3 * parallelReads {
+		h.store.addLog(t, testNow.Add(-time.Duration(i+1)*time.Minute), publicStart("192.0.2.7", "t1", "", testNow.Add(-time.Duration(i+1)*time.Minute)))
+	}
+	var (
+		mu       sync.Mutex
+		inFlight int
+		most     int
+		release  = make(chan struct{})
+		once     sync.Once
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	h.store.getHook = func(ctx context.Context, _ string) error {
+		mu.Lock()
+		inFlight++
+		most = max(most, inFlight)
+		if inFlight == parallelReads {
+			once.Do(func() { close(release) })
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}()
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return fmt.Errorf("fewer than %d reads ran at once: %w", parallelReads, ctx.Err())
+		}
+	}
+	usages, tl, err := h.job(t).scan(ctx, testNow.Add(-window), testNow, emptySet(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if most != parallelReads || tl.files != 3*parallelReads || usages["192.0.2.7"].connections != 3*parallelReads {
+		t.Fatalf("at most %d reads ran at once (want %d), tally %+v", most, parallelReads, tl)
 	}
 }
