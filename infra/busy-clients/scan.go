@@ -142,6 +142,7 @@ func (j *job) scan(ctx context.Context, from, to time.Time, skip *netipx.IPSet) 
 func (j *job) readLog(ctx context.Context, key string, from, to time.Time, skip *netipx.IPSet) (map[string]*usage, int, int, error) {
 	body, err := j.Store.Get(ctx, key)
 	if errors.Is(err, bucket.ErrNotFound) {
+		j.Logger.Warn("a connection log listed for this run is no longer in the bucket, so its connections are not counted", "node", j.Node, "key", key)
 		return nil, 0, 0, nil
 	}
 	if err != nil {

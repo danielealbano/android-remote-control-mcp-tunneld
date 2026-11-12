@@ -233,6 +233,9 @@ func TestJob_ScanSkipsALogGoneSinceTheListing(t *testing.T) {
 	if !h.store.read(gone) || tl.files != 2 || usages["192.0.2.7"] == nil {
 		t.Fatalf("tally %+v, usages %+v", tl, usages)
 	}
+	if logs := h.logs.String(); !strings.Contains(logs, "a connection log listed for this run is no longer in the bucket") || !strings.Contains(logs, gone) {
+		t.Fatalf("logs = %s", logs)
+	}
 }
 
 func TestJob_ScanStoppedByItsTimeLimit(t *testing.T) {
