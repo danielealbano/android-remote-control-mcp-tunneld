@@ -20,7 +20,7 @@ func newTestBot(t *testing.T, srv *telegramtest.Server, slept *[]time.Duration) 
 	t.Cleanup(ts.Close)
 	b, err := New(testBotToken, 42,
 		WithAPI(ts.URL),
-		WithSleep(func(_ context.Context, d time.Duration) error {
+		withSleep(func(_ context.Context, d time.Duration) error {
 			*slept = append(*slept, d)
 			return nil
 		}),
@@ -144,7 +144,7 @@ func TestNew_RefusesMissingSettings(t *testing.T) {
 		{name: "empty token", token: "", chat: 42},
 		{name: "missing chat", token: testBotToken, chat: 0},
 		{name: "empty API address", token: testBotToken, chat: 42, opts: []Option{WithAPI("")}},
-		{name: "missing sleep", token: testBotToken, chat: 42, opts: []Option{WithSleep(nil)}},
+		{name: "missing sleep", token: testBotToken, chat: 42, opts: []Option{withSleep(nil)}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

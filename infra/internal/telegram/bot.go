@@ -39,7 +39,7 @@ func WithAPI(base string) Option {
 	}
 }
 
-func WithSleep(sleep func(context.Context, time.Duration) error) Option {
+func withSleep(sleep func(context.Context, time.Duration) error) Option {
 	return func(b *Bot) error {
 		if sleep == nil {
 			return errors.New("the Telegram sleep function is missing")
