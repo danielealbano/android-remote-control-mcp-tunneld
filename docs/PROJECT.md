@@ -294,11 +294,13 @@ runs at install time), an address can be alerted twice. A run reads the connecti
 per client address (IPv6 per `/64`), the `start` events of public connections in the window, the tunnels they reached
 and their TLS fingerprints. It leaves out the addresses of OpenAI's three published ChatGPT lists
 (`chatgpt-connectors`, `chatgpt-actions`, `chatgpt-user`), the ranges of the "Outbound IP addresses" section of
-Anthropic's IP address page (both fetched on every run; a source that fails or lists no range, or a page whose
-outbound and phased-out headings are missing, fails the run) and the operator's `BUSY_CLIENTS_EXCLUDE` (addresses or
+Anthropic's IP address page (a bare address there counts as a range of one, any other value in it is logged as a
+warning; both sources are fetched on every run, and a source that fails or lists no range, or a page whose outbound
+and phased-out headings are missing, fails the run) and the operator's `BUSY_CLIENTS_EXCLUDE` (addresses or
 CIDR ranges — as each address is alerted once, it is mostly for the range of a network whose other addresses should
-not be reported). An address is flagged at 500 or more connections, or 100 or more to at least 3 tunnels
-(`BUSY_CLIENTS_CONNECTIONS`, `BUSY_CLIENTS_SPREAD_CONNECTIONS`, `BUSY_CLIENTS_SPREAD_TUNNELS`). Flagged addresses not
+not be reported). An address is flagged at 500 or more connections, or 100 or more to at least 3 tunnels: the
+defaults of `--connections`, `--spread-connections` and `--spread-tunnels`; the installer writes only its own settings
+into `/etc/tunneld/busy-clients.env`, so after an install the check uses these defaults. Flagged addresses not
 alerted before go out in one Telegram rich message, a table sorted by connections — the address linking to its
 ipinfo.io page, connections, tunnels (a count, never names), first and last connection and the number of TLS
 fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are added to
@@ -308,7 +310,7 @@ short goes on with the others at the next run. The first run of each day at or a
 addresses it alerted in the last 24 hours, and records the day in the same file, so a day without that line means no
 run got that far. A run with nothing new and no daily line due sends nothing and writes nothing. A failed run (it has
 120 s) sends a message saying so, including a value the check refuses (an exclude entry that is not an address or a
-CIDR range, an unknown time zone, a daily hour outside 0–23, a rule number that is not positive, an empty
+CIDR range, an unknown or empty time zone or `Local`, a daily hour outside 0–23, a rule number that is not positive, an empty
 `TUNNELD_S3_*` setting); a setting that is missing or cannot be parsed at all (such as a daily hour of `08`), or a
 Telegram that is not set up, is only logged, and the missing daily line shows it. When a part of the alert or the daily
 line went out but its save failed, the next run sends it again. A line of a log that is not a connection event, or a
