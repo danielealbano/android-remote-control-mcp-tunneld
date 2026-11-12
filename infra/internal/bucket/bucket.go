@@ -18,7 +18,7 @@ import (
 
 const (
 	maxObjectBytes = 64 << 20
-	DefaultTimeout = 30 * time.Second
+	defaultTimeout = 30 * time.Second
 )
 
 var ErrNotFound = errors.New("object not found")
@@ -35,7 +35,7 @@ type Config struct {
 
 func (c Config) requestTimeout() time.Duration {
 	if c.Timeout <= 0 {
-		return DefaultTimeout
+		return defaultTimeout
 	}
 	return c.Timeout
 }

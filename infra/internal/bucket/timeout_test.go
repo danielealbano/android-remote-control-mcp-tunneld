@@ -12,8 +12,8 @@ func TestConfig_RequestTimeout(t *testing.T) {
 		set  time.Duration
 		want time.Duration
 	}{
-		{name: "no timeout set keeps the default", set: 0, want: DefaultTimeout},
-		{name: "a negative timeout keeps the default", set: -time.Second, want: DefaultTimeout},
+		{name: "no timeout set keeps the default", set: 0, want: defaultTimeout},
+		{name: "a negative timeout keeps the default", set: -time.Second, want: defaultTimeout},
 		{name: "a set timeout is used", set: 2 * time.Minute, want: 2 * time.Minute},
 	}
 	for _, tc := range tests {
