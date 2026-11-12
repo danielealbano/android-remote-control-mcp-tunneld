@@ -13,6 +13,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
 )
 
@@ -42,8 +43,8 @@ func main() {
 	os.Exit(code)
 }
 
-func execute(ctx context.Context, c cli, logger *slog.Logger, opts ...telegramOption) int {
-	tg, err := newTelegram(c.TelegramToken, c.TelegramChat, opts...)
+func execute(ctx context.Context, c cli, logger *slog.Logger, opts ...telegram.Option) int {
+	tg, err := telegram.New(c.TelegramToken, c.TelegramChat, opts...)
 	if err != nil {
 		logger.Error("the refused-apps report cannot run, because Telegram is not set up", "node", c.Node, "err", err)
 		return 1
@@ -53,7 +54,7 @@ func execute(ctx context.Context, c cli, logger *slog.Logger, opts ...telegramOp
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		msg := fmt.Sprintf("<p>The refused-apps report failed on %s. The next scheduled run tries again.</p><p>Error: %s</p>",
-			html.EscapeString(c.Node), html.EscapeString(clip(err.Error(), failureErrorRunes)))
+			html.EscapeString(c.Node), html.EscapeString(telegram.Clip(err.Error(), failureErrorRunes)))
 		if serr := tg.Send(fctx, msg); serr != nil {
 			logger.Error("could not send the message about the failed report", "node", c.Node, "err", serr)
 		}

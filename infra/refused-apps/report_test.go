@@ -2,11 +2,11 @@ package main
 
 import (
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 )
 
 var testZone = time.FixedZone("TEST", 3600)
@@ -101,7 +101,7 @@ func TestReport_Intro(t *testing.T) {
 
 func TestReport_IntroRefusesAnUnreadableLastReport(t *testing.T) {
 	t.Parallel()
-	if _, err := (report{node: "n1", today: testToday, lastReport: "yesterday"}).messages(messageLimits{blocks: 500, runes: 32768}); err == nil {
+	if _, err := (report{node: "n1", today: testToday, lastReport: "yesterday"}).messages(telegram.Limits{Blocks: 500, Runes: 32768}); err == nil {
 		t.Fatal("an unreadable last report date must fail")
 	}
 }
@@ -110,19 +110,19 @@ func TestReport_ByApp(t *testing.T) {
 	t.Parallel()
 	r := sampleReport()
 	got := r.byApp(groupByDay(r.fresh, testZone))
-	want := []section{
+	want := []telegram.Section{
 		{
-			heading: "dev.example.copy (first time seen)", note: "key 6954770e320b…, version 20011750, verified",
-			columns: []string{"Day", "Time", "IP", "Tries"},
-			rows: [][]string{
-				{"Fri 6 Nov", "21:15–23:29", "198.51.100.7", "2"},
-				{"Sat 7 Nov", "08:30", "203.0.113.4", "1"},
+			Heading: "dev.example.copy (first time seen)", Note: "key 6954770e320b…, version 20011750, verified",
+			Columns: []string{"Day", "Time", "IP", "Tries"},
+			Rows: [][]telegram.Cell{
+				{telegram.Text("Fri 6 Nov"), telegram.Text("21:15–23:29"), telegram.Text("198.51.100.7"), telegram.Text("2")},
+				{telegram.Text("Sat 7 Nov"), telegram.Text("08:30"), telegram.Text("203.0.113.4"), telegram.Text("1")},
 			},
 		},
 		{
-			heading: "dev.example.known", note: "key aa, version 3, not verified",
-			columns: []string{"Day", "Time", "IP", "Tries"},
-			rows:    [][]string{{"Sat 7 Nov", "09:00", "203.0.113.9", "1"}},
+			Heading: "dev.example.known", Note: "key aa, version 3, not verified",
+			Columns: []string{"Day", "Time", "IP", "Tries"},
+			Rows:    [][]telegram.Cell{{telegram.Text("Sat 7 Nov"), telegram.Text("09:00"), telegram.Text("203.0.113.9"), telegram.Text("1")}},
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -184,94 +184,18 @@ func TestVariant_Texts(t *testing.T) {
 
 func TestReport_MessagesHaveOneTablePerAppAndKey(t *testing.T) {
 	t.Parallel()
-	msgs, err := sampleReport().messages(messageLimits{blocks: 500, runes: 32768})
+	msgs, err := sampleReport().messages(telegram.Limits{Blocks: 500, Runes: 32768})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "<p>Refused apps, report of Sat 7 Nov 2026 from n1 (times in TEST).<br>4 new attempts.</p>" +
-		"<h4>dev.example.copy (first time seen)</h4><p>key 6954770e320b…, version 20011750, verified</p>" + tableStart +
+		"<h4>dev.example.copy (first time seen)</h4><p>key 6954770e320b…, version 20011750, verified</p>" + "<table bordered striped compact>" +
 		"<tr><th>Day</th><th>Time</th><th>IP</th><th>Tries</th></tr>" +
 		"<tr><td>Fri 6 Nov</td><td>21:15–23:29</td><td>198.51.100.7</td><td>2</td></tr>" +
-		"<tr><td>Sat 7 Nov</td><td>08:30</td><td>203.0.113.4</td><td>1</td></tr>" + tableEnd +
-		"<h4>dev.example.known</h4><p>key aa, version 3, not verified</p>" + tableStart +
+		"<tr><td>Sat 7 Nov</td><td>08:30</td><td>203.0.113.4</td><td>1</td></tr>" + "</table>" +
+		"<h4>dev.example.known</h4><p>key aa, version 3, not verified</p>" + "<table bordered striped compact>" +
 		"<tr><th>Day</th><th>Time</th><th>IP</th><th>Tries</th></tr>" +
-		"<tr><td>Sat 7 Nov</td><td>09:00</td><td>203.0.113.9</td><td>1</td></tr>" + tableEnd
-	if len(msgs) != 1 || msgs[0] != want {
-		t.Fatalf("messages = %q\nwant       %q", msgs, want)
-	}
-}
-
-func testSection(name string, rows int) section {
-	s := section{heading: name, note: "note", columns: []string{"A", "B"}}
-	for i := range rows {
-		s.rows = append(s.rows, []string{name, "row" + strconv.Itoa(i)})
-	}
-	return s
-}
-
-func TestPack(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		sections []section
-		lim      messageLimits
-		want     int
-	}{
-		{name: "a report without attempts is the intro alone", lim: messageLimits{blocks: 500, runes: 32768}, want: 1},
-		{name: "everything that fits is one message", sections: []section{testSection("x", 3), testSection("y", 3)}, lim: messageLimits{blocks: 500, runes: 32768}, want: 1},
-		{name: "too many rows split by blocks", sections: []section{testSection("x", 30)}, lim: messageLimits{blocks: 15, runes: 32768}, want: 3},
-		{name: "too much text splits by characters", sections: []section{testSection("x", 30)}, lim: messageLimits{blocks: 500, runes: 600}, want: 3},
-		{name: "a section that no longer fits starts the next message", sections: []section{testSection("x", 8), testSection("y", 8)}, lim: messageLimits{blocks: 15, runes: 32768}, want: 2},
-		{name: "a row larger than a message still goes out alone", sections: []section{testSection("x", 2)}, lim: messageLimits{blocks: 500, runes: 10}, want: 2},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			msgs := pack([]string{"intro"}, tc.sections, tc.lim)
-			if len(msgs) != tc.want {
-				t.Fatalf("got %d messages, want %d: %q", len(msgs), tc.want, msgs)
-			}
-			rows := map[string]int{}
-			for i, m := range msgs {
-				lead := "<p>intro</p>"
-				if len(msgs) > 1 {
-					lead = "<p>Part " + strconv.Itoa(i+1) + " of " + strconv.Itoa(len(msgs))
-				}
-				if !strings.HasPrefix(m, lead) {
-					t.Fatalf("message %d starts %.40q, want %q", i+1, m, lead)
-				}
-				if i > 0 && strings.Contains(m, "intro") {
-					t.Fatalf("message %d repeats the intro", i+1)
-				}
-				if tc.lim.runes > 100 && (utf8.RuneCountInString(m) > tc.lim.runes || strings.Count(m, "<tr>")+strings.Count(m, "<h4>")+strings.Count(m, "<p>")+strings.Count(m, "<table") > tc.lim.blocks) {
-					t.Fatalf("message %d is over the limits %+v: %s", i+1, tc.lim, m)
-				}
-				for _, s := range tc.sections {
-					if strings.Contains(m, "<td>"+s.heading+"</td>") && !strings.Contains(m, "<h4>"+s.heading+"</h4><p>note</p>"+tableStart+"<tr><th>A</th><th>B</th></tr>") {
-						t.Fatalf("message %d has rows of %s without its heading and table header", i+1, s.heading)
-					}
-					for j := range s.rows {
-						rows[s.heading+"/"+strconv.Itoa(j)] += strings.Count(m, "<td>"+s.heading+"</td><td>row"+strconv.Itoa(j)+"</td>")
-					}
-				}
-			}
-			for _, s := range tc.sections {
-				for j := range s.rows {
-					if n := rows[s.heading+"/"+strconv.Itoa(j)]; n != 1 {
-						t.Fatalf("row %d of %s appears %d times", j, s.heading, n)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestPack_EscapesEveryValue(t *testing.T) {
-	t.Parallel()
-	s := section{heading: "<b>h</b>", note: "a & b", columns: []string{"<th>"}, rows: [][]string{{"</td><script>"}}}
-	msgs := pack([]string{"<i>intro</i>"}, []section{s}, messageLimits{blocks: 500, runes: 32768})
-	want := "<p>&lt;i&gt;intro&lt;/i&gt;</p><h4>&lt;b&gt;h&lt;/b&gt;</h4><p>a &amp; b</p>" + tableStart +
-		"<tr><th>&lt;th&gt;</th></tr><tr><td>&lt;/td&gt;&lt;script&gt;</td></tr>" + tableEnd
+		"<tr><td>Sat 7 Nov</td><td>09:00</td><td>203.0.113.9</td><td>1</td></tr>" + "</table>"
 	if len(msgs) != 1 || msgs[0] != want {
 		t.Fatalf("messages = %q\nwant       %q", msgs, want)
 	}

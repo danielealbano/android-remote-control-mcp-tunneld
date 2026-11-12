@@ -10,6 +10,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
@@ -106,7 +107,7 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 		}
 		hidden[app] = true
 	}
-	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: sleepContext, write: atomicfile.Write}
+	j := &job{jobConfig: cfg, hidden: hidden, now: time.Now, pause: time.Second, sleep: telegram.Sleep, write: atomicfile.Write}
 	for _, opt := range opts {
 		if err := opt(j); err != nil {
 			return nil, err
@@ -164,7 +165,7 @@ func (j *job) run(ctx context.Context) error {
 		fresh = append(fresh, newAttempt{app: app, a: a})
 	}
 	msgs, err := report{node: j.Node, today: today, lastReport: list.LastReport, known: known, fresh: fresh}.
-		messages(messageLimits{blocks: richMessageBlocks, runes: richMessageRunes})
+		messages(telegram.Limits{Blocks: telegram.MessageBlocks, Runes: telegram.MessageRunes})
 	if err != nil {
 		return err
 	}
