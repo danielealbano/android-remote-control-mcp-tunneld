@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	stdhtml "html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram/telegramtest"
@@ -157,12 +159,58 @@ func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	requests, _ := srv.Seen()
-	if len(requests) != 1 || !strings.HasPrefix(requests[0].RichMessage.HTML, "<p>The busy-clients check failed on n2; what it has not sent yet goes out with a later run.</p><p>Error: ") ||
+	if len(requests) != 1 || !strings.HasPrefix(requests[0].RichMessage.HTML, "<p>The busy-clients check failed on n2 and stopped before it finished.</p><p>Error: ") ||
 		!strings.Contains(requests[0].RichMessage.HTML, "Not/AZone") {
 		t.Fatalf("messages = %+v", requests)
 	}
 	if !strings.Contains(logs.String(), "the busy-clients check failed") {
 		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
+func TestExecute_TheFailureMessageIsEscapedAndClipped(t *testing.T) {
+	tests := []struct {
+		name  string
+		node  string
+		zone  string
+		check func(t *testing.T, html string)
+	}{
+		{
+			name: "the node and the error are escaped",
+			node: `<n&"1>`,
+			zone: `Bad<&">Zone`,
+			check: func(t *testing.T, html string) {
+				if !strings.HasPrefix(html, "<p>The busy-clients check failed on &lt;n&amp;&#34;1&gt; and stopped before it finished.</p><p>Error: ") ||
+					!strings.Contains(html, "Bad&lt;&amp;&#34;&gt;Zone") || strings.Contains(html, `Bad<&">Zone`) {
+					t.Fatalf("message = %s", html)
+				}
+			},
+		},
+		{
+			name: "a long error is clipped",
+			node: "n2",
+			zone: strings.Repeat("z", 5000),
+			check: func(t *testing.T, html string) {
+				errText := stdhtml.UnescapeString(strings.TrimSuffix(strings.SplitN(html, "<p>Error: ", 2)[1], "</p>"))
+				if utf8.RuneCountInString(errText) != failureErrorRunes+1 || !strings.HasSuffix(errText, "…") {
+					t.Fatalf("the error part has %d runes, want %d ending with …", utf8.RuneCountInString(errText), failureErrorRunes+1)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
+			srv, api := telegramServer(t)
+			if code := execute(context.Background(), requiredArgs("--node", tc.node, "--timezone", tc.zone), testLogger(&logBuffer{}), telegram.WithAPI(api)); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+			requests, _ := srv.Seen()
+			if len(requests) != 1 {
+				t.Fatalf("messages = %+v", requests)
+			}
+			tc.check(t, requests[0].RichMessage.HTML)
+		})
 	}
 }
 
@@ -354,7 +402,7 @@ func TestExecute_AFailureMessageThatCannotBeSentIsLogged(t *testing.T) {
 	if code := execute(context.Background(), requiredArgs("--timezone", "Not/AZone"), testLogger(logs), telegram.WithAPI(ts.URL)); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(logs.String(), "could not send the message about the failed check") || !strings.Contains(logs.String(), "chat not found") {
+	if !strings.Contains(logs.String(), `level=ERROR msg="could not send the message about the failed check"`) || !strings.Contains(logs.String(), "chat not found") {
 		t.Fatalf("logs = %s", logs.String())
 	}
 }
