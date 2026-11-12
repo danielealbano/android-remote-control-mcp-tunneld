@@ -66,10 +66,10 @@ func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...te
 		return 1
 	}
 	if err := runOnce(ctx, c, bot, logger); err != nil {
-		logger.Error("the busy-clients check failed; the next scheduled run tries again", "node", c.Node, "err", err)
+		logger.Error("the busy-clients check failed; what it has not sent yet goes out with a later run", "node", c.Node, "err", err)
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
-		msg := fmt.Sprintf("<p>The busy-clients check failed on %s. The next scheduled run tries again.</p><p>Error: %s</p>",
+		msg := fmt.Sprintf("<p>The busy-clients check failed on %s; what it has not sent yet goes out with a later run.</p><p>Error: %s</p>",
 			html.EscapeString(c.Node), html.EscapeString(telegram.Clip(err.Error(), failureErrorRunes)))
 		if serr := bot.Send(fctx, msg); serr != nil {
 			logger.Error("could not send the message about the failed check", "node", c.Node, "err", serr)

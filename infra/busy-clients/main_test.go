@@ -157,7 +157,7 @@ func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
 	requests, _ := srv.Seen()
-	if len(requests) != 1 || !strings.HasPrefix(requests[0].RichMessage.HTML, "<p>The busy-clients check failed on n2. The next scheduled run tries again.</p><p>Error: ") ||
+	if len(requests) != 1 || !strings.HasPrefix(requests[0].RichMessage.HTML, "<p>The busy-clients check failed on n2; what it has not sent yet goes out with a later run.</p><p>Error: ") ||
 		!strings.Contains(requests[0].RichMessage.HTML, "Not/AZone") {
 		t.Fatalf("messages = %+v", requests)
 	}
