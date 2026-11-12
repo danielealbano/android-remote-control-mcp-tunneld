@@ -289,38 +289,39 @@ The busy-clients check (`infra/busy-clients/`, built with `make busy-clients`) s
 address with unusually many public connections, once per address, so the operator can look at it and decide whether to
 ban it. A systemd timer runs it every hour on one or two nodes, each at its own minute at least 30 minutes apart, so
 their hourly runs do not update its list at the same moment; if two runs ever overlap (the check the installer starts
-runs at install time), an address can be alerted twice. A run reads the connection logs of the 24 hours before it (the
-files under `tunnel-logs/` whose name time is at most 10 minutes before that window, 16 at a time) and counts, per
-client address (IPv6 per `/64`), the `start` events of public connections in the window, the tunnels they reached and
-their TLS fingerprints. It leaves out the addresses of OpenAI's three published ChatGPT lists (`chatgpt-connectors`,
-`chatgpt-actions`, `chatgpt-user`), the ranges of the "Outbound IP addresses" section of Anthropic's IP address page (a
-bare address there counts as a range of one, any other value in it is logged as a warning; both sources are fetched on
-every run, and a source that fails or lists no range, or a page missing the outbound or the phased-out heading, or with
-the phased-out heading before the outbound one, fails the run) and the operator's `BUSY_CLIENTS_EXCLUDE` (addresses or
-CIDR ranges, an IPv4 range written in IPv4 — as each address is alerted once, it is mostly for the range of a network
-whose other addresses should not be reported). An address is flagged at 500 or more connections, or 100 or more to at
-least 3 tunnels: the defaults of `--connections`, `--spread-connections` and `--spread-tunnels`; the installer writes
-only its own settings into `/etc/tunneld/busy-clients.env`, so after an install the check uses these defaults. Flagged
-addresses not alerted before go out in one Telegram rich message, a table sorted by connections — the address linking to
-its ipinfo.io page, connections, tunnels (a count, never names), first and last connection and the number of TLS
-fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are added to
-`busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run cut
-short goes on with the others at the next run. The first run of each day at or after `BUSY_CLIENTS_DAILY_HOUR` (in
-`BUSY_CLIENTS_TIMEZONE`) also sends one line saying the check is running and how many addresses it alerted in the last
-24 hours, and records the day in the same file, so a day without that line means no run got that far. A run with nothing
-new and no daily line due sends nothing and writes nothing. A failed run (it has 120 s) sends a message saying so,
-including a value the check refuses (an exclude entry that is not an address or a CIDR range, or is an IPv4-mapped IPv6
-range, an unknown or empty time zone or `Local`, a daily hour outside 0–23, a rule number that is not positive, an empty
-`TUNNELD_S3_ENDPOINT`, `TUNNELD_S3_BUCKET`, `TUNNELD_S3_ACCESS_KEY` or `TUNNELD_S3_SECRET_KEY`); a setting that is
-missing or cannot be parsed at all (such as a daily hour of `08`), or a Telegram that is not set up, is only logged, and
-the missing daily line shows it. When a part of the alert or the daily line went out but its save failed, the next run
-sends it again. A line of a log that is not a connection event (including a public start without its time or tunnel), or
-a log listed for the run that is gone when it is read, is logged as a warning and skipped; a line longer than 1 MiB
-fails the run. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
-`/etc/tunneld/busy-clients.env` (`busy-clients.env.example`). `infra/busy-clients/install.sh` first checks the whole
-config file (a bad line, no node, or two run minutes less than 30 minutes apart installs nothing), then installs it on
-each node with its run minute, runs it once, and enables the hourly timer only when that check succeeds: a failed first
-check leaves the timer disabled there and stops the install (`--help` lists its settings).
+runs at install time), an address can be alerted twice and the daily line sent twice. A run reads the connection logs of
+the 24 hours before it (the files under `tunnel-logs/` whose name time is at most 10 minutes before that window, 16 at a
+time) and counts, per client address (IPv6 per `/64`), the `start` events of public connections in the window, the
+tunnels they reached and their TLS fingerprints. It leaves out the addresses of OpenAI's three published ChatGPT lists
+(`chatgpt-connectors`, `chatgpt-actions`, `chatgpt-user`), the ranges of the "Outbound IP addresses" section of
+Anthropic's IP address page (a bare address there counts as a range of one, any other value in it is logged as a
+warning; both sources are fetched on every run, and a source that fails or lists no range, or a page missing the
+outbound or the phased-out heading, or with the phased-out heading before the outbound one, fails the run) and the
+operator's `BUSY_CLIENTS_EXCLUDE` (addresses or CIDR ranges, an IPv4 range written in IPv4 — as each address is alerted
+once, it is mostly for the range of a network whose other addresses should not be reported). An address is flagged at
+500 or more connections, or 100 or more to at least 3 tunnels: the defaults of `--connections`, `--spread-connections`
+and `--spread-tunnels`; the installer writes only its own settings into `/etc/tunneld/busy-clients.env`, so after an
+install the check uses these defaults. Flagged addresses not alerted before go out in one Telegram rich message, a table
+sorted by connections — the address linking to its ipinfo.io page, connections, tunnels (a count, never names), first
+and last connection and the number of TLS fingerprints — split into numbered parts like the refused-apps report; the
+addresses of each part are added to `busy-clients/alerted.json` in the bucket right after that part is sent, so they are
+never sent again and a run cut short goes on with the others at the next run. The first run of each day at or after
+`BUSY_CLIENTS_DAILY_HOUR` (in `BUSY_CLIENTS_TIMEZONE`) also sends one line saying the check is running and how many
+addresses it alerted in the last 24 hours, and records the day in the same file, so a day without that line means no run
+got that far. A run with nothing new and no daily line due sends nothing and writes nothing. A failed run (it has 120 s)
+sends a message saying so, including a value the check refuses (an exclude entry that is not an address or a CIDR range,
+or is an IPv4-mapped IPv6 range, an unknown or empty time zone or `Local`, a daily hour outside 0–23, a rule number that
+is not positive, an empty `TUNNELD_S3_ENDPOINT`, `TUNNELD_S3_BUCKET`, `TUNNELD_S3_ACCESS_KEY` or
+`TUNNELD_S3_SECRET_KEY`); a setting that is missing or cannot be parsed at all (such as a daily hour of `08`), or a
+Telegram that is not set up, is only logged, and the missing daily line shows it. When a part of the alert or the daily
+line went out but its save failed, the next run sends it again. A line of a log that is not a connection event
+(including a public start without its time or tunnel), or a log listed for the run that is gone when it is read, is
+logged as a warning and skipped; a line longer than 1 MiB fails the run. The bucket settings come from tunneld's own
+`/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from `/etc/tunneld/busy-clients.env` (`busy-clients.env.example`).
+`infra/busy-clients/install.sh` first checks the whole config file (a bad line, no node, or two run minutes less than 30
+minutes apart installs nothing), then installs it on each node with its run minute, runs it once, and enables the hourly
+timer only when that check succeeds: a failed first check leaves the timer disabled there and stops the install
+(`--help` lists its settings).
 
 **Panics and Sentry.** Every HTTP handler, every goroutine and every TLS certificate callback is guarded
 against panics (`internal/report`), with or without Sentry; each panic is logged at Error with its stack and the
