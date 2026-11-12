@@ -90,12 +90,21 @@ func loadZone(name string) (*time.Location, error) {
 	return loc, nil
 }
 
+func bucketConfig(s bucket.Settings) (bucket.Config, error) {
+	cfg, err := s.Config()
+	if err != nil {
+		return bucket.Config{}, err
+	}
+	cfg.Timeout = defaultTimeout
+	return cfg, nil
+}
+
 func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) error {
 	loc, err := loadZone(c.Timezone)
 	if err != nil {
 		return err
 	}
-	bcfg, err := c.S3.Config()
+	bcfg, err := bucketConfig(c.S3)
 	if err != nil {
 		return err
 	}

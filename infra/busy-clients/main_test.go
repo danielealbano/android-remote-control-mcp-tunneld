@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram/telegramtest"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -118,6 +119,17 @@ func TestParseArgs_ExcludeFromTheEnvironment(t *testing.T) {
 				t.Fatalf("exclude = %q, want %q", c.Exclude, tc.want)
 			}
 		})
+	}
+}
+
+func TestBucketConfig_GivesEachReadTheRunsLimit(t *testing.T) {
+	t.Parallel()
+	cfg, err := bucketConfig(bucket.Settings{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", Bucket: "b", AccessKey: "k", SecretKey: "s"})
+	if err != nil || cfg.Timeout != defaultTimeout || cfg.Bucket != "b" {
+		t.Fatalf("config = %+v, %v; want the run's %s per read", cfg, err, defaultTimeout)
+	}
+	if _, err := bucketConfig(bucket.Settings{Region: "us-east-1"}); err == nil {
+		t.Fatal("empty bucket settings must be refused")
 	}
 }
 

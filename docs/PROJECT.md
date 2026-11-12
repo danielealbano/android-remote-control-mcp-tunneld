@@ -291,8 +291,9 @@ ban it. A systemd timer runs it every hour on one or two nodes, each at its own 
 their hourly runs do not update its list at the same moment; if two runs ever overlap (the check the installer starts
 runs at install time), an address can be alerted twice and the daily line sent twice. A run reads the connection logs of
 the 24 hours before it (the files under `tunnel-logs/` whose name time is at most 10 minutes before that window, 16 at a
-time) and counts, per client address (IPv6 per `/64`), the `start` events of public connections in the window, the
-tunnels they reached and their TLS fingerprints. It leaves out the addresses of OpenAI's three published ChatGPT lists
+time, each read allowed the run's whole 120 s instead of the bucket client's usual 30 s, as a file can grow to 16 MiB)
+and counts, per client address (IPv6 per `/64`), the `start` events of public connections in the window, the tunnels
+they reached and their TLS fingerprints. It leaves out the addresses of OpenAI's three published ChatGPT lists
 (`chatgpt-connectors`, `chatgpt-actions`, `chatgpt-user`), the ranges of the "Outbound IP addresses" section of
 Anthropic's IP address page (a bare address there counts as a range of one, any other value in it is logged as a
 warning; both sources are fetched on every run, and a source that fails or lists no range, or a page missing the
@@ -316,7 +317,7 @@ is not positive, an empty `TUNNELD_S3_ENDPOINT`, `TUNNELD_S3_BUCKET`, `TUNNELD_S
 Telegram that is not set up, is only logged, and the missing daily line shows it. When a part of the alert or the daily
 line went out but its save failed, the next run sends it again. A line of a log that is not a connection event
 (including a public start without its time or tunnel), or a log listed for the run that is gone when it is read, is
-logged as a warning and skipped; a line longer than 1 MiB fails the run. The bucket settings come from tunneld's own
+logged as a warning and skipped; a line of 1 MiB or longer fails the run. The bucket settings come from tunneld's own
 `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from `/etc/tunneld/busy-clients.env` (`busy-clients.env.example`).
 `infra/busy-clients/install.sh` first checks the whole config file (a bad line, no node, or two run minutes less than 30
 minutes apart installs nothing), then installs it on each node with its run minute, runs it once, and enables the hourly
