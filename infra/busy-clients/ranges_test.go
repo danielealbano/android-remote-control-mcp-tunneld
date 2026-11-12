@@ -80,6 +80,7 @@ func TestLoadRanges_Failures(t *testing.T) {
 		{name: "a list that does not answer 200", list: goodList, listCode: http.StatusInternalServerError, page: testPage, wantErr: "status 500", wantNamed: "/list.json"},
 		{name: "a list that is not JSON", list: "<html>", page: testPage, wantErr: "decode the OpenAI address list", wantNamed: "/list.json"},
 		{name: "a list entry that is not a range", list: `{"prefixes":[{"ipv4Prefix":"999.1.1.1/8"}]}`, page: testPage, wantErr: `read the range "999.1.1.1/8"`, wantNamed: "/list.json"},
+		{name: "a list entry that is an IPv4-mapped range", list: `{"prefixes":[{"ipv6Prefix":"::ffff:192.0.2.0/120"}]}`, page: testPage, wantErr: "IPv4-mapped IPv6 range", wantNamed: "/list.json"},
 		{name: "a list without range", list: `{"prefixes":[]}`, page: testPage, wantErr: "has no range", wantNamed: "/list.json"},
 		{name: "a second list without range", list: goodList, second: `{"prefixes":[]}`, page: testPage, wantErr: "has no range", wantNamed: "/second.json"},
 		{name: "a page without the outbound heading", list: goodList, page: phasedOut, wantErr: "has no outbound section followed by the phased-out one", wantNamed: "/page"},

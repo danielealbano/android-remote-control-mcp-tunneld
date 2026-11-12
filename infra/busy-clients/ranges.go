@@ -51,11 +51,11 @@ func loadRanges(ctx context.Context, client *http.Client, logger *slog.Logger, o
 				if s == "" {
 					continue
 				}
-				pfx, err := netip.ParsePrefix(s)
+				pfx, err := parseRange(s)
 				if err != nil {
 					return nil, fmt.Errorf("read the range %q of the OpenAI address list %s: %w", s, url, err)
 				}
-				all = append(all, pfx.Masked())
+				all = append(all, pfx)
 			}
 		}
 		if len(all) == found {
