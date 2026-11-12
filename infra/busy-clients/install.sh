@@ -5,8 +5,9 @@ usage() {
 	cat >&2 <<'USAGE'
 Usage: install.sh [--config FILE] [--binary FILE] [--timezone ZONE] [--daily-hour HH] [--telegram-token-file FILE] [--telegram-chat ID] [--exclude LIST] [-- SSH_OPTION...]
 
-Installs the hourly busy-clients check on every node in the config file, one node at a time, and runs it
-once on each.
+Installs the hourly busy-clients check on every node in the config file, one node at a time. On each node
+it runs the check once and enables the hourly timer only when that first check succeeds; when it fails,
+the timer is left disabled there and the install stops.
 Each config line is: <node> <ssh-target> <MM>
 MM is the minute of every hour the node runs at. The minutes must be at least 30 minutes apart (so at
 most two nodes), so their hourly runs do not update the list of alerted addresses at the same moment.
@@ -155,9 +156,14 @@ while read -r node target minute extra <&3 || [ -n "$node" ]; do
 		stop "$node: ssh failed, or the timer unit could not be written there"
 	ssh "$@" "$target" 'cat > /usr/local/sbin/arc-busy-clients.new && chmod 755 /usr/local/sbin/arc-busy-clients.new && mv /usr/local/sbin/arc-busy-clients.new /usr/local/sbin/arc-busy-clients' < "$binary" ||
 		stop "$node: ssh failed, or the binary could not be installed there"
-	ssh "$@" "$target" 'systemctl daemon-reload && systemctl enable --now arc-busy-clients.timer' < /dev/null ||
+	ssh "$@" "$target" 'systemctl daemon-reload' < /dev/null ||
+		stop "$node: ssh failed, or systemd could not reload its units"
+	if ! ssh "$@" "$target" 'systemctl start arc-busy-clients.service' < /dev/null; then
+		ssh "$@" "$target" 'systemctl disable --now arc-busy-clients.timer' < /dev/null ||
+			stop "$node: ssh failed, or the first check failed, and the hourly timer could not be disabled there; journalctl -u arc-busy-clients on the node says why"
+		stop "$node: ssh failed, or the first check failed, so the hourly timer is left disabled there; journalctl -u arc-busy-clients on the node says why"
+	fi
+	ssh "$@" "$target" 'systemctl enable --now arc-busy-clients.timer' < /dev/null ||
 		stop "$node: ssh failed, or systemd could not enable the hourly timer"
-	ssh "$@" "$target" 'systemctl start arc-busy-clients.service' < /dev/null ||
-		stop "$node: ssh failed, or the first check failed; journalctl -u arc-busy-clients on the node says why"
 	echo "$node installed, checked once, checks every hour at minute $minute"
 done 3< "$config"

@@ -4,7 +4,7 @@ set -eu
 DIR="$(cd "$(dirname "$0")" && pwd)"
 FAILS=0
 unset BUSY_CLIENTS_CONFIG BUSY_CLIENTS_BINARY BUSY_CLIENTS_TIMEZONE BUSY_CLIENTS_DAILY_HOUR BUSY_CLIENTS_TELEGRAM_TOKEN_FILE \
-	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_EXCLUDE STUB_SSH_FAIL_ON STUB_SSH_FAIL_STDIN
+	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_EXCLUDE STUB_SSH_FAIL_ON STUB_SSH_FAIL_ALSO STUB_SSH_FAIL_STDIN
 tmproot="$(mktemp -d)"
 trap 'rm -rf "$tmproot"' EXIT
 
@@ -16,11 +16,12 @@ mkdir -p "$bindir"
 cat > "$bindir/ssh" <<'SHIM'
 #!/bin/sh
 echo "$*" >> "$STUB_DIR/ssh_args"
-if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
+for pattern in "${STUB_SSH_FAIL_ON:-}" "${STUB_SSH_FAIL_ALSO:-}"; do
+	[ -n "$pattern" ] || continue
 	case "$*" in
-	*"$STUB_SSH_FAIL_ON"*) exit 1 ;;
+	*"$pattern"*) exit 1 ;;
 	esac
-fi
+done
 input=$(cat)
 printf '%s\n' "$input" >> "$STUB_DIR/ssh_stdin"
 if [ -n "${STUB_SSH_FAIL_STDIN:-}" ]; then
@@ -105,8 +106,17 @@ has "install gives the first node its minute" ssh_stdin 'OnCalendar=\*-\*-\* \*:
 has "install gives the second node its minute" ssh_stdin 'OnCalendar=\*-\*-\* \*:40:00'
 has "install copies the binary" ssh_stdin 'binary-bytes'
 has "install replaces the binary in one step" ssh_args 'mv /usr/local/sbin/arc-busy-clients.new /usr/local/sbin/arc-busy-clients'
+has "install reloads systemd" ssh_args 'systemctl daemon-reload'
 has "install enables the timer" ssh_args 'enable --now arc-busy-clients.timer'
 has "install runs the check once" ssh_args 'start arc-busy-clients.service'
+check_line=$(grep -n 'root@198.51.100.1 systemctl start arc-busy-clients.service' "$tmproot/ssh_args" | cut -d: -f1)
+enable_line=$(grep -n 'root@198.51.100.1 systemctl enable --now arc-busy-clients.timer' "$tmproot/ssh_args" | cut -d: -f1)
+if [ -n "$check_line" ] && [ -n "$enable_line" ] && [ "$check_line" -lt "$enable_line" ]; then
+	pass "install runs the first check before it enables the timer"
+else
+	fail "install runs the first check before it enables the timer"
+fi
+hasnt "install never disables the timer when the first check succeeds" ssh_args 'disable --now arc-busy-clients.timer'
 has "install passes the options after -- to ssh" ssh_args '-o BatchMode=yes root@198.51.100.2'
 
 for pair in 00:0 07:7 7:7 10:10 23:23; do
@@ -203,12 +213,21 @@ export STUB_SSH_FAIL_ON='cat > /etc/systemd/system/arc-busy-clients.timer'
 stops "a timer unit that cannot be written" "ssh failed, or the timer unit could not be written there"
 export STUB_SSH_FAIL_ON='cat > /usr/local/sbin/arc-busy-clients.new'
 stops "a binary that cannot be installed" "ssh failed, or the binary could not be installed there"
+export STUB_SSH_FAIL_ON='systemctl daemon-reload'
+stops "systemd that cannot reload its units" "ssh failed, or systemd could not reload its units"
+hasnt "systemd that cannot reload its units runs no check" ssh_args 'start arc-busy-clients.service'
 export STUB_SSH_FAIL_ON='enable --now arc-busy-clients.timer'
 stops "a timer that cannot be enabled" "ssh failed, or systemd could not enable the hourly timer"
-hasnt "a timer that cannot be enabled runs no check" ssh_args 'start arc-busy-clients.service'
+has "a timer that cannot be enabled still ran the first check" ssh_args 'start arc-busy-clients.service'
 export STUB_SSH_FAIL_ON='systemctl start arc-busy-clients.service'
-stops "a failed first check" "ssh failed, or the first check failed; journalctl -u arc-busy-clients on the node says why"
-unset STUB_SSH_FAIL_ON
+stops "a failed first check" "ssh failed, or the first check failed, so the hourly timer is left disabled there; journalctl -u arc-busy-clients on the node says why"
+has "a failed first check disables the timer" ssh_args 'disable --now arc-busy-clients.timer'
+hasnt "a failed first check never enables the timer" ssh_args 'enable --now arc-busy-clients.timer'
+expect_fail "an exclude entry the check refuses stops the install and says so" "n1: ssh failed, or the first check failed, so the hourly timer is left disabled there" all --exclude bad
+has "an exclude entry the check refuses leaves the timer disabled" ssh_args 'disable --now arc-busy-clients.timer'
+export STUB_SSH_FAIL_ALSO='disable --now arc-busy-clients.timer'
+stops "a failed first check whose timer cannot be disabled" "ssh failed, or the first check failed, and the hourly timer could not be disabled there; journalctl -u arc-busy-clients on the node says why"
+unset STUB_SSH_FAIL_ON STUB_SSH_FAIL_ALSO
 
 export STUB_SSH_FAIL_STDIN='systemd-analyze calendar'
 expect_fail "a time zone the node does not know stops the install and says so" "n1: ssh failed, /etc/tunneld/tunneld.env is not readable there, or it does not accept the time zone Europe/Zurich" all
