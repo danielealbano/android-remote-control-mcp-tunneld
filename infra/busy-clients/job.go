@@ -173,18 +173,9 @@ func (j *job) check(ctx context.Context) error {
 	}
 	fresh := j.newlyFlagged(usages, list)
 	if len(fresh) > 0 {
-		msgs := alert{node: j.Node, now: now.In(j.Location), rule: j.Rule, fresh: fresh}.
-			messages(telegram.Limits{Blocks: telegram.MessageBlocks, Runes: telegram.MessageRunes})
-		if err := j.send(ctx, msgs); err != nil {
-			return fmt.Errorf("send the alert: %w", err)
+		if err := j.sendAlert(ctx, now, fresh, &list); err != nil {
+			return err
 		}
-		for _, u := range fresh {
-			list.Addresses[u.address] = now.UTC()
-		}
-		if err := j.save(ctx, list); err != nil {
-			return fmt.Errorf("the alert was sent but the list of alerted addresses could not be saved, so the next run sends these addresses again: %w", err)
-		}
-		j.Logger.Info("sent the busy-clients alert", "node", j.Node, "messages", len(msgs), "new_addresses", len(fresh))
 	}
 	local := now.In(j.Location)
 	today := local.Format(dateLayout)
@@ -238,16 +229,27 @@ func (j *job) newlyFlagged(usages map[string]*usage, list alertedList) []*usage 
 	return out
 }
 
-func (j *job) send(ctx context.Context, msgs []string) error {
+func (j *job) sendAlert(ctx context.Context, now time.Time, fresh []*usage, list *alertedList) error {
+	msgs, rows := alert{node: j.Node, now: now.In(j.Location), rule: j.Rule, fresh: fresh}.
+		messages(telegram.Limits{Blocks: telegram.MessageBlocks, Runes: telegram.MessageRunes})
+	done := 0
 	for i, msg := range msgs {
 		if i > 0 {
 			if err := j.sleep(ctx, j.pause); err != nil {
-				return err
+				return fmt.Errorf("wait before part %d of %d of the alert: %w", i+1, len(msgs), err)
 			}
 		}
 		if err := j.Messages.Send(ctx, msg); err != nil {
-			return fmt.Errorf("message %d of %d: %w", i+1, len(msgs), err)
+			return fmt.Errorf("send part %d of %d of the alert: %w", i+1, len(msgs), err)
+		}
+		for _, u := range fresh[done : done+rows[i]] {
+			list.Addresses[u.address] = now.UTC()
+		}
+		done += rows[i]
+		if err := j.save(ctx, *list); err != nil {
+			return fmt.Errorf("part %d of %d of the alert was sent but its addresses could not be saved, so the next run sends them again: %w", i+1, len(msgs), err)
 		}
 	}
+	j.Logger.Info("sent the busy-clients alert", "node", j.Node, "messages", len(msgs), "new_addresses", len(fresh))
 	return nil
 }

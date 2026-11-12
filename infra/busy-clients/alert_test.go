@@ -53,9 +53,12 @@ func TestAlert_Messages(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msgs := alert{node: "n1", now: testNow.In(testZone), rule: r, fresh: tc.fresh}.messages(lim)
+			msgs, rows := alert{node: "n1", now: testNow.In(testZone), rule: r, fresh: tc.fresh}.messages(lim)
 			if len(msgs) != 1 || msgs[0] != tc.want {
 				t.Fatalf("messages = %q\nwant       %q", msgs, tc.want)
+			}
+			if len(rows) != 1 || rows[0] != len(tc.fresh) {
+				t.Fatalf("rows per message = %v, want [%d]", rows, len(tc.fresh))
 			}
 		})
 	}
@@ -64,17 +67,21 @@ func TestAlert_Messages(t *testing.T) {
 func TestDailyLine(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
+		name            string
 		node            string
 		alerted, onFile int
 		want            string
 	}{
-		{node: "n1", alerted: 1, onFile: 3, want: "<p>The busy-clients check is running (from n1): 1 address alerted in the last 24 hours, 3 on file.</p>"},
-		{node: "n1", alerted: 0, onFile: 0, want: "<p>The busy-clients check is running (from n1): 0 addresses alerted in the last 24 hours, 0 on file.</p>"},
-		{node: "<n&1>", alerted: 2, onFile: 2, want: "<p>The busy-clients check is running (from &lt;n&amp;1&gt;): 2 addresses alerted in the last 24 hours, 2 on file.</p>"},
+		{name: "one address", node: "n1", alerted: 1, onFile: 3, want: "<p>The busy-clients check is running (from n1): 1 address alerted in the last 24 hours, 3 on file.</p>"},
+		{name: "no address", node: "n1", alerted: 0, onFile: 0, want: "<p>The busy-clients check is running (from n1): 0 addresses alerted in the last 24 hours, 0 on file.</p>"},
+		{name: "the node name is escaped", node: "<n&1>", alerted: 2, onFile: 2, want: "<p>The busy-clients check is running (from &lt;n&amp;1&gt;): 2 addresses alerted in the last 24 hours, 2 on file.</p>"},
 	}
 	for _, tc := range tests {
-		if got := dailyLine(tc.node, tc.alerted, tc.onFile); got != tc.want {
-			t.Errorf("dailyLine(%q, %d, %d) = %q, want %q", tc.node, tc.alerted, tc.onFile, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dailyLine(tc.node, tc.alerted, tc.onFile); got != tc.want {
+				t.Fatalf("dailyLine(%q, %d, %d) = %q, want %q", tc.node, tc.alerted, tc.onFile, got, tc.want)
+			}
+		})
 	}
 }

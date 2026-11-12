@@ -21,7 +21,7 @@ type alert struct {
 	fresh []*usage
 }
 
-func (r alert) messages(lim telegram.Limits) []string {
+func (r alert) messages(lim telegram.Limits) ([]string, []int) {
 	loc := r.now.Location()
 	n := len(r.fresh)
 	lead := []string{
@@ -41,7 +41,7 @@ func (r alert) messages(lim telegram.Limits) []string {
 			telegram.Text(strconv.Itoa(len(u.fingerprints))),
 		}
 	}
-	return telegram.Pack(lead, []telegram.Section{{
+	return telegram.PackRows(lead, []telegram.Section{{
 		Heading: "New busy clients",
 		Columns: []string{"Address", "Connections", "Tunnels", "First", "Last", "TLS fingerprints"},
 		Rows:    rows,

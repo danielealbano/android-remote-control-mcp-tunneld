@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,9 +34,25 @@ func TestPack(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msgs := Pack([]string{"intro"}, tc.sections, tc.lim)
-			if len(msgs) != tc.want {
-				t.Fatalf("got %d messages, want %d: %q", len(msgs), tc.want, msgs)
+			msgs, counts := PackRows([]string{"intro"}, tc.sections, tc.lim)
+			if len(msgs) != tc.want || len(counts) != len(msgs) {
+				t.Fatalf("got %d messages and %d row counts, want %d: %q", len(msgs), len(counts), tc.want, msgs)
+			}
+			if plain := Pack([]string{"intro"}, tc.sections, tc.lim); !slices.Equal(plain, msgs) {
+				t.Fatalf("Pack and PackRows disagree: %q vs %q", plain, msgs)
+			}
+			total, packed := 0, 0
+			for _, s := range tc.sections {
+				total += len(s.Rows)
+			}
+			for i, m := range msgs {
+				if n := strings.Count(m, "<tr><td>"); n != counts[i] {
+					t.Fatalf("message %d holds %d rows but its count is %d", i+1, n, counts[i])
+				}
+				packed += counts[i]
+			}
+			if packed != total {
+				t.Fatalf("the row counts add up to %d, want %d", packed, total)
 			}
 			rows := map[string]int{}
 			for i, m := range msgs {
@@ -94,15 +111,44 @@ func TestPack_LinkCell(t *testing.T) {
 	}
 }
 
-func TestClipAndDisplay(t *testing.T) {
+func TestClip(t *testing.T) {
 	t.Parallel()
-	if got := Clip("abcdef", 3); got != "abc…" {
-		t.Errorf("Clip = %q, want %q", got, "abc…")
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "a long text is cut and marked", in: "abcdef", want: "abc…"},
+		{name: "a text of the limit is unchanged", in: "abc", want: "abc"},
+		{name: "runes, not bytes, are counted", in: "äöüß", want: "äöü…"},
 	}
-	if got := Clip("abc", 3); got != "abc" {
-		t.Errorf("Clip of a short text = %q, want it unchanged", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Clip(tc.in, 3); got != tc.want {
+				t.Fatalf("Clip(%q, 3) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
-	if got := Display("a\n\u202eb\xff"); got != "a\uFFFD\uFFFDb\uFFFD" {
-		t.Errorf("Display = %q", got)
+}
+
+func TestDisplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain text is unchanged", in: "dev.example.app", want: "dev.example.app"},
+		{name: "control and direction characters are replaced", in: "a\n\u202eb", want: "a\uFFFD\uFFFDb"},
+		{name: "invalid UTF-8 is replaced", in: "b\xff", want: "b\uFFFD"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := Display(tc.in); got != tc.want {
+				t.Fatalf("Display(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

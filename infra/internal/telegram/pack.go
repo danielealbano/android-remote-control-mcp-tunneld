@@ -64,23 +64,30 @@ func (s Section) render() (head string, blocks int, rows []string) {
 }
 
 func Pack(lead []string, sections []Section, lim Limits) []string {
+	msgs, _ := PackRows(lead, sections, lim)
+	return msgs
+}
+
+func PackRows(lead []string, sections []Section, lim Limits) ([]string, []int) {
 	escaped := make([]string, len(lead))
 	for i, l := range lead {
 		escaped[i] = html.EscapeString(l)
 	}
 	intro := strings.Join(escaped, "<br>")
 	var bodies []string
+	var counts []int
 	var cur strings.Builder
-	var blocks, runes, chunks int
+	var blocks, runes, chunks, held int
 	start := func() {
 		cur.Reset()
-		blocks, runes, chunks = 1, partRoom+utf8.RuneCountInString("<p></p>"), 0
+		blocks, runes, chunks, held = 1, partRoom+utf8.RuneCountInString("<p></p>"), 0, 0
 		if len(bodies) == 0 {
 			runes += utf8.RuneCountInString(intro)
 		}
 	}
 	flush := func() {
 		bodies = append(bodies, cur.String())
+		counts = append(counts, held)
 		start()
 	}
 	start()
@@ -111,6 +118,7 @@ func Pack(lead []string, sections []Section, lim Limits) []string {
 			cur.WriteString(tableEnd)
 			blocks, runes = b, n
 			chunks++
+			held += k
 			rows = rows[k:]
 			if len(rows) > 0 {
 				flush()
@@ -118,6 +126,7 @@ func Pack(lead []string, sections []Section, lim Limits) []string {
 		}
 	}
 	bodies = append(bodies, cur.String())
+	counts = append(counts, held)
 	msgs := make([]string, len(bodies))
 	for i, body := range bodies {
 		var first []string
@@ -129,7 +138,7 @@ func Pack(lead []string, sections []Section, lim Limits) []string {
 		}
 		msgs[i] = "<p>" + strings.Join(first, "<br>") + "</p>" + body
 	}
-	return msgs
+	return msgs, counts
 }
 
 func Clip(s string, n int) string {

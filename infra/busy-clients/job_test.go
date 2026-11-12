@@ -124,12 +124,7 @@ func TestJob_AIAndExcludedAddressesAreNeverAlerted(t *testing.T) {
 func TestJob_ALongAlertGoesOutInNumberedParts(t *testing.T) {
 	t.Parallel()
 	h := newHarness()
-	h.rule = rule{connections: 1, spreadConnections: 1, spreadTunnels: 1}
-	var events []store.Event
-	for i := range 600 {
-		events = append(events, publicStart(fmt.Sprintf("10.0.%d.%d", i/250, i%250+1), "t1", "", testNow.Add(-time.Hour)))
-	}
-	h.store.addLog(t, testNow.Add(-2*time.Hour), events...)
+	manyBusy(t, h, 600)
 	if err := h.job(t).run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -147,11 +142,94 @@ func TestJob_ALongAlertGoesOutInNumberedParts(t *testing.T) {
 		}
 		rows += strings.Count(m, "<tr><td>")
 	}
-	if rows != 600 || len(h.pauses) != len(sent)-1 {
-		t.Fatalf("rows %d, pauses %d; want 600 rows and a pause between parts", rows, len(h.pauses))
+	if rows != 600 || len(h.pauses) != len(sent)-1 || h.store.puts != len(sent) {
+		t.Fatalf("rows %d, pauses %d, puts %d; want 600 rows, a pause between parts and a save after each", rows, len(h.pauses), h.store.puts)
 	}
 	if l := h.store.state(t); len(l.Addresses) != 600 {
 		t.Fatalf("saved %d addresses, want 600", len(l.Addresses))
+	}
+}
+
+func manyBusy(t *testing.T, h *harness, n int) {
+	t.Helper()
+	h.rule = rule{connections: 1, spreadConnections: 1, spreadTunnels: 1}
+	var events []store.Event
+	for i := range n {
+		events = append(events, publicStart(fmt.Sprintf("10.0.%d.%d", i/250, i%250+1), "t1", "", testNow.Add(-time.Hour)))
+	}
+	h.store.addLog(t, testNow.Add(-2*time.Hour), events...)
+}
+
+func addressesIn(msgs []string) map[string]int {
+	seen := map[string]int{}
+	for _, m := range msgs {
+		for _, cell := range strings.Split(m, "<tr><td><a href=")[1:] {
+			start := strings.Index(cell, ">") + 1
+			seen[cell[start:start+strings.Index(cell[start:], "<")]]++
+		}
+	}
+	return seen
+}
+
+func TestJob_ALaterPartFailingKeepsTheSentParts(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	manyBusy(t, h, 600)
+	h.messages.fail = func(text string) error {
+		if strings.HasPrefix(text, "<p>Part 2 of") {
+			return errors.New("broke")
+		}
+		return nil
+	}
+	err := h.job(t).run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "send part 2 of") {
+		t.Fatalf("err = %v", err)
+	}
+	first := h.messages.sent()
+	if len(first) != 1 || len(h.store.state(t).Addresses) != len(addressesIn(first)) || h.store.puts != 1 {
+		t.Fatalf("sent %d messages, saved %d addresses in %d puts", len(first), len(h.store.state(t).Addresses), h.store.puts)
+	}
+	h.messages.fail = nil
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	seen := addressesIn(h.messages.sent())
+	if len(seen) != 600 || len(h.store.state(t).Addresses) != 600 {
+		t.Fatalf("%d addresses sent, %d saved; want all 600", len(seen), len(h.store.state(t).Addresses))
+	}
+	for addr, n := range seen {
+		if n != 1 {
+			t.Fatalf("%s was sent %d times", addr, n)
+		}
+	}
+}
+
+func TestJob_APauseCutShortKeepsTheSentParts(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	manyBusy(t, h, 600)
+	h.opts = []jobOption{withPause(time.Second, func(context.Context, time.Duration) error { return context.DeadlineExceeded })}
+	err := h.job(t).run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "wait before part 2 of") {
+		t.Fatalf("err = %v", err)
+	}
+	sent := h.messages.sent()
+	if len(sent) != 1 || len(h.store.state(t).Addresses) != len(addressesIn(sent)) {
+		t.Fatalf("sent %d messages, saved %d addresses", len(sent), len(h.store.state(t).Addresses))
+	}
+}
+
+func TestJob_AStoredListWithoutAddresses(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.objects[stateKey] = []byte(`{"last_daily":"2026-11-12"}`)
+	h.store.addLog(t, testNow.Add(-time.Hour), busy("192.0.2.7", 500, 1, testNow.Add(-50*time.Minute))...)
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	l := h.store.state(t)
+	if len(l.Addresses) != 1 || l.LastDaily != "2026-11-12" || len(h.messages.sent()) != 1 {
+		t.Fatalf("state = %+v, messages %d", l, len(h.messages.sent()))
 	}
 }
 
@@ -244,8 +322,8 @@ func TestJob_Failures(t *testing.T) {
 		{name: "the alerted list cannot be decoded", setup: func(h *harness) { h.store.objects[stateKey] = []byte("{") }, wantErr: "decode the list of alerted addresses busy-clients/alerted.json"},
 		{name: "the ranges cannot be loaded", setup: func(h *harness) { h.rangesErr = broke }, wantErr: "load the ChatGPT and Claude address ranges: broke"},
 		{name: "the logs cannot be listed", setup: func(h *harness) { h.store.listErr = broke }, wantErr: "list the connection logs under"},
-		{name: "the alert cannot be sent", setup: func(h *harness) { h.messages.fail = func(string) error { return broke } }, wantErr: "send the alert: message 1 of 1: broke"},
-		{name: "the list cannot be saved after the alert", setup: func(h *harness) { h.store.putErr = broke }, wantErr: "the alert was sent but the list of alerted addresses could not be saved, so the next run sends these addresses again: broke"},
+		{name: "the alert cannot be sent", setup: func(h *harness) { h.messages.fail = func(string) error { return broke } }, wantErr: "send part 1 of 1 of the alert: broke"},
+		{name: "the list cannot be saved after the alert", setup: func(h *harness) { h.store.putErr = broke }, wantErr: "part 1 of 1 of the alert was sent but its addresses could not be saved, so the next run sends them again: broke"},
 		{name: "the daily line cannot be sent", setup: func(h *harness) {
 			h.dailyHour = 0
 			h.messages.fail = dailyFails
