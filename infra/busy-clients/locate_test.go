@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -67,7 +69,7 @@ func TestCountriesOf(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			a := netip.MustParseAddr(tc.addr)
-			got, _, err := countriesOf(path, []netip.Addr{a, a})
+			got, _, err := countriesOf(openFile, path, []netip.Addr{a, a})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +83,7 @@ func TestCountriesOf(t *testing.T) {
 func TestCountriesOf_ManyAddressesInAnyOrder(t *testing.T) {
 	t.Parallel()
 	addrs := []netip.Addr{netip.MustParseAddr("2001:db8:1:2::5"), netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("198.51.100.200"), netip.MustParseAddr("192.0.2.7")}
-	got, skipped, err := countriesOf(writeCountries(t, testCountries), addrs)
+	got, skipped, err := countriesOf(openFile, writeCountries(t, testCountries), addrs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +114,7 @@ func TestCountriesOf_Failures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, _, err := countriesOf(tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			if _, _, err := countriesOf(openFile, tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
@@ -141,6 +143,60 @@ func TestOwnerEndpoint(t *testing.T) {
 			t.Parallel()
 			if _, err := ownerEndpoint(tc.raw); (err != nil) != tc.wantErr {
 				t.Fatalf("ownerEndpoint(%q) = %v, want an error: %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func mustLocator(t *testing.T, client *http.Client, logger *slog.Logger, countryFile string, owners *url.URL, opts ...locatorOption) locator {
+	t.Helper()
+	l, err := newLocator(client, logger, countryFile, owners, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
+type failingClose struct{ io.Reader }
+
+func (failingClose) Close() error { return errors.New("close broke") }
+
+func TestCountriesOf_ACloseErrorDropsTheCountries(t *testing.T) {
+	t.Parallel()
+	open := func(string) (io.ReadCloser, error) {
+		return failingClose{strings.NewReader("192.0.2.0,192.0.2.255,XX\n")}, nil
+	}
+	got, _, err := countriesOf(open, "countries.csv", []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	if got != nil || err == nil || !strings.Contains(err.Error(), "close the DB-IP country file countries.csv: close broke") {
+		t.Fatalf("countriesOf = %v, %v; want no countries and the close error", got, err)
+	}
+	base := ownerServer(t, func(w http.ResponseWriter, _ *http.Request) { okOwner(t, w, "X") })
+	logs := &logBuffer{}
+	places := mustLocator(t, &http.Client{Timeout: 5 * time.Second}, testLogger(logs), "countries.csv", base, withOpener(open))(
+		context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	if places[0].country != unknownPlace || !strings.Contains(logs.String(), "the DB-IP country file could not be read, so the alert shows every country as unknown") {
+		t.Fatalf("places = %+v, logs = %s", places, logs.String())
+	}
+}
+
+func TestNewLocator_RefusesBadOptions(t *testing.T) {
+	t.Parallel()
+	owners, err := ownerEndpoint("https://stat.example.test/data.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		opt  locatorOption
+	}{
+		{name: "a budget that is not positive", opt: withBudget(0)},
+		{name: "no opener", opt: withOpener(nil)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := newLocator(http.DefaultClient, testLogger(&logBuffer{}), "countries.csv", owners, tc.opt); err == nil {
+				t.Fatal("want an error")
 			}
 		})
 	}
@@ -190,7 +246,9 @@ func TestLookupOwner(t *testing.T) {
 		{name: "control characters in the status are replaced", code: 200, body: `{"status":"err\u0007or","data":{}}`, wantErr: `status "err` + "\uFFFD" + `or"`},
 		{name: "control characters in the explanation are replaced", code: 400, body: `{"status":"error","messages":[["error","a\u202eb"]]}`, wantErr: "error: a\uFFFDb"},
 		{name: "a long status is clipped", code: 200, body: `{"status":"` + strings.Repeat("s", 300) + `","data":{}}`, wantErr: `status "` + strings.Repeat("s", ownerRunes) + `…"`},
-		{name: "an answer that is not JSON", code: 200, body: "<html>", wantErr: "decode the network owner of 192.0.2.7"},
+		{name: "an answer that is not JSON", code: 200, body: "<html>under maintenance</html>", wantErr: "decode the network owner of 192.0.2.7: invalid character '<' looking for beginning of value; the answer was: <html>under maintenance</html>"},
+		{name: "an answer without the announced field keeps RIPEstat's explanation", code: 200, body: `{"status":"ok","messages":[["warning","not available now"]],"data":{}}`, wantErr: `did not say whether the address is announced (status "ok": warning: not available now)`},
+		{name: "an error answer without messages shows its body", code: 503, body: `{"status":"maintenance","data":{}}`, wantErr: `answered with HTTP status 503 and status "maintenance": {"status":"maintenance","data":{}}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,7 +327,7 @@ func TestNewLocator_GivesCountriesAndOwners(t *testing.T) {
 		}
 	})
 	logs := &logBuffer{}
-	locate := newLocator(&http.Client{Timeout: 5 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base, ownerBudget)
+	locate := mustLocator(t, &http.Client{Timeout: 5 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base)
 	got := locate(context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("203.0.113.5")})
 	want := []place{
 		{country: "XX", network: "AS64500 Owner of 192.0.2.7"},
@@ -294,7 +352,7 @@ func TestNewLocator_WithoutTheCountryFileShowsUnknownCountries(t *testing.T) {
 	base := ownerServer(t, func(w http.ResponseWriter, _ *http.Request) { okOwner(t, w, "X") })
 	logs := &logBuffer{}
 	missing := filepath.Join(t.TempDir(), "none.csv")
-	got := newLocator(&http.Client{Timeout: 5 * time.Second}, testLogger(logs), missing, base, ownerBudget)(context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	got := mustLocator(t, &http.Client{Timeout: 5 * time.Second}, testLogger(logs), missing, base)(context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	if !reflect.DeepEqual(got, []place{{country: unknownPlace, network: "AS64500 X"}}) {
 		t.Fatalf("places = %+v", got)
 	}
@@ -339,7 +397,7 @@ func TestNewLocator_LooksUpAtMostFourAtOnce(t *testing.T) {
 	countries := writeCountries(t, testCountries)
 	done := make(chan []place, 1)
 	go func() {
-		done <- newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), countries, base, ownerBudget)(context.Background(), addrs)
+		done <- mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), countries, base)(context.Background(), addrs)
 	}()
 	select {
 	case <-reached:
@@ -379,7 +437,7 @@ func TestNewLocator_TheBudgetEndsTheLookups(t *testing.T) {
 		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)})
 	}
 	logs := &logBuffer{}
-	got := newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base, 100*time.Millisecond)(context.Background(), addrs)
+	got := mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base, withBudget(100*time.Millisecond))(context.Background(), addrs)
 	for i, p := range got {
 		if p.network != unknownPlace || p.country != "XX" {
 			t.Fatalf("address %d: %+v", i, p)
@@ -402,7 +460,7 @@ func TestNewLocator_AStoppedRunSaysSo(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(100*time.Millisecond, cancel)
 	logs := &logBuffer{}
-	got := newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base, ownerBudget)(
+	got := mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base)(
 		ctx, []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	if got[0].network != unknownPlace {
 		t.Fatalf("places = %+v", got)
@@ -418,7 +476,7 @@ func TestNewLocator_LeavesHalfTheRunForSending(t *testing.T) {
 	base := ownerServer(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), writeCountries(t, testCountries), base, ownerBudget)(
+	mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), writeCountries(t, testCountries), base)(
 		ctx, []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	deadline, _ := ctx.Deadline()
 	if left := time.Until(deadline); left < 800*time.Millisecond {
@@ -445,7 +503,7 @@ func TestNewLocator_CountsTheSkippedRows(t *testing.T) {
 			t.Parallel()
 			base := ownerServer(t, func(w http.ResponseWriter, _ *http.Request) { okOwner(t, w, "X") })
 			logs := &logBuffer{}
-			got := newLocator(&http.Client{Timeout: 5 * time.Second}, testLogger(logs), writeCountries(t, tc.file), base, ownerBudget)(
+			got := mustLocator(t, &http.Client{Timeout: 5 * time.Second}, testLogger(logs), writeCountries(t, tc.file), base)(
 				context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 			if got[0].country != "XX" {
 				t.Fatalf("places = %+v", got)
@@ -494,7 +552,7 @@ func TestNewLocator_AnOrdinaryErrorAtTheEndIsAFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			logs := &logBuffer{}
-			got := newLocator(&http.Client{Transport: failsWhenDone{}}, testLogger(logs), writeCountries(t, testCountries), owners, tc.budget)(
+			got := mustLocator(t, &http.Client{Transport: failsWhenDone{}}, testLogger(logs), writeCountries(t, testCountries), owners, withBudget(tc.budget))(
 				tc.ctx(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 			if got[0].network != unknownPlace {
 				t.Fatalf("places = %+v", got)
@@ -520,7 +578,7 @@ func TestNewLocator_ALookupThatPanicsShowsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := newLocator(&http.Client{Transport: panickingTransport{}}, testLogger(logs), writeCountries(t, testCountries), owners, ownerBudget)(
+	got := mustLocator(t, &http.Client{Transport: panickingTransport{}}, testLogger(logs), writeCountries(t, testCountries), owners)(
 		context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	if !reflect.DeepEqual(got, []place{{country: "XX", network: unknownPlace}}) {
 		t.Fatalf("places = %+v", got)

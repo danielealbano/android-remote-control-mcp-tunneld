@@ -119,13 +119,17 @@ func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) er
 		return err
 	}
 	client := &http.Client{Timeout: 30 * time.Second}
+	locate, err := newLocator(client, logger.With("node", c.Node), c.CountryFile, owners)
+	if err != nil {
+		return err
+	}
 	j, err := newJob(jobConfig{
 		Store:    bucket.New(bcfg),
 		Messages: msgs,
 		Ranges: func(ctx context.Context) ([]netip.Prefix, error) {
 			return loadRanges(ctx, client, logger.With("node", c.Node), c.OpenAIRanges, c.AnthropicRanges)
 		},
-		Locate:    newLocator(client, logger.With("node", c.Node), c.CountryFile, owners, ownerBudget),
+		Locate:    locate,
 		Exclude:   c.Exclude,
 		Rule:      rule{connections: c.Connections, spreadConnections: c.SpreadConnections, spreadTunnels: c.SpreadTunnels},
 		DailyHour: c.DailyHour,

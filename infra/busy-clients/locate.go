@@ -43,8 +43,12 @@ type skippedRows struct {
 
 func (s skippedRows) total() int { return s.malformed + s.badAddress + s.badRange + s.badCountry }
 
-func countriesOf(path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
-	f, err := os.Open(path)
+type opener func(path string) (io.ReadCloser, error)
+
+func openFile(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+func countriesOf(open opener, path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
+	f, err := open(path)
 	if err != nil {
 		return nil, skipped, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
 	}
@@ -147,10 +151,11 @@ func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a neti
 			a, code, telegram.Clip(telegram.Display(v.Status), ownerRunes), ripeExplanation(v.Messages, body, derr))
 	}
 	if derr != nil {
-		return "", fmt.Errorf("decode the network owner of %s: %w", a, derr)
+		return "", fmt.Errorf("decode the network owner of %s: %w; the answer was: %s", a, derr, ripeExplanation(nil, body, derr))
 	}
 	if v.Data.Announced == nil {
-		return "", fmt.Errorf("the network owner lookup of %s did not say whether the address is announced", a)
+		return "", fmt.Errorf("the network owner lookup of %s did not say whether the address is announced (status %q: %s)",
+			a, telegram.Clip(telegram.Display(v.Status), ownerRunes), ripeExplanation(v.Messages, body, nil))
 	}
 	if !*v.Data.Announced || len(v.Data.ASNs) == 0 {
 		return "not announced", nil
@@ -192,13 +197,47 @@ func guardedLookup(ctx context.Context, logger *slog.Logger, client *http.Client
 	return lookupOwner(rctx, client, owners, a)
 }
 
-func newLocator(client *http.Client, logger *slog.Logger, countryFile string, owners *url.URL, budget time.Duration) locator {
+type locatorSettings struct {
+	budget time.Duration
+	open   opener
+}
+
+type locatorOption func(*locatorSettings) error
+
+func withBudget(d time.Duration) locatorOption {
+	return func(s *locatorSettings) error {
+		if d <= 0 {
+			return fmt.Errorf("the time for the network owner lookups %s is not positive", d)
+		}
+		s.budget = d
+		return nil
+	}
+}
+
+func withOpener(open opener) locatorOption {
+	return func(s *locatorSettings) error {
+		if open == nil {
+			return errors.New("the country file opener is missing")
+		}
+		s.open = open
+		return nil
+	}
+}
+
+func newLocator(client *http.Client, logger *slog.Logger, countryFile string, owners *url.URL, opts ...locatorOption) (locator, error) {
+	settings := locatorSettings{budget: ownerBudget, open: openFile}
+	for _, opt := range opts {
+		if err := opt(&settings); err != nil {
+			return nil, err
+		}
+	}
+	budget, open := settings.budget, settings.open
 	return func(ctx context.Context, addrs []netip.Addr) []place {
 		out := make([]place, len(addrs))
 		for i := range out {
 			out[i] = place{country: unknownPlace, network: unknownPlace}
 		}
-		countries, skipped, err := countriesOf(countryFile, addrs)
+		countries, skipped, err := countriesOf(open, countryFile, addrs)
 		if err != nil {
 			logger.Warn("the DB-IP country file could not be read, so the alert shows every country as unknown", "file", countryFile, "err", err)
 		}
@@ -252,5 +291,5 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 				"addresses", stopped, "of", len(addrs))
 		}
 		return out
-	}
+	}, nil
 }
