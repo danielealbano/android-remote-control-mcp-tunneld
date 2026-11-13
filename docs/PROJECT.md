@@ -307,22 +307,24 @@ sorted by connections — the address linking to its ipinfo.io page, its country
 tunneld's country bans use (`--country-file`, read only when an alert has new addresses), the network that announces it
 from RIPEstat's prefix-overview (`--owner-lookup`, an http or https address checked at start; 4 lookups at a time, for
 at most 30 s or half the run's remaining time, whichever is shorter, so the alert keeps time to go out; a missing or
-unreadable country file and each failed lookup show `unknown` and are logged as a warning, and the lookups the time cut
-off are counted in one warning), connections, tunnels (a count, never names), first and last connection and the number
-of TLS fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are added to
-`busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run cut
-short goes on with the others at the next run. The first run of each day at or after `BUSY_CLIENTS_DAILY_HOUR` (in
+unreadable country file, a row whose country is not two letters (skipped), and each failed lookup show `unknown` and are
+logged as a warning with RIPEstat's own explanation when it gives one, and the lookups the time cut off, or a stopped
+run interrupted, are counted in one warning), connections, tunnels (a count, never names), first and last connection and
+the number of TLS fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are
+added to `busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run
+cut short goes on with the others at the next run. The first run of each day at or after `BUSY_CLIENTS_DAILY_HOUR` (in
 `BUSY_CLIENTS_TIMEZONE`) also sends one line saying the check is running and how many addresses it alerted in the last
 24 hours, and records the day in the same file, so a day without that line means no run got that far. A run with nothing
 new and no daily line due sends nothing and writes nothing. A failed run (it has 120 s) sends a message saying so,
 including a value the check refuses (an exclude entry that is not an address or a CIDR range, or is an IPv4-mapped IPv6
 range, an unknown or empty time zone or `Local`, a daily hour outside 0–23, a rule number that is not positive, an empty
-`TUNNELD_S3_ENDPOINT`, `TUNNELD_S3_BUCKET`, `TUNNELD_S3_ACCESS_KEY` or `TUNNELD_S3_SECRET_KEY`); a setting that is
-missing or cannot be parsed at all (such as a daily hour of `08`), or a Telegram that is not set up, is only logged, and
-the missing daily line shows it. When a part of the alert or the daily line went out but its save failed, the next run
-sends it again. A line of a log that is not a connection event (including a public start without its time or tunnel), or
-a log listed for the run that is gone when it is read, is logged as a warning and skipped; a line of 1 MiB or longer
-fails the run. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
+`TUNNELD_S3_ENDPOINT`, `TUNNELD_S3_BUCKET`, `TUNNELD_S3_ACCESS_KEY` or `TUNNELD_S3_SECRET_KEY`, an empty
+`--country-file`, an `--owner-lookup` that is not an http or https address with a host); a setting that is missing or
+cannot be parsed at all (such as a daily hour of `08`), or a Telegram that is not set up, is only logged, and the
+missing daily line shows it. When a part of the alert or the daily line went out but its save failed, the next run sends
+it again. A line of a log that is not a connection event (including a public start without its time or tunnel), or a log
+listed for the run that is gone when it is read, is logged as a warning and skipped; a line of 1 MiB or longer fails the
+run. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`), the rest from
 `/etc/tunneld/busy-clients.env` (`busy-clients.env.example`). `infra/busy-clients/install.sh` first checks the whole
 config file (a bad line, no node, or two run minutes less than 30 minutes apart installs nothing), then installs it on
 each node with its run minute, runs it once, and enables the hourly timer only when that check succeeds: a failed first
