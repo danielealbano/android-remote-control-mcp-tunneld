@@ -109,29 +109,37 @@ func parseRange(s string) (netip.Prefix, error) {
 	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
-func fetch(ctx context.Context, client *http.Client, url string) (_ []byte, err error) {
+func fetch(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	code, body, err := get(ctx, client, url)
+	if err != nil {
+		return nil, err
+	}
+	if code != http.StatusOK {
+		return nil, fmt.Errorf("fetch %s: status %d", url, code)
+	}
+	return body, nil
+}
+
+func get(ctx context.Context, client *http.Client, url string) (_ int, _ []byte, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build the request for %s: %w", url, err)
+		return 0, nil, fmt.Errorf("build the request for %s: %w", url, err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch %s: %w", url, err)
+		return 0, nil, fmt.Errorf("fetch %s: %w", url, err)
 	}
 	defer func() {
 		if cerr := resp.Body.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close %s: %w", url, cerr))
 		}
 	}()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRangeBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", url, err)
+		return 0, nil, fmt.Errorf("read %s: %w", url, err)
 	}
 	if len(body) > maxRangeBytes {
-		return nil, fmt.Errorf("read %s: larger than %d bytes", url, maxRangeBytes)
+		return 0, nil, fmt.Errorf("read %s: larger than %d bytes", url, maxRangeBytes)
 	}
-	return body, nil
+	return resp.StatusCode, body, nil
 }

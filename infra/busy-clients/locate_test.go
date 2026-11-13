@@ -23,6 +23,10 @@ const testCountries = "start_ip,end_ip,country\n" +
 	"2001:db8::,2001:db8:ffff:ffff:ffff:ffff:ffff:ffff,YY\n" +
 	"203.0.113.10,203.0.113.0,XX\n" +
 	"10.0.0.0,2001:db9::,YY\n" +
+	"203.0.113.20,203.0.113.20,X1\n" +
+	"203.0.113.30,203.0.113.30,\n" +
+	"203.0.113.40,203.0.113.49,XX\n" +
+	"203.0.113.45,203.0.113.45,YY\n" +
 	"\"broken\n"
 
 func writeCountries(t *testing.T, body string) string {
@@ -49,6 +53,9 @@ func TestCountriesOf(t *testing.T) {
 		{name: "a row with two fields is skipped", addr: "203.0.113.5", want: ""},
 		{name: "an IPv6 address", addr: "2001:db8:1:2::5", want: "YY"},
 		{name: "an IPv6 address before any IPv6 range", addr: "::1", want: ""},
+		{name: "a row whose country is not two letters is skipped", addr: "203.0.113.20", want: ""},
+		{name: "a row whose country is empty is skipped", addr: "203.0.113.30", want: ""},
+		{name: "the first of two overlapping rows wins", addr: "203.0.113.45", want: "XX"},
 	}
 	path := writeCountries(t, testCountries)
 	for _, tc := range tests {
@@ -63,6 +70,19 @@ func TestCountriesOf(t *testing.T) {
 				t.Fatalf("countriesOf(%s) = %q (found %v), want %q", tc.addr, code, ok, tc.want)
 			}
 		})
+	}
+}
+
+func TestCountriesOf_ManyAddressesInAnyOrder(t *testing.T) {
+	t.Parallel()
+	addrs := []netip.Addr{netip.MustParseAddr("2001:db8:1:2::5"), netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("198.51.100.200"), netip.MustParseAddr("192.0.2.7")}
+	got, err := countriesOf(writeCountries(t, testCountries), addrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[netip.Addr]string{addrs[0]: "YY", addrs[1]: "YY", addrs[3]: "XX"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("countries = %v, want %v", got, want)
 	}
 }
 
@@ -147,9 +167,10 @@ func TestLookupOwner(t *testing.T) {
 		{name: "announced without a network", code: 200, body: `{"status":"ok","data":{"announced":true,"asns":[]}}`, want: "not announced"},
 		{name: "control characters are replaced", code: 200, body: `{"status":"ok","data":{"announced":true,"asns":[{"asn":64500,"holder":"A\u202eB"}]}}`, want: "AS64500 A\uFFFDB"},
 		{name: "a long name is clipped", code: 200, body: `{"status":"ok","data":{"announced":true,"asns":[{"asn":64500,"holder":"` + long + `"}]}}`, want: ("AS64500 " + long)[:ownerRunes] + "…"},
-		{name: "a status that is not ok", code: 200, body: `{"status":"maintenance","data":{}}`, wantErr: `answered with status "maintenance"`},
+		{name: "a status that is not ok", code: 200, body: `{"status":"maintenance","messages":[["info","down for maintenance"]],"data":{}}`, wantErr: `answered with HTTP status 200 and status "maintenance": info: down for maintenance`},
+		{name: "an error answer with RIPEstat's explanation", code: 400, body: `{"status":"error","messages":[["error","bad resource"],["info","see the docs"]]}`, wantErr: `answered with HTTP status 400 and status "error": error: bad resource; info: see the docs`},
 		{name: "an answer without the announced field", code: 200, body: `{"status":"ok","data":{"asns":[]}}`, wantErr: "did not say whether the address is announced"},
-		{name: "an answer that is not 200", code: 503, body: "busy", wantErr: "status 503"},
+		{name: "an answer that is not 200 and not JSON", code: 503, body: "busy\nnow", wantErr: `answered with HTTP status 503 and status "": busy` + "\uFFFD" + "now"},
 		{name: "an answer that is not JSON", code: 200, body: "<html>", wantErr: "decode the network owner of 192.0.2.7"},
 	}
 	for _, tc := range tests {
@@ -349,6 +370,23 @@ func TestNewLocator_TheBudgetEndsTheLookups(t *testing.T) {
 	}
 }
 
+func TestNewLocator_AStoppedRunSaysSo(t *testing.T) {
+	t.Parallel()
+	base := ownerServer(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	logs := &logBuffer{}
+	got := newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(logs), writeCountries(t, testCountries), base, ownerBudget)(
+		ctx, []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	if got[0].network != unknownPlace {
+		t.Fatalf("places = %+v", got)
+	}
+	if !strings.Contains(logs.String(), `level=WARN msg="the run was stopped before the network owner lookups finished, so some addresses show their owner as unknown" addresses=1 of=1`) ||
+		strings.Contains(logs.String(), "ran out") || strings.Contains(logs.String(), "could not be looked up") {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
 func TestNewLocator_LeavesHalfTheRunForSending(t *testing.T) {
 	t.Parallel()
 	base := ownerServer(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
@@ -380,9 +418,18 @@ func TestNewLocator_ALookupThatPanicsShowsUnknown(t *testing.T) {
 	if !reflect.DeepEqual(got, []place{{country: "XX", network: unknownPlace}}) {
 		t.Fatalf("places = %+v", got)
 	}
-	for _, want := range []string{"level=ERROR", `msg="` + lookupCrashMsg + `"`, "address=192.0.2.7", "panic=boom", "looking up the network owner of 192.0.2.7 crashed"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("logs = %s, want %q in them", logs.String(), want)
+	var crash string
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, "level=ERROR") {
+			crash = line
 		}
+	}
+	for _, want := range []string{`msg="` + lookupCrashMsg + `"`, "address=192.0.2.7", "panic=boom"} {
+		if !strings.Contains(crash, want) {
+			t.Fatalf("the error line %q lacks %q", crash, want)
+		}
+	}
+	if !strings.Contains(logs.String(), "looking up the network owner of 192.0.2.7 crashed") {
+		t.Fatalf("logs = %s", logs.String())
 	}
 }

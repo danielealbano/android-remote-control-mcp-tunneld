@@ -72,11 +72,15 @@ func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, err 
 		if e1 != nil || e2 != nil || start.BitLen() != end.BitLen() || end.Less(start) {
 			continue
 		}
+		code := strings.ToUpper(strings.TrimSpace(rec[2]))
+		if !isCountryCode(code) {
+			continue
+		}
 		valid++
 		i, _ := slices.BinarySearchFunc(sorted, start, netip.Addr.Compare)
 		for ; i < len(sorted) && !end.Less(sorted[i]); i++ {
 			if _, done := found[sorted[i]]; !done {
-				found[sorted[i]] = strings.ToUpper(strings.TrimSpace(rec[2]))
+				found[sorted[i]] = code
 			}
 		}
 	}
@@ -84,6 +88,10 @@ func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, err 
 		return nil, fmt.Errorf("the DB-IP country file %s has no valid row", path)
 	}
 	return found, nil
+}
+
+func isCountryCode(s string) bool {
+	return len(s) == 2 && s[0] >= 'A' && s[0] <= 'Z' && s[1] >= 'A' && s[1] <= 'Z'
 }
 
 func ownerEndpoint(raw string) (*url.URL, error) {
@@ -98,8 +106,9 @@ func ownerEndpoint(raw string) (*url.URL, error) {
 }
 
 type prefixOverview struct {
-	Status string `json:"status"`
-	Data   struct {
+	Status   string     `json:"status"`
+	Messages [][]string `json:"messages"`
+	Data     struct {
 		Announced *bool `json:"announced"`
 		ASNs      []struct {
 			ASN    int64  `json:"asn"`
@@ -114,16 +123,17 @@ func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a neti
 	q.Set("resource", a.String())
 	q.Set("sourceapp", sourceApp)
 	u.RawQuery = q.Encode()
-	body, err := fetch(ctx, client, u.String())
+	code, body, err := get(ctx, client, u.String())
 	if err != nil {
 		return "", err
 	}
 	var v prefixOverview
-	if err := json.Unmarshal(body, &v); err != nil {
-		return "", fmt.Errorf("decode the network owner of %s: %w", a, err)
+	derr := json.Unmarshal(body, &v)
+	if code != http.StatusOK || derr == nil && v.Status != "ok" {
+		return "", fmt.Errorf("the network owner lookup of %s answered with HTTP status %d and status %q: %s", a, code, v.Status, ripeExplanation(v.Messages, body, derr))
 	}
-	if v.Status != "ok" {
-		return "", fmt.Errorf("the network owner lookup of %s answered with status %q", a, v.Status)
+	if derr != nil {
+		return "", fmt.Errorf("decode the network owner of %s: %w", a, derr)
 	}
 	if v.Data.Announced == nil {
 		return "", fmt.Errorf("the network owner lookup of %s did not say whether the address is announced", a)
@@ -136,6 +146,17 @@ func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a neti
 		names[i] = fmt.Sprintf("AS%d %s", n.ASN, n.Holder)
 	}
 	return telegram.Clip(telegram.Display(strings.Join(names, ", ")), ownerRunes), nil
+}
+
+func ripeExplanation(messages [][]string, body []byte, derr error) string {
+	if derr != nil || len(messages) == 0 {
+		return telegram.Clip(telegram.Display(string(body)), ownerRunes)
+	}
+	parts := make([]string, len(messages))
+	for i, m := range messages {
+		parts[i] = strings.Join(m, ": ")
+	}
+	return telegram.Clip(telegram.Display(strings.Join(parts, "; ")), ownerRunes)
 }
 
 func lookupBudget(ctx context.Context, budget time.Duration) time.Duration {
@@ -175,9 +196,10 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 		lctx, cancel := context.WithTimeout(ctx, lookupBudget(ctx, budget))
 		defer cancel()
 		var (
-			mu     sync.Mutex
-			cutOff int
-			wg     sync.WaitGroup
+			mu      sync.Mutex
+			cutOff  int
+			stopped int
+			wg      sync.WaitGroup
 		)
 		slots := make(chan struct{}, ownerLookups)
 		for i, a := range addrs {
@@ -188,9 +210,13 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 				switch {
 				case err == nil:
 					out[i].network = name
-				case lctx.Err() != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
+				case errors.Is(lctx.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded):
 					mu.Lock()
 					cutOff++
+					mu.Unlock()
+				case errors.Is(lctx.Err(), context.Canceled) && errors.Is(err, context.Canceled):
+					mu.Lock()
+					stopped++
 					mu.Unlock()
 				default:
 					logger.Warn("the network owner of an address could not be looked up, so it shows as unknown", "address", a, "err", err)
@@ -201,6 +227,10 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 		if cutOff > 0 {
 			logger.Warn("the time for the network owner lookups ran out, so some addresses show their owner as unknown",
 				"addresses", cutOff, "of", len(addrs))
+		}
+		if stopped > 0 {
+			logger.Warn("the run was stopped before the network owner lookups finished, so some addresses show their owner as unknown",
+				"addresses", stopped, "of", len(addrs))
 		}
 		return out
 	}

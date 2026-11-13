@@ -54,7 +54,7 @@ func requiredArgs(overrides ...string) []string {
 		"--s3-endpoint": "http://127.0.0.1:1", "--s3-bucket": "b", "--s3-access-key": "k", "--s3-secret-key": "s",
 	}
 	for i := 0; i+1 < len(overrides); i += 2 {
-		if overrides[i+1] == "" && overrides[i] != "--s3-bucket" {
+		if overrides[i+1] == "" && overrides[i] != "--s3-bucket" && overrides[i] != "--country-file" {
 			delete(args, overrides[i])
 			continue
 		}
@@ -227,6 +227,31 @@ func TestExecute_TheFailureMessageIsEscapedAndClipped(t *testing.T) {
 	}
 }
 
+func TestExecute_RefusesBadLookupSettings(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "an empty country file", args: requiredArgs("--country-file", ""), want: "the DB-IP country file is not set"},
+		{name: "an owner lookup that is not http", args: requiredArgs("--owner-lookup", "ftp://stat.example.test/data.json"), want: "is not an http or https address with a host"},
+		{name: "an owner lookup without a host", args: requiredArgs("--owner-lookup", "https:///data.json"), want: "is not an http or https address with a host"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateEnv(t)
+			srv, api := telegramServer(t)
+			if code := execute(context.Background(), tc.args, testLogger(&logBuffer{}), telegram.WithAPI(api)); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+			requests, _ := srv.Seen()
+			if len(requests) != 1 || !strings.Contains(requests[0].RichMessage.HTML, tc.want) {
+				t.Fatalf("messages = %+v, want one naming %q", requests, tc.want)
+			}
+		})
+	}
+}
+
 func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 	isolateEnv(t)
 	srv, api := telegramServer(t)
@@ -387,7 +412,7 @@ func TestExecute_AlertsEndToEnd(t *testing.T) {
 	}
 	alertHTML := requests[0].RichMessage.HTML
 	first, second := strings.Index(alertHTML, ">198.51.100.1<"), strings.Index(alertHTML, ">198.51.100.2<")
-	if !strings.Contains(alertHTML, "2 new addresses") || first < 0 || second < 0 || first > second {
+	if !strings.Contains(alertHTML, "<p>2 new busy clients on n2 in the last 24 hours (times in UTC).</p>") || first < 0 || second < 0 || first > second {
 		t.Fatalf("alert = %s", alertHTML)
 	}
 	if !strings.Contains(alertHTML, ">198.51.100.1</a></td><td>YY</td><td>AS64500 Owner of 198.51.100.1</td>") {
