@@ -24,7 +24,7 @@ func TestJob_AlertsANewBusyClientOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := h.messages.sent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "1 new address made") ||
+	if len(sent) != 1 || !strings.Contains(sent[0], "<p>1 new busy client on n1 in the last 24 hours") ||
 		!strings.Contains(sent[0], ">192.0.2.7</a></td><td>XX</td><td>AS64500 Example for 192.0.2.7</td><td>500</td><td>1</td>") {
 		t.Fatalf("messages = %q", sent)
 	}
@@ -115,7 +115,7 @@ func TestJob_AlertTimesAreInTheZone(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := h.messages.sent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "in the 24 hours up to Thu 12 Nov 13:00 (times in TEST)") ||
+	if len(sent) != 1 || !strings.Contains(sent[0], "in the last 24 hours (times in TEST).</p>") ||
 		!strings.Contains(sent[0], "<td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td>") {
 		t.Fatalf("messages = %q", sent)
 	}
@@ -313,7 +313,7 @@ func TestJob_DailyLine(t *testing.T) {
 		},
 		{
 			name: "an alert goes out before the line", hour: 0, busy: true,
-			wantMessages:  []string{"<p>Busy clients, from n1: 1 new address", "<p>The busy-clients check is running (from n1): 2 addresses alerted in the last 24 hours, 3 on file.</p>"},
+			wantMessages:  []string{"<p>1 new busy client on n1", "<p>The busy-clients check is running (from n1): 2 addresses alerted in the last 24 hours, 3 on file.</p>"},
 			wantLastDaily: "2026-11-12",
 		},
 		{

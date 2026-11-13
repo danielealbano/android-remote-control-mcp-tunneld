@@ -17,7 +17,6 @@ const (
 type alert struct {
 	node   string
 	now    time.Time
-	rule   rule
 	fresh  []*usage
 	places []place
 }
@@ -25,12 +24,7 @@ type alert struct {
 func (r alert) messages(lim telegram.Limits) ([]string, []int) {
 	loc := r.now.Location()
 	n := len(r.fresh)
-	lead := []string{
-		fmt.Sprintf("Busy clients, from %s: %d new %s made unusually many tunnel connections in the 24 hours up to %s (times in %s).",
-			r.node, n, plural(n, "address", "addresses"), r.now.Format(dayTimeLayout), loc),
-		fmt.Sprintf("An address is flagged at %s. ChatGPT and Claude addresses are left out, and each address is reported only once.", r.rule.describe()),
-		"To block an address, add it to the ban file. To stop reports of other addresses of the same network, add its range to the exclude list.",
-	}
+	lead := []string{fmt.Sprintf("%d new busy %s on %s in the last 24 hours (times in %s).", n, plural(n, "client", "clients"), r.node, loc)}
 	rows := make([][]telegram.Cell, n)
 	for i, u := range r.fresh {
 		rows[i] = []telegram.Cell{
@@ -45,7 +39,6 @@ func (r alert) messages(lim telegram.Limits) ([]string, []int) {
 		}
 	}
 	return telegram.PackRows(lead, []telegram.Section{{
-		Heading: "New busy clients",
 		Columns: []string{"Address", "Country", "Network", "Connections", "Tunnels", "First", "Last", "TLS fingerprints"},
 		Rows:    rows,
 	}}, lim)

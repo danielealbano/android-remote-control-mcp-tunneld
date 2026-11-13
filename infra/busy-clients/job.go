@@ -229,7 +229,7 @@ func (j *job) sendAlert(ctx context.Context, now time.Time, fresh []*usage, list
 		addrs[i] = u.lookup
 	}
 	places := j.Locate(ctx, addrs)
-	msgs, rows := alert{node: j.Node, now: now.In(j.Location), rule: j.Rule, fresh: fresh, places: places}.
+	msgs, rows := alert{node: j.Node, now: now.In(j.Location), fresh: fresh, places: places}.
 		messages(telegram.Limits{Blocks: telegram.MessageBlocks, Runes: telegram.MessageRunes})
 	done := 0
 	for i, msg := range msgs {

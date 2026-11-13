@@ -35,8 +35,11 @@ type Limits struct {
 
 func (s Section) render() (head string, blocks int, rows []string) {
 	var b strings.Builder
-	b.WriteString("<h4>" + html.EscapeString(s.Heading) + "</h4>")
-	blocks = 3
+	blocks = 2
+	if s.Heading != "" {
+		b.WriteString("<h4>" + html.EscapeString(s.Heading) + "</h4>")
+		blocks++
+	}
 	if s.Note != "" {
 		b.WriteString("<p>" + html.EscapeString(s.Note) + "</p>")
 		blocks++

@@ -32,7 +32,3 @@ func (r rule) validate() error {
 func (r rule) flags(u *usage) bool {
 	return u.connections >= r.connections || u.connections >= r.spreadConnections && len(u.tunnels) >= r.spreadTunnels
 }
-
-func (r rule) describe() string {
-	return fmt.Sprintf("%d or more connections, or %d or more to at least %d tunnels", r.connections, r.spreadConnections, r.spreadTunnels)
-}

@@ -118,6 +118,16 @@ func TestPack_LinkCell(t *testing.T) {
 	}
 }
 
+func TestPack_ASectionWithoutHeading(t *testing.T) {
+	t.Parallel()
+	s := telegram.Section{Columns: []string{"A"}, Rows: [][]telegram.Cell{{telegram.Text("x")}}}
+	msgs := telegram.Pack([]string{"intro"}, []telegram.Section{s}, telegram.Limits{Blocks: 500, Runes: 32768})
+	want := "<p>intro</p>" + tableStart + "<tr><th>A</th></tr><tr><td>x</td></tr>" + tableEnd
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Fatalf("messages = %q\nwant       %q", msgs, want)
+	}
+}
+
 func TestClip(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
