@@ -128,6 +128,38 @@ func TestPack_ASectionWithoutHeading(t *testing.T) {
 	}
 }
 
+func TestPackRows_SectionsWithoutHeadingSplitByBlocks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		rows     int
+		heading  string
+		wantRows []int
+	}{
+		{name: "without a heading a message holds one more row", rows: 24, wantRows: []int{12, 12}},
+		{name: "with a heading the same rows need a third message", rows: 24, heading: "h", wantRows: []int{11, 11, 2}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := telegram.Section{Heading: tc.heading, Columns: []string{"A"}}
+			for i := range tc.rows {
+				s.Rows = append(s.Rows, []telegram.Cell{telegram.Text("r" + strconv.Itoa(i))})
+			}
+			lim := telegram.Limits{Blocks: 15, Runes: 32768}
+			msgs, rows := telegram.PackRows([]string{"intro"}, []telegram.Section{s}, lim)
+			if !slices.Equal(rows, tc.wantRows) {
+				t.Fatalf("rows per message = %v, want %v", rows, tc.wantRows)
+			}
+			for i, m := range msgs {
+				if n := strings.Count(m, "<tr>") + strings.Count(m, "<h4>") + strings.Count(m, "<p>") + strings.Count(m, "<table"); n > lim.Blocks {
+					t.Fatalf("message %d has %d blocks, over the limit of %d", i+1, n, lim.Blocks)
+				}
+			}
+		})
+	}
+}
+
 func TestClip(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
