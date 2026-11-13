@@ -28,6 +28,8 @@ const testCountries = "start_ip,end_ip,country\n" +
 	"203.0.113.30,203.0.113.30,\n" +
 	"203.0.113.40,203.0.113.49,XX\n" +
 	"203.0.113.45,203.0.113.45,YY\n" +
+	"203.0.113.50,203.0.113.50,XXY\n" +
+	"203.0.113.60,203.0.113.60,X\n" +
 	"\"broken\n"
 
 func writeCountries(t *testing.T, body string) string {
@@ -56,6 +58,8 @@ func TestCountriesOf(t *testing.T) {
 		{name: "an IPv6 address before any IPv6 range", addr: "::1", want: ""},
 		{name: "a row whose country is not two letters is skipped", addr: "203.0.113.20", want: ""},
 		{name: "a row whose country is empty is skipped", addr: "203.0.113.30", want: ""},
+		{name: "a row whose country has three letters is skipped", addr: "203.0.113.50", want: ""},
+		{name: "a row whose country has one letter is skipped", addr: "203.0.113.60", want: ""},
 		{name: "the first of two overlapping rows wins", addr: "203.0.113.45", want: "XX"},
 	}
 	path := writeCountries(t, testCountries)
@@ -85,7 +89,7 @@ func TestCountriesOf_ManyAddressesInAnyOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("countries = %v, want %v", got, want)
 	}
-	if skipped != (skippedRows{malformed: 2, badAddress: 2, badRange: 2, badCountry: 2}) {
+	if skipped != (skippedRows{malformed: 2, badAddress: 2, badRange: 2, badCountry: 4}) {
 		t.Fatalf("skipped = %+v", skipped)
 	}
 }
@@ -183,6 +187,8 @@ func TestLookupOwner(t *testing.T) {
 		{name: "an answer that is not 200 and not JSON", code: 503, body: "busy\nnow", wantErr: `answered with HTTP status 503 and status "": busy` + "\uFFFD" + "now"},
 		{name: "a long explanation is clipped", code: 400, body: `{"status":"error","messages":[["error","` + strings.Repeat("e", 300) + `"]]}`, wantErr: "error: " + strings.Repeat("e", ownerRunes-7) + "…"},
 		{name: "a long body that is not JSON is clipped", code: 502, body: strings.Repeat("b", 300), wantErr: `status "": ` + strings.Repeat("b", ownerRunes) + "…"},
+		{name: "control characters in the status are replaced", code: 200, body: `{"status":"err\u0007or","data":{}}`, wantErr: `status "err` + "\uFFFD" + `or"`},
+		{name: "control characters in the explanation are replaced", code: 400, body: `{"status":"error","messages":[["error","a\u202eb"]]}`, wantErr: "error: a\uFFFDb"},
 		{name: "a long status is clipped", code: 200, body: `{"status":"` + strings.Repeat("s", 300) + `","data":{}}`, wantErr: `status "` + strings.Repeat("s", ownerRunes) + `…"`},
 		{name: "an answer that is not JSON", code: 200, body: "<html>", wantErr: "decode the network owner of 192.0.2.7"},
 	}
@@ -278,7 +284,7 @@ func TestNewLocator_GivesCountriesAndOwners(t *testing.T) {
 		t.Fatalf("logs = %s", logs.String())
 	}
 	if !strings.Contains(logs.String(), `level=WARN msg="the DB-IP country file has rows that cannot be used, so addresses that only they cover show their country as unknown"`) ||
-		!strings.Contains(logs.String(), "malformed=2 bad_address=2 bad_range=2 bad_country=2") {
+		!strings.Contains(logs.String(), "malformed=2 bad_address=2 bad_range=2 bad_country=4") {
 		t.Fatalf("logs = %s, want the skipped rows counted", logs.String())
 	}
 }
@@ -417,6 +423,44 @@ func TestNewLocator_LeavesHalfTheRunForSending(t *testing.T) {
 	deadline, _ := ctx.Deadline()
 	if left := time.Until(deadline); left < 800*time.Millisecond {
 		t.Fatalf("the lookups left only %s of the run, want about half of it", left)
+	}
+}
+
+func TestNewLocator_CountsTheSkippedRows(t *testing.T) {
+	t.Parallel()
+	const valid = "192.0.2.0,192.0.2.255,XX\n"
+	tests := []struct {
+		name string
+		file string
+		want string
+	}{
+		{name: "a clean file logs nothing", file: valid},
+		{name: "a malformed row", file: valid + "203.0.113.0,203.0.113.9\n", want: "malformed=1 bad_address=0 bad_range=0 bad_country=0"},
+		{name: "a row with a bad address", file: valid + "x,y,XX\n", want: "malformed=0 bad_address=1 bad_range=0 bad_country=0"},
+		{name: "a reversed row", file: valid + "203.0.113.9,203.0.113.0,XX\n", want: "malformed=0 bad_address=0 bad_range=1 bad_country=0"},
+		{name: "a row with a bad country", file: valid + "203.0.113.0,203.0.113.9,XXY\n", want: "malformed=0 bad_address=0 bad_range=0 bad_country=1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := ownerServer(t, func(w http.ResponseWriter, _ *http.Request) { okOwner(t, w, "X") })
+			logs := &logBuffer{}
+			got := newLocator(&http.Client{Timeout: 5 * time.Second}, testLogger(logs), writeCountries(t, tc.file), base, ownerBudget)(
+				context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+			if got[0].country != "XX" {
+				t.Fatalf("places = %+v", got)
+			}
+			warnings := strings.Count(logs.String(), "the DB-IP country file has rows that cannot be used")
+			if tc.want == "" {
+				if warnings != 0 {
+					t.Fatalf("a clean file logged %d skipped-row warnings: %s", warnings, logs.String())
+				}
+				return
+			}
+			if warnings != 1 || !strings.Contains(logs.String(), tc.want) {
+				t.Fatalf("logs = %s, want one warning with %q", logs.String(), tc.want)
+			}
+		})
 	}
 }
 

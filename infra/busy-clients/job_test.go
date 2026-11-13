@@ -62,6 +62,20 @@ func TestJob_LocatesTheNewAddressesOnce(t *testing.T) {
 	}
 }
 
+func TestJob_LocatesWithinTheRunsTime(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.opts = []jobOption{withTimeout(5 * time.Second)}
+	h.store.addLog(t, testNow.Add(-time.Hour), busy("192.0.2.7", 500, 1, testNow.Add(-50*time.Minute))...)
+	before := time.Now()
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !h.bounded || h.deadline.Before(before.Add(4*time.Second)) || h.deadline.After(time.Now().Add(5*time.Second)) {
+		t.Fatalf("the locator got deadline %v (set %v), want the run's 5 s limit", h.deadline, h.bounded)
+	}
+}
+
 func TestJob_ALaterAlertKeepsEarlierAddresses(t *testing.T) {
 	t.Parallel()
 	h := newHarness()

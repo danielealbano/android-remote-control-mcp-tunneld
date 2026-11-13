@@ -58,6 +58,22 @@ func TestLoadRanges_ReadsBothSources(t *testing.T) {
 	}
 }
 
+func TestGet_ABrokenErrorAnswerKeepsItsStatus(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if _, err := w.Write([]byte("short")); err != nil {
+			t.Errorf("write the answer: %v", err)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	_, _, err := get(context.Background(), &http.Client{Timeout: 5 * time.Second}, ts.URL+"/list.json")
+	if err == nil || !strings.Contains(err.Error(), "(status 503): ") || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Fatalf("err = %v, want the read error with its status", err)
+	}
+}
+
 func TestLoadRanges_Failures(t *testing.T) {
 	t.Parallel()
 	goodList := `{"prefixes":[{"ipv4Prefix":"192.0.2.0/24"}]}`

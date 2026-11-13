@@ -215,6 +215,8 @@ type harness struct {
 	store     *fakeStore
 	messages  *fakeMessenger
 	located   [][]netip.Addr
+	deadline  time.Time
+	bounded   bool
 	ranges    []netip.Prefix
 	rangesErr error
 	exclude   []string
@@ -245,8 +247,9 @@ func (h *harness) job(t *testing.T) *job {
 		Ranges: func(context.Context) ([]netip.Prefix, error) {
 			return h.ranges, h.rangesErr
 		},
-		Locate: func(_ context.Context, addrs []netip.Addr) []place {
+		Locate: func(ctx context.Context, addrs []netip.Addr) []place {
 			h.located = append(h.located, addrs)
+			h.deadline, h.bounded = ctx.Deadline()
 			out := make([]place, len(addrs))
 			for i, a := range addrs {
 				out[i] = place{country: "XX", network: "AS64500 Example for " + a.String()}
