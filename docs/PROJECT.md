@@ -307,12 +307,13 @@ sorted by connections — the address linking to its ipinfo.io page, its country
 tunneld's country bans use (`--country-file`, read only when an alert has new addresses), the network that announces it
 from RIPEstat's prefix-overview (`--owner-lookup`, an http or https address checked at start; 4 lookups at a time, for
 at most 30 s or half the run's remaining time, whichever is shorter, so the alert keeps time to go out; a missing or
-unreadable country file, a row whose country is not two letters (skipped), and each failed lookup show `unknown` and are
-logged as a warning with RIPEstat's own explanation when it gives one, and the lookups the time cut off, or a stopped
-run interrupted, are counted in one warning), connections, tunnels (a count, never names), first and last connection and
-the number of TLS fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are
-added to `busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run
-cut short goes on with the others at the next run. The first run of each day at or after `BUSY_CLIENTS_DAILY_HOUR` (in
+unreadable country file and each failed lookup show `unknown` and are logged as a warning, with RIPEstat's own
+explanation when it gives one; rows of the country file that cannot be used (malformed, a bad address or range, a
+country that is not two letters) are skipped and counted in one warning, and so are the lookups the time cut off or a
+stopped run interrupted), connections, tunnels (a count, never names), first and last connection and the number of TLS
+fingerprints — split into numbered parts like the refused-apps report; the addresses of each part are added to
+`busy-clients/alerted.json` in the bucket right after that part is sent, so they are never sent again and a run cut
+short goes on with the others at the next run. The first run of each day at or after `BUSY_CLIENTS_DAILY_HOUR` (in
 `BUSY_CLIENTS_TIMEZONE`) also sends one line saying the check is running and how many addresses it alerted in the last
 24 hours, and records the day in the same file, so a day without that line means no run got that far. A run with nothing
 new and no daily line due sends nothing and writes nothing. A failed run (it has 120 s) sends a message saying so,
