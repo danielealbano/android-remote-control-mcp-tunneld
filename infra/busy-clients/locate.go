@@ -37,10 +37,16 @@ type place struct {
 
 type locator func(ctx context.Context, addrs []netip.Addr) []place
 
-func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, err error) {
+type skippedRows struct {
+	malformed, badAddress, badRange, badCountry int
+}
+
+func (s skippedRows) total() int { return s.malformed + s.badAddress + s.badRange + s.badCountry }
+
+func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, skipped skippedRows, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
+		return nil, skipped, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
@@ -62,18 +68,25 @@ func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, err 
 		}
 		var perr *csv.ParseError
 		if err != nil && !errors.As(err, &perr) {
-			return nil, fmt.Errorf("read the DB-IP country file %s: %w", path, err)
+			return nil, skipped, fmt.Errorf("read the DB-IP country file %s: %w", path, err)
 		}
 		if err != nil || len(rec) < 3 {
+			skipped.malformed++
 			continue
 		}
 		start, e1 := netip.ParseAddr(strings.TrimSpace(rec[0]))
 		end, e2 := netip.ParseAddr(strings.TrimSpace(rec[1]))
-		if e1 != nil || e2 != nil || start.BitLen() != end.BitLen() || end.Less(start) {
+		if e1 != nil || e2 != nil {
+			skipped.badAddress++
+			continue
+		}
+		if start.BitLen() != end.BitLen() || end.Less(start) {
+			skipped.badRange++
 			continue
 		}
 		code := strings.ToUpper(strings.TrimSpace(rec[2]))
 		if !isCountryCode(code) {
+			skipped.badCountry++
 			continue
 		}
 		valid++
@@ -85,9 +98,9 @@ func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, err 
 		}
 	}
 	if valid == 0 {
-		return nil, fmt.Errorf("the DB-IP country file %s has no valid row", path)
+		return nil, skipped, fmt.Errorf("the DB-IP country file %s has no valid row", path)
 	}
-	return found, nil
+	return found, skipped, nil
 }
 
 func isCountryCode(s string) bool {
@@ -99,7 +112,7 @@ func ownerEndpoint(raw string) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the network owner lookup address %q cannot be parsed: %w", raw, err)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" || u.Host == "" {
+	if u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
 		return nil, fmt.Errorf("the network owner lookup address %q is not an http or https address with a host", raw)
 	}
 	return u, nil
@@ -130,7 +143,8 @@ func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a neti
 	var v prefixOverview
 	derr := json.Unmarshal(body, &v)
 	if code != http.StatusOK || derr == nil && v.Status != "ok" {
-		return "", fmt.Errorf("the network owner lookup of %s answered with HTTP status %d and status %q: %s", a, code, v.Status, ripeExplanation(v.Messages, body, derr))
+		return "", fmt.Errorf("the network owner lookup of %s answered with HTTP status %d and status %q: %s",
+			a, code, telegram.Clip(telegram.Display(v.Status), ownerRunes), ripeExplanation(v.Messages, body, derr))
 	}
 	if derr != nil {
 		return "", fmt.Errorf("decode the network owner of %s: %w", a, derr)
@@ -184,9 +198,14 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 		for i := range out {
 			out[i] = place{country: unknownPlace, network: unknownPlace}
 		}
-		countries, err := countriesOf(countryFile, addrs)
+		countries, skipped, err := countriesOf(countryFile, addrs)
 		if err != nil {
 			logger.Warn("the DB-IP country file could not be read, so the alert shows every country as unknown", "file", countryFile, "err", err)
+		}
+		if skipped.total() > 0 {
+			logger.Warn("the DB-IP country file has rows that cannot be used, so addresses that only they cover show their country as unknown",
+				"file", countryFile, "malformed", skipped.malformed, "bad_address", skipped.badAddress, "bad_range", skipped.badRange,
+				"bad_country", skipped.badCountry)
 		}
 		for i, a := range addrs {
 			if code, ok := countries[a]; ok {

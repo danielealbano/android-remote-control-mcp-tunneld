@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -62,7 +63,7 @@ func TestCountriesOf(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			a := netip.MustParseAddr(tc.addr)
-			got, err := countriesOf(path, []netip.Addr{a, a})
+			got, _, err := countriesOf(path, []netip.Addr{a, a})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,13 +77,16 @@ func TestCountriesOf(t *testing.T) {
 func TestCountriesOf_ManyAddressesInAnyOrder(t *testing.T) {
 	t.Parallel()
 	addrs := []netip.Addr{netip.MustParseAddr("2001:db8:1:2::5"), netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("198.51.100.200"), netip.MustParseAddr("192.0.2.7")}
-	got, err := countriesOf(writeCountries(t, testCountries), addrs)
+	got, skipped, err := countriesOf(writeCountries(t, testCountries), addrs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[netip.Addr]string{addrs[0]: "YY", addrs[1]: "YY", addrs[3]: "XX"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("countries = %v, want %v", got, want)
+	}
+	if skipped != (skippedRows{malformed: 2, badAddress: 2, badRange: 2, badCountry: 2}) {
+		t.Fatalf("skipped = %+v", skipped)
 	}
 }
 
@@ -95,12 +99,16 @@ func TestCountriesOf_Failures(t *testing.T) {
 	}{
 		{name: "a missing file", path: func(t *testing.T) string { return filepath.Join(t.TempDir(), "none.csv") }, wantErr: "open the DB-IP country file"},
 		{name: "a file without a valid row", path: func(t *testing.T) string { return writeCountries(t, "a,b,c\n1.2.3,x,y\n") }, wantErr: "has no valid row"},
+		{name: "a file whose only rows have bad countries", path: func(t *testing.T) string {
+			return writeCountries(t, "192.0.2.0,192.0.2.255,X1\n192.0.2.0,192.0.2.255,\n")
+		}, wantErr: "has no valid row"},
+		{name: "a file whose only rows are reversed", path: func(t *testing.T) string { return writeCountries(t, "192.0.2.255,192.0.2.0,XX\n") }, wantErr: "has no valid row"},
 		{name: "a path that cannot be read", path: func(t *testing.T) string { return t.TempDir() }, wantErr: "read the DB-IP country file"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := countriesOf(tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			if _, _, err := countriesOf(tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
@@ -120,6 +128,8 @@ func TestOwnerEndpoint(t *testing.T) {
 		{name: "no scheme", raw: "stat.example.test/data.json", wantErr: true},
 		{name: "another scheme", raw: "ftp://stat.example.test/data.json", wantErr: true},
 		{name: "no host", raw: "https:///data.json", wantErr: true},
+		{name: "a port without a host", raw: "https://:443/data.json", wantErr: true},
+		{name: "only a port", raw: "http://:8080", wantErr: true},
 		{name: "an address that does not parse", raw: "http://[::1", wantErr: true},
 	}
 	for _, tc := range tests {
@@ -171,6 +181,9 @@ func TestLookupOwner(t *testing.T) {
 		{name: "an error answer with RIPEstat's explanation", code: 400, body: `{"status":"error","messages":[["error","bad resource"],["info","see the docs"]]}`, wantErr: `answered with HTTP status 400 and status "error": error: bad resource; info: see the docs`},
 		{name: "an answer without the announced field", code: 200, body: `{"status":"ok","data":{"asns":[]}}`, wantErr: "did not say whether the address is announced"},
 		{name: "an answer that is not 200 and not JSON", code: 503, body: "busy\nnow", wantErr: `answered with HTTP status 503 and status "": busy` + "\uFFFD" + "now"},
+		{name: "a long explanation is clipped", code: 400, body: `{"status":"error","messages":[["error","` + strings.Repeat("e", 300) + `"]]}`, wantErr: "error: " + strings.Repeat("e", ownerRunes-7) + "…"},
+		{name: "a long body that is not JSON is clipped", code: 502, body: strings.Repeat("b", 300), wantErr: `status "": ` + strings.Repeat("b", ownerRunes) + "…"},
+		{name: "a long status is clipped", code: 200, body: `{"status":"` + strings.Repeat("s", 300) + `","data":{}}`, wantErr: `status "` + strings.Repeat("s", ownerRunes) + `…"`},
 		{name: "an answer that is not JSON", code: 200, body: "<html>", wantErr: "decode the network owner of 192.0.2.7"},
 	}
 	for _, tc := range tests {
@@ -190,8 +203,8 @@ func TestLookupOwner(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || len(err.Error()) > 600 {
+					t.Fatalf("err = %v, want %q in an error of at most 600 bytes", err, tc.wantErr)
 				}
 				return
 			}
@@ -208,24 +221,26 @@ func TestLookupOwner(t *testing.T) {
 
 func TestLookupBudget(t *testing.T) {
 	t.Parallel()
-	far, cancelFar := context.WithTimeout(context.Background(), time.Hour)
-	defer cancelFar()
-	near, cancelNear := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelNear()
 	tests := []struct {
-		name string
-		ctx  context.Context
-		max  time.Duration
-		min  time.Duration
+		name    string
+		timeout time.Duration
+		min     time.Duration
+		max     time.Duration
 	}{
-		{name: "a run without a deadline gets the whole budget", ctx: context.Background(), min: ownerBudget, max: ownerBudget},
-		{name: "a run with plenty of time gets the whole budget", ctx: far, min: ownerBudget, max: ownerBudget},
-		{name: "a run near its deadline gets half the time left", ctx: near, min: 4 * time.Second, max: 5 * time.Second},
+		{name: "a run without a deadline gets 30 s", min: 30 * time.Second, max: 30 * time.Second},
+		{name: "a run with plenty of time gets 30 s", timeout: time.Hour, min: 30 * time.Second, max: 30 * time.Second},
+		{name: "a run near its deadline gets half the time left", timeout: 10 * time.Second, min: 4 * time.Second, max: 5 * time.Second},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := lookupBudget(tc.ctx, ownerBudget); got < tc.min || got > tc.max {
+			ctx := context.Background()
+			if tc.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.timeout)
+				t.Cleanup(cancel)
+			}
+			if got := lookupBudget(ctx, ownerBudget); got < tc.min || got > tc.max {
 				t.Fatalf("lookupBudget = %s, want between %s and %s", got, tc.min, tc.max)
 			}
 		})
@@ -259,8 +274,12 @@ func TestNewLocator_GivesCountriesAndOwners(t *testing.T) {
 		t.Fatalf("places = %+v\nwant     %+v", got, want)
 	}
 	if !strings.Contains(logs.String(), `level=WARN msg="the network owner of an address could not be looked up, so it shows as unknown" address=198.51.100.7`) ||
-		!strings.Contains(logs.String(), "status 500") || strings.Contains(logs.String(), "ran out") {
+		!strings.Contains(logs.String(), "HTTP status 500") || strings.Contains(logs.String(), "ran out") {
 		t.Fatalf("logs = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `level=WARN msg="the DB-IP country file has rows that cannot be used, so addresses that only they cover show their country as unknown"`) ||
+		!strings.Contains(logs.String(), "malformed=2 bad_address=2 bad_range=2 bad_country=2") {
+		t.Fatalf("logs = %s, want the skipped rows counted", logs.String())
 	}
 }
 
@@ -311,9 +330,10 @@ func TestNewLocator_LooksUpAtMostFourAtOnce(t *testing.T) {
 	for i := range addrs {
 		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)})
 	}
+	countries := writeCountries(t, testCountries)
 	done := make(chan []place, 1)
 	go func() {
-		done <- newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), writeCountries(t, testCountries), base, ownerBudget)(context.Background(), addrs)
+		done <- newLocator(&http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), countries, base, ownerBudget)(context.Background(), addrs)
 	}()
 	select {
 	case <-reached:
@@ -397,6 +417,49 @@ func TestNewLocator_LeavesHalfTheRunForSending(t *testing.T) {
 	deadline, _ := ctx.Deadline()
 	if left := time.Until(deadline); left < 800*time.Millisecond {
 		t.Fatalf("the lookups left only %s of the run, want about half of it", left)
+	}
+}
+
+type failsWhenDone struct{}
+
+func (failsWhenDone) RoundTrip(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, errors.New("the connection broke")
+}
+
+func TestNewLocator_AnOrdinaryErrorAtTheEndIsAFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		budget time.Duration
+		ctx    func(t *testing.T) context.Context
+	}{
+		{name: "when the time runs out", budget: 100 * time.Millisecond, ctx: func(*testing.T) context.Context { return context.Background() }},
+		{name: "when the run is stopped", budget: ownerBudget, ctx: func(t *testing.T) context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			time.AfterFunc(100*time.Millisecond, cancel)
+			return ctx
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			owners, err := ownerEndpoint("http://owner.example.test/data.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			logs := &logBuffer{}
+			got := newLocator(&http.Client{Transport: failsWhenDone{}}, testLogger(logs), writeCountries(t, testCountries), owners, tc.budget)(
+				tc.ctx(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+			if got[0].network != unknownPlace {
+				t.Fatalf("places = %+v", got)
+			}
+			if !strings.Contains(logs.String(), "could not be looked up") || !strings.Contains(logs.String(), "the connection broke") ||
+				strings.Contains(logs.String(), "ran out") || strings.Contains(logs.String(), "was stopped") {
+				t.Fatalf("logs = %s", logs.String())
+			}
+		})
 	}
 }
 

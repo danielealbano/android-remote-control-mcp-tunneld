@@ -88,6 +88,7 @@ func TestLoadRanges_Failures(t *testing.T) {
 		{name: "the headings in the wrong order", list: goodList, page: phasedOut + outbound, wantErr: "has no outbound section followed by the phased-out one", wantNamed: "/page"},
 		{name: "an outbound section without range", list: goodList, page: `<h2 id="outbound-ip-addresses">Outbound</h2><p><code>example.test</code></p>` + phasedOut, wantErr: "the outbound section of the Anthropic address page", wantNamed: "/page"},
 		{name: "a page over 4 MiB", list: goodList, page: testPage + strings.Repeat("x", maxRangeBytes), wantErr: "larger than", wantNamed: "/page"},
+		{name: "an error answer over 4 MiB keeps its status", list: strings.Repeat("x", maxRangeBytes+1), listCode: http.StatusBadGateway, page: testPage, wantErr: "(status 502): larger than", wantNamed: "/list.json"},
 		{name: "a server that does not answer", closed: true, wantErr: "fetch", wantNamed: "/list.json"},
 	}
 	for _, tc := range tests {

@@ -136,10 +136,10 @@ func get(ctx context.Context, client *http.Client, url string) (_ int, _ []byte,
 	}()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRangeBytes+1))
 	if err != nil {
-		return 0, nil, fmt.Errorf("read %s: %w", url, err)
+		return 0, nil, fmt.Errorf("read %s (status %d): %w", url, resp.StatusCode, err)
 	}
 	if len(body) > maxRangeBytes {
-		return 0, nil, fmt.Errorf("read %s: larger than %d bytes", url, maxRangeBytes)
+		return 0, nil, fmt.Errorf("read %s (status %d): larger than %d bytes", url, resp.StatusCode, maxRangeBytes)
 	}
 	return resp.StatusCode, body, nil
 }
