@@ -190,7 +190,10 @@ type fakeMessenger struct {
 	fail  func(text string) error
 }
 
-func (m *fakeMessenger) Send(_ context.Context, text string) error {
+func (m *fakeMessenger) Send(ctx context.Context, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.fail != nil {

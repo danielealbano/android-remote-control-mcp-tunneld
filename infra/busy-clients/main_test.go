@@ -370,15 +370,13 @@ func TestExecute_AlertsEndToEnd(t *testing.T) {
 		"/chatgpt.json": `{"prefixes":[{"ipv4Prefix":"192.0.2.0/24"}]}`,
 		"/page":         `<h2 id="outbound-ip-addresses">Outbound</h2><p><code>198.51.100.192/26</code></p><h3 id="phased-out-ip-addresses">Phased out</h3>`,
 	}, nil)
-	owners := ownerServer(t, func(w http.ResponseWriter, r *http.Request) {
-		writeAnswer(t, w, 200, `{"data":{"asns":[{"asn":64500,"holder":"Owner of `+r.URL.Query().Get("resource")+`"}]}}`)
-	})
-	countries := writeCountries(t, "198.51.100.0,198.51.100.127,NL\n")
+	owners := ownerServer(t, func(w http.ResponseWriter, r *http.Request) { okOwner(t, w, "Owner of "+r.URL.Query().Get("resource")) })
+	countries := writeCountries(t, "198.51.100.0,198.51.100.127,YY\n")
 	srv, api := telegramServer(t)
 	logs := &logBuffer{}
 	args := requiredArgs("--s3-endpoint", s3, "--s3-bucket", "bucket", "--daily-hour", "0", "--connections", "4", "--spread-connections", "3",
 		"--spread-tunnels", "2", "--exclude", "203.0.113.9", "--openai-ranges", sources+"/chatgpt.json", "--anthropic-ranges", sources+"/page",
-		"--country-file", countries, "--owner-lookup", owners)
+		"--country-file", countries, "--owner-lookup", owners.String())
 	if code := execute(context.Background(), args, testLogger(logs), telegram.WithAPI(api)); code != 0 {
 		t.Fatalf("exit code = %d, want 0; logs %s", code, logs.String())
 	}
@@ -392,7 +390,7 @@ func TestExecute_AlertsEndToEnd(t *testing.T) {
 	if !strings.Contains(alertHTML, "2 new addresses") || first < 0 || second < 0 || first > second {
 		t.Fatalf("alert = %s", alertHTML)
 	}
-	if !strings.Contains(alertHTML, ">198.51.100.1</a></td><td>NL</td><td>AS64500 Owner of 198.51.100.1</td>") {
+	if !strings.Contains(alertHTML, ">198.51.100.1</a></td><td>YY</td><td>AS64500 Owner of 198.51.100.1</td>") {
 		t.Fatalf("the alert has no country and owner for 198.51.100.1: %s", alertHTML)
 	}
 	for _, left := range []string{"198.51.100.3", "198.51.100.4", "192.0.2.5", "198.51.100.200", "203.0.113.9"} {

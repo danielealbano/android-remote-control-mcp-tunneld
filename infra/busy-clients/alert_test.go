@@ -36,20 +36,20 @@ func TestAlert_Messages(t *testing.T) {
 		{
 			name:   "two addresses",
 			fresh:  []*usage{v4, v6},
-			places: []place{{country: "NL", network: "AS64500 <Example> & Co"}, {country: unknownPlace, network: unknownPlace}},
+			places: []place{{country: "XX", network: "AS64500 <Example> & Co"}, {country: unknownPlace, network: unknownPlace}},
 			want: "<p>Busy clients, from n1: 2 new addresses made unusually many tunnel connections in the 24 hours up to Thu 12 Nov 13:00 (times in TEST).<br>" +
 				ruleLines + "</p>" + tableHead +
-				`<tr><td><a href="https://ipinfo.io/192.0.2.7">192.0.2.7</a></td><td>NL</td><td>AS64500 &lt;Example&gt; &amp; Co</td><td>600</td><td>1</td><td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td><td>2</td></tr>` +
+				`<tr><td><a href="https://ipinfo.io/192.0.2.7">192.0.2.7</a></td><td>XX</td><td>AS64500 &lt;Example&gt; &amp; Co</td><td>600</td><td>1</td><td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td><td>2</td></tr>` +
 				`<tr><td><a href="https://ipinfo.io/2001:db8:1:2::5">2001:db8:1:2::/64</a></td><td>unknown</td><td>unknown</td><td>120</td><td>3</td><td>Thu 12 Nov 10:05</td><td>Thu 12 Nov 10:06</td><td>1</td></tr>` +
 				"</table>",
 		},
 		{
 			name:   "one address",
 			fresh:  []*usage{v4},
-			places: []place{{country: "NL", network: "AS64500 Example"}},
+			places: []place{{country: "XX", network: "AS64500 Example"}},
 			want: "<p>Busy clients, from n1: 1 new address made unusually many tunnel connections in the 24 hours up to Thu 12 Nov 13:00 (times in TEST).<br>" +
 				ruleLines + "</p>" + tableHead +
-				`<tr><td><a href="https://ipinfo.io/192.0.2.7">192.0.2.7</a></td><td>NL</td><td>AS64500 Example</td><td>600</td><td>1</td><td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td><td>2</td></tr>` +
+				`<tr><td><a href="https://ipinfo.io/192.0.2.7">192.0.2.7</a></td><td>XX</td><td>AS64500 Example</td><td>600</td><td>1</td><td>Wed 11 Nov 14:00</td><td>Thu 12 Nov 12:30</td><td>2</td></tr>` +
 				"</table>",
 		},
 	}
