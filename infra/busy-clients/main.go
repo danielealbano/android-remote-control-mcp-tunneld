@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
@@ -110,6 +111,13 @@ func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) er
 	if err != nil {
 		return err
 	}
+	if c.CountryFile == "" {
+		return errors.New("the DB-IP country file is not set")
+	}
+	owners, err := ownerEndpoint(c.OwnerLookup)
+	if err != nil {
+		return err
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
 	j, err := newJob(jobConfig{
 		Store:    bucket.New(bcfg),
@@ -117,7 +125,7 @@ func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) er
 		Ranges: func(ctx context.Context) ([]netip.Prefix, error) {
 			return loadRanges(ctx, client, logger.With("node", c.Node), c.OpenAIRanges, c.AnthropicRanges)
 		},
-		Locate:    newLocator(client, logger.With("node", c.Node), c.CountryFile, c.OwnerLookup),
+		Locate:    newLocator(client, logger.With("node", c.Node), c.CountryFile, owners, ownerBudget),
 		Exclude:   c.Exclude,
 		Rule:      rule{connections: c.Connections, spreadConnections: c.SpreadConnections, spreadTunnels: c.SpreadTunnels},
 		DailyHour: c.DailyHour,
