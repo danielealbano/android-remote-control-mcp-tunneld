@@ -305,7 +305,7 @@ and `--spread-tunnels`; the installer writes only its own settings into `/etc/tu
 install the check uses these defaults. Flagged addresses not alerted before go out in one Telegram rich message, a table
 sorted by connections — the address linking to its ipinfo.io page, its country from the DB-IP Country Lite file
 tunneld's country bans use (`--country-file`, read only when an alert has new addresses), the network that announces it
-from RIPEstat's prefix-overview (`--owner-lookup`, an http or https address checked at start; 4 lookups at a time, for
+from RIPEstat's prefix-overview or `not announced` when none does (`--owner-lookup`, an http or https address checked at start; 4 lookups at a time, for
 at most 30 s or half the run's remaining time, whichever is shorter, so the alert keeps time to go out; a missing or
 unreadable country file and each failed lookup show `unknown` and are logged as a warning, with RIPEstat's own
 explanation when it gives one; rows of the country file that cannot be used (malformed, a bad address or range, a
