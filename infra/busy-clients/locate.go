@@ -43,14 +43,14 @@ type skippedRows struct {
 
 func (s skippedRows) total() int { return s.malformed + s.badAddress + s.badRange + s.badCountry }
 
-func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, skipped skippedRows, err error) {
+func countriesOf(path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, skipped, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			err = errors.Join(err, fmt.Errorf("close the DB-IP country file %s: %w", path, cerr))
+			found, err = nil, errors.Join(err, fmt.Errorf("close the DB-IP country file %s: %w", path, cerr))
 		}
 	}()
 	sorted := slices.Clone(addrs)
@@ -59,7 +59,7 @@ func countriesOf(path string, addrs []netip.Addr) (_ map[netip.Addr]string, skip
 	r := csv.NewReader(f)
 	r.FieldsPerRecord = -1
 	r.ReuseRecord = true
-	found := make(map[netip.Addr]string, len(sorted))
+	found = make(map[netip.Addr]string, len(sorted))
 	valid := 0
 	for {
 		rec, err := r.Read()
