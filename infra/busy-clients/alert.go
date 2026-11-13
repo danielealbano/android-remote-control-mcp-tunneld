@@ -15,10 +15,11 @@ const (
 )
 
 type alert struct {
-	node  string
-	now   time.Time
-	rule  rule
-	fresh []*usage
+	node   string
+	now    time.Time
+	rule   rule
+	fresh  []*usage
+	places []place
 }
 
 func (r alert) messages(lim telegram.Limits) ([]string, []int) {
@@ -34,6 +35,8 @@ func (r alert) messages(lim telegram.Limits) ([]string, []int) {
 	for i, u := range r.fresh {
 		rows[i] = []telegram.Cell{
 			{Text: u.address, URL: lookupURL + u.lookup.String()},
+			telegram.Text(r.places[i].country),
+			telegram.Text(r.places[i].network),
 			telegram.Text(strconv.Itoa(u.connections)),
 			telegram.Text(strconv.Itoa(len(u.tunnels))),
 			telegram.Text(u.first.In(loc).Format(dayTimeLayout)),
@@ -43,7 +46,7 @@ func (r alert) messages(lim telegram.Limits) ([]string, []int) {
 	}
 	return telegram.PackRows(lead, []telegram.Section{{
 		Heading: "New busy clients",
-		Columns: []string{"Address", "Connections", "Tunnels", "First", "Last", "TLS fingerprints"},
+		Columns: []string{"Address", "Country", "Network", "Connections", "Tunnels", "First", "Last", "TLS fingerprints"},
 		Rows:    rows,
 	}}, lim)
 }

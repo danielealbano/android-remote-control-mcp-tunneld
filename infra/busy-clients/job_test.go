@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,8 @@ func TestJob_AlertsANewBusyClientOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := h.messages.sent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "1 new address made") || !strings.Contains(sent[0], ">192.0.2.7</a></td><td>500</td><td>1</td>") {
+	if len(sent) != 1 || !strings.Contains(sent[0], "1 new address made") ||
+		!strings.Contains(sent[0], ">192.0.2.7</a></td><td>XX</td><td>AS64500 Example for 192.0.2.7</td><td>500</td><td>1</td>") {
 		t.Fatalf("messages = %q", sent)
 	}
 	l := h.store.state(t)
@@ -35,6 +37,28 @@ func TestJob_AlertsANewBusyClientOnce(t *testing.T) {
 	}
 	if len(h.messages.sent()) != 1 || h.store.puts != 1 {
 		t.Fatalf("the second run sent %d messages and saved %d times, want nothing new", len(h.messages.sent())-1, h.store.puts-1)
+	}
+}
+
+func TestJob_LocatesTheNewAddressesOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness()
+	h.store.setState(t, alertedList{Addresses: map[string]time.Time{"198.51.100.1": testNow.Add(-48 * time.Hour)}})
+	h.store.addLog(t, testNow.Add(-time.Hour), append(append(busy("198.51.100.1", 600, 1, testNow.Add(-50*time.Minute)),
+		busy("192.0.2.7", 700, 1, testNow.Add(-40*time.Minute))...),
+		append(busy("2001:db8:1:2::9", 300, 1, testNow.Add(-30*time.Minute)), busy("2001:db8:1:2::5", 300, 1, testNow.Add(-20*time.Minute))...)...)...)
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Addr{netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("2001:db8:1:2::9")}
+	if len(h.located) != 1 || !slices.Equal(h.located[0], want) {
+		t.Fatalf("located %v, want one lookup of %v (the new addresses in alert order, an IPv6 /64 by its first address)", h.located, want)
+	}
+	if err := h.job(t).run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.located) != 1 {
+		t.Fatalf("a run without new addresses looked up %v", h.located[1:])
 	}
 }
 
@@ -411,6 +435,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 			Store:     newFakeStore(),
 			Messages:  &fakeMessenger{},
 			Ranges:    func(context.Context) ([]netip.Prefix, error) { return nil, nil },
+			Locate:    func(context.Context, []netip.Addr) []place { return nil },
 			Rule:      rule{connections: 500, spreadConnections: 100, spreadTunnels: 3},
 			DailyHour: 9,
 			Node:      "n1",
@@ -429,6 +454,7 @@ func TestNewJob_RefusesMissingSettings(t *testing.T) {
 		{name: "no store", change: func(c *jobConfig) { c.Store = nil }},
 		{name: "no messenger", change: func(c *jobConfig) { c.Messages = nil }},
 		{name: "no range loader", change: func(c *jobConfig) { c.Ranges = nil }},
+		{name: "no locator", change: func(c *jobConfig) { c.Locate = nil }},
 		{name: "a daily hour below 0", change: func(c *jobConfig) { c.DailyHour = -1 }},
 		{name: "a daily hour above 23", change: func(c *jobConfig) { c.DailyHour = 24 }},
 		{name: "no node", change: func(c *jobConfig) { c.Node = "" }},

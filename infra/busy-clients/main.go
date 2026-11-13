@@ -32,6 +32,8 @@ type cli struct {
 	SpreadTunnels     int             `name:"spread-tunnels" env:"BUSY_CLIENTS_SPREAD_TUNNELS" default:"3" help:"Tunnels an address must reach to be flagged at --spread-connections."`
 	OpenAIRanges      []string        `name:"openai-ranges" env:"BUSY_CLIENTS_OPENAI_RANGES" default:"https://openai.com/chatgpt-connectors.json,https://openai.com/chatgpt-actions.json,https://openai.com/chatgpt-user.json" help:"OpenAI's published ChatGPT address lists (JSON), left out of the counts."`
 	AnthropicRanges   string          `name:"anthropic-ranges" env:"BUSY_CLIENTS_ANTHROPIC_RANGES" default:"https://platform.claude.com/docs/en/api/ip-addresses" help:"Anthropic's published address page, whose outbound ranges are left out of the counts."`
+	CountryFile       string          `name:"country-file" env:"BUSY_CLIENTS_COUNTRY_FILE" default:"/srv/tunneld/banfiles/dbip-country-lite.csv" help:"DB-IP Country Lite CSV that gives each alerted address its country (the file tunneld's country bans use)."`
+	OwnerLookup       string          `name:"owner-lookup" env:"BUSY_CLIENTS_OWNER_LOOKUP" default:"https://stat.ripe.net/data/prefix-overview/data.json" help:"RIPEstat prefix-overview address that gives each alerted address its network owner."`
 	S3                bucket.Settings `embed:""`
 }
 
@@ -115,6 +117,7 @@ func runOnce(ctx context.Context, c cli, msgs messenger, logger *slog.Logger) er
 		Ranges: func(ctx context.Context) ([]netip.Prefix, error) {
 			return loadRanges(ctx, client, logger.With("node", c.Node), c.OpenAIRanges, c.AnthropicRanges)
 		},
+		Locate:    newLocator(client, logger.With("node", c.Node), c.CountryFile, c.OwnerLookup),
 		Exclude:   c.Exclude,
 		Rule:      rule{connections: c.Connections, spreadConnections: c.SpreadConnections, spreadTunnels: c.SpreadTunnels},
 		DailyHour: c.DailyHour,

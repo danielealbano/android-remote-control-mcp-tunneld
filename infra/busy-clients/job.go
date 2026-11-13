@@ -37,6 +37,7 @@ type jobConfig struct {
 	Store     objectStore
 	Messages  messenger
 	Ranges    rangeLoader
+	Locate    locator
 	Exclude   []string
 	Rule      rule
 	DailyHour int
@@ -94,6 +95,8 @@ func newJob(cfg jobConfig, opts ...jobOption) (*job, error) {
 		return nil, errors.New("the messenger is missing")
 	case cfg.Ranges == nil:
 		return nil, errors.New("the address range loader is missing")
+	case cfg.Locate == nil:
+		return nil, errors.New("the address locator is missing")
 	case cfg.DailyHour < 0 || cfg.DailyHour > 23:
 		return nil, fmt.Errorf("the hour of the daily line %d is not between 0 and 23", cfg.DailyHour)
 	case cfg.Node == "":
@@ -221,7 +224,12 @@ func (j *job) newlyFlagged(usages map[string]*usage, list alertedList) []*usage 
 }
 
 func (j *job) sendAlert(ctx context.Context, now time.Time, fresh []*usage, list *alertedList) error {
-	msgs, rows := alert{node: j.Node, now: now.In(j.Location), rule: j.Rule, fresh: fresh}.
+	addrs := make([]netip.Addr, len(fresh))
+	for i, u := range fresh {
+		addrs[i] = u.lookup
+	}
+	places := j.Locate(ctx, addrs)
+	msgs, rows := alert{node: j.Node, now: now.In(j.Location), rule: j.Rule, fresh: fresh, places: places}.
 		messages(telegram.Limits{Blocks: telegram.MessageBlocks, Runes: telegram.MessageRunes})
 	done := 0
 	for i, msg := range msgs {
