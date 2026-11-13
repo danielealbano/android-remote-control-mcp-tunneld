@@ -69,7 +69,7 @@ func TestCountriesOf(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			a := netip.MustParseAddr(tc.addr)
-			got, _, err := countriesOf(openFile, path, []netip.Addr{a, a})
+			got, _, err := countriesOf(context.Background(), openFile, path, []netip.Addr{a, a})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func TestCountriesOf(t *testing.T) {
 func TestCountriesOf_ManyAddressesInAnyOrder(t *testing.T) {
 	t.Parallel()
 	addrs := []netip.Addr{netip.MustParseAddr("2001:db8:1:2::5"), netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("198.51.100.200"), netip.MustParseAddr("192.0.2.7")}
-	got, skipped, err := countriesOf(openFile, writeCountries(t, testCountries), addrs)
+	got, skipped, err := countriesOf(context.Background(), openFile, writeCountries(t, testCountries), addrs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestCountriesOf_Failures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, _, err := countriesOf(openFile, tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			if _, _, err := countriesOf(context.Background(), openFile, tc.path(t), []netip.Addr{netip.MustParseAddr("192.0.2.7")}); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
@@ -166,7 +166,7 @@ func TestCountriesOf_ACloseErrorDropsTheCountries(t *testing.T) {
 	open := func(string) (io.ReadCloser, error) {
 		return failingClose{strings.NewReader("192.0.2.0,192.0.2.255,XX\n")}, nil
 	}
-	got, _, err := countriesOf(open, "countries.csv", []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	got, _, err := countriesOf(context.Background(), open, "countries.csv", []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	if got != nil || err == nil || !strings.Contains(err.Error(), "close the DB-IP country file countries.csv: close broke") {
 		t.Fatalf("countriesOf = %v, %v; want no countries and the close error", got, err)
 	}
@@ -176,6 +176,16 @@ func TestCountriesOf_ACloseErrorDropsTheCountries(t *testing.T) {
 		context.Background(), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
 	if places[0].country != unknownPlace || !strings.Contains(logs.String(), "the DB-IP country file could not be read, so the alert shows every country as unknown") {
 		t.Fatalf("places = %+v, logs = %s", places, logs.String())
+	}
+}
+
+func TestCountriesOf_AStoppedRunEndsTheRead(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, _, err := countriesOf(ctx, openFile, writeCountries(t, testCountries), []netip.Addr{netip.MustParseAddr("192.0.2.7")})
+	if got != nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "read the DB-IP country file") {
+		t.Fatalf("countriesOf = %v, %v; want no countries and the stop", got, err)
 	}
 }
 
@@ -395,9 +405,10 @@ func TestNewLocator_LooksUpAtMostFourAtOnce(t *testing.T) {
 		addrs[i] = netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)})
 	}
 	countries := writeCountries(t, testCountries)
+	locate := mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), countries, base)
 	done := make(chan []place, 1)
 	go func() {
-		done <- mustLocator(t, &http.Client{Timeout: 30 * time.Second}, testLogger(&logBuffer{}), countries, base)(context.Background(), addrs)
+		done <- locate(context.Background(), addrs)
 	}()
 	select {
 	case <-reached:
@@ -594,7 +605,7 @@ func TestNewLocator_ALookupThatPanicsShowsUnknown(t *testing.T) {
 			t.Fatalf("the error line %q lacks %q", crash, want)
 		}
 	}
-	if !strings.Contains(logs.String(), "looking up the network owner of 192.0.2.7 crashed") {
-		t.Fatalf("logs = %s", logs.String())
+	if strings.Count(logs.String(), "level=ERROR") != 1 || strings.Contains(logs.String(), "could not be looked up") {
+		t.Fatalf("a crashed lookup must log one error and no failed-lookup warning: %s", logs.String())
 	}
 }

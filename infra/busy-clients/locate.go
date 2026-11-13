@@ -47,7 +47,7 @@ type opener func(path string) (io.ReadCloser, error)
 
 func openFile(path string) (io.ReadCloser, error) { return os.Open(path) }
 
-func countriesOf(open opener, path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
+func countriesOf(ctx context.Context, open opener, path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
 	f, err := open(path)
 	if err != nil {
 		return nil, skipped, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
@@ -66,6 +66,9 @@ func countriesOf(open opener, path string, addrs []netip.Addr) (found map[netip.
 	found = make(map[netip.Addr]string, len(sorted))
 	valid := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, skipped, fmt.Errorf("read the DB-IP country file %s: %w", path, err)
+		}
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
 			break
@@ -135,6 +138,9 @@ type prefixOverview struct {
 }
 
 func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a netip.Addr) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	u := *base
 	q := u.Query()
 	q.Set("resource", a.String())
@@ -185,18 +191,6 @@ func lookupBudget(ctx context.Context, budget time.Duration) time.Duration {
 	return budget
 }
 
-func guardedLookup(ctx context.Context, logger *slog.Logger, client *http.Client, owners *url.URL, a netip.Addr) (name string, err error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	rctx := report.WithScope(ctx)
-	report.SetAttrs(rctx, slog.String("address", a.String()))
-	defer report.RecoverWith(rctx, logger, "looking up a network owner", lookupCrashMsg, func() {
-		name, err = "", fmt.Errorf("looking up the network owner of %s crashed", a)
-	})
-	return lookupOwner(rctx, client, owners, a)
-}
-
 type locatorSettings struct {
 	budget time.Duration
 	open   opener
@@ -237,7 +231,7 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 		for i := range out {
 			out[i] = place{country: unknownPlace, network: unknownPlace}
 		}
-		countries, skipped, err := countriesOf(open, countryFile, addrs)
+		countries, skipped, err := countriesOf(ctx, open, countryFile, addrs)
 		if err != nil {
 			logger.Warn("the DB-IP country file could not be read, so the alert shows every country as unknown", "file", countryFile, "err", err)
 		}
@@ -264,7 +258,10 @@ func newLocator(client *http.Client, logger *slog.Logger, countryFile string, ow
 			slots <- struct{}{}
 			wg.Go(func() {
 				defer func() { <-slots }()
-				name, err := guardedLookup(lctx, logger, client, owners, a)
+				rctx := report.WithScope(lctx)
+				report.SetAttrs(rctx, slog.String("address", a.String()))
+				defer report.RecoverWith(rctx, logger, "looking up a network owner", lookupCrashMsg, func() {})
+				name, err := lookupOwner(rctx, client, owners, a)
 				switch {
 				case err == nil:
 					out[i].network = name
