@@ -14,7 +14,11 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram/telegramtest"
 )
+
+const testBotToken = "123:sekret-bot-token"
 
 func TestCLI_HideAppsFromTheEnvironment(t *testing.T) {
 	tests := []struct {
@@ -46,16 +50,16 @@ func TestCLI_HideAppsFromTheEnvironment(t *testing.T) {
 
 func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 	t.Parallel()
-	srv := &telegramServer{t: t}
+	srv := &telegramtest.Server{T: t}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	var logs bytes.Buffer
 	c := cli{Node: "n2", Timezone: "Not/AZone", TelegramToken: testBotToken, TelegramChat: 42}
-	code := execute(context.Background(), c, slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil)), withTelegramAPI(ts.URL))
+	code := execute(context.Background(), c, slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, &logs), nil)), telegram.WithAPI(ts.URL))
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	requests, _ := srv.seen()
+	requests, _ := srv.Seen()
 	if len(requests) != 1 || !strings.HasPrefix(requests[0].RichMessage.HTML, "<p>The refused-apps report failed on n2. The next scheduled run tries again.</p><p>Error: ") ||
 		!strings.Contains(requests[0].RichMessage.HTML, "Not/AZone") {
 		t.Fatalf("messages = %+v", requests)
@@ -67,15 +71,15 @@ func TestExecute_AFailedRunSendsAMessage(t *testing.T) {
 
 func TestExecute_AnEmptyBucketSettingFailsTheRunAndSaysSo(t *testing.T) {
 	t.Parallel()
-	srv := &telegramServer{t: t}
+	srv := &telegramtest.Server{T: t}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	c := cli{Node: "n2", Timezone: "UTC", TelegramToken: testBotToken, TelegramChat: 42,
 		S3: bucket.Settings{Endpoint: "http://127.0.0.1:1", Region: "us-east-1", AccessKey: "k", SecretKey: "s"}}
-	if code := execute(context.Background(), c, testLog(), withTelegramAPI(ts.URL)); code != 1 {
+	if code := execute(context.Background(), c, testLog(), telegram.WithAPI(ts.URL)); code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
-	requests, _ := srv.seen()
+	requests, _ := srv.Seen()
 	if len(requests) != 1 || !strings.Contains(requests[0].RichMessage.HTML, "the setting --s3-bucket (TUNNELD_S3_BUCKET) is empty") {
 		t.Fatalf("messages = %+v", requests)
 	}
@@ -92,7 +96,7 @@ func TestExecute_WithoutTelegramItOnlyLogs(t *testing.T) {
 
 func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 	t.Parallel()
-	srv := &telegramServer{t: t}
+	srv := &telegramtest.Server{T: t}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -102,7 +106,7 @@ func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 		Textfile: "/nonexistent/x.prom"}
 	done := make(chan int, 1)
 	go func() {
-		done <- execute(ctx, c, testLog(), withTelegramAPI(ts.URL))
+		done <- execute(ctx, c, testLog(), telegram.WithAPI(ts.URL))
 	}()
 	select {
 	case code := <-done:
@@ -112,7 +116,7 @@ func TestExecute_TheFailureMessageOutlivesACancelledRun(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("execute did not return")
 	}
-	if requests, _ := srv.seen(); len(requests) != 1 {
+	if requests, _ := srv.Seen(); len(requests) != 1 {
 		t.Fatalf("messages = %d, want the failure message despite the cancelled run", len(requests))
 	}
 }

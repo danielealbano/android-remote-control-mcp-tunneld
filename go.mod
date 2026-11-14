@@ -1,6 +1,6 @@
 module github.com/danielealbano/android-remote-control-mcp-tunneld
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/alecthomas/kong v1.17.0

@@ -20,6 +20,7 @@ import (
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/atomicfile"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/bucket"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 )
 
 func testLog() *slog.Logger {
@@ -349,7 +350,7 @@ func TestJob_ALongReportGoesOutInNumberedParts(t *testing.T) {
 		if !strings.HasPrefix(text, "<p>Part "+strconv.Itoa(i+1)+" of "+strconv.Itoa(n)) {
 			t.Fatalf("message %d = %.80q, want part %d of %d", i+1, text, i+1, n)
 		}
-		if utf8.RuneCountInString(text) > richMessageRunes || strings.Count(text, "<tr>") >= richMessageBlocks {
+		if utf8.RuneCountInString(text) > telegram.MessageRunes || strings.Count(text, "<tr>") >= telegram.MessageBlocks {
 			t.Fatalf("message %d is over Telegram's limits", i+1)
 		}
 	}

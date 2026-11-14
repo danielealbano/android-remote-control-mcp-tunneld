@@ -1,0 +1,292 @@
+package main
+
+import (
+	"context"
+	"encoding/csv"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/report"
+)
+
+const (
+	unknownPlace   = "unknown"
+	ownerBudget    = 30 * time.Second
+	ownerLookups   = 4
+	ownerRunes     = 128
+	sourceApp      = "arc-busy-clients"
+	lookupCrashMsg = "looking up a network owner crashed, so that address shows its owner as unknown"
+)
+
+type place struct {
+	country string
+	network string
+}
+
+type locator func(ctx context.Context, addrs []netip.Addr) []place
+
+type skippedRows struct {
+	malformed, badAddress, badRange, badCountry int
+}
+
+func (s skippedRows) total() int { return s.malformed + s.badAddress + s.badRange + s.badCountry }
+
+type opener func(path string) (io.ReadCloser, error)
+
+func openFile(path string) (io.ReadCloser, error) { return os.Open(path) }
+
+func countriesOf(ctx context.Context, open opener, path string, addrs []netip.Addr) (found map[netip.Addr]string, skipped skippedRows, err error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, skipped, fmt.Errorf("open the DB-IP country file %s: %w", path, err)
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			found, err = nil, errors.Join(err, fmt.Errorf("close the DB-IP country file %s: %w", path, cerr))
+		}
+	}()
+	sorted := slices.Clone(addrs)
+	slices.SortFunc(sorted, netip.Addr.Compare)
+	sorted = slices.Compact(sorted)
+	r := csv.NewReader(f)
+	r.FieldsPerRecord = -1
+	r.ReuseRecord = true
+	found = make(map[netip.Addr]string, len(sorted))
+	valid := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, skipped, fmt.Errorf("read the DB-IP country file %s: %w", path, err)
+		}
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		var perr *csv.ParseError
+		if err != nil && !errors.As(err, &perr) {
+			return nil, skipped, fmt.Errorf("read the DB-IP country file %s: %w", path, err)
+		}
+		if err != nil || len(rec) < 3 {
+			skipped.malformed++
+			continue
+		}
+		start, e1 := netip.ParseAddr(strings.TrimSpace(rec[0]))
+		end, e2 := netip.ParseAddr(strings.TrimSpace(rec[1]))
+		if e1 != nil || e2 != nil {
+			skipped.badAddress++
+			continue
+		}
+		if start.BitLen() != end.BitLen() || end.Less(start) {
+			skipped.badRange++
+			continue
+		}
+		code := strings.ToUpper(strings.TrimSpace(rec[2]))
+		if !isCountryCode(code) {
+			skipped.badCountry++
+			continue
+		}
+		valid++
+		i, _ := slices.BinarySearchFunc(sorted, start, netip.Addr.Compare)
+		for ; i < len(sorted) && !end.Less(sorted[i]); i++ {
+			if _, done := found[sorted[i]]; !done {
+				found[sorted[i]] = code
+			}
+		}
+	}
+	if valid == 0 {
+		return nil, skipped, fmt.Errorf("the DB-IP country file %s has no valid row", path)
+	}
+	return found, skipped, nil
+}
+
+func isCountryCode(s string) bool {
+	return len(s) == 2 && s[0] >= 'A' && s[0] <= 'Z' && s[1] >= 'A' && s[1] <= 'Z'
+}
+
+func ownerEndpoint(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("the network owner lookup address %q cannot be parsed: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
+		return nil, fmt.Errorf("the network owner lookup address %q is not an http or https address with a host", raw)
+	}
+	return u, nil
+}
+
+type prefixOverview struct {
+	Status   string     `json:"status"`
+	Messages [][]string `json:"messages"`
+	Data     struct {
+		Announced *bool `json:"announced"`
+		ASNs      []struct {
+			ASN    int64  `json:"asn"`
+			Holder string `json:"holder"`
+		} `json:"asns"`
+	} `json:"data"`
+}
+
+func lookupOwner(ctx context.Context, client *http.Client, base *url.URL, a netip.Addr) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	u := *base
+	q := u.Query()
+	q.Set("resource", a.String())
+	q.Set("sourceapp", sourceApp)
+	u.RawQuery = q.Encode()
+	code, body, err := get(ctx, client, u.String())
+	if err != nil {
+		return "", err
+	}
+	var v prefixOverview
+	derr := json.Unmarshal(body, &v)
+	if code != http.StatusOK || derr == nil && v.Status != "ok" {
+		return "", fmt.Errorf("the network owner lookup of %s answered with HTTP status %d and status %q: %s",
+			a, code, telegram.Clip(telegram.Display(v.Status), ownerRunes), ripeExplanation(v.Messages, body, derr))
+	}
+	if derr != nil {
+		return "", fmt.Errorf("decode the network owner of %s: %w; the answer was: %s", a, derr, ripeExplanation(nil, body, derr))
+	}
+	if v.Data.Announced == nil {
+		return "", fmt.Errorf("the network owner lookup of %s did not say whether the address is announced (status %q: %s)",
+			a, telegram.Clip(telegram.Display(v.Status), ownerRunes), ripeExplanation(v.Messages, body, nil))
+	}
+	if !*v.Data.Announced || len(v.Data.ASNs) == 0 {
+		return "not announced", nil
+	}
+	names := make([]string, len(v.Data.ASNs))
+	for i, n := range v.Data.ASNs {
+		names[i] = fmt.Sprintf("AS%d %s", n.ASN, n.Holder)
+	}
+	return telegram.Clip(telegram.Display(strings.Join(names, ", ")), ownerRunes), nil
+}
+
+func ripeExplanation(messages [][]string, body []byte, derr error) string {
+	if derr != nil || len(messages) == 0 {
+		return telegram.Clip(telegram.Display(string(body)), ownerRunes)
+	}
+	parts := make([]string, len(messages))
+	for i, m := range messages {
+		parts[i] = strings.Join(m, ": ")
+	}
+	return telegram.Clip(telegram.Display(strings.Join(parts, "; ")), ownerRunes)
+}
+
+func lookupBudget(ctx context.Context, budget time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return min(budget, time.Until(deadline)/2)
+	}
+	return budget
+}
+
+type locatorSettings struct {
+	budget time.Duration
+	open   opener
+}
+
+type locatorOption func(*locatorSettings) error
+
+func withBudget(d time.Duration) locatorOption {
+	return func(s *locatorSettings) error {
+		if d <= 0 {
+			return fmt.Errorf("the time for the network owner lookups %s is not positive", d)
+		}
+		s.budget = d
+		return nil
+	}
+}
+
+func withOpener(open opener) locatorOption {
+	return func(s *locatorSettings) error {
+		if open == nil {
+			return errors.New("the country file opener is missing")
+		}
+		s.open = open
+		return nil
+	}
+}
+
+func newLocator(client *http.Client, logger *slog.Logger, countryFile string, owners *url.URL, opts ...locatorOption) (locator, error) {
+	settings := locatorSettings{budget: ownerBudget, open: openFile}
+	for _, opt := range opts {
+		if err := opt(&settings); err != nil {
+			return nil, err
+		}
+	}
+	budget, open := settings.budget, settings.open
+	return func(ctx context.Context, addrs []netip.Addr) []place {
+		out := make([]place, len(addrs))
+		for i := range out {
+			out[i] = place{country: unknownPlace, network: unknownPlace}
+		}
+		countries, skipped, err := countriesOf(ctx, open, countryFile, addrs)
+		if err != nil {
+			logger.Warn("the DB-IP country file could not be read, so the alert shows every country as unknown", "file", countryFile, "err", err)
+		}
+		if skipped.total() > 0 {
+			logger.Warn("the DB-IP country file has rows that cannot be used, so addresses that only they cover show their country as unknown",
+				"file", countryFile, "malformed", skipped.malformed, "bad_address", skipped.badAddress, "bad_range", skipped.badRange,
+				"bad_country", skipped.badCountry)
+		}
+		for i, a := range addrs {
+			if code, ok := countries[a]; ok {
+				out[i].country = code
+			}
+		}
+		lctx, cancel := context.WithTimeout(ctx, lookupBudget(ctx, budget))
+		defer cancel()
+		var (
+			mu      sync.Mutex
+			cutOff  int
+			stopped int
+			wg      sync.WaitGroup
+		)
+		slots := make(chan struct{}, ownerLookups)
+		for i, a := range addrs {
+			slots <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-slots }()
+				rctx := report.WithScope(lctx)
+				report.SetAttrs(rctx, slog.String("address", a.String()))
+				defer report.RecoverWith(rctx, logger, "looking up a network owner", lookupCrashMsg, func() {})
+				name, err := lookupOwner(rctx, client, owners, a)
+				switch {
+				case err == nil:
+					out[i].network = name
+				case errors.Is(lctx.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded):
+					mu.Lock()
+					cutOff++
+					mu.Unlock()
+				case errors.Is(lctx.Err(), context.Canceled) && errors.Is(err, context.Canceled):
+					mu.Lock()
+					stopped++
+					mu.Unlock()
+				default:
+					logger.Warn("the network owner of an address could not be looked up, so it shows as unknown", "address", a, "err", err)
+				}
+			})
+		}
+		wg.Wait()
+		if cutOff > 0 {
+			logger.Warn("the time for the network owner lookups ran out, so some addresses show their owner as unknown",
+				"addresses", cutOff, "of", len(addrs))
+		}
+		if stopped > 0 {
+			logger.Warn("the run was stopped before the network owner lookups finished, so some addresses show their owner as unknown",
+				"addresses", stopped, "of", len(addrs))
+		}
+		return out
+	}, nil
+}

@@ -16,7 +16,10 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-const maxObjectBytes = 64 << 20
+const (
+	maxObjectBytes = 64 << 20
+	defaultTimeout = 30 * time.Second
+)
 
 var ErrNotFound = errors.New("object not found")
 
@@ -27,6 +30,14 @@ type Config struct {
 	AccessKey      string
 	SecretKey      string
 	ForcePathStyle bool
+	Timeout        time.Duration
+}
+
+func (c Config) requestTimeout() time.Duration {
+	if c.Timeout <= 0 {
+		return defaultTimeout
+	}
+	return c.Timeout
 }
 
 type S3 struct {
@@ -40,7 +51,7 @@ func New(cfg Config) *S3 {
 		Credentials:  credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
 		BaseEndpoint: aws.String(cfg.Endpoint),
 		UsePathStyle: cfg.ForcePathStyle,
-		HTTPClient:   awshttp.NewBuildableClient().WithTimeout(30 * time.Second),
+		HTTPClient:   awshttp.NewBuildableClient().WithTimeout(cfg.requestTimeout()),
 	})
 	return &S3{cli: cli, bucket: cfg.Bucket}
 }

@@ -164,3 +164,34 @@ func TestSettings_Config(t *testing.T) {
 		})
 	}
 }
+
+func TestS3_TheTimeoutBoundsEachRequest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		wantErr bool
+	}{
+		{name: "a read slower than the timeout fails", timeout: 50 * time.Millisecond, wantErr: true},
+		{name: "a read within the timeout succeeds", timeout: 10 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				time.Sleep(300 * time.Millisecond)
+				if _, err := io.WriteString(w, "slow"); err != nil {
+					t.Logf("write the slow answer: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			b := bucket.New(bucket.Config{
+				Endpoint: srv.URL, Region: "us-east-1", Bucket: "bucket", AccessKey: "k", SecretKey: "s", ForcePathStyle: true, Timeout: tc.timeout,
+			})
+			body, err := b.Get(context.Background(), "tunnel-logs/x.jsonl")
+			if (err != nil) != tc.wantErr || !tc.wantErr && string(body) != "slow" {
+				t.Fatalf("Get = %q, %v; want an error: %v", body, err, tc.wantErr)
+			}
+		})
+	}
+}

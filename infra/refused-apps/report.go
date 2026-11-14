@@ -2,13 +2,11 @@ package main
 
 import (
 	"fmt"
-	"html"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/infra/internal/telegram"
 )
 
 const (
@@ -19,9 +17,6 @@ const (
 	keyShown       = 12
 	retentionDays  = 30
 	cellRunes      = 256
-	partRoom       = 32
-	tableStart     = "<table bordered striped compact>"
-	tableEnd       = "</table>"
 )
 
 type newAttempt struct {
@@ -37,24 +32,12 @@ type report struct {
 	fresh      []newAttempt
 }
 
-type section struct {
-	heading string
-	note    string
-	columns []string
-	rows    [][]string
-}
-
-type messageLimits struct {
-	blocks int
-	runes  int
-}
-
-func (r report) messages(lim messageLimits) ([]string, error) {
+func (r report) messages(lim telegram.Limits) ([]string, error) {
 	intro, err := r.intro()
 	if err != nil {
 		return nil, err
 	}
-	return pack(intro, r.byApp(groupByDay(r.fresh, r.today.Location())), lim), nil
+	return telegram.Pack(intro, r.byApp(groupByDay(r.fresh, r.today.Location())), lim), nil
 }
 
 func (r report) intro() ([]string, error) {
@@ -88,7 +71,7 @@ func (r report) first() bool {
 }
 
 func (r report) appName(name string) string {
-	s := clip(display(name), cellRunes)
+	s := telegram.Clip(telegram.Display(name), cellRunes)
 	if name == "" {
 		s = "(no app named in the attestation)"
 	}
@@ -98,14 +81,14 @@ func (r report) appName(name string) string {
 	return s
 }
 
-func (r report) byApp(days []dayGroup) []section {
+func (r report) byApp(days []dayGroup) []telegram.Section {
 	type appVariant struct {
 		app string
 		v   variant
 	}
 	loc := r.today.Location()
 	index := make(map[appVariant]int)
-	var sections []section
+	var sections []telegram.Section
 	for _, day := range days {
 		for _, app := range day.apps {
 			for _, v := range app.variants {
@@ -114,112 +97,18 @@ func (r report) byApp(days []dayGroup) []section {
 				if !ok {
 					i = len(sections)
 					index[k] = i
-					sections = append(sections, section{heading: r.appName(app.name), note: v.describe(), columns: []string{"Day", "Time", "IP", "Tries"}})
+					sections = append(sections, telegram.Section{Heading: r.appName(app.name), Note: v.describe(), Columns: []string{"Day", "Time", "IP", "Tries"}})
 				}
 				for _, src := range v.sources {
-					sections[i].rows = append(sections[i].rows, []string{
-						day.date.Format(shortDayLayout), src.span(loc), clip(display(src.ip), cellRunes), strconv.Itoa(len(src.times)),
+					sections[i].Rows = append(sections[i].Rows, []telegram.Cell{
+						telegram.Text(day.date.Format(shortDayLayout)), telegram.Text(src.span(loc)),
+						telegram.Text(telegram.Clip(telegram.Display(src.ip), cellRunes)), telegram.Text(strconv.Itoa(len(src.times))),
 					})
 				}
 			}
 		}
 	}
 	return sections
-}
-
-func (s section) render() (head string, blocks int, rows []string) {
-	var b strings.Builder
-	b.WriteString("<h4>" + html.EscapeString(s.heading) + "</h4>")
-	blocks = 3
-	if s.note != "" {
-		b.WriteString("<p>" + html.EscapeString(s.note) + "</p>")
-		blocks++
-	}
-	b.WriteString(tableStart + "<tr>")
-	for _, c := range s.columns {
-		b.WriteString("<th>" + html.EscapeString(c) + "</th>")
-	}
-	b.WriteString("</tr>")
-	rows = make([]string, len(s.rows))
-	for i, row := range s.rows {
-		var rb strings.Builder
-		rb.WriteString("<tr>")
-		for _, c := range row {
-			rb.WriteString("<td>" + html.EscapeString(c) + "</td>")
-		}
-		rb.WriteString("</tr>")
-		rows[i] = rb.String()
-	}
-	return b.String(), blocks, rows
-}
-
-func pack(lead []string, sections []section, lim messageLimits) []string {
-	escaped := make([]string, len(lead))
-	for i, l := range lead {
-		escaped[i] = html.EscapeString(l)
-	}
-	intro := strings.Join(escaped, "<br>")
-	var bodies []string
-	var cur strings.Builder
-	var blocks, runes, chunks int
-	start := func() {
-		cur.Reset()
-		blocks, runes, chunks = 1, partRoom+utf8.RuneCountInString("<p></p>"), 0
-		if len(bodies) == 0 {
-			runes += utf8.RuneCountInString(intro)
-		}
-	}
-	flush := func() {
-		bodies = append(bodies, cur.String())
-		start()
-	}
-	start()
-	for _, s := range sections {
-		head, headBlocks, rows := s.render()
-		for len(rows) > 0 {
-			b := blocks + headBlocks
-			n := runes + utf8.RuneCountInString(head) + len(tableEnd)
-			k := 0
-			for k < len(rows) && b+1 <= lim.blocks && n+utf8.RuneCountInString(rows[k]) <= lim.runes {
-				b++
-				n += utf8.RuneCountInString(rows[k])
-				k++
-			}
-			if k == 0 {
-				if chunks > 0 {
-					flush()
-					continue
-				}
-				k = 1
-				b++
-				n += utf8.RuneCountInString(rows[0])
-			}
-			cur.WriteString(head)
-			for _, row := range rows[:k] {
-				cur.WriteString(row)
-			}
-			cur.WriteString(tableEnd)
-			blocks, runes = b, n
-			chunks++
-			rows = rows[k:]
-			if len(rows) > 0 {
-				flush()
-			}
-		}
-	}
-	bodies = append(bodies, cur.String())
-	msgs := make([]string, len(bodies))
-	for i, body := range bodies {
-		var first []string
-		if len(bodies) > 1 {
-			first = append(first, fmt.Sprintf("Part %d of %d", i+1, len(bodies)))
-		}
-		if i == 0 {
-			first = append(first, intro)
-		}
-		msgs[i] = "<p>" + strings.Join(first, "<br>") + "</p>" + body
-	}
-	return msgs
 }
 
 func daysBetween(from, to time.Time) int {
@@ -280,7 +169,7 @@ func (v variant) keyText() string {
 	if v.key == "" {
 		return "none"
 	}
-	return clip(display(v.key), keyShown)
+	return telegram.Clip(telegram.Display(v.key), keyShown)
 }
 
 func (s sourceGroup) span(loc *time.Location) string {
@@ -348,20 +237,4 @@ func groupByDay(fresh []newAttempt, loc *time.Location) []dayGroup {
 		v.sources = append(v.sources, sourceGroup{ip: k.ip, times: ts})
 	}
 	return days
-}
-
-func clip(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	return string([]rune(s)[:n]) + "…"
-}
-
-func display(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return '\uFFFD'
-		}
-		return r
-	}, strings.ToValidUTF8(s, "\uFFFD"))
 }

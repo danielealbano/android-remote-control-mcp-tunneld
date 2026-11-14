@@ -1,4 +1,4 @@
-package main
+package telegram
 
 import (
 	"bytes"
@@ -13,13 +13,13 @@ import (
 )
 
 const (
-	richMessageBlocks  = 500
-	richMessageRunes   = 32768
-	telegramRetries    = 3
-	telegramMaxBackoff = 60 * time.Second
+	MessageBlocks = 500
+	MessageRunes  = 32768
+	retries       = 3
+	maxBackoff    = 60 * time.Second
 )
 
-type telegram struct {
+type Bot struct {
 	client *http.Client
 	api    string
 	token  string
@@ -27,48 +27,48 @@ type telegram struct {
 	sleep  func(context.Context, time.Duration) error
 }
 
-type telegramOption func(*telegram) error
+type Option func(*Bot) error
 
-func withTelegramAPI(base string) telegramOption {
-	return func(t *telegram) error {
+func WithAPI(base string) Option {
+	return func(b *Bot) error {
 		if base == "" {
 			return errors.New("the Telegram API address is empty")
 		}
-		t.api = strings.TrimRight(base, "/")
+		b.api = strings.TrimRight(base, "/")
 		return nil
 	}
 }
 
-func withTelegramSleep(sleep func(context.Context, time.Duration) error) telegramOption {
-	return func(t *telegram) error {
+func withSleep(sleep func(context.Context, time.Duration) error) Option {
+	return func(b *Bot) error {
 		if sleep == nil {
 			return errors.New("the Telegram sleep function is missing")
 		}
-		t.sleep = sleep
+		b.sleep = sleep
 		return nil
 	}
 }
 
-func newTelegram(token string, chat int64, opts ...telegramOption) (*telegram, error) {
+func New(token string, chat int64, opts ...Option) (*Bot, error) {
 	if token == "" {
 		return nil, errors.New("the Telegram bot token is empty")
 	}
 	if chat == 0 {
 		return nil, errors.New("the Telegram chat id is missing")
 	}
-	t := &telegram{
+	b := &Bot{
 		client: &http.Client{Timeout: 30 * time.Second},
 		api:    "https://api.telegram.org",
 		token:  token,
 		chat:   chat,
-		sleep:  sleepContext,
+		sleep:  Sleep,
 	}
 	for _, opt := range opts {
-		if err := opt(t); err != nil {
+		if err := opt(b); err != nil {
 			return nil, err
 		}
 	}
-	return t, nil
+	return b, nil
 }
 
 type sendRichMessageRequest struct {
@@ -89,41 +89,41 @@ type telegramResponse struct {
 	} `json:"parameters"`
 }
 
-func (t *telegram) Send(ctx context.Context, html string) error {
-	body, err := json.Marshal(sendRichMessageRequest{ChatID: t.chat, RichMessage: inputRichMessage{HTML: html, SkipEntityDetection: true}})
+func (b *Bot) Send(ctx context.Context, html string) error {
+	body, err := json.Marshal(sendRichMessageRequest{ChatID: b.chat, RichMessage: inputRichMessage{HTML: html, SkipEntityDetection: true}})
 	if err != nil {
 		return fmt.Errorf("encode the Telegram message: %w", err)
 	}
 	for try := 0; ; try++ {
-		wait, err := t.post(ctx, body)
+		wait, err := b.post(ctx, body)
 		if err == nil {
 			return nil
 		}
-		if wait <= 0 || wait > telegramMaxBackoff || try >= telegramRetries {
+		if wait <= 0 || wait > maxBackoff || try >= retries {
 			return err
 		}
-		if serr := t.sleep(ctx, wait); serr != nil {
+		if serr := b.sleep(ctx, wait); serr != nil {
 			return errors.Join(err, serr)
 		}
 	}
 }
 
-func (t *telegram) post(ctx context.Context, body []byte) (time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.api+"/bot"+t.token+"/sendRichMessage", bytes.NewReader(body))
+func (b *Bot) post(ctx context.Context, body []byte) (time.Duration, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.api+"/bot"+b.token+"/sendRichMessage", bytes.NewReader(body))
 	if err != nil {
-		return 0, t.redact(fmt.Errorf("build the Telegram request: %w", err))
+		return 0, b.redact(fmt.Errorf("build the Telegram request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := t.client.Do(req)
+	resp, err := b.client.Do(req)
 	if err != nil {
-		return 0, t.redact(fmt.Errorf("send the Telegram request: %w", err))
+		return 0, b.redact(fmt.Errorf("send the Telegram request: %w", err))
 	}
 	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if cerr := resp.Body.Close(); cerr != nil {
 		rerr = errors.Join(rerr, cerr)
 	}
 	if rerr != nil {
-		return 0, t.redact(fmt.Errorf("read the Telegram answer (status %d): %w", resp.StatusCode, rerr))
+		return 0, b.redact(fmt.Errorf("read the Telegram answer (status %d): %w", resp.StatusCode, rerr))
 	}
 	var answer telegramResponse
 	if err := json.Unmarshal(raw, &answer); err != nil {
@@ -139,11 +139,11 @@ func (t *telegram) post(ctx context.Context, body []byte) (time.Duration, error)
 	return 0, err
 }
 
-func (t *telegram) redact(err error) error {
-	return errors.New(strings.ReplaceAll(err.Error(), t.token, "<bot token>"))
+func (b *Bot) redact(err error) error {
+	return errors.New(strings.ReplaceAll(err.Error(), b.token, "<bot token>"))
 }
 
-func sleepContext(ctx context.Context, d time.Duration) error {
+func Sleep(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
