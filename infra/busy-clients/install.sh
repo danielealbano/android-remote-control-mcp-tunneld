@@ -3,7 +3,7 @@ set -eu
 
 usage() {
 	cat >&2 <<'USAGE'
-Usage: install.sh [--config FILE] [--binary FILE] [--timezone ZONE] [--daily-hour HH] [--telegram-token-file FILE] [--telegram-chat ID] [--exclude LIST] [-- SSH_OPTION...]
+Usage: install.sh [--config FILE] [--binary FILE] [--timezone ZONE] [--daily-hour HH] [--telegram-token-file FILE] [--telegram-chat ID] [--connections N] [--spread-connections N] [--spread-tunnels N] [--exclude LIST] [-- SSH_OPTION...]
 
 Installs the hourly busy-clients check on every node in the config file, one node at a time. On each node
 it runs the check once and enables the hourly timer only when that first check succeeds; when it fails,
@@ -21,6 +21,11 @@ Blank lines and lines starting with # are skipped.
                               or BUSY_CLIENTS_DAILY_HOUR
   --telegram-token-file FILE  file holding the Telegram bot token, or BUSY_CLIENTS_TELEGRAM_TOKEN_FILE
   --telegram-chat ID          Telegram chat that receives the messages, or BUSY_CLIENTS_TELEGRAM_CHAT
+  --connections N             connections in 24 hours that flag an address, or BUSY_CLIENTS_CONNECTIONS
+  --spread-connections N      connections in 24 hours that flag an address reaching --spread-tunnels tunnels,
+                              or BUSY_CLIENTS_SPREAD_CONNECTIONS
+  --spread-tunnels N          tunnels an address must reach to be flagged at --spread-connections, or
+                              BUSY_CLIENTS_SPREAD_TUNNELS
   --exclude LIST              comma-separated addresses or CIDR ranges that are never counted, or
                               BUSY_CLIENTS_EXCLUDE (optional)
 
@@ -36,11 +41,14 @@ timezone=${BUSY_CLIENTS_TIMEZONE:-}
 hour=${BUSY_CLIENTS_DAILY_HOUR:-}
 token_file=${BUSY_CLIENTS_TELEGRAM_TOKEN_FILE:-}
 chat=${BUSY_CLIENTS_TELEGRAM_CHAT:-}
+connections=${BUSY_CLIENTS_CONNECTIONS:-}
+spread_connections=${BUSY_CLIENTS_SPREAD_CONNECTIONS:-}
+spread_tunnels=${BUSY_CLIENTS_SPREAD_TUNNELS:-}
 exclude=${BUSY_CLIENTS_EXCLUDE:-}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--config | --binary | --timezone | --daily-hour | --telegram-token-file | --telegram-chat | --exclude)
+	--config | --binary | --timezone | --daily-hour | --telegram-token-file | --telegram-chat | --connections | --spread-connections | --spread-tunnels | --exclude)
 		[ $# -ge 2 ] || usage
 		case "$1" in
 		--config) config=$2 ;;
@@ -49,6 +57,9 @@ while [ $# -gt 0 ]; do
 		--daily-hour) hour=$2 ;;
 		--telegram-token-file) token_file=$2 ;;
 		--telegram-chat) chat=$2 ;;
+		--connections) connections=$2 ;;
+		--spread-connections) spread_connections=$2 ;;
+		--spread-tunnels) spread_tunnels=$2 ;;
 		--exclude) exclude=$2 ;;
 		esac
 		shift 2
@@ -62,7 +73,8 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-if [ -z "$config" ] || [ -z "$binary" ] || [ -z "$timezone" ] || [ -z "$hour" ] || [ -z "$token_file" ] || [ -z "$chat" ]; then
+if [ -z "$config" ] || [ -z "$binary" ] || [ -z "$timezone" ] || [ -z "$hour" ] || [ -z "$token_file" ] || [ -z "$chat" ] ||
+	[ -z "$connections" ] || [ -z "$spread_connections" ] || [ -z "$spread_tunnels" ]; then
 	usage
 fi
 for f in "$config" "$binary" "$token_file"; do
@@ -91,6 +103,17 @@ case "${chat#-}" in
 	exit 1
 	;;
 esac
+positive() {
+	case "$2" in
+	0* | *[!0-9]*)
+		echo "the $1 setting $2 is not a positive whole number without leading zeros" >&2
+		exit 1
+		;;
+	esac
+}
+positive connections "$connections"
+positive "spread connections" "$spread_connections"
+positive "spread tunnels" "$spread_tunnels"
 case "$exclude" in
 *[!0-9A-Fa-f.:/,]* | ,* | *, | *,,*)
 	echo "exclude list $exclude must be addresses or CIDR ranges separated by single commas" >&2
@@ -146,7 +169,8 @@ while read -r node target minute extra <&3 || [ -n "$node" ]; do
 	printf "test -r /etc/tunneld/tunneld.env && systemd-analyze calendar '*-*-* *:%s:00 %s'\n" "$minute" "$timezone" |
 		ssh "$@" "$target" sh ||
 		stop "$node: ssh failed, /etc/tunneld/tunneld.env is not readable there, or it does not accept the time zone $timezone"
-	printf 'BUSY_CLIENTS_NODE=%s\nBUSY_CLIENTS_TIMEZONE=%s\nBUSY_CLIENTS_DAILY_HOUR=%s\nBUSY_CLIENTS_TELEGRAM_CHAT=%s\nBUSY_CLIENTS_TELEGRAM_TOKEN=%s\nBUSY_CLIENTS_EXCLUDE=%s\n' "$node" "$timezone" "$hour" "$chat" "$token" "$exclude" |
+	printf 'BUSY_CLIENTS_NODE=%s\nBUSY_CLIENTS_TIMEZONE=%s\nBUSY_CLIENTS_DAILY_HOUR=%s\nBUSY_CLIENTS_TELEGRAM_CHAT=%s\nBUSY_CLIENTS_TELEGRAM_TOKEN=%s\nBUSY_CLIENTS_CONNECTIONS=%s\nBUSY_CLIENTS_SPREAD_CONNECTIONS=%s\nBUSY_CLIENTS_SPREAD_TUNNELS=%s\nBUSY_CLIENTS_EXCLUDE=%s\n' \
+		"$node" "$timezone" "$hour" "$chat" "$token" "$connections" "$spread_connections" "$spread_tunnels" "$exclude" |
 		ssh "$@" "$target" 'umask 077 && cat > /etc/tunneld/busy-clients.env && chmod 600 /etc/tunneld/busy-clients.env' ||
 		stop "$node: ssh failed, or /etc/tunneld/busy-clients.env could not be written there"
 	ssh "$@" "$target" 'cat > /etc/systemd/system/arc-busy-clients.service' < "$dir/arc-busy-clients.service" ||

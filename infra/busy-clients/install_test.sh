@@ -4,7 +4,8 @@ set -eu
 DIR="$(cd "$(dirname "$0")" && pwd)"
 FAILS=0
 unset BUSY_CLIENTS_CONFIG BUSY_CLIENTS_BINARY BUSY_CLIENTS_TIMEZONE BUSY_CLIENTS_DAILY_HOUR BUSY_CLIENTS_TELEGRAM_TOKEN_FILE \
-	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_EXCLUDE STUB_SSH_FAIL_ON STUB_SSH_FAIL_ALSO STUB_SSH_FAIL_STDIN STUB_CHECK_REFUSES
+	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_CONNECTIONS BUSY_CLIENTS_SPREAD_CONNECTIONS BUSY_CLIENTS_SPREAD_TUNNELS BUSY_CLIENTS_EXCLUDE \
+	STUB_SSH_FAIL_ON STUB_SSH_FAIL_ALSO STUB_SSH_FAIL_STDIN STUB_CHECK_REFUSES
 tmproot="$(mktemp -d)"
 trap 'rm -rf "$tmproot"' EXIT
 
@@ -57,7 +58,7 @@ install() {
 
 all() {
 	install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone Europe/Zurich --daily-hour 09 \
-		--telegram-token-file "$tmproot/token" --telegram-chat -100123 --exclude 198.51.100.7,203.0.113.0/24 "$@"
+		--telegram-token-file "$tmproot/token" --telegram-chat -100123 --connections 600 --spread-connections 60 --spread-tunnels 6 --exclude 198.51.100.7,203.0.113.0/24 "$@"
 }
 
 has() {
@@ -107,6 +108,9 @@ has "install writes the time zone" ssh_stdin '^BUSY_CLIENTS_TIMEZONE=Europe/Zuri
 has "install writes the daily hour without its leading zero" ssh_stdin '^BUSY_CLIENTS_DAILY_HOUR=9$'
 has "install writes the chat" ssh_stdin '^BUSY_CLIENTS_TELEGRAM_CHAT=-100123$'
 has "install writes the token without its newline" ssh_stdin '^BUSY_CLIENTS_TELEGRAM_TOKEN=123:sekret-bot-token$'
+has "install writes the connections that flag an address" ssh_stdin '^BUSY_CLIENTS_CONNECTIONS=600$'
+has "install writes the spread connections" ssh_stdin '^BUSY_CLIENTS_SPREAD_CONNECTIONS=60$'
+has "install writes the spread tunnels" ssh_stdin '^BUSY_CLIENTS_SPREAD_TUNNELS=6$'
 has "install writes the exclude list" ssh_stdin '^BUSY_CLIENTS_EXCLUDE=198.51.100.7,203.0.113.0/24$'
 has "install keeps the settings file private" ssh_args 'umask 077 && cat > /etc/tunneld/busy-clients.env && chmod 600 /etc/tunneld/busy-clients.env'
 hasnt "install keeps the token off the command line" ssh_args 'sekret-bot-token'
@@ -137,17 +141,22 @@ expect_ok "an empty exclude list installs" all --exclude ''
 has "an empty exclude list is written empty" ssh_stdin '^BUSY_CLIENTS_EXCLUDE=$'
 
 export BUSY_CLIENTS_CONFIG="$tmproot/nodes.conf" BUSY_CLIENTS_BINARY="$tmproot/arc-busy-clients" BUSY_CLIENTS_TIMEZONE=UTC \
-	BUSY_CLIENTS_DAILY_HOUR=8 BUSY_CLIENTS_TELEGRAM_TOKEN_FILE="$tmproot/token" BUSY_CLIENTS_TELEGRAM_CHAT=42 BUSY_CLIENTS_EXCLUDE=192.0.2.1
+	BUSY_CLIENTS_DAILY_HOUR=8 BUSY_CLIENTS_TELEGRAM_TOKEN_FILE="$tmproot/token" BUSY_CLIENTS_TELEGRAM_CHAT=42 BUSY_CLIENTS_CONNECTIONS=700 \
+	BUSY_CLIENTS_SPREAD_CONNECTIONS=70 BUSY_CLIENTS_SPREAD_TUNNELS=7 BUSY_CLIENTS_EXCLUDE=192.0.2.1
 expect_ok "install reads its settings from the environment" install
 has "install writes the time zone from the environment" ssh_stdin '^BUSY_CLIENTS_TIMEZONE=UTC$'
 has "install writes the daily hour from the environment" ssh_stdin '^BUSY_CLIENTS_DAILY_HOUR=8$'
 has "install writes the chat from the environment" ssh_stdin '^BUSY_CLIENTS_TELEGRAM_CHAT=42$'
 has "install writes the exclude list from the environment" ssh_stdin '^BUSY_CLIENTS_EXCLUDE=192.0.2.1$'
-expect_ok "install takes settings from the command line over the environment" install --daily-hour 21 --exclude 2001:db8::/32
+has "install writes the connections from the environment" ssh_stdin '^BUSY_CLIENTS_CONNECTIONS=700$'
+has "install writes the spread connections from the environment" ssh_stdin '^BUSY_CLIENTS_SPREAD_CONNECTIONS=70$'
+has "install writes the spread tunnels from the environment" ssh_stdin '^BUSY_CLIENTS_SPREAD_TUNNELS=7$'
+expect_ok "install takes settings from the command line over the environment" install --daily-hour 21 --spread-tunnels 9 --exclude 2001:db8::/32
 has "a command-line daily hour overrides the environment" ssh_stdin '^BUSY_CLIENTS_DAILY_HOUR=21$'
+has "a command-line spread tunnels overrides the environment" ssh_stdin '^BUSY_CLIENTS_SPREAD_TUNNELS=9$'
 has "a command-line exclude list overrides the environment" ssh_stdin '^BUSY_CLIENTS_EXCLUDE=2001:db8::/32$'
 unset BUSY_CLIENTS_CONFIG BUSY_CLIENTS_BINARY BUSY_CLIENTS_TIMEZONE BUSY_CLIENTS_DAILY_HOUR BUSY_CLIENTS_TELEGRAM_TOKEN_FILE \
-	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_EXCLUDE
+	BUSY_CLIENTS_TELEGRAM_CHAT BUSY_CLIENTS_CONNECTIONS BUSY_CLIENTS_SPREAD_CONNECTIONS BUSY_CLIENTS_SPREAD_TUNNELS BUSY_CLIENTS_EXCLUDE
 
 refused() {
 	label=$1
@@ -158,11 +167,14 @@ refused() {
 	if [ -e "$tmproot/ssh_args" ]; then fail "$label must touch no node"; else pass "$label touches no node"; fi
 }
 
-refused "install without a binary" "Usage: install.sh" install --config "$tmproot/nodes.conf" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42
-refused "install without a time zone" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42
-refused "install without a daily hour" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --telegram-token-file "$tmproot/token" --telegram-chat 42
-refused "install without a token file" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-chat 42
-refused "install without a chat" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token"
+refused "install without a binary" "Usage: install.sh" install --config "$tmproot/nodes.conf" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42 --connections 600 --spread-connections 60 --spread-tunnels 6
+refused "install without a time zone" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42 --connections 600 --spread-connections 60 --spread-tunnels 6
+refused "install without a daily hour" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --telegram-token-file "$tmproot/token" --telegram-chat 42 --connections 600 --spread-connections 60 --spread-tunnels 6
+refused "install without a token file" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-chat 42 --connections 600 --spread-connections 60 --spread-tunnels 6
+refused "install without a chat" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --connections 600 --spread-connections 60 --spread-tunnels 6
+refused "install without the connections" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42 --spread-connections 60 --spread-tunnels 6
+refused "install without the spread connections" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42 --connections 600 --spread-tunnels 6
+refused "install without the spread tunnels" "Usage: install.sh" install --config "$tmproot/nodes.conf" --binary "$tmproot/arc-busy-clients" --timezone UTC --daily-hour 9 --telegram-token-file "$tmproot/token" --telegram-chat 42 --connections 600 --spread-connections 60
 refused "an unreadable token file" "cannot read $tmproot/missing-token" all --telegram-token-file "$tmproot/missing-token"
 refused "an empty token file" "token file $tmproot/empty-token is empty" all --telegram-token-file "$tmproot/empty-token"
 refused "a chat id that is not a number" "Telegram chat id 12a is not a number" all --telegram-chat 12a
@@ -170,6 +182,12 @@ refused "a time zone with shell characters" "time zone Europe/Zurich';reboot' ha
 refused "a daily hour of 24" "daily hour 24 is not HH (00-23)" all --daily-hour 24
 refused "a daily hour that is not a number" "daily hour 9a is not HH (00-23)" all --daily-hour 9a
 refused "a daily hour with shell characters" "is not HH (00-23)" all --daily-hour '9;reboot'
+refused "zero connections" "the connections setting 0 is not a positive whole number without leading zeros" all --connections 0
+refused "connections with a leading zero" "the connections setting 0600 is not a positive whole number without leading zeros" all --connections 0600
+refused "connections that are not a number" "the connections setting 5k is not a positive whole number without leading zeros" all --connections 5k
+refused "connections with shell characters" "the connections setting 600;reboot is not a positive whole number" all --connections '600;reboot'
+refused "zero spread connections" "the spread connections setting 0 is not a positive whole number without leading zeros" all --spread-connections 0
+refused "negative spread tunnels" "the spread tunnels setting -5 is not a positive whole number without leading zeros" all --spread-tunnels -5
 refused "an exclude list with shell characters" "must be addresses or CIDR ranges separated by single commas" all --exclude '192.0.2.1;reboot'
 refused "an exclude list with a leading comma" "must be addresses or CIDR ranges separated by single commas" all --exclude ,192.0.2.1
 refused "an exclude list with a trailing comma" "must be addresses or CIDR ranges separated by single commas" all --exclude 192.0.2.1,
