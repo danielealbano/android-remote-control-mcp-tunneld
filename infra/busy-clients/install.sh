@@ -106,7 +106,7 @@ esac
 positive() {
 	case "$2" in
 	0* | *[!0-9]*)
-		echo "$1 $2 is not a positive whole number" >&2
+		echo "$1 $2 is not a positive whole number without leading zeros" >&2
 		exit 1
 		;;
 	esac
