@@ -182,12 +182,12 @@ refused "a time zone with shell characters" "time zone Europe/Zurich';reboot' ha
 refused "a daily hour of 24" "daily hour 24 is not HH (00-23)" all --daily-hour 24
 refused "a daily hour that is not a number" "daily hour 9a is not HH (00-23)" all --daily-hour 9a
 refused "a daily hour with shell characters" "is not HH (00-23)" all --daily-hour '9;reboot'
-refused "zero connections" "connections 0 is not a positive whole number" all --connections 0
-refused "connections with a leading zero" "connections 0600 is not a positive whole number without leading zeros" all --connections 0600
-refused "connections that are not a number" "connections 5k is not a positive whole number" all --connections 5k
-refused "connections with shell characters" "is not a positive whole number" all --connections '600;reboot'
-refused "zero spread connections" "spread connections 0 is not a positive whole number" all --spread-connections 0
-refused "negative spread tunnels" "spread tunnels -5 is not a positive whole number" all --spread-tunnels -5
+refused "zero connections" "the connections setting 0 is not a positive whole number without leading zeros" all --connections 0
+refused "connections with a leading zero" "the connections setting 0600 is not a positive whole number without leading zeros" all --connections 0600
+refused "connections that are not a number" "the connections setting 5k is not a positive whole number without leading zeros" all --connections 5k
+refused "connections with shell characters" "the connections setting 600;reboot is not a positive whole number" all --connections '600;reboot'
+refused "zero spread connections" "the spread connections setting 0 is not a positive whole number without leading zeros" all --spread-connections 0
+refused "negative spread tunnels" "the spread tunnels setting -5 is not a positive whole number without leading zeros" all --spread-tunnels -5
 refused "an exclude list with shell characters" "must be addresses or CIDR ranges separated by single commas" all --exclude '192.0.2.1;reboot'
 refused "an exclude list with a leading comma" "must be addresses or CIDR ranges separated by single commas" all --exclude ,192.0.2.1
 refused "an exclude list with a trailing comma" "must be addresses or CIDR ranges separated by single commas" all --exclude 192.0.2.1,
