@@ -300,9 +300,9 @@ warning; both sources are fetched on every run, and a source that fails or lists
 outbound or the phased-out heading, or with the phased-out heading before the outbound one, fails the run) and the
 operator's `BUSY_CLIENTS_EXCLUDE` (addresses or CIDR ranges, an IPv4 range written in IPv4 — as each address is alerted
 once, it is mostly for the range of a network whose other addresses should not be reported). An address is flagged at
-500 or more connections, or 100 or more to at least 3 tunnels: the defaults of `--connections`, `--spread-connections`
-and `--spread-tunnels`; the installer writes only its own settings into `/etc/tunneld/busy-clients.env`, so after an
-install the check uses these defaults. Flagged addresses not alerted before go out in one Telegram rich message, a table
+`--connections` or more connections, or `--spread-connections` or more to at least `--spread-tunnels` tunnels (defaults
+500, 100 and 3); the installer requires all three and writes them into `/etc/tunneld/busy-clients.env`, so the rule a node
+uses is the one in the operator's installer settings. Flagged addresses not alerted before go out in one Telegram rich message, a table
 sorted by connections — the address linking to its ipinfo.io page, its country from the DB-IP Country Lite file
 tunneld's country bans use (`--country-file`, read only when an alert has new addresses), the network that announces it
 from RIPEstat's prefix-overview or `not announced` when none does (`--owner-lookup`, an http or https address checked at start; 4 lookups at a time, for
