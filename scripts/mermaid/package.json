@@ -1,0 +1,10 @@
+{
+  "name": "tunneld-mermaid-check",
+  "private": true,
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "12.2.0"
+  },
+  "allowScripts": {
+    "puppeteer": true
+  }
+}
