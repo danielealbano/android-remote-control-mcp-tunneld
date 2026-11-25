@@ -98,9 +98,10 @@ type KeyDescription struct {
 }
 
 // ParseKeyDescription locates the attestation extension on the leaf and decodes the fields the
-// seven-point predicate needs. attestationApplicationId and the OS/patch levels are read from whichever
-// list carries them, but rootOfTrust is read ONLY from the TEE-enforced list (a copy in softwareEnforced
-// is platform-supplied and ignored); its ABSENCE from teeEnforced is a hard failure at Verify (see
+// seven-point predicate needs, plus the optional device properties. attestationApplicationId and the
+// OS/patch levels are read from whichever list carries them, but rootOfTrust and the device properties are
+// read ONLY from the TEE-enforced list (a copy in softwareEnforced is platform-supplied and ignored); the
+// ABSENCE of rootOfTrust from teeEnforced is a hard failure at Verify (see
 // verify.go point 5) — the zero-value boot state would otherwise read as Verified+unlocked.
 func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 	var raw []byte
@@ -133,7 +134,7 @@ func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 }
 
 // walkAuthList decodes the context-tagged entries of an authorization list into out. tee reports whether
-// this is the TEE-enforced list: rootOfTrust is honored ONLY from it.
+// this is the TEE-enforced list: rootOfTrust and the device properties are honored ONLY from it.
 func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 	rest := raw
 	for len(rest) > 0 {
