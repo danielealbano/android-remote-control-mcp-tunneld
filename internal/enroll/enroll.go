@@ -50,6 +50,10 @@ type NameStore = store.NameStore
 // EvidenceStore persists rejected-enrollment evidence.
 type EvidenceStore = store.EvidenceStore
 
+type AttestationStore = store.AttestationStore
+
+const attestationHistory = 10
+
 // Request carries the submitted material for enrollment (Phase 1) or issuance (Phase 2 / renewal). Phase
 // 1 (Enroll) uses everything except TLSCSR; issuance (Issue) uses all of it.
 type Request struct {
@@ -95,6 +99,7 @@ type Config struct {
 	CA             *ca.CA
 	Names          NameStore
 	Evidence       EvidenceStore
+	Attestations   AttestationStore
 	Verifier       Verifier
 	Limiter        *limit.Limiter
 	Issuer         PublicIssuer
@@ -213,7 +218,11 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		}
 		return Result{}, signError(err)
 	}
-	s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
+	t = s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
+	if !s.cfg.AttestOptional {
+		s.recordAttestation(ctx, name, ip, store.AttestationKindEnroll, req)
+		s.logStep("enrollment step finished", "attestation-record", t, "ip", ip, "tunnel", name)
+	}
 	return Result{Name: name, IdentityCert: identityPEM}, nil
 }
 
@@ -362,7 +371,13 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		s.logger.Info("a certificate was issued but not recorded because the phone stopped waiting for it", "tunnel", name, "ip", ip, "ca", info.CA)
 	} else {
 		s.recordCert(ctx, name, cur, req, info, att.Device)
-		s.logStep("certificate issuance step finished", "registry-write", t, "tunnel", name, "ip", ip)
+		t = s.logStep("certificate issuance step finished", "registry-write", t, "tunnel", name, "ip", ip)
+		if !s.cfg.AttestOptional {
+			if s.recordAttestation(ctx, name, ip, store.AttestationKindIssue, req) {
+				s.pruneAttestations(ctx, name)
+			}
+			s.logStep("certificate issuance step finished", "attestation-record", t, "tunnel", name, "ip", ip)
+		}
 	}
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
@@ -527,6 +542,25 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	rec.SetCert(info)
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
 		s.logger.Warn("could not save the new certificate in the tunnel's record; the phone still gets the certificate", "tunnel", name, "err", err)
+	}
+}
+
+func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, req Request) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	a := store.Attestation{TS: s.now().UTC(), Kind: kind, AttestChainPEM: string(req.AttestChainPEM)}
+	if err := s.cfg.Attestations.PutAttestation(ctx, name, a); err != nil {
+		s.logger.Warn("could not save the phone's attestation in the tunnel's history; the phone is not affected", "tunnel", name, "ip", ip, "kind", kind, "err", err)
+		return false
+	}
+	return true
+}
+
+func (s *Service) pruneAttestations(ctx context.Context, name string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.cfg.Attestations.PruneAttestations(ctx, name, attestationHistory); err != nil {
+		s.logger.Warn("could not remove the oldest attestations from the tunnel's history; the next certificate request removes them", "tunnel", name, "err", err)
 	}
 }
 

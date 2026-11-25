@@ -193,7 +193,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 
 	// Enrollment service + handler.
 	enrollSvc := enroll.NewService(enroll.Config{
-		RDB: rdb, CA: caObj, Names: st, Evidence: st, Verifier: verifier, Limiter: lim, Issuer: chain,
+		RDB: rdb, CA: caObj, Names: st, Evidence: st, Attestations: st, Verifier: verifier, Limiter: lim, Issuer: chain,
 		TunnelDomain: cfg.TunnelDomain,
 		NamePrefix:   cfg.NamePrefix, NameLength: cfg.NameLength,
 		ExtraReserved: []string{firstLabel(cfg.EnrollHost), firstLabel(cfg.ControlHost)},
