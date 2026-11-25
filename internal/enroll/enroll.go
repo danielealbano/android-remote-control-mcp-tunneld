@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/redis/go-redis/v9"
 
@@ -621,6 +623,9 @@ func parseReportedDevice(raw json.RawMessage) (store.ReportedDevice, map[string]
 }
 
 func reportedValueProblem(v string) string {
+	if strings.ContainsRune(v, utf8.RuneError) {
+		return "not valid UTF-8"
+	}
 	if len(v) > reportedDeviceMaxLen {
 		return fmt.Sprintf("%d bytes, more than %d", len(v), reportedDeviceMaxLen)
 	}
