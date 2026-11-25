@@ -155,6 +155,16 @@ func (s *Store) Attestations(name string) []store.Attestation {
 	return out
 }
 
+func (s *Store) AttestationCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, h := range s.attestations {
+		n += len(h)
+	}
+	return n
+}
+
 // NameCount reports how many name records exist (rollback assertions).
 func (s *Store) NameCount() int {
 	s.mu.Lock()
