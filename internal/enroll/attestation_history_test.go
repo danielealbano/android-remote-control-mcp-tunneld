@@ -3,7 +3,10 @@ package enroll
 import (
 	"context"
 	"crypto/x509"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -180,5 +183,53 @@ func TestIssue_DevicePropertiesFollowTheLatestAttestation(t *testing.T) {
 	}
 	if rec, err := st.GetName(context.Background(), name); err != nil || rec.Device != withoutModel {
 		t.Fatalf("the record must follow the latest attestation, got %+v (%v)", rec.Device, err)
+	}
+}
+
+type overlapProbe struct {
+	*tunneltest.Store
+	armed      atomic.Bool
+	once       sync.Once
+	historyIn  chan struct{}
+	overlapped atomic.Bool
+}
+
+func (p *overlapProbe) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
+	if p.armed.Load() {
+		p.once.Do(func() { close(p.historyIn) })
+	}
+	return p.Store.PutAttestation(ctx, name, a)
+}
+
+func (p *overlapProbe) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	if p.armed.Load() {
+		select {
+		case <-p.historyIn:
+			p.overlapped.Store(true)
+		case <-ctx.Done():
+		}
+	}
+	return p.Store.PutName(ctx, name, rec)
+}
+
+func TestIssue_HistoryWriteRunsAlongsideTheNameRecord(t *testing.T) {
+	t.Parallel()
+	probe := &overlapProbe{Store: tunneltest.NewStore(), historyIn: make(chan struct{})}
+	idCSR, idPub := newCSR(t)
+	logger, _ := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: probe, Evidence: probe.Store, Attestations: probe, TunnelDomain: "example.test", Logger: logger,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := enrollWithChain(t, svc, idCSR)
+	probe.armed.Store(true)
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	if !probe.overlapped.Load() {
+		t.Fatal("the history write must run while the name record is written, so the answer waits no longer after the issuance")
+	}
+	if got := probe.Attestations(name); len(got) != 2 || !slices.ContainsFunc(got, func(a store.Attestation) bool { return a.Kind == store.AttestationKindIssue }) {
+		t.Fatalf("the issuance must be in the history before Issue returns, got %+v", got)
 	}
 }
