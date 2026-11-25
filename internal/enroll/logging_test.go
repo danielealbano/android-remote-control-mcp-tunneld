@@ -375,7 +375,7 @@ func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 				ctx.Expire()
 			}
 			svc.recordCert(ctx, "n", store.NameRecord{Schema: 1, EnrolledAt: earlier}, Request{IdentityCSR: idCSR},
-				store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{})
+				store.CertInfo{CA: "letsencrypt"}, store.DeviceInfo{}, store.ReportedDevice{})
 			rec, err := st.GetName(context.Background(), "n")
 			if err != nil || !rec.EnrolledAt.Equal(tc.wantEnrolled) || rec.CA != "letsencrypt" {
 				t.Fatalf("recorded = %+v (err %v), want the issued cert with enrolled_at %s", rec, err, tc.wantEnrolled)
