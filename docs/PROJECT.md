@@ -171,8 +171,12 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
 - **S3 / MinIO (durable):** the name registry (`names/<name>`), connection logs (per-node JSONL objects
   `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
-  window, or per 16 MiB, then deletes it locally), and
-  rejected-enrollment evidence (`rejected-enroll/…`) — plain `GetObject`/`PutObject`/`DeleteObject` only
+  window, or per 16 MiB, then deletes it locally),
+  rejected-enrollment evidence (`rejected-enroll/…`), and the attestation history
+  (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each accepted enrollment and
+  certificate request of the name, the last 10 kept — after each certificate request tunneld lists the name's
+  history and deletes the older ones; a failed write is logged and never refuses the phone) — plain
+  `GetObject`/`PutObject`/`DeleteObject`/`ListObjectsV2` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a per-name
   Valkey claim lock plus a GET-absent check before the PUT, not from conditional writes. **PRE-GO-LIVE**, validate a provider with a read-after-write
   probe (PUT → GET → overwrite-PUT → GET returns the newest body; a GET of a missing key returns 404
@@ -185,7 +189,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   the bucket — on AWS-style IAM `s3:GetObject` / `s3:PutObject` / `s3:DeleteObject` on the objects and
   `s3:ListBucket` on the bucket, without which a missing key answers 403 instead of 404): name registry
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
-  rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), tunnel
+  rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the
+  attestation history **the last 10 per name** (tunneld deletes the older ones; no rule), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
   refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, the
   registered-phones count (§6) its state as `registered-phones/state.json`, and the busy-clients check (§6) its

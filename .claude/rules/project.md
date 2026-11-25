@@ -59,7 +59,7 @@ does NOT duplicate them.
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`config.EnvTwins`: `TUNNELD_` + the upper-cased flag name, `-` → `_`, so `--s3-*` → `TUNNELD_S3_*`); `Validate()` enforces every cross-field invariant at startup. |
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/issue`) + replica↔replica mesh control RPCs; binary control frames per `docs/PROTOCOL.md`; the data path is an HTTP/1.1-upgraded dial-back connection (`/api/v1/data`) carrying an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
-| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete only (no conditional writes); name registry + conn logs + rejected-enroll evidence; Valkey-locked name claim. |
+| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete/List only (no conditional writes); name registry + conn logs + rejected-enroll evidence + per-name attestation history (last 10); Valkey-locked name claim. |
 | ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, optional CAs, per-account Valkey issuance budgets + wait-until/backoff, several GTS accounts looked up by key, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
@@ -148,7 +148,9 @@ MUST NOT be relaxed without explicit user direction.
   (`traf:` day/week traffic, issuance/`--issue-per-week`) MUST PERSIST across reconnects — a tunnel MUST NOT
   reset its quota just by reconnecting.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
-  and rejected-enroll evidence, via plain Get/Put/Delete (NO conditional writes — runs on any plain S3).
+  rejected-enroll evidence, and the attestation history (the submitted chains of each name's last 10 accepted
+  enrollments/certificate requests, pruned by tunneld), via plain Get/Put/Delete/List (NO conditional writes —
+  runs on any plain S3).
   Name uniqueness is the **Valkey claim lock**: `SET lock:claim:{name} NX EX` (taken → new name; never
   released; TTL `--registry-claim-settle` > the claim deadline) → GET-absent → PUT the record, all under one
   `--registry-claim-timeout` deadline started before the lock, SDK retries disabled. Retention (logs 90d, rejected-enroll
@@ -255,7 +257,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME issuance budgets + wait-until |
 | `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
-| `store` | `internal/store`: durable S3/MinIO name registry, connection logs, rejected-enroll evidence |
+| `store` | `internal/store`: durable S3/MinIO name registry, connection logs, rejected-enroll evidence, attestation history |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, several GTS accounts looked up by key) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |

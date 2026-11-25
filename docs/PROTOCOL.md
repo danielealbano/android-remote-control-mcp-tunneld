@@ -104,6 +104,15 @@ are ignored; any even number of hex digits is accepted, the length is not otherw
 not valid hex, an odd number of digits included, rejects the whole file (fatal at startup, the last good set
 is kept at runtime); an empty file allows no signer.
 
+**Device properties (optional).** The phone SHOULD generate every attested identity key with the device
+properties included (`setDevicePropertiesAttestationIncluded(true)`, Android 12+), so the attestation also
+carries the brand, device, product, manufacturer and model the TEE checked against its factory copy. Not every
+device can attest them: when generating the key with them fails (Android Keystore: a `ProviderException`), the
+phone generates it again at once without them, over the same nonce; only a failure without them is the
+key-generation failure the retry rules below describe. The server reads them only from the TEE-enforced list
+and records them in the name record when present. They are not part of the predicate: their absence never
+refuses a phone.
+
 **Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
 (`lock:claim:{name}`, `SET NX EX`; a lock already taken draws a new name). The lock, the registry read and the claim PUT run under one
 `--registry-claim-timeout` deadline that starts before the lock. The lock is never released and lives

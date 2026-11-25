@@ -258,17 +258,23 @@ tokens are `crypto/rand.Text` (26 base32 chars, 128 bits).
 
 ## 6. Durable S3 state
 
-`internal/store` uses plain `GetObject`/`PutObject`/`DeleteObject` only (no conditional writes): the name
-registry (`names/<name>`), connection logs (per-node JSONL objects
+`internal/store` uses plain `GetObject`/`PutObject`/`DeleteObject`/`ListObjectsV2` only (no conditional
+writes): the name registry (`names/<name>`), connection logs (per-node JSONL objects
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed; a connection's start and
-end may land in different objects), and rejected-enroll evidence
-(`rejected-enroll/…`). Name uniqueness: a candidate name is claimed only after
+end may land in different objects), rejected-enroll evidence
+(`rejected-enroll/…`), and the attestation history (`attestations/<name>/<time>-<rand>.json`). The enroll
+service PUTs the submitted chain after a successful enrollment and after each successful certificate request
+(the same request that refreshes the name record; never in the test-only optional-attestation mode, which
+verifies no chain), then — after a certificate request — LISTs the name's
+history and DELETEs all but the newest 10 (keys sort by time, so concurrent prunes only ever delete entries
+older than the newest 10). Every history write is best-effort with its own 5 s deadline: a failure is logged
+and never refuses the phone, and the next certificate request prunes what a failed prune left. Name uniqueness: a candidate name is claimed only after
 `SET lock:claim:{name} NX EX` succeeds in Valkey (a lock already taken draws a new name); then GET (absent) →
 PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
 deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is
 never released and lives `--registry-claim-settle` (strictly > that deadline), so a timed-out PUT has landed or
 died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d) is a one-time lifecycle setup on the bucket
-(`docs/PROJECT.md` §5); tunneld only gets, puts and deletes objects.
+(`docs/PROJECT.md` §5); tunneld only gets, puts, lists and deletes objects.
 
 ## 7. Ban engine
 
