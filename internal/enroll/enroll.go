@@ -190,7 +190,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		return Result{}, e
 	}
 	t = s.logStep("enrollment step finished", "attest", t, "ip", ip)
-	reported := s.reportedDevice("", ip, req.ReportedDevice)
+	reported, ignoredReported := parseReportedDevice(req.ReportedDevice)
 
 	// Generate + claim a fresh name.
 	rec := store.NameRecord{Device: att.Device, ReportedDevice: reported}
@@ -210,6 +210,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	}
 	report.SetAttrs(ctx, slog.String("tunnel", name))
 	t = s.logStep("enrollment step finished", "claim", t, "ip", ip, "tunnel", name)
+	s.logIgnoredReported(name, ip, ignoredReported)
 
 	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
 	// failure rolls the freshly claimed name back (plain delete);
@@ -260,7 +261,8 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, e
 	}
 	t = s.logStep("certificate issuance step finished", "attest", t, "tunnel", name, "ip", ip)
-	reported := s.reportedDevice(name, ip, req.ReportedDevice)
+	reported, ignoredReported := parseReportedDevice(req.ReportedDevice)
+	s.logIgnoredReported(name, ip, ignoredReported)
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
 	// and MUST request exactly <name>.<tunnel-domain>.
 	if err := req.TLSCSR.CheckSignature(); err != nil {
@@ -579,17 +581,16 @@ func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, 
 
 const reportedDeviceMaxLen = 256
 
-func (s *Service) reportedDevice(name, ip string, raw json.RawMessage) store.ReportedDevice {
+func parseReportedDevice(raw json.RawMessage) (store.ReportedDevice, map[string]string) {
 	var reported store.ReportedDevice
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return reported
+		return reported, nil
 	}
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		s.logger.Info("the phone reported its device in an unexpected form, so it is not recorded", "tunnel", name, "ip", ip, "err", err)
-		return reported
+	if json.Unmarshal(raw, &fields) != nil {
+		return reported, map[string]string{"reported_device": "not a JSON object"}
 	}
-	var ignored []string
+	ignored := map[string]string{}
 	for _, f := range []struct {
 		key string
 		dst *string
@@ -606,28 +607,35 @@ func (s *Service) reportedDevice(name, ip string, raw json.RawMessage) store.Rep
 			continue
 		}
 		var str string
-		if json.Unmarshal(v, &str) != nil || !reportedValue(str) {
-			ignored = append(ignored, f.key)
+		if json.Unmarshal(v, &str) != nil {
+			ignored[f.key] = "not a string"
+			continue
+		}
+		if problem := reportedValueProblem(str); problem != "" {
+			ignored[f.key] = problem
 			continue
 		}
 		*f.dst = str
 	}
-	if len(ignored) > 0 {
-		s.logger.Info("the phone reported device properties in an unexpected form, so they are not recorded", "tunnel", name, "ip", ip, "fields", ignored)
-	}
-	return reported
+	return reported, ignored
 }
 
-func reportedValue(v string) bool {
+func reportedValueProblem(v string) string {
 	if len(v) > reportedDeviceMaxLen {
-		return false
+		return fmt.Sprintf("%d bytes, more than %d", len(v), reportedDeviceMaxLen)
 	}
 	for _, r := range v {
 		if !unicode.IsPrint(r) {
-			return false
+			return "holds a character that is not printable"
 		}
 	}
-	return true
+	return ""
+}
+
+func (s *Service) logIgnoredReported(name, ip string, ignored map[string]string) {
+	if len(ignored) > 0 {
+		s.logger.Info("the phone reported device properties in an unexpected form, so they are not recorded", "tunnel", name, "ip", ip, "ignored", ignored)
+	}
 }
 
 // recordRejection bumps the rejection metric (reason is an observ.RejectReasons label) and persists the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -13,20 +14,16 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
-const (
-	reportedFieldsLog = `level=INFO msg="the phone reported device properties in an unexpected form, so they are not recorded"`
-	reportedObjectLog = `level=INFO msg="the phone reported its device in an unexpected form, so it is not recorded"`
-)
+const reportedIgnoredLog = `level=INFO msg="the phone reported device properties in an unexpected form, so they are not recorded"`
 
-func TestReportedDevice_KeepsOnlyConformingValues(t *testing.T) {
+func TestParseReportedDevice_KeepsOnlyConformingValues(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("m", reportedDeviceMaxLen)
 	tests := []struct {
-		name       string
-		raw        string
-		want       store.ReportedDevice
-		wantLog    string
-		wantFields string
+		name        string
+		raw         string
+		want        store.ReportedDevice
+		wantIgnored map[string]string
 	}{
 		{name: "absent"},
 		{name: "null", raw: `null`},
@@ -36,12 +33,16 @@ func TestReportedDevice_KeepsOnlyConformingValues(t *testing.T) {
 			want: store.ReportedDevice{Brand: "brand-r", Device: "device-r", Product: "product-r", Manufacturer: "maker-r", Model: "Model R 5G",
 				Fingerprint: "brand-r/product-r/device-r:16/ID1/7:user/release-keys"},
 		},
-		{name: "not an object", raw: `"model-r"`, wantLog: reportedObjectLog},
-		{name: "an array", raw: `[1]`, wantLog: reportedObjectLog},
-		{name: "number value", raw: `{"brand":"brand-r","model":7}`, want: store.ReportedDevice{Brand: "brand-r"}, wantLog: reportedFieldsLog, wantFields: "fields=[model]"},
-		{name: "control character", raw: `{"brand":"brand-r","model":"a\nb"}`, want: store.ReportedDevice{Brand: "brand-r"}, wantLog: reportedFieldsLog, wantFields: "fields=[model]"},
+		{name: "not an object", raw: `"model-r"`, wantIgnored: map[string]string{"reported_device": "not a JSON object"}},
+		{name: "an array", raw: `[1]`, wantIgnored: map[string]string{"reported_device": "not a JSON object"}},
+		{name: "number value", raw: `{"brand":"brand-r","model":7}`, want: store.ReportedDevice{Brand: "brand-r"}, wantIgnored: map[string]string{"model": "not a string"}},
+		{name: "control character", raw: `{"brand":"brand-r","model":"a\nb"}`, want: store.ReportedDevice{Brand: "brand-r"},
+			wantIgnored: map[string]string{"model": "holds a character that is not printable"}},
 		{name: "longest value", raw: `{"model":"` + long + `"}`, want: store.ReportedDevice{Model: long}},
-		{name: "too long", raw: `{"brand":"brand-r","model":"` + long + `m"}`, want: store.ReportedDevice{Brand: "brand-r"}, wantLog: reportedFieldsLog, wantFields: "fields=[model]"},
+		{name: "too long", raw: `{"brand":"brand-r","model":"` + long + `m"}`, want: store.ReportedDevice{Brand: "brand-r"},
+			wantIgnored: map[string]string{"model": "257 bytes, more than 256"}},
+		{name: "several ignored", raw: `{"brand":{},"model":"a\tb","device":"device-r"}`, want: store.ReportedDevice{Device: "device-r"},
+			wantIgnored: map[string]string{"brand": "not a string", "model": "holds a character that is not printable"}},
 		{name: "empty and null values", raw: `{"model":"","brand":null}`},
 		{name: "unknown field", raw: `{"serial":"123","model":"model-r"}`, want: store.ReportedDevice{Model: "model-r"}},
 		{name: "non-ASCII", raw: `{"model":"Modèle – R"}`, want: store.ReportedDevice{Model: "Modèle – R"}},
@@ -49,27 +50,68 @@ func TestReportedDevice_KeepsOnlyConformingValues(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			svc, buf := newHistoryService(t, tunneltest.NewStore(), fakeVerifier{}, false)
 			var raw json.RawMessage
 			if tc.raw != "" {
 				raw = json.RawMessage(tc.raw)
 			}
-			if got := svc.reportedDevice("tun", "1.2.3.4", raw); got != tc.want {
+			got, ignored := parseReportedDevice(raw)
+			if got != tc.want {
 				t.Errorf("reported device = %+v, want %+v", got, tc.want)
 			}
-			out := buf.String()
-			if tc.wantLog == "" {
-				if strings.Contains(out, "unexpected form") {
-					t.Errorf("nothing must be logged, got:\n%s", out)
-				}
-				return
-			}
-			for _, want := range []string{tc.wantLog, "tunnel=tun", "ip=1.2.3.4", tc.wantFields} {
-				if !strings.Contains(out, want) {
-					t.Errorf("log must contain %q, got:\n%s", want, out)
-				}
+			if !maps.Equal(ignored, tc.wantIgnored) {
+				t.Errorf("ignored = %v, want %v", ignored, tc.wantIgnored)
 			}
 		})
+	}
+}
+
+func TestEnrollIssue_IgnoredReportedValuesAreLoggedWithTheTunnel(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, buf := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+	assertLogged := func(name, want string) {
+		t.Helper()
+		var line string
+		for _, l := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(l, reportedIgnoredLog) && strings.Contains(l, "tunnel="+name+" ") {
+				line = l
+			}
+		}
+		for _, part := range []string{"ip=1.2.3.4", want} {
+			if !strings.Contains(line, part) {
+				t.Fatalf("an Info line about the ignored values of %s carrying %q is missing, log:\n%s", name, part, buf.String())
+			}
+		}
+	}
+	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(`{"model":7}`),
+	})
+	if ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	assertLogged(res.Name, `ignored="map[model:not a string]"`)
+	svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
+	if _, ee := svc.Issue(context.Background(), res.Name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, res.Name+".example.test"),
+		AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(`[1]`),
+	}); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	assertLogged(res.Name, `ignored="map[reported_device:not a JSON object]"`)
+}
+
+func TestEnroll_ConformingReportedDeviceLogsNothing(t *testing.T) {
+	t.Parallel()
+	idCSR, idPub := newCSR(t)
+	svc, buf := newHistoryService(t, tunneltest.NewStore(), fakeVerifier{key: idPub}, false)
+	if _, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(`{"model":"model-r"}`),
+	}); ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	if strings.Contains(buf.String(), "unexpected form") {
+		t.Fatalf("nothing must be logged, got:\n%s", buf.String())
 	}
 }
 
@@ -128,8 +170,18 @@ func TestEnrollIssue_RecordTheReportedDevice(t *testing.T) {
 func TestIssue_ReportedDeviceNeverRefusesTheCertificateRequest(t *testing.T) {
 	t.Parallel()
 	enrolled := store.ReportedDevice{Model: "model-r"}
-	for _, raw := range []string{`7`, `"model-r"`, `[1]`, `{"model":["x"],"brand":{}}`, `{"model":"a\nb"}`} {
-		t.Run(raw, func(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "number", raw: `7`},
+		{name: "string", raw: `"model-r"`},
+		{name: "array", raw: `[1]`},
+		{name: "wrong value types", raw: `{"model":["x"],"brand":{}}`},
+		{name: "control character", raw: `{"model":"a\nb"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := tunneltest.NewStore()
 			idCSR, idPub := newCSR(t)
@@ -143,7 +195,7 @@ func TestIssue_ReportedDeviceNeverRefusesTheCertificateRequest(t *testing.T) {
 			svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
 			if _, ee := svc.Issue(context.Background(), res.Name, "1.2.3.4", Request{
 				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, res.Name+".example.test"),
-				AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(raw),
+				AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(tc.raw),
 			}); ee != nil {
 				t.Fatalf("a malformed reported_device must not refuse the certificate request, got %v", ee)
 			}
