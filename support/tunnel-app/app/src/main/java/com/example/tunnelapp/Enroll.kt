@@ -1,5 +1,6 @@
 package com.example.tunnelapp
 
+import android.os.Build
 import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -123,6 +124,7 @@ object Enroll {
             .put("nonce", nonce)
             .put("attestation_chain", Keys.attestationChainPem(idAlias))
             .put("identity_csr", Csr.identityCsr(Keys.privateKey(idAlias), Keys.publicKey(idAlias)))
+            .put("reported_device", reportedDevice())
         val (status, resp) = postJson(enrollClient(server), net.url(enrollHost, "/api/v1/enroll"), body.toString())
         if (status != 200) fail(status, resp)
         val r = JSONObject(resp)
@@ -167,6 +169,7 @@ object Enroll {
                 .put("attestation_chain", Keys.attestationChainPem(nextId))
                 .put("identity_csr", Csr.identityCsr(Keys.privateKey(nextId), Keys.publicKey(nextId)))
                 .put("tls_csr", Csr.tlsCsr(Keys.privateKey(nextTls), Keys.publicKey(nextTls), fqdn))
+                .put("reported_device", reportedDevice())
             val (status, resp) = postJson(issueClient(id.mtlsClient()), id.net.url(id.controlHost, "/api/v1/issue"), body.toString())
             if (status != 200) fail(status, resp)
             val r = JSONObject(resp)
@@ -184,6 +187,14 @@ object Enroll {
     fun renew(id: Identity, attempt: (() -> Unit) -> Unit) {
         issue(id, null, attempt)
     }
+
+    private fun reportedDevice() = JSONObject()
+        .put("brand", Build.BRAND)
+        .put("device", Build.DEVICE)
+        .put("product", Build.PRODUCT)
+        .put("manufacturer", Build.MANUFACTURER)
+        .put("model", Build.MODEL)
+        .put("fingerprint", Build.FINGERPRINT)
 
     private fun fail(status: Int, resp: String): Nothing {
         val r = try {
