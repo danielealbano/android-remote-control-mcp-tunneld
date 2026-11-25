@@ -42,7 +42,7 @@ type chainParams struct {
 	deviceIDs           map[int]string
 	deviceIDsInSoftware bool
 	deviceIDsAsUTF8     bool
-	malformedDeviceID   bool
+	rawModel            []byte
 }
 
 func defaultParams() chainParams {
@@ -228,8 +228,8 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 		}
 		idFields = append(idFields, ctxTag(t, tag, inner))
 	}
-	if p.malformedDeviceID {
-		idFields = append(idFields, ctxTag(t, tagIDModel, []byte{0x04, 0x05, 'x'}))
+	if p.rawModel != nil {
+		idFields = append(idFields, ctxTag(t, tagIDModel, p.rawModel))
 	}
 	if p.deviceIDsInSoftware {
 		softwareFields = append(softwareFields, idFields...)

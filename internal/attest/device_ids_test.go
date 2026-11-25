@@ -29,7 +29,11 @@ func TestParseKeyDescription_DeviceIDs(t *testing.T) {
 		{name: "only the model", mutate: func(p *chainParams) { p.deviceIDs = map[int]string{tagIDModel: "model-x"} }, want: [5]string{4: "model-x"}},
 		{name: "software list only is ignored", mutate: func(p *chainParams) { p.deviceIDs, p.deviceIDsInSoftware = allDeviceIDs(), true }},
 		{name: "a string type other than OCTET STRING is ignored", mutate: func(p *chainParams) { p.deviceIDs, p.deviceIDsAsUTF8 = allDeviceIDs(), true }, wantIgnored: allTags},
-		{name: "a malformed value is ignored", mutate: func(p *chainParams) { p.malformedDeviceID = true }, wantIgnored: []int{tagIDModel}},
+		{name: "a truncated value is ignored", mutate: func(p *chainParams) { p.rawModel = []byte{0x04, 0x05, 'x'} }, wantIgnored: []int{tagIDModel}},
+		{name: "bytes after the value are ignored", mutate: func(p *chainParams) { p.rawModel = []byte{0x04, 0x03, 'a', 'b', 'c', 0x00} }, wantIgnored: []int{tagIDModel}},
+		{name: "a context-specific tag 4 is ignored", mutate: func(p *chainParams) { p.rawModel = []byte{0x84, 0x03, 'a', 'b', 'c'} }, wantIgnored: []int{tagIDModel}},
+		{name: "a constructed OCTET STRING is ignored", mutate: func(p *chainParams) { p.rawModel = []byte{0x24, 0x05, 0x04, 0x03, 'a', 'b', 'c'} }, wantIgnored: []int{tagIDModel}},
+		{name: "a well-formed raw value is read", mutate: func(p *chainParams) { p.rawModel = []byte{0x04, 0x03, 'a', 'b', 'c'} }, want: [5]string{4: "abc"}},
 		{
 			name: "a value that is not UTF-8 is ignored",
 			mutate: func(p *chainParams) {
