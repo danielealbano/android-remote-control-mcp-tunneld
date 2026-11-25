@@ -269,8 +269,9 @@ verifies no chain), then — after a certificate request — LISTs the name's
 history and DELETEs all but the newest 10 (keys sort by time, so concurrent prunes only ever delete entries
 older than the newest 10). The history write of a request (the PUT, then the prune) is best-effort under one
 5 s deadline: a failure is logged and never refuses the phone, and the next certificate request prunes what a
-failed prune left. After a certificate request it runs alongside the name-record write, also bounded at 5 s, and
-the answer waits for whichever of the two finishes last. Name uniqueness: a candidate name is claimed only after
+failed prune left. After an enrollment the PUT runs before the answer, so a slow S3 delays the enrollment answer
+by up to 5 s. After a certificate request it runs alongside the name-record write, also bounded at 5 s, and the
+answer waits for whichever of the two finishes last. Name uniqueness: a candidate name is claimed only after
 `SET lock:claim:{name} NX EX` succeeds in Valkey (a lock already taken draws a new name); then GET (absent) →
 PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
 deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is

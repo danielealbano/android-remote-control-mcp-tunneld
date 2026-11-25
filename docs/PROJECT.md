@@ -175,7 +175,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   rejected-enrollment evidence (`rejected-enroll/…`), and the attestation history
   (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
   and certificate request of the name, the last 10 kept — after each certificate request tunneld lists the name's
-  history and deletes the older ones; a failed write is logged and never refuses the phone) — plain
+  history and deletes the older ones; the answer waits for the write, at most 5 s, and a failed write is logged and
+  never refuses the phone) — plain
   `GetObject`/`PutObject`/`DeleteObject`/`ListObjectsV2` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a per-name
   Valkey claim lock plus a GET-absent check before the PUT, not from conditional writes. **PRE-GO-LIVE**, validate a provider with a read-after-write
