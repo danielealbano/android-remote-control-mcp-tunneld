@@ -37,6 +37,12 @@ const (
 	tagRootOfTrust      = 704
 	tagVendorPatch      = 718
 	tagBootPatch        = 719
+
+	tagIDBrand        = 710
+	tagIDDevice       = 711
+	tagIDProduct      = 712
+	tagIDManufacturer = 716
+	tagIDModel        = 717
 )
 
 // keyDescription is the top-level KeyDescription SEQUENCE.
@@ -84,6 +90,11 @@ type KeyDescription struct {
 	OSPatch            int
 	VendorPatch        int
 	BootPatch          int
+	Brand              string
+	Device             string
+	Product            string
+	Manufacturer       string
+	Model              string
 }
 
 // ParseKeyDescription locates the attestation extension on the leaf and decodes the fields the
@@ -177,9 +188,33 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 			if out.BootPatch, err = decodeInt(rv.Bytes); err != nil {
 				return fmt.Errorf("bootPatchLevel: %w", err)
 			}
+		case tagIDBrand, tagIDDevice, tagIDProduct, tagIDManufacturer, tagIDModel:
+			if !tee {
+				continue
+			}
+			var id asn1.RawValue
+			if _, err := asn1.Unmarshal(rv.Bytes, &id); err != nil {
+				return fmt.Errorf("attestation id [%d]: %w", rv.Tag, err)
+			}
+			*deviceID(out, rv.Tag) = string(id.Bytes)
 		}
 	}
 	return nil
+}
+
+func deviceID(out *KeyDescription, tag int) *string {
+	switch tag {
+	case tagIDBrand:
+		return &out.Brand
+	case tagIDDevice:
+		return &out.Device
+	case tagIDProduct:
+		return &out.Product
+	case tagIDManufacturer:
+		return &out.Manufacturer
+	default:
+		return &out.Model
+	}
 }
 
 // decodeInt decodes a context-tagged INTEGER's contents.

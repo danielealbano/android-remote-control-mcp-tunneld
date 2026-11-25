@@ -141,6 +141,11 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 			AttestationVersion: kd.AttestationVersion,
 			KeymintVersion:     kd.KeymasterVersion,
 			SecurityLevel:      securityLevelString(kd.SecurityLevel),
+			Brand:              kd.Brand,
+			Device:             kd.Device,
+			Product:            kd.Product,
+			Manufacturer:       kd.Manufacturer,
+			Model:              kd.Model,
 		},
 	}, nil
 }

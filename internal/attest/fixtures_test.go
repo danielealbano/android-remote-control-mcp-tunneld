@@ -9,7 +9,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"maps"
 	"math/big"
+	"slices"
 	"testing"
 	"time"
 )
@@ -36,6 +38,11 @@ type chainParams struct {
 	noRootOfTrust      bool // omit rootOfTrust from BOTH authorization lists
 	rootInSoftwareOnly bool // place rootOfTrust in softwareEnforced instead of teeEnforced
 	malformedOSVersion bool
+
+	deviceIDs           map[int]string
+	deviceIDsInSoftware bool
+	deviceIDsAsUTF8     bool
+	malformedDeviceID   bool
 }
 
 func defaultParams() chainParams {
@@ -208,6 +215,26 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 		softwareFields = append(softwareFields, field704)
 	default:
 		teeFields = append(teeFields, field704)
+	}
+	var idFields [][]byte
+	for _, tag := range slices.Sorted(maps.Keys(p.deviceIDs)) {
+		inner := mustMarshal(t, []byte(p.deviceIDs[tag]))
+		if p.deviceIDsAsUTF8 {
+			utf8, err := asn1.MarshalWithParams(p.deviceIDs[tag], "utf8")
+			if err != nil {
+				t.Fatal(err)
+			}
+			inner = utf8
+		}
+		idFields = append(idFields, ctxTag(t, tag, inner))
+	}
+	if p.malformedDeviceID {
+		idFields = append(idFields, ctxTag(t, tagIDModel, []byte{0x04, 0x05, 'x'}))
+	}
+	if p.deviceIDsInSoftware {
+		softwareFields = append(softwareFields, idFields...)
+	} else {
+		teeFields = append(teeFields, idFields...)
 	}
 	software := sequence(t, softwareFields...)
 	tee := sequence(t, teeFields...)
