@@ -120,9 +120,12 @@ the TEE-enforced `rootOfTrust` (hex) in the name record.
 values `BRAND`, `DEVICE`, `PRODUCT`, `MANUFACTURER`, `MODEL` and `FINGERPRINT`. Unlike the device properties, the TEE
 checked none of them, so the server keeps them apart from the attested values: in the name record (where a request
 without them keeps the previous ones) and with the request's attestation in the history. Each value is a string of
-at most 256 bytes of printable characters; the server ignores any other value, or a `reported_device` that is not an
-object, and logs what it ignored and why; a `null` object or value counts as absent and is not logged, and unknown keys are
-ignored. The server never refuses a request over them.
+at most 256 bytes (UTF-8) made only of letters, marks, numbers, punctuation, symbols and the ASCII space (Unicode
+categories L, M, N, P and S, plus U+0020: any other space, control or format character makes the value invalid); the
+server ignores any other value, or a `reported_device` that is not an object, and logs what it ignored and why, never
+the value; a `null` object or value counts as absent and is not logged, and unknown keys are ignored. The server never
+refuses a request over them, as long as the whole body fits the request-body limit (`--limit-enroll-body`, default
+16 KiB, for `/api/v1/enroll`; 256 KiB for `/api/v1/issue`).
 
 **Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
 (`lock:claim:{name}`, `SET NX EX`; a lock already taken draws a new name). The lock, the registry read and the claim PUT run under one
