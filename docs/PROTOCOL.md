@@ -121,7 +121,7 @@ values `BRAND`, `DEVICE`, `PRODUCT`, `MANUFACTURER`, `MODEL` and `FINGERPRINT`. 
 checked none of them, so the server keeps them apart from the attested values: in the name record (where a request
 without them keeps the previous ones) and with the request's attestation in the history. Each value is a string of
 at most 256 bytes of printable characters; the server ignores any other value, or a `reported_device` that is not an
-object, and logs what it ignored; a `null` object or value counts as absent and is not logged, and unknown keys are
+object, and logs what it ignored and why; a `null` object or value counts as absent and is not logged, and unknown keys are
 ignored. The server never refuses a request over them.
 
 **Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
