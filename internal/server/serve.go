@@ -168,7 +168,7 @@ func issueFunc(svc *enroll.Service) phoneconn.IssueFunc {
 		}
 		res, eerr := svc.Issue(ctx, name, ip, enroll.Request{
 			Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: attestChain,
-			IdentityCSR: idCSR, TLSCSR: tlsCSR,
+			IdentityCSR: idCSR, TLSCSR: tlsCSR, ReportedDevice: req.ReportedDevice,
 		})
 		if eerr != nil {
 			if eerr.Refusal() {

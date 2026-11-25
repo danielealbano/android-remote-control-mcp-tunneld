@@ -25,9 +25,10 @@ type nonceResponse struct {
 
 // enrollRequestBody is the POST /api/v1/enroll body (Phase 1: identity only — NO TLS CSR).
 type enrollRequestBody struct {
-	Nonce          string `json:"nonce"`             // hex
-	AttestChainPEM string `json:"attestation_chain"` // PEM bundle
-	IdentityCSR    string `json:"identity_csr"`      // PEM
+	Nonce          string          `json:"nonce"`             // hex
+	AttestChainPEM string          `json:"attestation_chain"` // PEM bundle
+	IdentityCSR    string          `json:"identity_csr"`      // PEM
+	ReportedDevice json.RawMessage `json:"reported_device"`
 }
 
 // enrollResponse returns the assigned name, the bootstrap identity cert, and a fresh single-use
@@ -198,6 +199,7 @@ func (h *Handler) handleEnroll(w http.ResponseWriter, r *http.Request, ip string
 		AttestChainPEM: []byte(req.AttestChainPEM),
 		AttestChain:    chain,
 		IdentityCSR:    idCSR,
+		ReportedDevice: req.ReportedDevice,
 	})
 	if ee != nil {
 		h.rec.EnrollmentResult(ee.Reason)

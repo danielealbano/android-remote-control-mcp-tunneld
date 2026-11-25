@@ -174,7 +174,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   window, or per 16 MiB, then deletes it locally),
   rejected-enrollment evidence (`rejected-enroll/…`), and the attestation history
   (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
-  and certificate request of the name, the last 10 kept — after each certificate request tunneld lists the name's
+  and certificate request of the name, with the device the phone reported when it sent one, the last 10 kept — after each certificate request tunneld lists the name's
   history and deletes the older ones; the answer waits for the write, at most 5 s, and a failed write is logged and
   never refuses the phone) — plain
   `GetObject`/`PutObject`/`DeleteObject`/`ListObjectsV2` only

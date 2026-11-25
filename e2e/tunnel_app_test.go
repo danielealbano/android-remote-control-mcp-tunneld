@@ -348,6 +348,11 @@ func assertAttestationHistory(t *testing.T, inf *e2eInfra, serial, name string, 
 	if len(keys) != want {
 		t.Fatalf("attestation history of %s holds %d objects, want %d (one enrollment + one per issuance): %v", name, len(keys), want, keys)
 	}
+	getprop := func(p string) string { return strings.TrimSpace(string(adb(t, serial, "shell", "getprop", p))) }
+	reported := store.ReportedDevice{
+		Brand: getprop("ro.product.brand"), Device: getprop("ro.product.device"), Product: getprop("ro.product.name"),
+		Manufacturer: getprop("ro.product.manufacturer"), Model: getprop("ro.product.model"), Fingerprint: getprop("ro.build.fingerprint"),
+	}
 	for i, k := range keys {
 		var a store.Attestation
 		if err := json.Unmarshal(tunneltest.S3GetObject(t, inf.s3URL, inf.access, inf.secret, e2eBucket, k), &a); err != nil {
@@ -370,14 +375,24 @@ func assertAttestationHistory(t *testing.T, inf *e2eInfra, serial, name string, 
 		if a.Kind != wantKind || certs < 2 {
 			t.Fatalf("attestation %s = kind %q with %d certificates, want kind %q with the device's full chain", k, a.Kind, certs, wantKind)
 		}
+		if a.ReportedDevice != reported {
+			t.Fatalf("attestation %s reports %+v, want the device's own %+v", k, a.ReportedDevice, reported)
+		}
 	}
 	var rec store.NameRecord
 	if err := json.Unmarshal(tunneltest.S3GetObject(t, inf.s3URL, inf.access, inf.secret, e2eBucket, "names/"+name), &rec); err != nil {
 		t.Fatalf("decode the name record of %s: %v", name, err)
 	}
 	d := rec.Device
-	t.Logf("attested device properties (optional): brand=%q device=%q product=%q manufacturer=%q model=%q; getprop ro.product.model=%q",
-		d.Brand, d.Device, d.Product, d.Manufacturer, d.Model, strings.TrimSpace(string(adb(t, serial, "shell", "getprop", "ro.product.model"))))
+	t.Logf("attested device properties (optional): brand=%q device=%q product=%q manufacturer=%q model=%q; reported %+v",
+		d.Brand, d.Device, d.Product, d.Manufacturer, d.Model, rec.ReportedDevice)
+	if rec.ReportedDevice != reported {
+		t.Fatalf("the name record reports %+v, want the device's own %+v", rec.ReportedDevice, reported)
+	}
+	if d.VerifiedBootKey == "" || d.VerifiedBootHash == "" {
+		t.Fatalf("the name record must carry the verified boot key and hash, got %q and %q", d.VerifiedBootKey, d.VerifiedBootHash)
+	}
+	t.Logf("verified boot key=%s hash=%s", d.VerifiedBootKey, d.VerifiedBootHash)
 }
 
 func amCommand(t *testing.T, serial, pkg, cmd string, kv ...string) {

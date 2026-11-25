@@ -142,6 +142,8 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 			AttestationVersion: kd.AttestationVersion,
 			KeymintVersion:     kd.KeymasterVersion,
 			SecurityLevel:      securityLevelString(kd.SecurityLevel),
+			VerifiedBootKey:    hex.EncodeToString(kd.VerifiedBootKey),
+			VerifiedBootHash:   hex.EncodeToString(kd.VerifiedBootHash),
 			Brand:              kd.Brand,
 			Device:             kd.Device,
 			Product:            kd.Product,

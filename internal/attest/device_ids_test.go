@@ -90,9 +90,39 @@ func TestVerify_CarriesTheDeviceProperties(t *testing.T) {
 	}
 	want := store.DeviceInfo{
 		OSVersion: 160000, OSPatch: 202607, VendorPatch: 202607, BootPatch: 202607, AttestationVersion: 200, KeymintVersion: 200,
-		SecurityLevel: "tee", Brand: "brand-x", Device: "device-x", Product: "product-x", Manufacturer: "maker-x", Model: "model-x",
+		SecurityLevel: "tee", VerifiedBootKey: "01020304", VerifiedBootHash: "05060708",
+		Brand: "brand-x", Device: "device-x", Product: "product-x", Manufacturer: "maker-x", Model: "model-x",
 	}
 	if res.Device != want {
 		t.Errorf("device = %+v, want %+v", res.Device, want)
+	}
+}
+
+func TestVerify_RecordsTheVerifiedBootKeyAndHash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		noBootHash bool
+		wantKey    string
+		wantHash   string
+	}{
+		{name: "key and hash", wantKey: "01020304", wantHash: "05060708"},
+		{name: "no hash", noBootHash: true, wantKey: "01020304"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ca := newFakeCA(t)
+			p := defaultParams()
+			p.noBootHash = tc.noBootHash
+			chain, _ := ca.buildChain(t, p)
+			res, err := testVerifier(t, ca, p.signerDigest, nil, frozenNow()).Verify(chain, p.challenge, frozenNow())
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if res.Device.VerifiedBootKey != tc.wantKey || res.Device.VerifiedBootHash != tc.wantHash {
+				t.Errorf("boot key/hash = %q/%q, want %q/%q", res.Device.VerifiedBootKey, res.Device.VerifiedBootHash, tc.wantKey, tc.wantHash)
+			}
+		})
 	}
 }

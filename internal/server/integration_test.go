@@ -38,6 +38,7 @@ import (
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/config"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/enroll"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/limit"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/phoneconn"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/router"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
@@ -690,6 +691,69 @@ func TestIntegration_Registry(t *testing.T) {
 		}
 		if !slices.Contains(kept, keys[0]) {
 			t.Errorf("the newest attestation (the enrollment) must be kept: %v", kept)
+		}
+	})
+
+	t.Run("reported-device", func(t *testing.T) {
+		ctx := context.Background()
+		rdb := newRedis(t, redisURL)
+		svc := enroll.NewService(enroll.Config{
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st, Attestations: st,
+			Verifier: stubVerifier{}, Issuer: stubIssuer{},
+			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
+		})
+		nonce, err := svc.Nonce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, chainPEM := dummyAttChain(t)
+		res, ee := svc.Enroll(ctx, "9.9.9.7", enroll.Request{Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: chain, IdentityCSR: identityCSR(t)})
+		if ee != nil {
+			t.Fatalf("enrollment failed: %v", ee)
+		}
+		issueNonce, err := svc.Nonce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tlsKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fqdn := res.Name + "." + itTunnelDomain
+		tlsDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: fqdn}, DNSNames: []string{fqdn}}, tlsKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const reportedJSON = `{"model":"model-r","fingerprint":"brand-r/product-r/device-r:16/ID1/7:user/release-keys"}`
+		_, ierr := issueFunc(svc)(ctx, res.Name, "9.9.9.7", phoneconn.IssueRequest{
+			Nonce:               fmt.Sprintf("%x", issueNonce),
+			AttestationChainPEM: string(chainPEM),
+			IdentityCSR:         string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: identityCSR(t).Raw})),
+			TLSCSR:              string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: tlsDER})),
+			ReportedDevice:      json.RawMessage(reportedJSON),
+		})
+		if ierr != nil {
+			t.Fatalf("certificate request failed: %+v", ierr)
+		}
+		want := store.ReportedDevice{Model: "model-r", Fingerprint: "brand-r/product-r/device-r:16/ID1/7:user/release-keys"}
+		var rec store.NameRecord
+		if err := json.Unmarshal(tunneltest.S3GetObject(t, s3URL, access, secret, bucket, "names/"+res.Name), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.ReportedDevice != want {
+			t.Fatalf("name record reports %+v, want %+v", rec.ReportedDevice, want)
+		}
+		keys := tunneltest.S3ListKeys(t, s3URL, access, secret, bucket, store.AttestationPrefix(res.Name))
+		if len(keys) != 2 {
+			t.Fatalf("history must hold the enrollment and the certificate request, got %v", keys)
+		}
+		var issued store.Attestation
+		if err := json.Unmarshal(tunneltest.S3GetObject(t, s3URL, access, secret, bucket, keys[1]), &issued); err != nil {
+			t.Fatal(err)
+		}
+		if issued.Kind != store.AttestationKindIssue || issued.ReportedDevice != want {
+			t.Fatalf("the certificate request's history entry = %+v, want kind %q reporting %+v", issued, store.AttestationKindIssue, want)
 		}
 	})
 

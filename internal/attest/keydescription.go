@@ -86,6 +86,8 @@ type KeyDescription struct {
 	SignatureDigests   [][]byte
 	DeviceLocked       bool
 	VerifiedBootState  int
+	VerifiedBootKey    []byte
+	VerifiedBootHash   []byte
 	HasRootOfTrust     bool // rootOfTrust was present in the TEE-enforced authorization list
 	OSVersion          int
 	OSPatch            int
@@ -158,6 +160,8 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 			out.HasRootOfTrust = true
 			out.DeviceLocked = rot.DeviceLocked
 			out.VerifiedBootState = int(rot.VerifiedBootState)
+			out.VerifiedBootKey = rot.VerifiedBootKey
+			out.VerifiedBootHash = rot.VerifiedBootHash
 		case tagAttestationAppID:
 			// The value is an OCTET STRING wrapping the AttestationApplicationId DER.
 			var inner asn1.RawValue

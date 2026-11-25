@@ -476,6 +476,34 @@ func TestServeIssue_RetryableErrorIs503(t *testing.T) {
 	}
 }
 
+func TestServeIssue_HandsOverTheReportedDeviceAsSent(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "absent", body: `{}`},
+		{name: "object", body: `{"reported_device":{"model":"model-r"}}`, want: `{"model":"model-r"}`},
+		{name: "wrong type", body: `{"reported_device":7}`, want: `7`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _, _ := newMgr(t)
+			var got IssueRequest
+			h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4,
+				OnIssue: func(_ context.Context, _, _ string, req IssueRequest) (IssueResponse, *IssueError) {
+					got = req
+					return IssueResponse{}, nil
+				}})
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, issuePost(t, tc.body))
+			if rec.Code != http.StatusOK || string(got.ReportedDevice) != tc.want {
+				t.Fatalf("issue = %d with reported_device %q, want 200 with %q", rec.Code, got.ReportedDevice, tc.want)
+			}
+		})
+	}
+}
+
 func TestServeIssue_HandlerDeadline(t *testing.T) {
 	m, _, _, _ := newMgr(t)
 	var deadline time.Time

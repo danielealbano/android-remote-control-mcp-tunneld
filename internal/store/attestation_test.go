@@ -54,6 +54,47 @@ func TestDeviceInfo_JSONStaysCompatible(t *testing.T) {
 	if !strings.Contains(string(b), `"brand":"brand-x"`) || !strings.Contains(string(b), `"model":"model-x"`) || strings.Contains(string(b), `"device":`) {
 		t.Errorf("only the attested device properties are written: %s", b)
 	}
+	got.VerifiedBootKey, got.VerifiedBootHash = "0102", "0304"
+	b, err = json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"verified_boot_key":"0102"`) || !strings.Contains(string(b), `"verified_boot_hash":"0304"`) {
+		t.Errorf("the verified boot key and hash must be written: %s", b)
+	}
+}
+
+func TestReportedDevice_WrittenOnlyWhenSet(t *testing.T) {
+	t.Parallel()
+	reported := store.ReportedDevice{Model: "model-r", Fingerprint: "brand/product/device:16/ID/1:user/release-keys"}
+	tests := []struct {
+		name  string
+		empty any
+		set   any
+	}{
+		{name: "name record", empty: store.NameRecord{}, set: store.NameRecord{ReportedDevice: reported}},
+		{name: "attestation", empty: store.Attestation{}, set: store.Attestation{ReportedDevice: reported}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, err := json.Marshal(tc.empty)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(b), "reported_device") {
+				t.Errorf("nothing reported must keep the old JSON shape: %s", b)
+			}
+			b, err = json.Marshal(tc.set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `"reported_device":{"model":"model-r","fingerprint":"brand/product/device:16/ID/1:user/release-keys"}`
+			if !strings.Contains(string(b), want) {
+				t.Errorf("JSON = %s, want it to contain %s", b, want)
+			}
+		})
+	}
 }
 
 func TestFakeAttestations_PruneKeepsTheNewest(t *testing.T) {

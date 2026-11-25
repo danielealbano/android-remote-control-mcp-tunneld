@@ -1,18 +1,23 @@
 package enroll
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/redis/go-redis/v9"
 
@@ -63,6 +68,7 @@ type Request struct {
 	AttestChain    []*x509.Certificate
 	IdentityCSR    *x509.CertificateRequest
 	TLSCSR         *x509.CertificateRequest // Phase 2 (Issue) only — the public-cert CSR (SAN=<name>.<tunnel-domain>)
+	ReportedDevice json.RawMessage
 }
 
 // Result is a successful enrollment/renewal.
@@ -186,9 +192,10 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		return Result{}, e
 	}
 	t = s.logStep("enrollment step finished", "attest", t, "ip", ip)
+	reported, ignoredReported := parseReportedDevice(req.ReportedDevice)
 
 	// Generate + claim a fresh name.
-	rec := store.NameRecord{Device: att.Device}
+	rec := store.NameRecord{Device: att.Device, ReportedDevice: reported}
 	if req.IdentityCSR != nil {
 		fp, err := keyFingerprint(req.IdentityCSR.PublicKey)
 		if err != nil {
@@ -205,6 +212,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	}
 	report.SetAttrs(ctx, slog.String("tunnel", name))
 	t = s.logStep("enrollment step finished", "claim", t, "ip", ip, "tunnel", name)
+	s.logIgnoredReported(name, ip, ignoredReported)
 
 	// Bootstrap identity cert (CN = the server-assigned name; the CSR subject is ignored). A sign
 	// failure rolls the freshly claimed name back (plain delete);
@@ -221,7 +229,7 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 	}
 	t = s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
 	if !s.cfg.AttestOptional {
-		s.recordAttestation(ctx, name, ip, store.AttestationKindEnroll, req, false)
+		s.recordAttestation(ctx, name, ip, store.AttestationKindEnroll, req, reported, false)
 		s.logStep("enrollment step finished", "attestation-record", t, "ip", ip, "tunnel", name)
 	}
 	return Result{Name: name, IdentityCert: identityPEM}, nil
@@ -255,6 +263,8 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		return Result{}, e
 	}
 	t = s.logStep("certificate issuance step finished", "attest", t, "tunnel", name, "ip", ip)
+	reported, ignoredReported := parseReportedDevice(req.ReportedDevice)
+	s.logIgnoredReported(name, ip, ignoredReported)
 	// Proof-of-possession of the TLS key + the server-dictated public identity: the TLS CSR MUST verify
 	// and MUST request exactly <name>.<tunnel-domain>.
 	if err := req.TLSCSR.CheckSignature(); err != nil {
@@ -375,11 +385,11 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 		if !s.cfg.AttestOptional {
 			history.Go(func() {
 				defer report.Recover(ctx, s.logger, "attestation history write", func() {})
-				s.recordAttestation(ctx, name, ip, store.AttestationKindIssue, req, true)
+				s.recordAttestation(ctx, name, ip, store.AttestationKindIssue, req, reported, true)
 				s.logStep("certificate issuance step finished", "attestation-record", t, "tunnel", name, "ip", ip)
 			})
 		}
-		s.recordCert(ctx, name, cur, req, info, att.Device)
+		s.recordCert(ctx, name, cur, req, info, att.Device, reported)
 		s.logStep("certificate issuance step finished", "registry-write", t, "tunnel", name, "ip", ip)
 		history.Wait()
 	}
@@ -519,9 +529,9 @@ func (s *Service) claimCandidate(ctx context.Context, cand string, rec store.Nam
 func claimLockKey(name string) string { return "lock:claim:" + name }
 
 // recordCert LWW-updates the registry record with the issued cert + rotated identity-key fingerprint +
-// the freshly-attested device scalars. A failure here is non-fatal (the
+// the freshly-attested device scalars + the device the phone reported. A failure here is non-fatal (the
 // certs are issued and the next Issue's LWW refreshes it) but logged, never silent.
-func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo) {
+func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRecord, req Request, info store.CertInfo, dev store.DeviceInfo, reported store.ReportedDevice) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	// Re-read for the freshest record; on a transient read failure fall back to `cur` (the record Issue
@@ -546,16 +556,19 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	if dev != (store.DeviceInfo{}) {
 		rec.Device = dev // refresh from the renewal's fresh attestation; keep prior when attestation was optional
 	}
+	if reported != (store.ReportedDevice{}) {
+		rec.ReportedDevice = reported
+	}
 	rec.SetCert(info)
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
 		s.logger.Warn("could not save the new certificate in the tunnel's record; the phone still gets the certificate", "tunnel", name, "err", err)
 	}
 }
 
-func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, req Request, prune bool) {
+func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, req Request, reported store.ReportedDevice, prune bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	a := store.Attestation{TS: s.now().UTC(), Kind: kind, AttestChainPEM: string(req.AttestChainPEM)}
+	a := store.Attestation{TS: s.now().UTC(), Kind: kind, AttestChainPEM: string(req.AttestChainPEM), ReportedDevice: reported}
 	if err := s.cfg.Attestations.PutAttestation(ctx, name, a); err != nil {
 		s.logger.Warn("could not save the phone's attestation in the tunnel's history; the phone is not affected", "tunnel", name, "ip", ip, "kind", kind, "err", err)
 		return
@@ -565,6 +578,68 @@ func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, 
 	}
 	if err := s.cfg.Attestations.PruneAttestations(ctx, name, attestationHistory); err != nil {
 		s.logger.Warn("could not remove the oldest attestations from the tunnel's history; the next certificate request removes them", "tunnel", name, "err", err)
+	}
+}
+
+const reportedDeviceMaxLen = 256
+
+func parseReportedDevice(raw json.RawMessage) (store.ReportedDevice, map[string]string) {
+	var reported store.ReportedDevice
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return reported, nil
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return reported, map[string]string{"reported_device": "not a JSON object"}
+	}
+	ignored := map[string]string{}
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{
+		{"brand", &reported.Brand},
+		{"device", &reported.Device},
+		{"product", &reported.Product},
+		{"manufacturer", &reported.Manufacturer},
+		{"model", &reported.Model},
+		{"fingerprint", &reported.Fingerprint},
+	} {
+		v, ok := fields[f.key]
+		if !ok {
+			continue
+		}
+		var str string
+		if json.Unmarshal(v, &str) != nil {
+			ignored[f.key] = "not a string"
+			continue
+		}
+		if problem := reportedValueProblem(str); problem != "" {
+			ignored[f.key] = problem
+			continue
+		}
+		*f.dst = str
+	}
+	return reported, ignored
+}
+
+func reportedValueProblem(v string) string {
+	if strings.ContainsRune(v, utf8.RuneError) {
+		return "not valid UTF-8"
+	}
+	if len(v) > reportedDeviceMaxLen {
+		return fmt.Sprintf("%d bytes, more than %d", len(v), reportedDeviceMaxLen)
+	}
+	for _, r := range v {
+		if !unicode.IsPrint(r) {
+			return "holds a character that is not printable"
+		}
+	}
+	return ""
+}
+
+func (s *Service) logIgnoredReported(name, ip string, ignored map[string]string) {
+	if len(ignored) > 0 {
+		s.logger.Info("the phone reported device properties in an unexpected form, so they are not recorded", "tunnel", name, "ip", ip, "ignored", ignored)
 	}
 }
 

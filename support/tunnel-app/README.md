@@ -30,7 +30,8 @@ On `enroll` it:
   hardware-attested over the server enroll nonce, and a **TLS** key for the local server; every attested
   identity key (at enrollment and at each issuance) includes the device properties when the device can attest
   them, and is generated again without them when the keystore refuses (`ProviderException`), as
-  `docs/PROTOCOL.md` §2 describes;
+  `docs/PROTOCOL.md` §2 describes; the enrollment and every issuance also send `reported_device` (the `Build`
+  brand, device, product, manufacturer, model and fingerprint);
 - runs **two-phase attested enrollment** (`POST /enroll` → `POST /issue`) with PKCS#10 CSRs signed by
   those keys (BouncyCastle), presenting the identity key over client-mTLS on the `/issue` exchange, and
   retries both phases as `docs/PROTOCOL.md` §2 prescribes;

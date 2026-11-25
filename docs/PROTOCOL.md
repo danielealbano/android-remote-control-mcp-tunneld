@@ -112,7 +112,22 @@ phone generates it again at once without them, over the same nonce; only a failu
 key-generation failure the retry rules below describe. The server reads them only from the TEE-enforced list
 and records them in the name record when present. They are not part of the predicate: their absence never
 refuses a phone, and neither does a value that is not a UTF-8 OCTET STRING, which the server ignores (it records
-the others and logs the tags it ignored).
+the others and logs the tags it ignored). The server also records, in the name record, the `verifiedBootKey` of
+the TEE-enforced `rootOfTrust` and, when the `rootOfTrust` carries one, its `verifiedBootHash` (hex, each written only
+when not empty).
+
+**Reported device (optional).** The phone SHOULD send `reported_device` with `POST /api/v1/enroll` and every
+`POST /api/v1/issue`: `{"brand", "device", "product", "manufacturer", "model", "fingerprint"}`, the Android `Build`
+values `BRAND`, `DEVICE`, `PRODUCT`, `MANUFACTURER`, `MODEL` and `FINGERPRINT`. Unlike the device properties, the TEE
+checked none of them, so the server keeps them apart from the attested values: in the name record (where a request
+without them keeps the previous ones) and with the request's attestation in the history. Each value is a string of
+at most 256 bytes of valid UTF-8 (invalid bytes, a lone surrogate escape or U+FFFD make the value invalid) made only of
+letters, marks, numbers, punctuation, symbols and the ASCII space (Unicode categories L, M, N, P and S, plus U+0020:
+any other space, control or format character makes the value invalid); the server ignores any other value, or a
+`reported_device` that is not an object, and logs what it ignored and why, never the value; a `null` object or value
+counts as absent and is not logged, and unknown keys are ignored. The server never refuses a request over them, as
+long as the whole body fits the request-body limit (`--limit-enroll-body`, default 16 KiB, for `/api/v1/enroll`;
+256 KiB for `/api/v1/issue`).
 
 **Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
 (`lock:claim:{name}`, `SET NX EX`; a lock already taken draws a new name). The lock, the registry read and the claim PUT run under one
@@ -130,7 +145,8 @@ auto-retries (a retried claim PUT would be a self-inflicted zombie write).
   per-IP enroll windows (`--limit-enroll-minute`, default 2; `--limit-enroll-hour`, default 20): each nonce
   call, and each POST that passes parsing and the read-only rate pre-check, spends one slot, so an attempt
   (nonce + POST) spends two.
-- `POST /api/v1/enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>"}`
+- `POST /api/v1/enroll` with `{"nonce": "<hex>", "attestation_chain": "<PEM bundle>", "identity_csr": "<PEM>",
+  "reported_device": {…}}` (`reported_device` optional, see above)
   → `{"name": "<assigned>", "identity_cert": "<PEM>", "issue_nonce": "<hex>"}`. `issue_nonce` is the
   single-use nonce the phone echoes in its follow-up `POST /api/v1/issue`. Errors are
   `{"reason", "retryable", "retry_after_seconds"?}`; the status mapping (both enroll routes): `403`
@@ -228,7 +244,8 @@ connection with close reason `ban-evict`, which every node keeps for the splices
 `/api/v1/issue` is the single cert-generation endpoint for BOTH the initial public cert (Phase 2) and every
 renewal, authenticated by the phone's mTLS identity cert (name = its CN). Request/response are JSON:
 
-- Request: `{nonce, attestation_chain, identity_csr, tls_csr}` — `nonce` is the Phase-1 `issue_nonce`
+- Request: `{nonce, attestation_chain, identity_csr, tls_csr, reported_device}` (`reported_device` optional, §2)
+  — `nonce` is the Phase-1 `issue_nonce`
   (initial) or the `RENEW_NUDGE` nonce (renewal); `tls_csr` MUST request exactly `<name>.<tunnel-domain>`
   (byte-exact, lowercase): as its single DNS SAN or, with no SAN, as its CN; a non-empty CN must equal it; no
   IP / email / URI SAN; anything else is `400` `csr_domain_mismatch` (not retryable).
