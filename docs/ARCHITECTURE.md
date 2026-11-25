@@ -263,7 +263,7 @@ writes): the name registry (`names/<name>`), connection logs (per-node JSONL obj
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed; a connection's start and
 end may land in different objects), rejected-enroll evidence
 (`rejected-enroll/…`), and the attestation history (`attestations/<name>/<time>-<rand>.json`). The enroll
-service PUTs the submitted chain after a successful enrollment and after each successful certificate request
+service PUTs the submitted chain, with the device the phone reported when it sent one, after a successful enrollment and after each successful certificate request
 (the same request that refreshes the name record; never in the test-only optional-attestation mode, which
 verifies no chain), then — after a certificate request — LISTs the name's
 history and DELETEs all but the newest 10 (keys sort by time, so concurrent prunes only ever delete entries
