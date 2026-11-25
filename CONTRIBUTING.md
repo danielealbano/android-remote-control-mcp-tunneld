@@ -42,7 +42,7 @@ See [`docs/PROJECT.md`](docs/PROJECT.md) for the operational reference and
 - **Docker**: the integration, e2e and staging tests start Valkey, MinIO and a test ACME CA with
   testcontainers; Docker also builds the image and runs the compose stack.
 - **golangci-lint v2.14.0** (the version CI uses) and **shellcheck**, for `make lint`.
-- **Node.js** with `npx`, for `make mermaid-check` (CI uses Node 24).
+- **Node.js** with `npm`, for `make mermaid-check`, which installs the versions fixed in `scripts/mermaid/package-lock.json` (CI uses Node 24).
 - Optional: the **Android SDK** and **adb** with one attached device, for the on-device test apps under
   `support/` (`make attest-probe`, `make tunnel-app`, `make soak-app`) and the device e2e tests.
 
