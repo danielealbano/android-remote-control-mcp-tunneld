@@ -33,7 +33,7 @@ flowchart TD
   ca["ca: internal CA (identity + mesh-role certs)"]
   router["router: Valkey route + node registry"]
   limit["limit: rate / traffic / concurrency / ACME cooldown"]
-  store["store: durable S3 registry + logs + evidence"]
+  store["store: durable S3 registry + logs + evidence + attestation history"]
   metrics["metrics: internal listener + PromRecorder"]
   acmehttp[":80 plain listener (http-01 answers; plain dial-backs)"]
 

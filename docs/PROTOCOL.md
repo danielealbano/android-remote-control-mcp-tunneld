@@ -94,8 +94,8 @@ key is refused (`unsupported_key_type`) before the public cert is ever obtained.
 TrustedEnvironment` (Software rejected; StrongBox not required) ∧ `verifiedBootState == Verified` ∧
 `deviceLocked == true` ∧ not revoked (status list refreshed with last-known-good; refused if `> 24h`
 stale). A KeyDescription that does not parse — including a malformed informational field such as the OS
-version or a patch level — fails the chain (the phone gets `401` `unauthorized`; `attest-untrusted` is the
-server's metric label). The root set is fetched from `--attest-root-url` (default
+version or a patch level, but not a device property (below) — fails the chain (the phone gets `401`
+`unauthorized`; `attest-untrusted` is the server's metric label). The root set is fetched from `--attest-root-url` (default
 `https://android.googleapis.com/attestation/root`) and refreshed every `--attest-refresh` (default 1 h); no
 root is pinned in the binary. Any status-list entry for a certificate of the chain counts as revoked,
 whatever its status (`SUSPENDED` included). The signer allowlist file holds one hex SHA-256
@@ -111,7 +111,8 @@ device can attest them: when generating the key with them fails (Android Keystor
 phone generates it again at once without them, over the same nonce; only a failure without them is the
 key-generation failure the retry rules below describe. The server reads them only from the TEE-enforced list
 and records them in the name record when present. They are not part of the predicate: their absence never
-refuses a phone.
+refuses a phone, and neither does a value that is not a UTF-8 OCTET STRING, which the server ignores (it records
+the others and logs the tags it ignored).
 
 **Name-claim invariant**: a candidate name is claimed only by the request that set its Valkey lock
 (`lock:claim:{name}`, `SET NX EX`; a lock already taken draws a new name). The lock, the registry read and the claim PUT run under one
