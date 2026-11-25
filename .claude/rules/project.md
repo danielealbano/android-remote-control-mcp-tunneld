@@ -8,7 +8,7 @@ it peeks each ClientHello (SNI/ALPN/version/JA4), routes on SNI, and splices the
 stream** to a connection the phone dials back to the entry node (the replicas' mTLS **mesh** carries
 control RPCs only) — it can NEVER read tunnel traffic. Run **one
 replica per host**; **Valkey** holds transient control state (TTL'd), a plain **S3** bucket holds the
-durable state (name registry, connection logs, rejected-enroll evidence). Identity is earned by
+durable state (name registry, connection logs, rejected-enroll evidence, attestation history). Identity is earned by
 **two-phase attested enrollment** (Android hardware key attestation → identity mTLS cert → server-run
 ACME public cert). Abuse is contained by layered caps and a hot-reloadable ban/geo engine.
 
@@ -148,7 +148,7 @@ MUST NOT be relaxed without explicit user direction.
   (`traf:` day/week traffic, issuance/`--issue-per-week`) MUST PERSIST across reconnects — a tunnel MUST NOT
   reset its quota just by reconnecting.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
-  rejected-enroll evidence, and the attestation history (the submitted chains of each name's last 10 accepted
+  rejected-enroll evidence, and the attestation history (the submitted chains of each name's last 10 successful
   enrollments/certificate requests, pruned by tunneld), via plain Get/Put/Delete/List (NO conditional writes —
   runs on any plain S3).
   Name uniqueness is the **Valkey claim lock**: `SET lock:claim:{name} NX EX` (taken → new name; never

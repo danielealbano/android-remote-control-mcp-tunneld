@@ -69,7 +69,7 @@ flowchart TD
 | `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict, slot-candidate, free-slot), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME issuance budgets + wait-until |
-| `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence |
+| `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence, attestation history |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | control-frame codec + dial-back constants + the ChunkSize pacing constant |
@@ -267,8 +267,10 @@ service PUTs the submitted chain after a successful enrollment and after each su
 (the same request that refreshes the name record; never in the test-only optional-attestation mode, which
 verifies no chain), then — after a certificate request — LISTs the name's
 history and DELETEs all but the newest 10 (keys sort by time, so concurrent prunes only ever delete entries
-older than the newest 10). Every history write is best-effort with its own 5 s deadline: a failure is logged
-and never refuses the phone, and the next certificate request prunes what a failed prune left. Name uniqueness: a candidate name is claimed only after
+older than the newest 10). The history write of a request (the PUT, then the prune) is best-effort under one
+5 s deadline: a failure is logged and never refuses the phone, and the next certificate request prunes what a
+failed prune left. After a certificate request it runs alongside the name-record write, so the answer waits no
+longer after the issuance than before. Name uniqueness: a candidate name is claimed only after
 `SET lock:claim:{name} NX EX` succeeds in Valkey (a lock already taken draws a new name); then GET (absent) →
 PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
 deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is

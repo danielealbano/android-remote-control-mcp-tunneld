@@ -23,7 +23,7 @@ internal mTLS HTTP/2 **mesh**, and the phone dials back to the node where a publ
 tunnel data crosses nodes.
 **Valkey** holds transient control state (routing/rate-limit/concurrency — everything TTL'd); a plain
 **S3** bucket (any provider; MinIO locally) holds the durable state (name registry, connection logs,
-rejected-enrollment evidence).
+rejected-enrollment evidence, attestation history).
 
 ```mermaid
 flowchart LR
@@ -173,8 +173,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
   window, or per 16 MiB, then deletes it locally),
   rejected-enrollment evidence (`rejected-enroll/…`), and the attestation history
-  (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each accepted enrollment and
-  certificate request of the name, the last 10 kept — after each certificate request tunneld lists the name's
+  (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
+  and certificate request of the name, the last 10 kept — after each certificate request tunneld lists the name's
   history and deletes the older ones; a failed write is logged and never refuses the phone) — plain
   `GetObject`/`PutObject`/`DeleteObject`/`ListObjectsV2` only
   (no conditional writes), so any plain-S3 provider works; name uniqueness comes from a per-name
