@@ -287,3 +287,44 @@ func TestEnroll_HistoryOutlivesTheCaller(t *testing.T) {
 		t.Fatalf("the enrollment's attestation must be kept although the caller had gone, got %+v", got)
 	}
 }
+
+type ignoredIDsVerifier struct {
+	fakeVerifier
+	tags []int
+}
+
+func (v ignoredIDsVerifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time) (attest.Result, error) {
+	res, err := v.fakeVerifier.Verify(chain, nonce, now)
+	res.IgnoredDeviceIDs = v.tags
+	return res, err
+}
+
+func TestEnroll_IgnoredDevicePropertiesAreLoggedAndNeverRefuse(t *testing.T) {
+	t.Parallel()
+	const line = `msg="the phone's attestation carried device properties in an unexpected form, so they are not recorded"`
+	tests := []struct {
+		name    string
+		tags    []int
+		wantLog bool
+	}{
+		{name: "none ignored", wantLog: false},
+		{name: "the model ignored", tags: []int{717}, wantLog: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			svc, buf := newHistoryService(t, st, ignoredIDsVerifier{fakeVerifier: fakeVerifier{key: idPub}, tags: tc.tags}, false)
+			name := enrollWithChain(t, svc, idCSR)
+			if got := st.Attestations(name); len(got) != 1 {
+				t.Fatalf("the enrollment must stand and be recorded, got %+v", got)
+			}
+			out := buf.String()
+			logged := strings.Contains(out, line) && strings.Contains(out, "level=INFO") && strings.Contains(out, "717") && strings.Contains(out, "ip=1.2.3.4")
+			if logged != tc.wantLog {
+				t.Fatalf("ignored device properties logged = %v, want %v; log:\n%s", logged, tc.wantLog, out)
+			}
+		})
+	}
+}

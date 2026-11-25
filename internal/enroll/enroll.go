@@ -405,6 +405,9 @@ func (s *Service) attestAndBind(ctx context.Context, ip, name string, req Reques
 			return attest.Result{}, &Error{Reason: "unauthorized"}
 		}
 		s.rec.AttestVerify("ok")
+		if len(res.IgnoredDeviceIDs) > 0 {
+			s.logger.Info("the phone's attestation carried device properties in an unexpected form, so they are not recorded", "tunnel", name, "ip", ip, "tags", res.IgnoredDeviceIDs)
+		}
 		att = res
 	}
 	if err := req.IdentityCSR.CheckSignature(); err != nil {
