@@ -55,10 +55,11 @@ type BanIP func(addr netip.Addr) bool
 // identity and TLS CSRs. It is the SINGLE certificate-generation request for BOTH the initial public
 // cert (right after enrollment) and every renewal — it regenerates the identity + public certs together.
 type IssueRequest struct {
-	Nonce               string `json:"nonce"`             // hex
-	AttestationChainPEM string `json:"attestation_chain"` // PEM bundle
-	IdentityCSR         string `json:"identity_csr"`      // PEM
-	TLSCSR              string `json:"tls_csr"`           // PEM (SAN = <name>.<tunnel-domain>)
+	Nonce               string          `json:"nonce"`             // hex
+	AttestationChainPEM string          `json:"attestation_chain"` // PEM bundle
+	IdentityCSR         string          `json:"identity_csr"`      // PEM
+	TLSCSR              string          `json:"tls_csr"`           // PEM (SAN = <name>.<tunnel-domain>)
+	ReportedDevice      json.RawMessage `json:"reported_device"`
 }
 
 // IssueResponse returns the regenerated identity + public certs.
