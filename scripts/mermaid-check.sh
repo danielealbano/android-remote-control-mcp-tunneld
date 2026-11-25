@@ -1,6 +1,7 @@
 #!/bin/sh
 # Validates every ```mermaid fenced block in the given Markdown files by rendering it with mmdc
-# (@mermaid-js/mermaid-cli via npx). Exits non-zero if any block fails to render.
+# (@mermaid-js/mermaid-cli, installed with `npm ci` from scripts/mermaid/package-lock.json so every
+# dependency version is fixed). Exits non-zero if any block fails to render.
 set -eu
 
 if [ "$#" -eq 0 ]; then
@@ -10,6 +11,11 @@ fi
 
 OUT_DIR="$(mktemp -d)"
 trap 'rm -rf "$OUT_DIR"' EXIT
+
+mkdir "$OUT_DIR/mermaid"
+cp "$(dirname "$0")/mermaid/package.json" "$(dirname "$0")/mermaid/package-lock.json" "$OUT_DIR/mermaid/"
+npm ci --prefix "$OUT_DIR/mermaid" --no-audit --no-fund
+MMDC="$OUT_DIR/mermaid/node_modules/.bin/mmdc"
 
 # Puppeteer needs --no-sandbox to launch Chromium in CI containers.
 printf '{"args":["--no-sandbox"]}\n' > "$OUT_DIR/puppeteer.json"
@@ -27,7 +33,7 @@ for f in "$@"; do
 			/^```[ \t]*$/        { if (in_block) { in_block = 0; grab = 0; next } }
 			grab { print }
 		' "$f" > "$OUT_DIR/block.mmd"
-		if npx --yes @mermaid-js/mermaid-cli@12.0.0 -p "$OUT_DIR/puppeteer.json" \
+		if "$MMDC" -p "$OUT_DIR/puppeteer.json" \
 			-i "$OUT_DIR/block.mmd" -o "$OUT_DIR/block.svg" > "$OUT_DIR/mmdc.log" 2>&1; then
 			echo "OK   $f mermaid block $i"
 			cat "$OUT_DIR/mmdc.log"
