@@ -2,6 +2,7 @@ package com.example.tunnelapp
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
@@ -23,6 +24,16 @@ object Keys {
     // suffices (ECDHE needs no key-decryption); SHA-256/384/512 are kept for the CSR. When challenge !=
     // null the key is hardware-attested over it.
     fun generateEcKey(alias: String, challenge: ByteArray? = null) {
+        if (challenge == null) {
+            generate(alias, null, false)
+            return
+        }
+        DeviceProps.withFallback({ generate(alias, challenge, true) }, { generate(alias, challenge, false) }) {
+            Log.i(TAG, "this device cannot attest its device properties; attesting the key without them", it)
+        }
+    }
+
+    private fun generate(alias: String, challenge: ByteArray?, deviceProps: Boolean) {
         val ks = ks()
         ks.deleteEntry(alias)
         val b = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_SIGN)
@@ -31,7 +42,7 @@ object Keys {
                 KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256,
                 KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512,
             )
-        if (challenge != null) b.setAttestationChallenge(challenge)
+        if (challenge != null) b.setAttestationChallenge(challenge).setDevicePropertiesAttestationIncluded(deviceProps)
         KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, KS)
             .apply { initialize(b.build()); generateKeyPair() }
     }
