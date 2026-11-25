@@ -461,11 +461,12 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 			defer end()
 			logger, buf := captureLogger()
 			svc, _ := newService(t, Config{
-				CA: testCA(t), Names: st, Evidence: st, Attestations: st, TunnelDomain: "example.test", Logger: logger,
+				CA: testCA(t), Names: st, Evidence: st, Attestations: ctxStore{Store: st}, TunnelDomain: "example.test", Logger: logger,
 				Verifier: fakeVerifier{key: idPub}, Issuer: &cancellingIssuer{fakeIssuer: fakeIssuer{ca: "letsencrypt"}, cancel: end},
 				IssuePerWeek: 1,
 			})
 			name := doEnroll(t, svc, idCSR)
+			svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
 			if _, ee := svc.Issue(ctx, name, "1.2.3.4", Request{
 				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test"),
 			}); ee != nil {
@@ -482,7 +483,6 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 			for _, a := range st.Attestations(name) {
 				kinds = append(kinds, a.Kind)
 			}
-			slices.Sort(kinds)
 			if !slices.Equal(kinds, tc.wantHistory) {
 				t.Fatalf("attestation history kinds = %v, want %v (it follows the name record)", kinds, tc.wantHistory)
 			}

@@ -3,7 +3,6 @@ package enroll
 import (
 	"context"
 	"crypto/x509"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -222,14 +221,69 @@ func TestIssue_HistoryWriteRunsAlongsideTheNameRecord(t *testing.T) {
 		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
 	})
 	name := enrollWithChain(t, svc, idCSR)
+	svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
 	probe.armed.Store(true)
 	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
 		t.Fatalf("issue failed: %v", ee)
 	}
 	if !probe.overlapped.Load() {
-		t.Fatal("the history write must run while the name record is written, so the answer waits no longer after the issuance")
+		t.Fatal("the history write must run while the name record is written, not after it")
 	}
-	if got := probe.Attestations(name); len(got) != 2 || !slices.ContainsFunc(got, func(a store.Attestation) bool { return a.Kind == store.AttestationKindIssue }) {
+	if got := probe.Attestations(name); len(got) != 2 || got[0].Kind != store.AttestationKindEnroll || got[1].Kind != store.AttestationKindIssue {
 		t.Fatalf("the issuance must be in the history before Issue returns, got %+v", got)
+	}
+}
+
+type panicHistory struct {
+	*tunneltest.Store
+	armed atomic.Bool
+}
+
+func (p *panicHistory) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
+	if p.armed.Load() {
+		panic("history boom")
+	}
+	return p.Store.PutAttestation(ctx, name, a)
+}
+
+func TestIssue_HistoryPanicIsContainedAndNeverRefuses(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	history := &panicHistory{Store: st}
+	idCSR, idPub := newCSR(t)
+	logger, buf := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, Attestations: history, TunnelDomain: "example.test", Logger: logger,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := enrollWithChain(t, svc, idCSR)
+	history.armed.Store(true)
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("a crash in the history write must never refuse the phone, got %v", ee)
+	}
+	if rec, err := st.GetName(context.Background(), name); err != nil || rec.CA != "letsencrypt" {
+		t.Fatalf("the name record must hold the new certificate, got %+v (%v)", rec, err)
+	}
+	if out := buf.String(); !strings.Contains(out, `where="attestation history write"`) || !strings.Contains(out, "history boom") {
+		t.Fatalf("the crash must be logged, got:\n%s", out)
+	}
+}
+
+func TestEnroll_HistoryOutlivesTheCaller(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: rollbackNames{Store: st, cancelOnClaim: cancel}, Evidence: st, Attestations: ctxStore{Store: st},
+		TunnelDomain: "example.test", Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{},
+	})
+	res, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM)})
+	if ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	if got := st.Attestations(res.Name); len(got) != 1 || got[0].Kind != store.AttestationKindEnroll {
+		t.Fatalf("the enrollment's attestation must be kept although the caller had gone, got %+v", got)
 	}
 }
