@@ -112,8 +112,9 @@ phone generates it again at once without them, over the same nonce; only a failu
 key-generation failure the retry rules below describe. The server reads them only from the TEE-enforced list
 and records them in the name record when present. They are not part of the predicate: their absence never
 refuses a phone, and neither does a value that is not a UTF-8 OCTET STRING, which the server ignores (it records
-the others and logs the tags it ignored). The server also records the `verifiedBootKey` and `verifiedBootHash` of
-the TEE-enforced `rootOfTrust` (hex) in the name record.
+the others and logs the tags it ignored). The server also records, in the name record, the `verifiedBootKey` of
+the TEE-enforced `rootOfTrust` and, when the `rootOfTrust` carries one, its `verifiedBootHash` (hex, each written only
+when not empty).
 
 **Reported device (optional).** The phone SHOULD send `reported_device` with `POST /api/v1/enroll` and every
 `POST /api/v1/issue`: `{"brand", "device", "product", "manufacturer", "model", "fingerprint"}`, the Android `Build`
