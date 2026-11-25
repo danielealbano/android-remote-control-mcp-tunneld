@@ -4,7 +4,8 @@ import "time"
 
 // DeviceInfo holds the device scalars pulled from the attestation KeyDescription (helpful for
 // debugging; NEVER the full chain): os version + three patch levels + attestation/keymint versions +
-// the security-level string, plus the device properties when the phone attested them.
+// the security-level string + the hex verified boot key and hash, plus the device properties when the
+// phone attested them.
 type DeviceInfo struct {
 	OSVersion          int    `json:"os_version"`
 	OSPatch            int    `json:"os_patch"`
@@ -13,11 +14,22 @@ type DeviceInfo struct {
 	AttestationVersion int    `json:"attestation_version"`
 	KeymintVersion     int    `json:"keymint_version"`
 	SecurityLevel      string `json:"security_level"`
+	VerifiedBootKey    string `json:"verified_boot_key,omitempty"`
+	VerifiedBootHash   string `json:"verified_boot_hash,omitempty"`
 	Brand              string `json:"brand,omitempty"`
 	Device             string `json:"device,omitempty"`
 	Product            string `json:"product,omitempty"`
 	Manufacturer       string `json:"manufacturer,omitempty"`
 	Model              string `json:"model,omitempty"`
+}
+
+type ReportedDevice struct {
+	Brand        string `json:"brand,omitempty"`
+	Device       string `json:"device,omitempty"`
+	Product      string `json:"product,omitempty"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
 }
 
 // CertInfo is the shared public-cert metadata: which CA issued it and the serial/validity/ARI id.
@@ -43,13 +55,14 @@ type CertRecord struct {
 // It NEVER stores cert PEM, private keys, or attestation
 // chains for accepted enrollments.
 type NameRecord struct {
-	Schema        int        `json:"schema"`
-	EnrolledAt    time.Time  `json:"enrolled_at"`
-	LastRenewedAt time.Time  `json:"last_renewed_at"`
-	IdentityKeyFP string     `json:"identity_key_fpr"`
-	CA            string     `json:"ca"` // top-level issuing CA — the ONLY place the CA is stored
-	Cert          CertRecord `json:"cert"`
-	Device        DeviceInfo `json:"device"`
+	Schema         int            `json:"schema"`
+	EnrolledAt     time.Time      `json:"enrolled_at"`
+	LastRenewedAt  time.Time      `json:"last_renewed_at"`
+	IdentityKeyFP  string         `json:"identity_key_fpr"`
+	CA             string         `json:"ca"` // top-level issuing CA — the ONLY place the CA is stored
+	Cert           CertRecord     `json:"cert"`
+	Device         DeviceInfo     `json:"device"`
+	ReportedDevice ReportedDevice `json:"reported_device,omitzero"`
 }
 
 // SetCert populates the top-level CA and the cert sub-object from an issuer's CertInfo.

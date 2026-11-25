@@ -8,9 +8,10 @@ import (
 )
 
 type Attestation struct {
-	TS             time.Time `json:"ts"`
-	Kind           string    `json:"kind"`
-	AttestChainPEM string    `json:"attest_chain_pem"`
+	TS             time.Time      `json:"ts"`
+	Kind           string         `json:"kind"`
+	AttestChainPEM string         `json:"attest_chain_pem"`
+	ReportedDevice ReportedDevice `json:"reported_device,omitzero"`
 }
 
 const (
