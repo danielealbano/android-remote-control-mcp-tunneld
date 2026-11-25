@@ -29,7 +29,7 @@ object Keys {
             return
         }
         DeviceProps.withFallback({ generate(alias, challenge, true) }, { generate(alias, challenge, false) }) {
-            Log.i(TAG, "this device cannot attest its device properties; attesting the key without them", it)
+            Log.i(TAG, "could not generate the key with the device properties; generating it again without them", it)
         }
     }
 
