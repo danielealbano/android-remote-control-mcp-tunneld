@@ -125,6 +125,38 @@ func TestEnrollIssue_RecordTheReportedDevice(t *testing.T) {
 	}
 }
 
+func TestIssue_ReportedDeviceNeverRefusesTheCertificateRequest(t *testing.T) {
+	t.Parallel()
+	enrolled := store.ReportedDevice{Model: "model-r"}
+	for _, raw := range []string{`7`, `"model-r"`, `[1]`, `{"model":["x"],"brand":{}}`, `{"model":"a\nb"}`} {
+		t.Run(raw, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			svc, _ := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+			res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
+				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(`{"model":"model-r"}`),
+			})
+			if ee != nil {
+				t.Fatalf("enroll failed: %v", ee)
+			}
+			svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
+			if _, ee := svc.Issue(context.Background(), res.Name, "1.2.3.4", Request{
+				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, res.Name+".example.test"),
+				AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(raw),
+			}); ee != nil {
+				t.Fatalf("a malformed reported_device must not refuse the certificate request, got %v", ee)
+			}
+			if rec, err := st.GetName(context.Background(), res.Name); err != nil || rec.ReportedDevice != enrolled || rec.CA == "" {
+				t.Fatalf("name record = %+v (err %v), want the issued cert and the enrollment's reported device %+v", rec, err, enrolled)
+			}
+			if got := st.Attestations(res.Name); len(got) != 2 || got[1].ReportedDevice != (store.ReportedDevice{}) {
+				t.Fatalf("the certificate request's history entry must report nothing, got %+v", got)
+			}
+		})
+	}
+}
+
 func TestIssue_OptionalAttestationStillRecordsTheReportedDevice(t *testing.T) {
 	t.Parallel()
 	st := tunneltest.NewStore()
