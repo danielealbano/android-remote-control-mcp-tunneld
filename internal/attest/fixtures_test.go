@@ -38,6 +38,7 @@ type chainParams struct {
 	noRootOfTrust      bool // omit rootOfTrust from BOTH authorization lists
 	rootInSoftwareOnly bool // place rootOfTrust in softwareEnforced instead of teeEnforced
 	malformedOSVersion bool
+	noBootHash         bool
 
 	deviceIDs           map[int]string
 	deviceIDsInSoftware bool
@@ -196,6 +197,9 @@ func keyDescriptionExtension(t *testing.T, p chainParams) pkix.Extension {
 		DeviceLocked:      p.deviceLocked,
 		VerifiedBootState: asn1.Enumerated(p.bootState),
 		VerifiedBootHash:  []byte{5, 6, 7, 8},
+	}
+	if p.noBootHash {
+		rot.VerifiedBootHash = nil
 	}
 	field704 := ctxTag(t, 704, mustMarshal(t, rot))
 	field705 := ctxTag(t, 705, mustMarshal(t, 160000))
