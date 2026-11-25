@@ -323,6 +323,20 @@ func (s ctxStore) PutRejectedEnrollment(ctx context.Context, ev store.RejectedEn
 	return s.Store.PutRejectedEnrollment(ctx, ev)
 }
 
+func (s ctxStore) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.PutAttestation(ctx, name, a)
+}
+
+func (s ctxStore) PruneAttestations(ctx context.Context, name string, keep int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.PruneAttestations(ctx, name, keep)
+}
+
 func TestRecordCert_RecordsTheIssuedCert(t *testing.T) {
 	t.Parallel()
 	earlier, fresh := time.Unix(1000, 0).UTC(), time.Unix(2000, 0).UTC()

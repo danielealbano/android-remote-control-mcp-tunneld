@@ -1,6 +1,7 @@
-// Package store is tunneld's FIRST durable server-side state: the name registry and the connection
-// logs, on any PLAIN S3 provider. It uses ONLY plain GetObject/PutObject/DeleteObject — no
-// conditional-write / atomic-PUT feature — so it runs on any S3 (production targets a plain S3 such as
+// Package store is tunneld's FIRST durable server-side state: the name registry, the connection logs,
+// the rejected-enrollment evidence and the attestation history, on any PLAIN S3 provider. It uses ONLY
+// plain GetObject/PutObject/DeleteObject/ListObjectsV2 — no conditional-write / atomic-PUT feature — so it
+// runs on any S3 (production targets a plain S3 such as
 // OVH; MinIO is a local/e2e stand-in). Name uniqueness comes from the claim protocol in
 // internal/enroll, not from storage semantics. See docs/PROTOCOL.md.
 package store
@@ -34,9 +35,15 @@ type EvidenceStore interface {
 	PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollment) error
 }
 
+type AttestationStore interface {
+	PutAttestation(ctx context.Context, name string, a Attestation) error
+	PruneAttestations(ctx context.Context, name string, keep int) error
+}
+
 // Store is the full composition implemented by the S3 backend and the tunneltest fake.
 type Store interface {
 	NameStore
 	ConnLogUploader
 	EvidenceStore
+	AttestationStore
 }

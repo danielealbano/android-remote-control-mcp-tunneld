@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,7 +28,7 @@ type S3Config struct {
 	ForcePathStyle bool
 }
 
-// S3Store is the plain-S3 backend. It uses ONLY GetObject/PutObject/DeleteObject — no conditional
+// S3Store is the plain-S3 backend. It uses ONLY GetObject/PutObject/DeleteObject/ListObjectsV2 — no conditional
 // writes, no ETags. Registry writes go through a client with SDK auto-retries DISABLED (a timed-out
 // claim PUT must never be silently replayed into a zombie write); the caller's ctx carries the deadline.
 type S3Store struct {
@@ -138,6 +139,51 @@ func (s *S3Store) PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollme
 		return fmt.Errorf("store: put rejected enrollment: %w", err)
 	}
 	return nil
+}
+
+func (s *S3Store) PutAttestation(ctx context.Context, name string, a Attestation) error {
+	body, err := json.Marshal(a)
+	if err != nil {
+		return fmt.Errorf("store: marshal attestation of %q: %w", name, err)
+	}
+	_, err = s.cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      &s.bucket,
+		Key:         aws.String(AttestationKey(name, a)),
+		Body:        bytes.NewReader(body),
+		ContentType: aws.String("application/json"),
+	})
+	if err != nil {
+		return fmt.Errorf("store: put attestation of %q: %w", name, err)
+	}
+	return nil
+}
+
+func (s *S3Store) PruneAttestations(ctx context.Context, name string, keep int) error {
+	if keep < 1 {
+		return fmt.Errorf("store: prune attestations of %q: keep %d is below 1", name, keep)
+	}
+	var keys []string
+	pages := s3.NewListObjectsV2Paginator(s.cli, &s3.ListObjectsV2Input{Bucket: &s.bucket, Prefix: aws.String(AttestationPrefix(name))})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("store: list attestations of %q: %w", name, err)
+		}
+		for _, o := range page.Contents {
+			keys = append(keys, aws.ToString(o.Key))
+		}
+	}
+	if len(keys) <= keep {
+		return nil
+	}
+	slices.Sort(keys)
+	var errs []error
+	for _, k := range keys[:len(keys)-keep] {
+		if _, err := s.cli.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &s.bucket, Key: aws.String(k)}); err != nil && !isNotFound(err) {
+			errs = append(errs, fmt.Errorf("store: delete attestation %q: %w", k, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // isNotFound reports whether err is a definitive KEY-absence (NoSuchKey / HeadObject NotFound). A

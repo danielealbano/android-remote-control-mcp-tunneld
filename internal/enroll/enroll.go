@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -50,11 +51,15 @@ type NameStore = store.NameStore
 // EvidenceStore persists rejected-enrollment evidence.
 type EvidenceStore = store.EvidenceStore
 
+type AttestationStore = store.AttestationStore
+
+const attestationHistory = 10
+
 // Request carries the submitted material for enrollment (Phase 1) or issuance (Phase 2 / renewal). Phase
 // 1 (Enroll) uses everything except TLSCSR; issuance (Issue) uses all of it.
 type Request struct {
 	Nonce          []byte
-	AttestChainPEM []byte // raw submitted chain (retained on rejection)
+	AttestChainPEM []byte // raw submitted chain (kept as rejection evidence and in the attestation history)
 	AttestChain    []*x509.Certificate
 	IdentityCSR    *x509.CertificateRequest
 	TLSCSR         *x509.CertificateRequest // Phase 2 (Issue) only — the public-cert CSR (SAN=<name>.<tunnel-domain>)
@@ -95,6 +100,7 @@ type Config struct {
 	CA             *ca.CA
 	Names          NameStore
 	Evidence       EvidenceStore
+	Attestations   AttestationStore
 	Verifier       Verifier
 	Limiter        *limit.Limiter
 	Issuer         PublicIssuer
@@ -213,7 +219,11 @@ func (s *Service) Enroll(ctx context.Context, ip string, req Request) (Result, *
 		}
 		return Result{}, signError(err)
 	}
-	s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
+	t = s.logStep("enrollment step finished", "sign", t, "ip", ip, "tunnel", name)
+	if !s.cfg.AttestOptional {
+		s.recordAttestation(ctx, name, ip, store.AttestationKindEnroll, req, false)
+		s.logStep("enrollment step finished", "attestation-record", t, "ip", ip, "tunnel", name)
+	}
 	return Result{Name: name, IdentityCert: identityPEM}, nil
 }
 
@@ -361,8 +371,17 @@ func (s *Service) Issue(ctx context.Context, name, ip string, req Request) (Resu
 	if errors.Is(ctx.Err(), context.Canceled) {
 		s.logger.Info("a certificate was issued but not recorded because the phone stopped waiting for it", "tunnel", name, "ip", ip, "ca", info.CA)
 	} else {
+		var history sync.WaitGroup
+		if !s.cfg.AttestOptional {
+			history.Go(func() {
+				defer report.Recover(ctx, s.logger, "attestation history write", func() {})
+				s.recordAttestation(ctx, name, ip, store.AttestationKindIssue, req, true)
+				s.logStep("certificate issuance step finished", "attestation-record", t, "tunnel", name, "ip", ip)
+			})
+		}
 		s.recordCert(ctx, name, cur, req, info, att.Device)
 		s.logStep("certificate issuance step finished", "registry-write", t, "tunnel", name, "ip", ip)
+		history.Wait()
 	}
 
 	return Result{Name: name, IdentityCert: identityPEM, PublicCert: pubChain, CA: info.CA}, nil
@@ -386,6 +405,9 @@ func (s *Service) attestAndBind(ctx context.Context, ip, name string, req Reques
 			return attest.Result{}, &Error{Reason: "unauthorized"}
 		}
 		s.rec.AttestVerify("ok")
+		if len(res.IgnoredDeviceIDs) > 0 {
+			s.logger.Info("the phone's attestation carried device properties in an unexpected form, so they are not recorded", "tunnel", name, "ip", ip, "tags", res.IgnoredDeviceIDs)
+		}
 		att = res
 	}
 	if err := req.IdentityCSR.CheckSignature(); err != nil {
@@ -527,6 +549,22 @@ func (s *Service) recordCert(ctx context.Context, name string, cur store.NameRec
 	rec.SetCert(info)
 	if err := s.cfg.Names.PutName(ctx, name, rec); err != nil {
 		s.logger.Warn("could not save the new certificate in the tunnel's record; the phone still gets the certificate", "tunnel", name, "err", err)
+	}
+}
+
+func (s *Service) recordAttestation(ctx context.Context, name, ip, kind string, req Request, prune bool) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	a := store.Attestation{TS: s.now().UTC(), Kind: kind, AttestChainPEM: string(req.AttestChainPEM)}
+	if err := s.cfg.Attestations.PutAttestation(ctx, name, a); err != nil {
+		s.logger.Warn("could not save the phone's attestation in the tunnel's history; the phone is not affected", "tunnel", name, "ip", ip, "kind", kind, "err", err)
+		return
+	}
+	if !prune {
+		return
+	}
+	if err := s.cfg.Attestations.PruneAttestations(ctx, name, attestationHistory); err != nil {
+		s.logger.Warn("could not remove the oldest attestations from the tunnel's history; the next certificate request removes them", "tunnel", name, "err", err)
 	}
 }
 

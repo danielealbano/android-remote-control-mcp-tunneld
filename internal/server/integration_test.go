@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -617,7 +618,7 @@ func TestIntegration_Registry(t *testing.T) {
 	t.Run("rejected-enrollment-evidence", func(t *testing.T) {
 		rdb := newRedis(t, redisURL)
 		svc := enroll.NewService(enroll.Config{
-			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st, Attestations: st,
 			Verifier: rejectVerifier{}, Issuer: stubIssuer{},
 			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
 			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
@@ -640,11 +641,63 @@ func TestIntegration_Registry(t *testing.T) {
 		}
 	})
 
+	t.Run("attestation-history", func(t *testing.T) {
+		ctx := context.Background()
+		rdb := newRedis(t, redisURL)
+		svc := enroll.NewService(enroll.Config{
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st, Attestations: st,
+			Verifier: stubVerifier{}, Issuer: stubIssuer{},
+			TunnelDomain: itTunnelDomain, NameLength: 10, IssuePerWeek: 3,
+			EnrollHour: 1000, EnrollMinute: 1000, ClaimTimeout: time.Second, ClaimSettle: 2 * time.Second,
+		})
+		nonce, err := svc.Nonce(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chain, chainPEM := dummyAttChain(t)
+		res, ee := svc.Enroll(ctx, "9.9.9.8", enroll.Request{Nonce: nonce, AttestChainPEM: chainPEM, AttestChain: chain, IdentityCSR: identityCSR(t)})
+		if ee != nil {
+			t.Fatalf("enrollment failed: %v", ee)
+		}
+		prefix := store.AttestationPrefix(res.Name)
+		keys := tunneltest.S3ListKeys(t, s3URL, access, secret, bucket, prefix)
+		if len(keys) != 1 {
+			t.Fatalf("enrollment must write exactly one attestation under %q, got %v", prefix, keys)
+		}
+		var got store.Attestation
+		if err := json.Unmarshal(tunneltest.S3GetObject(t, s3URL, access, secret, bucket, keys[0]), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Kind != store.AttestationKindEnroll || got.AttestChainPEM != string(chainPEM) {
+			t.Fatalf("stored attestation = %+v, want the enrollment's submitted chain", got)
+		}
+
+		base := time.Unix(1_600_000_000, 0).UTC()
+		for i := range 12 {
+			if err := st.PutAttestation(ctx, res.Name, store.Attestation{TS: base.Add(time.Duration(i) * time.Minute), Kind: store.AttestationKindIssue}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := st.PruneAttestations(ctx, res.Name, 10); err != nil {
+			t.Fatal(err)
+		}
+		kept := tunneltest.S3ListKeys(t, s3URL, access, secret, bucket, prefix)
+		if len(kept) != 10 {
+			t.Fatalf("prune must keep 10 attestations, got %d: %v", len(kept), kept)
+		}
+		if oldest := prefix + base.Add(3*time.Minute).Format("20060102T150405.000000000Z"); !strings.HasPrefix(kept[0], oldest) {
+			t.Errorf("the three oldest must be gone: oldest kept %q, want %q…", kept[0], oldest)
+		}
+		if !slices.Contains(kept, keys[0]) {
+			t.Errorf("the newest attestation (the enrollment) must be kept: %v", kept)
+		}
+	})
+
 	t.Run("concurrent-claim-one-winner", func(t *testing.T) {
 		const fixed = "collide23456"
 		rdb := newRedis(t, redisURL)
 		svc := enroll.NewService(enroll.Config{
-			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st,
+			RDB: rdb, Limiter: limit.NewLimiter(rdb, 0, 0, 0, time.Hour), CA: loadCA(t), Names: st, Evidence: st, Attestations: st,
 			Verifier: stubVerifier{}, Issuer: stubIssuer{}, AttestOptional: true,
 			TunnelDomain: itTunnelDomain, NameLength: 12, IssuePerWeek: 3,
 			EnrollHour: 1000, EnrollMinute: 1000,

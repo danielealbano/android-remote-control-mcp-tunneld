@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
 )
 
@@ -238,6 +240,8 @@ func TestE2E_ReferenceTunnelApp(t *testing.T) {
 	assertPhoneCert(t, edge, fqdn, inf.pebble.IssuingRoots) // still validating after the nudge-driven swap
 	t.Logf("nudge rotated the cert: %s -> %s", f2, info3.TLSCertSHA256)
 
+	assertAttestationHistory(t, inf, serial, name, 4)
+
 	// /wait throughput: byte-exact, hash-matching streams concurrently over N h1 connections and N h2
 	// streams (the h2 streams multiplex over ONE tunnel connection).
 	runWaitLoad(t, edge, fqdn, inf.pebble.IssuingRoots)
@@ -336,6 +340,44 @@ func TestE2E_ReferenceTunnelAppDialBackModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func assertAttestationHistory(t *testing.T, inf *e2eInfra, serial, name string, want int) {
+	t.Helper()
+	keys := tunneltest.S3ListKeys(t, inf.s3URL, inf.access, inf.secret, e2eBucket, store.AttestationPrefix(name))
+	if len(keys) != want {
+		t.Fatalf("attestation history of %s holds %d objects, want %d (one enrollment + one per issuance): %v", name, len(keys), want, keys)
+	}
+	for i, k := range keys {
+		var a store.Attestation
+		if err := json.Unmarshal(tunneltest.S3GetObject(t, inf.s3URL, inf.access, inf.secret, e2eBucket, k), &a); err != nil {
+			t.Fatalf("decode attestation %s: %v", k, err)
+		}
+		wantKind := store.AttestationKindIssue
+		if i == 0 {
+			wantKind = store.AttestationKindEnroll
+		}
+		certs := 0
+		for rest := []byte(a.AttestChainPEM); ; certs++ {
+			var b *pem.Block
+			if b, rest = pem.Decode(rest); b == nil {
+				break
+			}
+			if _, err := x509.ParseCertificate(b.Bytes); err != nil {
+				t.Fatalf("attestation %s carries an unparsable certificate: %v", k, err)
+			}
+		}
+		if a.Kind != wantKind || certs < 2 {
+			t.Fatalf("attestation %s = kind %q with %d certificates, want kind %q with the device's full chain", k, a.Kind, certs, wantKind)
+		}
+	}
+	var rec store.NameRecord
+	if err := json.Unmarshal(tunneltest.S3GetObject(t, inf.s3URL, inf.access, inf.secret, e2eBucket, "names/"+name), &rec); err != nil {
+		t.Fatalf("decode the name record of %s: %v", name, err)
+	}
+	d := rec.Device
+	t.Logf("attested device properties (optional): brand=%q device=%q product=%q manufacturer=%q model=%q; getprop ro.product.model=%q",
+		d.Brand, d.Device, d.Product, d.Manufacturer, d.Model, strings.TrimSpace(string(adb(t, serial, "shell", "getprop", "ro.product.model"))))
 }
 
 func amCommand(t *testing.T, serial, pkg, cmd string, kv ...string) {

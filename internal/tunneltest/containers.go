@@ -194,6 +194,25 @@ func S3ListKeys(t *testing.T, endpointURL, access, secret, bucket, prefix string
 	return keys
 }
 
+func S3GetObject(t *testing.T, endpointURL, access, secret, bucket, key string) []byte {
+	t.Helper()
+	cli := s3TestClient(endpointURL, access, secret)
+	out, err := cli.GetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		t.Fatalf("get object %q: %v", key, err)
+	}
+	defer func() {
+		if err := out.Body.Close(); err != nil {
+			t.Errorf("close object %q: %v", key, err)
+		}
+	}()
+	body, err := io.ReadAll(out.Body)
+	if err != nil {
+		t.Fatalf("read object %q: %v", key, err)
+	}
+	return body
+}
+
 func S3LifecycleConfigured(t *testing.T, endpointURL, access, secret, bucket string) bool {
 	t.Helper()
 	cli := s3TestClient(endpointURL, access, secret)

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"fmt"
+	"unicode/utf8"
 )
 
 // attestOID is the Android Key Attestation extension OID (KeyDescription).
@@ -37,6 +38,12 @@ const (
 	tagRootOfTrust      = 704
 	tagVendorPatch      = 718
 	tagBootPatch        = 719
+
+	tagIDBrand        = 710
+	tagIDDevice       = 711
+	tagIDProduct      = 712
+	tagIDManufacturer = 716
+	tagIDModel        = 717
 )
 
 // keyDescription is the top-level KeyDescription SEQUENCE.
@@ -84,12 +91,19 @@ type KeyDescription struct {
 	OSPatch            int
 	VendorPatch        int
 	BootPatch          int
+	Brand              string
+	Device             string
+	Product            string
+	Manufacturer       string
+	Model              string
+	IgnoredDeviceIDs   []int
 }
 
 // ParseKeyDescription locates the attestation extension on the leaf and decodes the fields the
-// seven-point predicate needs. attestationApplicationId and the OS/patch levels are read from whichever
-// list carries them, but rootOfTrust is read ONLY from the TEE-enforced list (a copy in softwareEnforced
-// is platform-supplied and ignored); its ABSENCE from teeEnforced is a hard failure at Verify (see
+// seven-point predicate needs, plus the optional device properties. attestationApplicationId and the
+// OS/patch levels are read from whichever list carries them, but rootOfTrust and the device properties are
+// read ONLY from the TEE-enforced list (a copy in softwareEnforced is platform-supplied and ignored); the
+// ABSENCE of rootOfTrust from teeEnforced is a hard failure at Verify (see
 // verify.go point 5) — the zero-value boot state would otherwise read as Verified+unlocked.
 func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 	var raw []byte
@@ -122,7 +136,7 @@ func ParseKeyDescription(leaf *x509.Certificate) (*KeyDescription, error) {
 }
 
 // walkAuthList decodes the context-tagged entries of an authorization list into out. tee reports whether
-// this is the TEE-enforced list: rootOfTrust is honored ONLY from it.
+// this is the TEE-enforced list: rootOfTrust and the device properties are honored ONLY from it.
 func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 	rest := raw
 	for len(rest) > 0 {
@@ -177,9 +191,42 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 			if out.BootPatch, err = decodeInt(rv.Bytes); err != nil {
 				return fmt.Errorf("bootPatchLevel: %w", err)
 			}
+		case tagIDBrand, tagIDDevice, tagIDProduct, tagIDManufacturer, tagIDModel:
+			if !tee {
+				continue
+			}
+			if v, ok := deviceIDValue(rv.Bytes); ok {
+				*deviceID(out, rv.Tag) = v
+			} else {
+				out.IgnoredDeviceIDs = append(out.IgnoredDeviceIDs, rv.Tag)
+			}
 		}
 	}
 	return nil
+}
+
+func deviceIDValue(b []byte) (string, bool) {
+	var id asn1.RawValue
+	rest, err := asn1.Unmarshal(b, &id)
+	if err != nil || len(rest) != 0 || id.Class != asn1.ClassUniversal || id.Tag != asn1.TagOctetString || id.IsCompound || !utf8.Valid(id.Bytes) {
+		return "", false
+	}
+	return string(id.Bytes), true
+}
+
+func deviceID(out *KeyDescription, tag int) *string {
+	switch tag {
+	case tagIDBrand:
+		return &out.Brand
+	case tagIDDevice:
+		return &out.Device
+	case tagIDProduct:
+		return &out.Product
+	case tagIDManufacturer:
+		return &out.Manufacturer
+	default:
+		return &out.Model
+	}
 }
 
 // decodeInt decodes a context-tagged INTEGER's contents.

@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -237,7 +238,7 @@ func TestSignFailureRollsBack(t *testing.T) {
 			}
 			logger, buf := captureLogger()
 			svc, _ := newService(t, Config{
-				CA: testCA(t), Names: names, Evidence: st,
+				CA: testCA(t), Names: names, Evidence: st, Attestations: st,
 				Verifier: fakeVerifier{key: rsaKey.Public()}, Issuer: &fakeIssuer{}, Logger: logger,
 			})
 			if _, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: rsaCSR}); ee == nil || ee.Reason != "unsupported_key_type" {
@@ -245,6 +246,9 @@ func TestSignFailureRollsBack(t *testing.T) {
 			}
 			if got := st.NameCount(); got != tc.wantNames {
 				t.Fatalf("registry holds %d names after the sign failure, want %d", got, tc.wantNames)
+			}
+			if got := st.AttestationCount(); got != 0 {
+				t.Fatalf("a failed enrollment must leave no attestation history, got %d entries", got)
 			}
 			logs := buf.String()
 			switch {
@@ -426,15 +430,17 @@ func (c *cancellingIssuer) Obtain(ctx context.Context, csr *x509.CertificateRequ
 func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		end     func() (context.Context, context.CancelFunc)
-		wantCA  string
-		wantLog string
+		name        string
+		end         func() (context.Context, context.CancelFunc)
+		wantCA      string
+		wantLog     string
+		wantHistory []string
 	}{
 		{
-			name:    "phone gone after the issuance",
-			end:     func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			wantLog: `msg="a certificate was issued but not recorded because the phone stopped waiting for it"`,
+			name:        "phone gone after the issuance",
+			end:         func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			wantLog:     `msg="a certificate was issued but not recorded because the phone stopped waiting for it"`,
+			wantHistory: []string{store.AttestationKindEnroll},
 		},
 		{
 			name: "request deadline passed after the issuance",
@@ -442,7 +448,8 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 				c := tunneltest.NewExpiringCtx()
 				return c, c.Expire
 			},
-			wantCA: "letsencrypt",
+			wantCA:      "letsencrypt",
+			wantHistory: []string{store.AttestationKindEnroll, store.AttestationKindIssue},
 		},
 	}
 	for _, tc := range tests {
@@ -454,11 +461,12 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 			defer end()
 			logger, buf := captureLogger()
 			svc, _ := newService(t, Config{
-				CA: testCA(t), Names: st, Evidence: st, TunnelDomain: "example.test", Logger: logger,
+				CA: testCA(t), Names: st, Evidence: st, Attestations: ctxStore{Store: st}, TunnelDomain: "example.test", Logger: logger,
 				Verifier: fakeVerifier{key: idPub}, Issuer: &cancellingIssuer{fakeIssuer: fakeIssuer{ca: "letsencrypt"}, cancel: end},
 				IssuePerWeek: 1,
 			})
 			name := doEnroll(t, svc, idCSR)
+			svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
 			if _, ee := svc.Issue(ctx, name, "1.2.3.4", Request{
 				Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test"),
 			}); ee != nil {
@@ -470,6 +478,13 @@ func TestIssue_RecordsTheCertOnlyWhenThePhoneGetsIt(t *testing.T) {
 			}
 			if tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog) {
 				t.Fatalf("the unrecorded issuance must be logged; log = %q", buf.String())
+			}
+			var kinds []string
+			for _, a := range st.Attestations(name) {
+				kinds = append(kinds, a.Kind)
+			}
+			if !slices.Equal(kinds, tc.wantHistory) {
+				t.Fatalf("attestation history kinds = %v, want %v (it follows the name record)", kinds, tc.wantHistory)
 			}
 		})
 	}

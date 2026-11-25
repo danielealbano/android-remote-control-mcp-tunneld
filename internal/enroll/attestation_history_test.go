@@ -1,0 +1,338 @@
+package enroll
+
+import (
+	"context"
+	"crypto/x509"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/attest"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/tunneltest"
+)
+
+const testChainPEM = "-----BEGIN CERTIFICATE-----\nATTESTATION\n-----END CERTIFICATE-----\n"
+
+func newHistoryService(t *testing.T, st *tunneltest.Store, v Verifier, optional bool) (*Service, *syncBuffer) {
+	t.Helper()
+	logger, buf := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, Attestations: st, TunnelDomain: "example.test", Logger: logger,
+		Verifier: v, Issuer: &fakeIssuer{ca: "letsencrypt"}, AttestOptional: optional,
+	})
+	return svc, buf
+}
+
+func enrollWithChain(t *testing.T, svc *Service, idCSR *x509.CertificateRequest) string {
+	t.Helper()
+	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM),
+	})
+	if ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	return res.Name
+}
+
+func issueWithChain(t *testing.T, svc *Service, name string, idCSR *x509.CertificateRequest) *Error {
+	t.Helper()
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, name+".example.test"),
+		AttestChainPEM: []byte(testChainPEM),
+	})
+	return ee
+}
+
+func TestEnroll_RecordsTheAcceptedAttestation(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+	name := enrollWithChain(t, svc, idCSR)
+	got := st.Attestations(name)
+	want := store.Attestation{TS: time.Unix(1_700_000_000, 0).UTC(), Kind: store.AttestationKindEnroll, AttestChainPEM: testChainPEM}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("attestation history = %+v, want exactly %+v", got, want)
+	}
+}
+
+func TestIssue_RecordsTheAttestationAndKeepsTheLastTen(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+	name := enrollWithChain(t, svc, idCSR)
+	base := time.Unix(1_600_000_000, 0).UTC()
+	for i := range 10 {
+		if err := st.PutAttestation(context.Background(), name, store.Attestation{TS: base.Add(time.Duration(i) * time.Hour), Kind: store.AttestationKindIssue, AttestChainPEM: "older"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	got := st.Attestations(name)
+	if len(got) != attestationHistory {
+		t.Fatalf("history holds %d attestations, want %d", len(got), attestationHistory)
+	}
+	if !got[0].TS.Equal(base.Add(2 * time.Hour)) {
+		t.Errorf("oldest kept attestation is from %s, want the two oldest dropped (%s)", got[0].TS, base.Add(2*time.Hour))
+	}
+	enrolled, issued := got[len(got)-2], got[len(got)-1]
+	if enrolled.Kind != store.AttestationKindEnroll || issued.Kind != store.AttestationKindIssue || issued.AttestChainPEM != testChainPEM ||
+		!issued.TS.Equal(time.Unix(1_700_000_100, 0)) {
+		t.Errorf("the newest attestations must be the enrollment then this issuance, got %+v then %+v", enrolled, issued)
+	}
+}
+
+func TestAttestationHistory_NothingRecordedWhenAttestationIsOptional(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, _ := newCSR(t)
+	svc, _ := newHistoryService(t, st, fakeVerifier{err: attest.ErrChainUntrusted}, true)
+	name := enrollWithChain(t, svc, idCSR)
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	if got := st.Attestations(name); len(got) != 0 {
+		t.Fatalf("an unverified attestation must never enter the history, got %+v", got)
+	}
+}
+
+func TestIssue_RefusedAttestationIsNotRecorded(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	svc, _ := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+	name := enrollWithChain(t, svc, idCSR)
+	_, ee := svc.Issue(context.Background(), name, "1.2.3.4", Request{
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, "attacker.example.test"),
+		AttestChainPEM: []byte(testChainPEM),
+	})
+	if ee == nil || ee.Reason != "csr_domain_mismatch" {
+		t.Fatalf("expected csr_domain_mismatch, got %v", ee)
+	}
+	if got := st.Attestations(name); len(got) != 1 || got[0].Kind != store.AttestationKindEnroll {
+		t.Fatalf("a refused certificate request must not enter the history, got %+v", got)
+	}
+}
+
+func TestAttestationHistory_StoreFailuresAreLoggedAndNeverRefuse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		putErr   error
+		pruneErr error
+		want     string
+	}{
+		{name: "put fails", putErr: errInjected, want: "could not save the phone's attestation in the tunnel's history"},
+		{name: "prune fails", pruneErr: errInjected, want: "could not remove the oldest attestations from the tunnel's history"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			svc, buf := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+			name := enrollWithChain(t, svc, idCSR)
+			st.AttestationPutErr, st.AttestationPruneErr = tc.putErr, tc.pruneErr
+			if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+				t.Fatalf("a history failure must never refuse the phone, got %v", ee)
+			}
+			if out := buf.String(); !strings.Contains(out, tc.want) || !strings.Contains(out, "level=WARN") || !strings.Contains(out, "tunnel="+name) {
+				t.Fatalf("log must carry the failure, got:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestEnroll_HistoryFailureIsLoggedAndNeverRefuses(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	st.AttestationPutErr = errInjected
+	idCSR, idPub := newCSR(t)
+	svc, buf := newHistoryService(t, st, fakeVerifier{key: idPub}, false)
+	name := enrollWithChain(t, svc, idCSR)
+	if _, err := st.GetName(context.Background(), name); err != nil {
+		t.Fatalf("the enrollment must stand: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "could not save the phone's attestation in the tunnel's history") || !strings.Contains(out, "kind=enroll") {
+		t.Fatalf("log must carry the failure, got:\n%s", out)
+	}
+}
+
+func TestIssue_DevicePropertiesFollowTheLatestAttestation(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	withModel := store.DeviceInfo{OSVersion: 150000, SecurityLevel: "tee", Brand: "brand-x", Device: "device-x", Product: "product-x", Manufacturer: "maker-x", Model: "model-x"}
+	svc, _ := newHistoryService(t, st, devVerifier{fakeVerifier: fakeVerifier{key: idPub}, dev: withModel}, false)
+	name := enrollWithChain(t, svc, idCSR)
+	if rec, err := st.GetName(context.Background(), name); err != nil || rec.Device != withModel {
+		t.Fatalf("enrollment must record the attested device properties, got %+v (%v)", rec.Device, err)
+	}
+	withoutModel := store.DeviceInfo{OSVersion: 150000, SecurityLevel: "tee"}
+	svc.cfg.Verifier = devVerifier{fakeVerifier: fakeVerifier{key: idPub}, dev: withoutModel}
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("an attestation without device properties must still be accepted, got %v", ee)
+	}
+	if rec, err := st.GetName(context.Background(), name); err != nil || rec.Device != withoutModel {
+		t.Fatalf("the record must follow the latest attestation, got %+v (%v)", rec.Device, err)
+	}
+}
+
+type overlapProbe struct {
+	*tunneltest.Store
+	armed                          atomic.Bool
+	historyOnce, nameOnce          sync.Once
+	historyIn, nameIn              chan struct{}
+	historySawName, nameSawHistory atomic.Bool
+}
+
+func meet(ctx context.Context, other <-chan struct{}, saw *atomic.Bool) {
+	select {
+	case <-other:
+		saw.Store(true)
+	case <-ctx.Done():
+	}
+}
+
+func (p *overlapProbe) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
+	if p.armed.Load() {
+		p.historyOnce.Do(func() { close(p.historyIn) })
+		meet(ctx, p.nameIn, &p.historySawName)
+	}
+	return p.Store.PutAttestation(ctx, name, a)
+}
+
+func (p *overlapProbe) PutName(ctx context.Context, name string, rec store.NameRecord) error {
+	if p.armed.Load() {
+		p.nameOnce.Do(func() { close(p.nameIn) })
+		meet(ctx, p.historyIn, &p.nameSawHistory)
+	}
+	return p.Store.PutName(ctx, name, rec)
+}
+
+func TestIssue_HistoryWriteRunsAlongsideTheNameRecord(t *testing.T) {
+	t.Parallel()
+	probe := &overlapProbe{Store: tunneltest.NewStore(), historyIn: make(chan struct{}), nameIn: make(chan struct{})}
+	idCSR, idPub := newCSR(t)
+	logger, _ := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: probe, Evidence: probe.Store, Attestations: probe, TunnelDomain: "example.test", Logger: logger,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := enrollWithChain(t, svc, idCSR)
+	svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
+	probe.armed.Store(true)
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("issue failed: %v", ee)
+	}
+	if !probe.historySawName.Load() || !probe.nameSawHistory.Load() {
+		t.Fatal("the history write must run while the name record is written, not before or after it")
+	}
+	if got := probe.Attestations(name); len(got) != 2 || got[0].Kind != store.AttestationKindEnroll || got[1].Kind != store.AttestationKindIssue {
+		t.Fatalf("the issuance must be in the history before Issue returns, got %+v", got)
+	}
+}
+
+type panicHistory struct {
+	*tunneltest.Store
+	armed atomic.Bool
+}
+
+func (p *panicHistory) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
+	if p.armed.Load() {
+		panic("history boom")
+	}
+	return p.Store.PutAttestation(ctx, name, a)
+}
+
+func TestIssue_HistoryPanicIsContainedAndNeverRefuses(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	history := &panicHistory{Store: st}
+	idCSR, idPub := newCSR(t)
+	logger, buf := captureLogger()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: st, Evidence: st, Attestations: history, TunnelDomain: "example.test", Logger: logger,
+		Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{ca: "letsencrypt"},
+	})
+	name := enrollWithChain(t, svc, idCSR)
+	history.armed.Store(true)
+	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
+		t.Fatalf("a crash in the history write must never refuse the phone, got %v", ee)
+	}
+	if rec, err := st.GetName(context.Background(), name); err != nil || rec.CA != "letsencrypt" {
+		t.Fatalf("the name record must hold the new certificate, got %+v (%v)", rec, err)
+	}
+	if out := buf.String(); !strings.Contains(out, `where="attestation history write"`) || !strings.Contains(out, "history boom") {
+		t.Fatalf("the crash must be logged, got:\n%s", out)
+	}
+}
+
+func TestEnroll_HistoryOutlivesTheCaller(t *testing.T) {
+	t.Parallel()
+	st := tunneltest.NewStore()
+	idCSR, idPub := newCSR(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc, _ := newService(t, Config{
+		CA: testCA(t), Names: rollbackNames{Store: st, cancelOnClaim: cancel}, Evidence: st, Attestations: ctxStore{Store: st},
+		TunnelDomain: "example.test", Verifier: fakeVerifier{key: idPub}, Issuer: &fakeIssuer{},
+	})
+	res, ee := svc.Enroll(ctx, "1.2.3.4", Request{Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM)})
+	if ee != nil {
+		t.Fatalf("enroll failed: %v", ee)
+	}
+	if got := st.Attestations(res.Name); len(got) != 1 || got[0].Kind != store.AttestationKindEnroll {
+		t.Fatalf("the enrollment's attestation must be kept although the caller had gone, got %+v", got)
+	}
+}
+
+type ignoredIDsVerifier struct {
+	fakeVerifier
+	tags []int
+}
+
+func (v ignoredIDsVerifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time) (attest.Result, error) {
+	res, err := v.fakeVerifier.Verify(chain, nonce, now)
+	res.IgnoredDeviceIDs = v.tags
+	return res, err
+}
+
+func TestEnroll_IgnoredDevicePropertiesAreLoggedAndNeverRefuse(t *testing.T) {
+	t.Parallel()
+	const line = `msg="the phone's attestation carried device properties in an unexpected form, so they are not recorded"`
+	tests := []struct {
+		name    string
+		tags    []int
+		wantLog bool
+	}{
+		{name: "none ignored", wantLog: false},
+		{name: "the model ignored", tags: []int{717}, wantLog: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tunneltest.NewStore()
+			idCSR, idPub := newCSR(t)
+			svc, buf := newHistoryService(t, st, ignoredIDsVerifier{fakeVerifier: fakeVerifier{key: idPub}, tags: tc.tags}, false)
+			name := enrollWithChain(t, svc, idCSR)
+			if got := st.Attestations(name); len(got) != 1 {
+				t.Fatalf("the enrollment must stand and be recorded, got %+v", got)
+			}
+			out := buf.String()
+			switch {
+			case !tc.wantLog && strings.Contains(out, line):
+				t.Fatalf("nothing was ignored, so nothing must be logged; log:\n%s", out)
+			case tc.wantLog && (!strings.Contains(out, "level=INFO "+line) || !strings.Contains(out, "tags=[717]") || !strings.Contains(out, "ip=1.2.3.4")):
+				t.Fatalf("the ignored tags must be logged at Info with the address; log:\n%s", out)
+			}
+		})
+	}
+}

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
@@ -26,10 +29,16 @@ type Store struct {
 	FailNextPut   error
 	ZombieNextPut error
 	RejectedErr   error
+
+	attestations        map[string]map[string]store.Attestation
+	AttestationPutErr   error
+	AttestationPruneErr error
 }
 
 // NewStore builds an empty fake.
-func NewStore() *Store { return &Store{names: map[string]store.NameRecord{}} }
+func NewStore() *Store {
+	return &Store{names: map[string]store.NameRecord{}, attestations: map[string]map[string]store.Attestation{}}
+}
 
 var _ store.Store = (*Store)(nil)
 
@@ -105,6 +114,55 @@ func (s *Store) PutRejectedEnrollment(_ context.Context, ev store.RejectedEnroll
 	}
 	s.Rejected = append(s.Rejected, ev)
 	return nil
+}
+
+func (s *Store) PutAttestation(_ context.Context, name string, a store.Attestation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AttestationPutErr != nil {
+		return s.AttestationPutErr
+	}
+	if s.attestations[name] == nil {
+		s.attestations[name] = map[string]store.Attestation{}
+	}
+	s.attestations[name][store.AttestationKey(name, a)] = a
+	return nil
+}
+
+func (s *Store) PruneAttestations(_ context.Context, name string, keep int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.AttestationPruneErr != nil {
+		return s.AttestationPruneErr
+	}
+	if keep < 1 {
+		return fmt.Errorf("tunneltest: prune attestations of %q: keep %d is below 1", name, keep)
+	}
+	keys := slices.Sorted(maps.Keys(s.attestations[name]))
+	for _, k := range keys[:max(0, len(keys)-keep)] {
+		delete(s.attestations[name], k)
+	}
+	return nil
+}
+
+func (s *Store) Attestations(name string) []store.Attestation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []store.Attestation{}
+	for _, k := range slices.Sorted(maps.Keys(s.attestations[name])) {
+		out = append(out, s.attestations[name][k])
+	}
+	return out
+}
+
+func (s *Store) AttestationCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, h := range s.attestations {
+		n += len(h)
+	}
+	return n
 }
 
 // NameCount reports how many name records exist (rollback assertions).

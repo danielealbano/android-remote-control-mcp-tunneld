@@ -153,6 +153,9 @@ func newService(t *testing.T, cfg Config) (*Service, *miniredis.Miniredis) {
 	if cfg.ClaimSettle == 0 {
 		cfg.ClaimSettle = 5 * time.Second
 	}
+	if cfg.Attestations == nil {
+		cfg.Attestations = tunneltest.NewStore()
+	}
 	svc := NewService(cfg)
 	svc.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
 	return svc, mr

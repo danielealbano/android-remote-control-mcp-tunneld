@@ -27,7 +27,10 @@ including the previous generation's key aliases so they are still deleted one ge
 On `enroll` it:
 
 - generates two **non-exportable, TEE-backed EC P-256** AndroidKeyStore keys — an **identity** key
-  hardware-attested over the server enroll nonce, and a **TLS** key for the local server;
+  hardware-attested over the server enroll nonce, and a **TLS** key for the local server; every attested
+  identity key (at enrollment and at each issuance) includes the device properties when the device can attest
+  them, and is generated again without them when the keystore refuses (`ProviderException`), as
+  `docs/PROTOCOL.md` §2 describes;
 - runs **two-phase attested enrollment** (`POST /enroll` → `POST /issue`) with PKCS#10 CSRs signed by
   those keys (BouncyCastle), presenting the identity key over client-mTLS on the `/issue` exchange, and
   retries both phases as `docs/PROTOCOL.md` §2 prescribes;

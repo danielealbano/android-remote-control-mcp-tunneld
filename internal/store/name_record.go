@@ -3,8 +3,8 @@ package store
 import "time"
 
 // DeviceInfo holds the device scalars pulled from the attestation KeyDescription (helpful for
-// debugging; NEVER the full chain). All seven agreed scalars: os version + three patch levels +
-// attestation/keymint versions + the security-level string.
+// debugging; NEVER the full chain): os version + three patch levels + attestation/keymint versions +
+// the security-level string, plus the device properties when the phone attested them.
 type DeviceInfo struct {
 	OSVersion          int    `json:"os_version"`
 	OSPatch            int    `json:"os_patch"`
@@ -13,6 +13,11 @@ type DeviceInfo struct {
 	AttestationVersion int    `json:"attestation_version"`
 	KeymintVersion     int    `json:"keymint_version"`
 	SecurityLevel      string `json:"security_level"`
+	Brand              string `json:"brand,omitempty"`
+	Device             string `json:"device,omitempty"`
+	Product            string `json:"product,omitempty"`
+	Manufacturer       string `json:"manufacturer,omitempty"`
+	Model              string `json:"model,omitempty"`
 }
 
 // CertInfo is the shared public-cert metadata: which CA issued it and the serial/validity/ARI id.

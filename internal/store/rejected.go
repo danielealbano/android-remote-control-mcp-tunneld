@@ -8,9 +8,7 @@ import (
 )
 
 // RejectedEnrollment is the forensic evidence persisted for a REJECTED/suspicious enrollment (30-day
-// lifecycle). It is the ONLY place a submitted attestation chain is retained, and only for rejections
-// — accepted enrollments never store a chain (privacy). Best-effort: a store error is logged, never
-// masks the rejection.
+// lifecycle). Best-effort: a store error is logged, never masks the rejection.
 type RejectedEnrollment struct {
 	TS              time.Time `json:"ts"`
 	SrcIP           string    `json:"src_ip"`
