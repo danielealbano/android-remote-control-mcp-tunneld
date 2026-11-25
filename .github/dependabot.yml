@@ -23,3 +23,7 @@ updates:
     directory: "/deploy"
     schedule:
       interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/scripts/mermaid"
+    schedule:
+      interval: "weekly"
