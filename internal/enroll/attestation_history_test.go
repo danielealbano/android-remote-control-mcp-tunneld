@@ -187,33 +187,39 @@ func TestIssue_DevicePropertiesFollowTheLatestAttestation(t *testing.T) {
 
 type overlapProbe struct {
 	*tunneltest.Store
-	armed      atomic.Bool
-	once       sync.Once
-	historyIn  chan struct{}
-	overlapped atomic.Bool
+	armed                          atomic.Bool
+	historyOnce, nameOnce          sync.Once
+	historyIn, nameIn              chan struct{}
+	historySawName, nameSawHistory atomic.Bool
+}
+
+func meet(ctx context.Context, other <-chan struct{}, saw *atomic.Bool) {
+	select {
+	case <-other:
+		saw.Store(true)
+	case <-ctx.Done():
+	}
 }
 
 func (p *overlapProbe) PutAttestation(ctx context.Context, name string, a store.Attestation) error {
 	if p.armed.Load() {
-		p.once.Do(func() { close(p.historyIn) })
+		p.historyOnce.Do(func() { close(p.historyIn) })
+		meet(ctx, p.nameIn, &p.historySawName)
 	}
 	return p.Store.PutAttestation(ctx, name, a)
 }
 
 func (p *overlapProbe) PutName(ctx context.Context, name string, rec store.NameRecord) error {
 	if p.armed.Load() {
-		select {
-		case <-p.historyIn:
-			p.overlapped.Store(true)
-		case <-ctx.Done():
-		}
+		p.nameOnce.Do(func() { close(p.nameIn) })
+		meet(ctx, p.historyIn, &p.nameSawHistory)
 	}
 	return p.Store.PutName(ctx, name, rec)
 }
 
 func TestIssue_HistoryWriteRunsAlongsideTheNameRecord(t *testing.T) {
 	t.Parallel()
-	probe := &overlapProbe{Store: tunneltest.NewStore(), historyIn: make(chan struct{})}
+	probe := &overlapProbe{Store: tunneltest.NewStore(), historyIn: make(chan struct{}), nameIn: make(chan struct{})}
 	idCSR, idPub := newCSR(t)
 	logger, _ := captureLogger()
 	svc, _ := newService(t, Config{
@@ -226,8 +232,8 @@ func TestIssue_HistoryWriteRunsAlongsideTheNameRecord(t *testing.T) {
 	if ee := issueWithChain(t, svc, name, idCSR); ee != nil {
 		t.Fatalf("issue failed: %v", ee)
 	}
-	if !probe.overlapped.Load() {
-		t.Fatal("the history write must run while the name record is written, not after it")
+	if !probe.historySawName.Load() || !probe.nameSawHistory.Load() {
+		t.Fatal("the history write must run while the name record is written, not before or after it")
 	}
 	if got := probe.Attestations(name); len(got) != 2 || got[0].Kind != store.AttestationKindEnroll || got[1].Kind != store.AttestationKindIssue {
 		t.Fatalf("the issuance must be in the history before Issue returns, got %+v", got)
@@ -321,9 +327,11 @@ func TestEnroll_IgnoredDevicePropertiesAreLoggedAndNeverRefuse(t *testing.T) {
 				t.Fatalf("the enrollment must stand and be recorded, got %+v", got)
 			}
 			out := buf.String()
-			logged := strings.Contains(out, line) && strings.Contains(out, "level=INFO") && strings.Contains(out, "717") && strings.Contains(out, "ip=1.2.3.4")
-			if logged != tc.wantLog {
-				t.Fatalf("ignored device properties logged = %v, want %v; log:\n%s", logged, tc.wantLog, out)
+			switch {
+			case !tc.wantLog && strings.Contains(out, line):
+				t.Fatalf("nothing was ignored, so nothing must be logged; log:\n%s", out)
+			case tc.wantLog && (!strings.Contains(out, "level=INFO "+line) || !strings.Contains(out, "tags=[717]") || !strings.Contains(out, "ip=1.2.3.4")):
+				t.Fatalf("the ignored tags must be logged at Info with the address; log:\n%s", out)
 			}
 		})
 	}
