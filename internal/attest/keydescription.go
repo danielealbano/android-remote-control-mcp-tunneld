@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"fmt"
+	"unicode/utf8"
 )
 
 // attestOID is the Android Key Attestation extension OID (KeyDescription).
@@ -95,6 +96,7 @@ type KeyDescription struct {
 	Product            string
 	Manufacturer       string
 	Model              string
+	IgnoredDeviceIDs   []int
 }
 
 // ParseKeyDescription locates the attestation extension on the leaf and decodes the fields the
@@ -193,14 +195,23 @@ func walkAuthList(raw []byte, out *KeyDescription, tee bool) error {
 			if !tee {
 				continue
 			}
-			var id asn1.RawValue
-			if _, err := asn1.Unmarshal(rv.Bytes, &id); err != nil {
-				return fmt.Errorf("attestation id [%d]: %w", rv.Tag, err)
+			if v, ok := deviceIDValue(rv.Bytes); ok {
+				*deviceID(out, rv.Tag) = v
+			} else {
+				out.IgnoredDeviceIDs = append(out.IgnoredDeviceIDs, rv.Tag)
 			}
-			*deviceID(out, rv.Tag) = string(id.Bytes)
 		}
 	}
 	return nil
+}
+
+func deviceIDValue(b []byte) (string, bool) {
+	var id asn1.RawValue
+	rest, err := asn1.Unmarshal(b, &id)
+	if err != nil || len(rest) != 0 || id.Class != asn1.ClassUniversal || id.Tag != asn1.TagOctetString || id.IsCompound || !utf8.Valid(id.Bytes) {
+		return "", false
+	}
+	return string(id.Bytes), true
 }
 
 func deviceID(out *KeyDescription, tag int) *string {

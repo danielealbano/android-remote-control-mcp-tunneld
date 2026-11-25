@@ -27,9 +27,10 @@ var (
 
 // Result is returned on a passing verification.
 type Result struct {
-	Package       string
-	Device        store.DeviceInfo
-	LeafPublicKey crypto.PublicKey // the attested TEE key — the enroll service binds the identity CSR to it
+	Package          string
+	Device           store.DeviceInfo
+	IgnoredDeviceIDs []int
+	LeafPublicKey    crypto.PublicKey // the attested TEE key — the enroll service binds the identity CSR to it
 }
 
 // Verifier enforces the seven-point predicate against the current root pool, revocation status, and
@@ -147,6 +148,7 @@ func (v *Verifier) Verify(chain []*x509.Certificate, nonce []byte, now time.Time
 			Manufacturer:       kd.Manufacturer,
 			Model:              kd.Model,
 		},
+		IgnoredDeviceIDs: kd.IgnoredDeviceIDs,
 	}, nil
 }
 
