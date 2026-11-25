@@ -41,6 +41,11 @@ func TestParseReportedDevice_KeepsOnlyConformingValues(t *testing.T) {
 		{name: "longest value", raw: `{"model":"` + long + `"}`, want: store.ReportedDevice{Model: long}},
 		{name: "too long", raw: `{"brand":"brand-r","model":"` + long + `m"}`, want: store.ReportedDevice{Brand: "brand-r"},
 			wantIgnored: map[string]string{"model": "257 bytes, more than 256"}},
+		{name: "longest multi-byte value", raw: `{"model":"` + strings.Repeat("é", 128) + `"}`, want: store.ReportedDevice{Model: strings.Repeat("é", 128)}},
+		{name: "multi-byte too long", raw: `{"model":"` + strings.Repeat("é", 129) + `"}`, wantIgnored: map[string]string{"model": "258 bytes, more than 256"}},
+		{name: "right-to-left override", raw: `{"model":"a\u202eb"}`, wantIgnored: map[string]string{"model": "holds a character that is not printable"}},
+		{name: "zero-width space", raw: `{"model":"a\u200bb"}`, wantIgnored: map[string]string{"model": "holds a character that is not printable"}},
+		{name: "no-break space", raw: `{"model":"a\u00a0b"}`, wantIgnored: map[string]string{"model": "holds a character that is not printable"}},
 		{name: "several ignored", raw: `{"brand":{},"model":"a\tb","device":"device-r"}`, want: store.ReportedDevice{Device: "device-r"},
 			wantIgnored: map[string]string{"brand": "not a string", "model": "holds a character that is not printable"}},
 		{name: "empty and null values", raw: `{"model":"","brand":null}`},
@@ -85,12 +90,16 @@ func TestEnrollIssue_IgnoredReportedValuesAreLoggedWithTheTunnel(t *testing.T) {
 		}
 	}
 	res, ee := svc.Enroll(context.Background(), "1.2.3.4", Request{
-		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM), ReportedDevice: json.RawMessage(`{"model":7}`),
+		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, AttestChainPEM: []byte(testChainPEM),
+		ReportedDevice: json.RawMessage(`{"brand":7,"model":"distinct-model-value\n"}`),
 	})
 	if ee != nil {
 		t.Fatalf("enroll failed: %v", ee)
 	}
-	assertLogged(res.Name, `ignored="map[model:not a string]"`)
+	assertLogged(res.Name, `ignored="map[brand:not a string model:holds a character that is not printable]"`)
+	if strings.Contains(buf.String(), "distinct-model-value") {
+		t.Fatalf("an ignored value must never be logged, log:\n%s", buf.String())
+	}
 	svc.SetClock(func() time.Time { return time.Unix(1_700_000_100, 0) })
 	if _, ee := svc.Issue(context.Background(), res.Name, "1.2.3.4", Request{
 		Nonce: mintNonce(t, svc), IdentityCSR: idCSR, TLSCSR: newTLSCSR(t, res.Name+".example.test"),
