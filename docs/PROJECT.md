@@ -197,7 +197,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the lists
   of phones seen **35 days** (rule `phones-seen-expire`, prefix `phones-seen/`: the active-users count reads the
-  last 31 days, and the extra days cover a list uploaded late), the
+  last 31 days and the rest is a margin; R2 counts the age from each list's last upload), the
   attestation history **the last 10 per name** (tunneld deletes the older ones; no rule), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
   refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, the
