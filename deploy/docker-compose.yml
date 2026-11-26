@@ -53,7 +53,7 @@ services:
     logging: *caplog
 
   valkey:
-    image: valkey/valkey:9.1-alpine
+    image: valkey/valkey:9.2-alpine
     restart: unless-stopped
     command: ["valkey-server", "--save", "", "--appendonly", "no"]   # transient control state only
     logging: *caplog

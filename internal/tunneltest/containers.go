@@ -37,7 +37,7 @@ import (
 // Pinned container images. MinIO: a recent release with object-lifecycle support (no conditional-write
 // feature is used — MinIO is a plain-S3 stand-in). Pebble + challtestsrv: the hermetic ACME test CA.
 const (
-	valkeyImage       = "valkey/valkey:9.1-alpine"
+	valkeyImage       = "valkey/valkey:9.2-alpine"
 	minioImage        = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z"
 	pebbleImage       = "ghcr.io/letsencrypt/pebble:2.10.1"
 	challtestsrvImage = "ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1"
