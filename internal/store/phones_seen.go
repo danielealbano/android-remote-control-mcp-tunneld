@@ -64,6 +64,7 @@ type PhonesSeen struct {
 
 	lock   *os.File
 	fileMu sync.Mutex
+	saves  map[string]uint64
 
 	mu     sync.Mutex
 	day    time.Time
@@ -136,7 +137,7 @@ func NewPhonesSeen(ctx context.Context, dir, nodeID string, up PhonesSeenUploade
 	p := &PhonesSeen{
 		dir: dir, nodeID: nodeID, up: up, logger: logger, now: time.Now, tick: phonesSeenTick, debounce: phonesSeenDebounce,
 		saveFile: saveFileSynced, remove: os.Remove,
-		phones: map[string]PhoneSeen{}, live: map[string]int{},
+		phones: map[string]PhoneSeen{}, live: map[string]int{}, saves: map[string]uint64{},
 		kick: make(chan struct{}, 1), stop: make(chan struct{}), saverDone: make(chan struct{}), uploaderDone: make(chan struct{}),
 	}
 	for _, o := range opts {
@@ -275,6 +276,7 @@ func (p *PhonesSeen) saver() {
 			p.save(false)
 		case <-t.C:
 			p.save(false)
+			p.flushWarns(false)
 		case <-p.stop:
 			return
 		}
@@ -366,9 +368,14 @@ func (p *PhonesSeen) writeLocal(f PhonesSeenFile) error {
 	if err != nil {
 		return fmt.Errorf("encode the list of %s: %w", f.Day, err)
 	}
+	name := phonesSeenFileName(day, f.Node)
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
-	return p.saveFile(filepath.Join(p.dir, phonesSeenFileName(day, f.Node)), data)
+	if err := p.saveFile(filepath.Join(p.dir, name), data); err != nil {
+		return err
+	}
+	p.saves[name]++
+	return nil
 }
 
 func (p *PhonesSeen) currentName() string {
@@ -386,10 +393,7 @@ func (p *PhonesSeen) upload(final bool) {
 	}
 	currentName := p.currentName()
 	slot := p.now().UTC().Truncate(phonesSeenUploadEvery)
-	var (
-		failed  int
-		lastErr error
-	)
+	var errs []error
 	for _, e := range entries {
 		m := phonesSeenName.FindStringSubmatch(e.Name())
 		if m == nil || !e.Type().IsRegular() {
@@ -401,48 +405,50 @@ func (p *PhonesSeen) upload(final bool) {
 		}
 		path := filepath.Join(p.dir, e.Name())
 		key := fmt.Sprintf("%s%s/%s/%s/%s.json", PhonesSeenPrefix, m[1], m[2], m[3], m[4])
-		uploaded, err := p.put(path, key)
-		if err != nil {
-			failed++
-			lastErr = err
+		saves := p.savesOf(e.Name())
+		if err := p.put(path, key); err != nil {
+			errs = append(errs, err)
 			continue
 		}
 		if isCurrent {
 			p.uploadedName, p.uploadedSlot = e.Name(), slot
 			continue
 		}
-		if err := p.removeUploaded(path, uploaded); err != nil {
+		if err := p.removeUploaded(e.Name(), saves); err != nil {
 			p.problem(final, "could not remove an uploaded list of phones seen; it is uploaded again within a minute, replacing the same object",
 				"could not remove an uploaded list of phones seen before stopping; it is uploaded again after the next start, replacing the same object",
 				err, "file", path)
 		}
 	}
-	if lastErr != nil && (final || p.upCtx.Err() == nil) {
+	if len(errs) > 0 && (final || p.upCtx.Err() == nil) {
 		p.problem(final, "could not upload the lists of phones seen; they stay on disk and are tried again within a minute",
-			"could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start", lastErr, "files", failed)
+			"could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start", errors.Join(errs...), "files", len(errs))
 	}
 }
 
-func (p *PhonesSeen) removeUploaded(path string, uploaded os.FileInfo) error {
+func (p *PhonesSeen) savesOf(name string) uint64 {
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
-	cur, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("check %s before removing it: %w", path, err)
-	}
-	if !os.SameFile(uploaded, cur) {
-		return nil
-	}
-	return p.remove(path)
+	return p.saves[name]
 }
 
-func (p *PhonesSeen) put(path, key string) (os.FileInfo, error) {
+func (p *PhonesSeen) removeUploaded(name string, savesAtUpload uint64) error {
+	p.fileMu.Lock()
+	defer p.fileMu.Unlock()
+	if p.saves[name] != savesAtUpload {
+		return nil
+	}
+	if err := p.remove(filepath.Join(p.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	delete(p.saves, name)
+	return nil
+}
+
+func (p *PhonesSeen) put(path, key string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
@@ -451,14 +457,14 @@ func (p *PhonesSeen) put(path, key string) (os.FileInfo, error) {
 	}()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, fmt.Errorf("read the size of %s: %w", path, err)
+		return fmt.Errorf("read the size of %s: %w", path, err)
 	}
 	uctx, cancel := context.WithTimeout(p.upCtx, phonesSeenUploadTimeout)
 	defer cancel()
 	if err := p.up.PutPhonesSeenFile(uctx, key, f, info.Size()); err != nil {
-		return nil, err
+		return fmt.Errorf("upload %s: %w", key, err)
 	}
-	return info, nil
+	return nil
 }
 
 func (p *PhonesSeen) problem(final bool, msg, finalMsg string, err error, args ...any) {
@@ -482,10 +488,10 @@ func (p *PhonesSeen) warn(msg string, err error, args ...any) {
 	p.warnLast, p.warnSuppressed = now, 0
 }
 
-func (p *PhonesSeen) flushWarns() {
+func (p *PhonesSeen) flushWarns(force bool) {
 	p.warnMu.Lock()
 	defer p.warnMu.Unlock()
-	if p.warnSuppressed == 0 {
+	if p.warnSuppressed == 0 || !force && p.now().Sub(p.warnLast) < phonesSeenWarnEvery {
 		return
 	}
 	p.logger.Warn("more errors with the lists of phones seen happened and were not logged one by one", "count", p.warnSuppressed,
@@ -503,7 +509,7 @@ func (p *PhonesSeen) Drain(ctx context.Context) {
 		p.save(true)
 		p.upload(true)
 		p.upCancel()
-		p.flushWarns()
+		p.flushWarns(true)
 		if err := p.lock.Close(); err != nil {
 			p.logger.Warn("could not release the phones-seen directory lock cleanly; the system releases it at the latest when tunneld exits", "dir", p.dir, "err", err)
 		}

@@ -19,6 +19,7 @@ type fakeSeenUploader struct {
 	mu       sync.Mutex
 	puts     map[string][]PhonesSeenFile
 	err      error
+	errFor   map[string]error
 	block    bool
 	inFlight chan struct{}
 }
@@ -52,6 +53,9 @@ func (f *fakeSeenUploader) PutPhonesSeenFile(ctx context.Context, key string, bo
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.errFor[key]; err != nil {
+		return err
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -334,7 +338,7 @@ func TestPhonesSeen_UploadsWhatAnEarlierProcessLeftAndWarnsOncePerMinute(t *test
 	up := newFakeSeenUploader()
 	up.setErr(errors.New("bucket down"))
 	env := newSeen(t, dir, time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up)
-	failed := `msg="could not upload the lists of phones seen; they stay on disk and are tried again within a minute" files=1 err="bucket down"`
+	failed := `msg="could not upload the lists of phones seen; they stay on disk and are tried again within a minute" files=1 err="upload phones-seen/2026/10/12/1111aaaa.json: bucket down"`
 	waitFor(t, "the failed upload logged", func() bool { return strings.Contains(env.log.String(), failed) })
 	waitFor(t, "more failed uploads held back", func() bool { return env.suppressed() >= 2 })
 	if got := strings.Count(env.log.String(), failed); got != 1 {
@@ -451,39 +455,108 @@ func TestPhonesSeen_UploadedListThatCannotBeRemovedIsUploadedAgain(t *testing.T)
 	waitFor(t, "the removal", func() bool { _, ok := readSeenFile(t, leftover); return !ok })
 }
 
-func TestPhonesSeen_RemovesAnUploadedListOnlyIfItWasNotReplaced(t *testing.T) {
+func TestPhonesSeen_RemovesAnUploadedListOnlyIfItWasNotSavedAgain(t *testing.T) {
 	t.Parallel()
-	env := newSeen(t, t.TempDir(), time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), newFakeSeenUploader())
-	path := filepath.Join(env.dir, "20261011-2222bbbb.txt")
-	if err := saveFileSynced(path, []byte("uploaded")); err != nil {
+	up := newFakeSeenUploader()
+	up.setErr(errors.New("bucket down"))
+	env := newSeen(t, t.TempDir(), time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up)
+	list := PhonesSeenFile{Schema: 1, Node: testNode, Day: "2026-10-11", Phones: map[string]PhoneSeen{}}
+	name := "20261011-" + testNode + ".json"
+	path := filepath.Join(env.dir, name)
+	if err := env.p.writeLocal(list); err != nil {
 		t.Fatal(err)
 	}
-	uploaded, err := os.Stat(path)
-	if err != nil {
+	atUpload := env.p.savesOf(name)
+	for range 2 {
+		if err := env.p.writeLocal(list); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := env.p.removeUploaded(name, atUpload); err != nil {
 		t.Fatal(err)
 	}
-	if err := saveFileSynced(path, []byte("saved after the upload")); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a list saved again after its upload began must stay on disk for the next upload: %v", err)
 	}
-	if err := env.p.removeUploaded(path, uploaded); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "saved after the upload" {
-		t.Fatalf("a list saved again after its upload must stay on disk for the next upload, got %q, %v", got, err)
-	}
-	same, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := env.p.removeUploaded(path, same); err != nil {
+	if err := env.p.removeUploaded(name, env.p.savesOf(name)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the uploaded list itself must be removed, stat err = %v", err)
+		t.Fatalf("a list not saved since its upload began must be removed, stat err = %v", err)
 	}
-	if err := env.p.removeUploaded(path, same); err != nil {
+	if err := env.p.removeUploaded(name, env.p.savesOf(name)); err != nil {
 		t.Fatalf("a list already gone is no error, got %v", err)
 	}
+}
+
+func TestPhonesSeen_HeldBackWarningsAreSummedUpAMinuteLater(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	seed(t, dir, "20261012-1111aaaa.json", `{"schema":1,"node":"1111aaaa","day":"2026-10-12","phones":{}}`)
+	up := newFakeSeenUploader()
+	up.setErr(errors.New("bucket down"))
+	start := time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC)
+	env := newSeen(t, dir, start, up)
+	waitFor(t, "failed uploads held back", func() bool { return env.suppressed() >= 2 })
+	up.setErr(nil)
+	waitFor(t, "the leftover uploaded", func() bool { _, ok := readSeenFile(t, filepath.Join(dir, "20261012-1111aaaa.json")); return !ok })
+	env.clock.set(start.Add(time.Minute))
+	waitFor(t, "the held-back warnings summed up", func() bool {
+		return strings.Contains(env.log.String(), `msg="more errors with the lists of phones seen happened and were not logged one by one" count=`)
+	})
+}
+
+func TestPhonesSeen_AnUploadPassLogsTheErrorOfEveryList(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	seed(t, dir, "20261011-1111aaaa.json", `{"schema":1,"node":"1111aaaa","day":"2026-10-11","phones":{}}`)
+	seed(t, dir, "20261012-2222bbbb.json", `{"schema":1,"node":"2222bbbb","day":"2026-10-12","phones":{}}`)
+	up := newFakeSeenUploader()
+	up.errFor = map[string]error{
+		PhonesSeenPrefix + "2026/10/11/1111aaaa.json": errors.New("refused"),
+		PhonesSeenPrefix + "2026/10/12/2222bbbb.json": errors.New("timed out"),
+	}
+	env := newSeen(t, dir, time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up)
+	waitFor(t, "the failed pass logged", func() bool {
+		return strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen; they stay on disk and are tried again within a minute" files=2 err="upload phones-seen/2026/10/11/1111aaaa.json: refused\nupload phones-seen/2026/10/12/2222bbbb.json: timed out"`)
+	})
+}
+
+func TestSaveFileSynced_Failures(t *testing.T) {
+	t.Parallel()
+	t.Run("a target that is a directory leaves the temp file for the next save", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "20261013-"+testNode+".json")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := saveFileSynced(path, []byte("{}"))
+		if err == nil || !strings.Contains(err.Error(), "replace "+path) {
+			t.Fatalf("saveFileSynced = %v, want the replace error", err)
+		}
+		if got, err := os.ReadFile(path + ".tmp"); err != nil || string(got) != "{}" {
+			t.Fatalf("the temp file must stay with the data, got %q, %v", got, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := saveFileSynced(path, []byte(`{"a":1}`)); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != `{"a":1}` {
+			t.Fatalf("a later save must replace the list, got %q, %v", got, err)
+		}
+		if _, err := os.Stat(path + ".tmp"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a successful save must leave no temp file, stat err = %v", err)
+		}
+	})
+	t.Run("a missing directory", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "gone", "20261013-"+testNode+".json")
+		if err := saveFileSynced(path, []byte("{}")); err == nil || !strings.Contains(err.Error(), "create "+path+".tmp") {
+			t.Fatalf("saveFileSynced = %v, want the create error", err)
+		}
+	})
 }
 
 func TestPhonesSeen_UnfinishedListThatCannotBeRemovedIsLogged(t *testing.T) {
@@ -526,7 +599,7 @@ func TestPhonesSeen_DrainLogsWhatIsLeftOnDisk(t *testing.T) {
 	up.setErr(errors.New("bucket down"))
 	env.p.PhoneOpen("abc")
 	drainSeenWithin(env.p, 5*time.Second)
-	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="bucket down"`) {
+	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="upload `+seenKey("2026/10/13")+`: bucket down"`) {
 		t.Fatalf("a failed final upload must be logged; log = %q", env.log.String())
 	}
 	if _, ok := readSeenFile(t, localSeen(env.dir, "20261013")); !ok {
@@ -553,7 +626,7 @@ func TestPhonesSeen_DrainIsBoundedByItsContext(t *testing.T) {
 	if _, ok := readSeenFile(t, localSeen(env.dir, "20261013")); !ok {
 		t.Fatal("the list whose upload was cut short must stay on disk for the next start")
 	}
-	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="context canceled"`) {
+	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="upload `+seenKey("2026/10/13")+`: context canceled"`) {
 		t.Fatalf("an upload cut short at shutdown must be logged; log = %q", env.log.String())
 	}
 }
