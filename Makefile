@@ -3,7 +3,7 @@ GO_PACKAGES = $(shell go list ./...)
 
 .PHONY: build lint vet govulncheck test-unit test-integration test-e2e test-soak-app test-staging test-all test-scripts \
         tidy compose-config mermaid-check third-party-licenses attest-probe tunnel-app soak-app soak-client refused-apps registered-phones \
-        busy-clients
+        busy-clients active-users
 
 build:
 	go build -ldflags "-X main.version=$(VERSION)" -o bin/tunneld ./cmd/tunneld
@@ -18,7 +18,7 @@ lint:
 	golangci-lint run --build-tags=e2e,soak ./...
 	golangci-lint run --build-tags=staging ./...
 	shellcheck deploy/scripts/*.sh deploy/fetcher/command.sh scripts/*.sh infra/status-report/*.sh infra/refused-apps/*.sh infra/registered-phones/*.sh \
-	    infra/busy-clients/*.sh
+	    infra/busy-clients/*.sh infra/active-users/*.sh
 	$(MAKE) compose-config
 
 vet:
@@ -60,6 +60,7 @@ test-scripts:
 	sh infra/refused-apps/install_test.sh
 	sh infra/registered-phones/install_test.sh
 	sh infra/busy-clients/install_test.sh
+	sh infra/active-users/install_test.sh
 
 tidy:
 	go mod tidy
@@ -140,3 +141,6 @@ registered-phones:
 
 busy-clients:
 	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/arc-busy-clients ./infra/busy-clients
+
+active-users:
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/arc-active-users ./infra/active-users
