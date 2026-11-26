@@ -61,6 +61,7 @@ type PhonesSeen struct {
 	debounce time.Duration
 	saveFile func(path string, data []byte) error
 	remove   func(path string) error
+	readDir  func(dir string) ([]os.DirEntry, error)
 
 	lock   *os.File
 	fileMu sync.Mutex
@@ -113,12 +114,12 @@ func withPhonesSeenTicks(tick, debounce time.Duration) phonesSeenOption {
 	}
 }
 
-func withPhonesSeenFileOps(save func(path string, data []byte) error, remove func(path string) error) phonesSeenOption {
+func withPhonesSeenFileOps(save func(path string, data []byte) error, remove func(path string) error, readDir func(dir string) ([]os.DirEntry, error)) phonesSeenOption {
 	return func(p *PhonesSeen) error {
-		if save == nil || remove == nil {
+		if save == nil || remove == nil || readDir == nil {
 			return errors.New("store: nil phones-seen file op")
 		}
-		p.saveFile, p.remove = save, remove
+		p.saveFile, p.remove, p.readDir = save, remove, readDir
 		return nil
 	}
 }
@@ -136,7 +137,7 @@ func NewPhonesSeen(ctx context.Context, dir, nodeID string, up PhonesSeenUploade
 	}
 	p := &PhonesSeen{
 		dir: dir, nodeID: nodeID, up: up, logger: logger, now: time.Now, tick: phonesSeenTick, debounce: phonesSeenDebounce,
-		saveFile: saveFileSynced, remove: os.Remove,
+		saveFile: saveFileSynced, remove: os.Remove, readDir: os.ReadDir,
 		phones: map[string]PhoneSeen{}, live: map[string]int{}, saves: map[string]uint64{},
 		kick: make(chan struct{}, 1), stop: make(chan struct{}), saverDone: make(chan struct{}), uploaderDone: make(chan struct{}),
 	}
@@ -189,7 +190,7 @@ func saveFileSynced(path string, data []byte) error {
 }
 
 func (p *PhonesSeen) removeTemps() {
-	entries, err := os.ReadDir(p.dir)
+	entries, err := p.readDir(p.dir)
 	if err != nil {
 		p.logger.Warn("could not look for unfinished lists of phones seen left from an earlier run; any that are left stay on disk", "dir", p.dir, "err", err)
 		return
@@ -385,7 +386,7 @@ func (p *PhonesSeen) currentName() string {
 }
 
 func (p *PhonesSeen) upload(final bool) {
-	entries, err := os.ReadDir(p.dir)
+	entries, err := p.readDir(p.dir)
 	if err != nil {
 		p.problem(final, "could not list the saved lists of phones seen to upload them; it is tried again within a minute",
 			"could not list the saved lists of phones seen to upload them before stopping; they are uploaded after the next start", err, "dir", p.dir)
