@@ -76,9 +76,10 @@ func (f *fakeSeenUploader) setErr(err error) {
 }
 
 type seenFS struct {
-	mu        sync.Mutex
-	saveErr   func(path string) error
-	removeErr func(path string) error
+	mu         sync.Mutex
+	saveErr    func(path string) error
+	removeErr  func(path string) error
+	readDirErr error
 }
 
 func (s *seenFS) save(path string, data []byte) error {
@@ -103,6 +104,22 @@ func (s *seenFS) rm(path string) error {
 		}
 	}
 	return os.Remove(path)
+}
+
+func (s *seenFS) rd(dir string) ([]os.DirEntry, error) {
+	s.mu.Lock()
+	err := s.readDirErr
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadDir(dir)
+}
+
+func (s *seenFS) failReadDir(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readDirErr = err
 }
 
 func (s *seenFS) set(saveErr, removeErr func(path string) error) {
@@ -143,7 +160,7 @@ func newSeenWithFS(t *testing.T, dir string, at time.Time, up *fakeSeenUploader,
 	clock := newClock(at)
 	log := &syncBuf{}
 	p, err := NewPhonesSeen(context.Background(), dir, testNode, up, slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, log), nil)),
-		withPhonesSeenClock(clock.now), withPhonesSeenTicks(2*time.Millisecond, time.Millisecond), withPhonesSeenFileOps(fs.save, fs.rm))
+		withPhonesSeenClock(clock.now), withPhonesSeenTicks(2*time.Millisecond, time.Millisecond), withPhonesSeenFileOps(fs.save, fs.rm, fs.rd))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,10 +409,12 @@ func TestPhonesSeen_FailedSavesAreRetriedAndWarnedOncePerMinute(t *testing.T) {
 		t.Fatalf("failed saves must be warned about at most once a minute, got %q", got)
 	}
 	env.clock.set(start.Add(time.Minute))
-	waitFor(t, "the next minute's warning", func() bool { return len(linesWith(env.log.String(), failed)) == 2 })
-	if second := linesWith(env.log.String(), failed)[1]; strings.HasSuffix(second, "suppressed_since_last=0") {
-		t.Fatalf("the next warning must count the held-back ones, got %q", second)
-	}
+	summary := `msg="more errors with the lists of phones seen happened and were not logged one by one" count=`
+	waitFor(t, "the held-back warnings surfacing in the next minute", func() bool {
+		log := env.log.String()
+		lines := linesWith(log, failed)
+		return len(lines) == 2 && !strings.HasSuffix(lines[1], "suppressed_since_last=0") || strings.Contains(log, summary)
+	})
 	fs.set(nil, nil)
 	waitFor(t, "the retried save", func() bool {
 		f, ok := readSeenFile(t, localSeen(env.dir, "20261013"))
@@ -425,8 +444,8 @@ func TestPhonesSeen_EndedDayThatFailsToSaveIsSavedAndUploadedLater(t *testing.T)
 		return env.p.day.Equal(time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC))
 	})
 	env.clock.set(time.Date(2026, 10, 14, 0, 2, 30, 0, time.UTC))
-	waitFor(t, "the ended day's failed save logged", func() bool {
-		return len(linesWith(env.log.String(), `msg="could not save the list of phones seen on a day that has ended; it is tried again within a minute" day=2026-10-13`)) >= 1
+	waitFor(t, "the ended day's failed save logged, itself or in the held-back summary", func() bool {
+		return strings.Contains(env.log.String(), "could not save the list of phones seen on a day that has ended; it is tried again within a minute")
 	})
 	fs.set(nil, nil)
 	waitFor(t, "the ended day uploaded with the change", func() bool {
@@ -437,6 +456,79 @@ func TestPhonesSeen_EndedDayThatFailsToSaveIsSavedAndUploadedLater(t *testing.T)
 		_, ok := v[len(v)-1].Phones["unsaved"]
 		return ok
 	})
+}
+
+func TestPhonesSeen_SavesGoOnWhileAnUploadHangs(t *testing.T) {
+	t.Parallel()
+	up := newFakeSeenUploader()
+	up.block = true
+	env := newSeen(t, t.TempDir(), time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up)
+	env.p.PhoneOpen("first")
+	select {
+	case <-up.inFlight:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upload started")
+	}
+	env.p.PhoneOpen("second")
+	waitFor(t, "the change saved while the upload hangs", func() bool {
+		f, ok := readSeenFile(t, localSeen(env.dir, "20261013"))
+		_, saved := f.Phones["second"]
+		return ok && saved
+	})
+	drainSeenWithin(env.p, 100*time.Millisecond)
+}
+
+func TestPhonesSeen_ListingFailuresAreLoggedRunningAndAtShutdown(t *testing.T) {
+	t.Parallel()
+	fs := &seenFS{}
+	fs.failReadDir(errors.New("i/o error"))
+	env := newSeenWithFS(t, t.TempDir(), time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	waitFor(t, "the failed listing logged", func() bool {
+		return strings.Contains(env.log.String(), `msg="could not list the saved lists of phones seen to upload them; it is tried again within a minute" dir=`+env.dir+` err="i/o error"`)
+	})
+	drainSeenWithin(env.p, 5*time.Second)
+	for _, want := range []string{
+		`msg="could not look for unfinished lists of phones seen left from an earlier run; any that are left stay on disk" dir=` + env.dir + ` err="i/o error"`,
+		`msg="could not list the saved lists of phones seen to upload them before stopping; they are uploaded after the next start" dir=` + env.dir + ` err="i/o error"`,
+	} {
+		if !strings.Contains(env.log.String(), want) {
+			t.Fatalf("log must contain %q; log = %q", want, env.log.String())
+		}
+	}
+}
+
+func TestPhonesSeen_DrainSaysAFailedFinalSaveOfAnEndedDayLosesItsChanges(t *testing.T) {
+	t.Parallel()
+	fs := &seenFS{}
+	fs.set(failSuffix("20261013-"+testNode+".json", errors.New("disk full")), nil)
+	env := newSeenWithFS(t, t.TempDir(), time.Date(2026, 10, 13, 23, 59, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	env.p.PhoneOpen("abc")
+	env.p.PhoneClose("abc")
+	waitFor(t, "the failed save", func() bool { return strings.Contains(env.log.String(), "disk full") })
+	env.clock.set(time.Date(2026, 10, 14, 0, 1, 0, 0, time.UTC))
+	waitFor(t, "the day rollover", func() bool {
+		env.p.mu.Lock()
+		defer env.p.mu.Unlock()
+		return env.p.day.Equal(time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC))
+	})
+	drainSeenWithin(env.p, 5*time.Second)
+	if !strings.Contains(env.log.String(), `msg="could not save the list of phones seen on a day that has ended before stopping, so what changed since its last save is lost" day=2026-10-13 dir=`+env.dir+` err="disk full"`) {
+		t.Fatalf("a failed final save of an ended day must say what is lost; log = %q", env.log.String())
+	}
+}
+
+func TestPhonesSeen_DrainSaysAFailedRemovalIsUploadedAgainAfterTheNextStart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	leftover := seed(t, dir, "20261012-1111aaaa.json", `{"schema":1,"node":"1111aaaa","day":"2026-10-12","phones":{}}`)
+	fs := &seenFS{}
+	fs.set(nil, failSuffix("20261012-1111aaaa.json", errors.New("read-only")))
+	env := newSeenWithFS(t, dir, time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	waitFor(t, "the failed removal", func() bool { return strings.Contains(env.log.String(), "read-only") })
+	drainSeenWithin(env.p, 5*time.Second)
+	if !strings.Contains(env.log.String(), `msg="could not remove an uploaded list of phones seen before stopping; it is uploaded again after the next start, replacing the same object" file=`+leftover+` err=read-only`) {
+		t.Fatalf("a failed removal at shutdown must say it is uploaded again after the next start; log = %q", env.log.String())
+	}
 }
 
 func TestPhonesSeen_UploadedListThatCannotBeRemovedIsUploadedAgain(t *testing.T) {
@@ -735,8 +827,9 @@ func TestNewPhonesSeen_RejectsBadArguments(t *testing.T) {
 		{name: "no clock", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenClock(nil)}, want: "nil phones-seen clock"},
 		{name: "zero tick", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenTicks(0, time.Second)}, want: "non-positive phones-seen tick"},
 		{name: "zero debounce", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenTicks(time.Second, 0)}, want: "non-positive phones-seen tick"},
-		{name: "no save", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenFileOps(nil, fs.rm)}, want: "nil phones-seen file op"},
-		{name: "no remove", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenFileOps(fs.save, nil)}, want: "nil phones-seen file op"},
+		{name: "no save", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenFileOps(nil, fs.rm, fs.rd)}, want: "nil phones-seen file op"},
+		{name: "no remove", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenFileOps(fs.save, nil, fs.rd)}, want: "nil phones-seen file op"},
+		{name: "no listing", dir: "x", node: testNode, up: newFakeSeenUploader(), logger: logger, opts: []phonesSeenOption{withPhonesSeenFileOps(fs.save, fs.rm, nil)}, want: "nil phones-seen file op"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
