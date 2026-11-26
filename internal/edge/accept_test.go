@@ -226,6 +226,31 @@ func waitHandlers(t *testing.T, te *testEdge) {
 	}
 }
 
+func TestEdge_AcceptLoop_ClosesAConnectionAcceptedAfterWaitUnhandled(t *testing.T) {
+	t.Parallel()
+	logs := &lockedBuffer{}
+	cfg := baseConfig()
+	cfg.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	te := newTestEdge(t, cfg, nil)
+	waitHandlers(t, te)
+	conn := &readSignalConn{scriptConn: newScriptConn("198.51.100.21", nil), reading: make(chan struct{})}
+	runAccepted(t, te, conn)
+	select {
+	case <-conn.closeCh:
+	default:
+		t.Fatal("a connection accepted after Wait started must be closed by the accept loop itself")
+	}
+	select {
+	case <-conn.reading:
+		t.Fatal("a connection accepted after Wait started must never reach a handler")
+	default:
+	}
+	if !strings.Contains(logs.String(), `msg="closed a public connection that arrived while this node is stopping" peer=198.51.100.21:`) {
+		t.Fatalf("the refused connection must be logged with its peer; log = %q", logs.String())
+	}
+	waitHandlers(t, te)
+}
+
 func TestEdge_RoutedConns_IgnoresAConnectionStillSendingItsClientHello(t *testing.T) {
 	t.Parallel()
 	te := newTestEdge(t, baseConfig(), nil)

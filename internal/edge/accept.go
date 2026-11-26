@@ -101,8 +101,7 @@ func peekClientHello(conn net.Conn, deadline time.Duration) (info ClientHelloInf
 	return parsed, &peekConn{Conn: conn, prefix: record}, nil
 }
 
-// acceptLoop accepts raw TCP connections and hands each to handleConn (which applies the accept-time
-// checks in the documented order). It runs until ctx is done or the listener closes.
+// acceptLoop accepts raw TCP connections. It runs until ctx is done or the listener closes.
 func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 	var delay time.Duration
 	for {
@@ -126,7 +125,11 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 			continue
 		}
 		delay = 0
-		e.wg.Add(1)
+		if !e.trackHandler() {
+			e.cfg.Logger.Debug("closed a public connection that arrived while this node is stopping", "peer", conn.RemoteAddr().String())
+			closeLogged(e.cfg.Logger, "public client", conn)
+			continue
+		}
 		go func() {
 			defer e.wg.Done()
 			cctx := report.WithScope(ctx)
@@ -135,6 +138,16 @@ func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 			e.handleConn(cctx, conn)
 		}()
 	}
+}
+
+func (e *Edge) trackHandler() bool {
+	e.wgMu.Lock()
+	defer e.wgMu.Unlock()
+	if e.stopping {
+		return false
+	}
+	e.wg.Add(1)
+	return true
 }
 
 // admit enforces the global --max-clients ceiling.
