@@ -33,11 +33,15 @@ type Store struct {
 	attestations        map[string]map[string]store.Attestation
 	AttestationPutErr   error
 	AttestationPruneErr error
+
+	phonesSeen       map[string]store.PhonesSeenFile
+	PhonesSeenPutErr error
 }
 
 // NewStore builds an empty fake.
 func NewStore() *Store {
-	return &Store{names: map[string]store.NameRecord{}, attestations: map[string]map[string]store.Attestation{}}
+	return &Store{names: map[string]store.NameRecord{}, attestations: map[string]map[string]store.Attestation{},
+		phonesSeen: map[string]store.PhonesSeenFile{}}
 }
 
 var _ store.Store = (*Store)(nil)
@@ -95,6 +99,30 @@ func (s *Store) PutConnLogFile(_ context.Context, _ string, body io.ReadSeeker, 
 	defer s.mu.Unlock()
 	s.ConnLogs = append(s.ConnLogs, evs...)
 	return nil
+}
+
+func (s *Store) PutPhonesSeenFile(_ context.Context, key string, body io.ReadSeeker, _ int64) error {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	var f store.PhonesSeenFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.PhonesSeenPutErr != nil {
+		return s.PhonesSeenPutErr
+	}
+	s.phonesSeen[key] = f
+	return nil
+}
+
+func (s *Store) PhonesSeenFiles() map[string]store.PhonesSeenFile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.phonesSeen)
 }
 
 // PutConnLog captures a connection-log event.

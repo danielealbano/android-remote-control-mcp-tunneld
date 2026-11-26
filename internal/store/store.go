@@ -1,5 +1,5 @@
 // Package store is tunneld's FIRST durable server-side state: the name registry, the connection logs,
-// the rejected-enrollment evidence and the attestation history, on any PLAIN S3 provider. It uses ONLY
+// the rejected-enrollment evidence, the attestation history and the lists of phones seen, on any PLAIN S3 provider. It uses ONLY
 // plain GetObject/PutObject/DeleteObject/ListObjectsV2 — no conditional-write / atomic-PUT feature — so it
 // runs on any S3 (production targets a plain S3 such as
 // OVH; MinIO is a local/e2e stand-in). Name uniqueness comes from the claim protocol in
@@ -44,6 +44,7 @@ type AttestationStore interface {
 type Store interface {
 	NameStore
 	ConnLogUploader
+	PhonesSeenUploader
 	EvidenceStore
 	AttestationStore
 }

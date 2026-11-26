@@ -72,12 +72,12 @@ type ServeCmd struct {
 	// --- S3 / MinIO durable store ---
 	S3Endpoint       string `name:"s3-endpoint" help:"S3/MinIO endpoint URL. Required for serve."`
 	S3Region         string `name:"s3-region" default:"us-east-1" help:"S3 region."`
-	S3Bucket         string `name:"s3-bucket" help:"Bucket for the name registry, connection logs, rejected-enrollment evidence and attestation history. Required for serve."`
+	S3Bucket         string `name:"s3-bucket" help:"Bucket for the name registry, connection logs, rejected-enrollment evidence, attestation history and lists of phones seen. Required for serve."`
 	S3AccessKey      string `name:"s3-access-key" help:"S3 access key (secret). Required for serve."`
 	S3SecretKey      string `name:"s3-secret-key" help:"S3 secret key (secret). Required for serve."`
 	S3ForcePathStyle bool   `name:"s3-force-path-style" default:"true" help:"Path-style addressing (MinIO default)."`
 
-	ConnLogDir string `name:"conn-log-dir" help:"Connection-log spool directory on a persistent volume: events are appended locally, uploaded to S3 as per-node 5-minute JSONL objects, then deleted. Required for serve."`
+	ConnLogDir string `name:"conn-log-dir" help:"Connection-log spool directory on a persistent volume: events are appended locally, uploaded to S3 as per-node 5-minute JSONL objects, then deleted. Its phones-seen/ subdirectory holds the daily lists of the phones seen on this node until they are uploaded. Required for serve."`
 
 	RegistryClaimTimeout time.Duration `name:"registry-claim-timeout" default:"3s" help:"Hard deadline of one name claim: its Valkey lock, read and PUT (SDK retries disabled; timeout = name abandoned)."`
 	RegistryClaimSettle  time.Duration `name:"registry-claim-settle" default:"5s" help:"Lifetime of the per-name claim lock in Valkey, never released (MUST exceed the claim timeout)."`

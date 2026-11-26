@@ -121,7 +121,7 @@ func TestControl_NewCertificateReplacesLiveConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	hook := &recordingClosedHook{fr: newFakeRouter()}
-	m := NewManager(Config{Router: reg, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, NodeID: "nodeA",
+	m := NewManager(Config{Router: reg, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, Seen: nopSeen{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-10-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})
 	const name = "abcdef234567"
@@ -786,7 +786,7 @@ func TestServeControl_BindFailureLogging(t *testing.T) {
 			fr := newFakeRouter()
 			fr.bindErr = tc.bindErr
 			var buf bytes.Buffer
-			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
+			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: nopSeen{},
 				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 				RouteTTL: 30 * time.Second, Logger: slog.New(slog.NewTextHandler(&buf, nil))})
 			h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})

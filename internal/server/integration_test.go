@@ -442,6 +442,25 @@ func TestIntegration_EnrollConnectRoundtrip(t *testing.T) {
 	if events < 2 {
 		t.Errorf("the objects must carry at least the phone start and end events of %s, got %d", ident.Name, events)
 	}
+	seenRe := regexp.MustCompile(`^phones-seen/\d{4}/\d{2}/\d{2}/[0-9a-f]{16}\.json$`)
+	seenKeys := tunneltest.S3ListKeys(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, store.PhonesSeenPrefix)
+	var seen store.PhoneSeen
+	for _, k := range seenKeys {
+		if !seenRe.MatchString(k) {
+			t.Errorf("phones-seen key %q does not match the per-day, per-node layout", k)
+		}
+		var f store.PhonesSeenFile
+		if err := json.Unmarshal(s3GetObject(t, env.s3URL, env.s3Access, env.s3Secret, itBucket, k), &f); err != nil {
+			t.Errorf("phones-seen object %s is not valid JSON: %v", k, err)
+			continue
+		}
+		if p, ok := f.Phones[ident.Name]; ok && p.Last.After(seen.Last) {
+			seen = p
+		}
+	}
+	if seen.First.IsZero() || seen.Last.Before(seen.First) {
+		t.Errorf("the uploaded phones-seen lists must carry %s with its first and last time seen, got %+v in %v", ident.Name, seen, seenKeys)
+	}
 	if tunneltest.S3LifecycleConfigured(t, env.s3URL, env.s3Access, env.s3Secret, itBucket) {
 		t.Error("tunneld must never write the bucket's lifecycle configuration (retention is an operator setup)")
 	}

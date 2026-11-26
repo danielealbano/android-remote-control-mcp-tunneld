@@ -129,7 +129,7 @@ func startTestServerMode(t *testing.T, mtls bool) *testServer {
 		t.Fatal(err)
 	}
 	mgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: st, Recorder: &tunneltest.Recorder{}, Closed: nopClosedHook{},
+		Router: reg, Logs: st, Recorder: &tunneltest.Recorder{}, Closed: nopClosedHook{}, Seen: nopSeen{},
 		NodeID: "node-test", NodeHost: "host-test", NodeStart: "start", RouteTTL: 30 * time.Second,
 	})
 
@@ -221,6 +221,11 @@ func startTestServerMode(t *testing.T, mtls bool) *testServer {
 type nopClosedHook struct{}
 
 func (nopClosedHook) PhoneConnClosed(context.Context, string, string, string) {}
+
+type nopSeen struct{}
+
+func (nopSeen) PhoneOpen(string)  {}
+func (nopSeen) PhoneClose(string) {}
 
 func (ts *testServer) dialBack(t *testing.T, token string, useHTTPS, useMTLS bool) (net.Conn, error) {
 	t.Helper()
