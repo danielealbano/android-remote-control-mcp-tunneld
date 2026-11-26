@@ -20,6 +20,7 @@ type fakeSeenUploader struct {
 	puts     map[string][]PhonesSeenFile
 	err      error
 	errFor   map[string]error
+	onPut    func(key string)
 	block    bool
 	inFlight chan struct{}
 }
@@ -30,8 +31,11 @@ func newFakeSeenUploader() *fakeSeenUploader {
 
 func (f *fakeSeenUploader) PutPhonesSeenFile(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
 	f.mu.Lock()
-	block := f.block
+	block, onPut := f.block, f.onPut
 	f.mu.Unlock()
+	if onPut != nil {
+		onPut(key)
+	}
 	if block {
 		select {
 		case f.inFlight <- struct{}{}:
@@ -456,6 +460,113 @@ func TestPhonesSeen_EndedDayThatFailsToSaveIsSavedAndUploadedLater(t *testing.T)
 		_, ok := v[len(v)-1].Phones["unsaved"]
 		return ok
 	})
+}
+
+func newSeenWithoutWorkers(t *testing.T, at time.Time, up *fakeSeenUploader, fs *seenFS) (*PhonesSeen, *fakeClock) {
+	t.Helper()
+	clock := newClock(at)
+	p := &PhonesSeen{
+		dir: t.TempDir(), nodeID: testNode, up: up, logger: stderrLogger(), now: clock.now, tick: time.Hour, debounce: time.Hour,
+		saveFile: fs.save, remove: fs.rm, readDir: fs.rd,
+		phones: map[string]PhoneSeen{}, live: map[string]int{}, saves: map[string]uint64{}, kick: make(chan struct{}, 1),
+		day: utcDay(at),
+	}
+	p.upCtx, p.upCancel = context.WithCancel(context.Background())
+	t.Cleanup(p.upCancel)
+	return p, clock
+}
+
+func TestPhonesSeen_ANewDaysListIsUploadedEvenIfTheOldDayTookTheSlot(t *testing.T) {
+	t.Parallel()
+	up := newFakeSeenUploader()
+	p, clock := newSeenWithoutWorkers(t, time.Date(2026, 10, 13, 23, 50, 0, 0, time.UTC), up, &seenFS{})
+	p.PhoneOpen("abc")
+	p.save(false)
+	p.upload(false)
+	clock.set(time.Date(2026, 10, 14, 0, 0, 30, 0, time.UTC))
+	p.upload(false)
+	if got := len(up.versions(seenKey("2026/10/13"))); got != 2 {
+		t.Fatalf("before the rollover the old day is still today's list and takes the new slot, got %d uploads", got)
+	}
+	p.save(false)
+	p.upload(false)
+	if got := up.versions(seenKey("2026/10/14")); len(got) != 1 || got[0].Phones["abc"].Last.IsZero() {
+		t.Fatalf("the new day's list must be uploaded in the slot the old day took, got %+v", got)
+	}
+}
+
+func TestPhonesSeen_AListSavedDuringItsUploadIsKept(t *testing.T) {
+	t.Parallel()
+	up := newFakeSeenUploader()
+	p, _ := newSeenWithoutWorkers(t, time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up, &seenFS{})
+	ended := PhonesSeenFile{Schema: 1, Node: testNode, Day: "2026-10-11", Phones: map[string]PhoneSeen{}}
+	if err := p.writeLocal(ended); err != nil {
+		t.Fatal(err)
+	}
+	up.onPut = func(key string) {
+		if key == seenKey("2026/10/11") {
+			if err := p.writeLocal(ended); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	p.upload(false)
+	if _, ok := readSeenFile(t, localSeen(p.dir, "20261011")); !ok {
+		t.Fatal("a list saved while its upload was running must stay on disk for the next upload")
+	}
+	up.onPut = nil
+	p.upload(false)
+	if _, ok := readSeenFile(t, localSeen(p.dir, "20261011")); ok {
+		t.Fatal("a list not saved since its upload began must be removed")
+	}
+}
+
+func TestPhonesSeen_AFailedSaveNeverReplacesANewerCopyOfItsDay(t *testing.T) {
+	t.Parallel()
+	fs := &seenFS{}
+	p, clock := newSeenWithoutWorkers(t, time.Date(2026, 10, 13, 23, 59, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	p.PhoneOpen("stay")
+	failed := false
+	fs.set(func(path string) error {
+		if failed || !strings.HasSuffix(path, "20261013-"+testNode+".json") {
+			return nil
+		}
+		failed = true
+		clock.set(time.Date(2026, 10, 13, 23, 59, 30, 0, time.UTC))
+		p.PhoneOpen("late")
+		p.PhoneClose("late")
+		clock.set(time.Date(2026, 10, 14, 0, 0, 10, 0, time.UTC))
+		p.PhoneOpen("new")
+		p.PhoneClose("new")
+		return errors.New("disk full")
+	}, nil)
+	p.save(false)
+	p.save(false)
+	day, ok := readSeenFile(t, localSeen(p.dir, "20261013"))
+	if !ok {
+		t.Fatal("the ended day must be saved")
+	}
+	if _, ok := day.Phones["late"]; !ok {
+		t.Fatalf("the older failed copy must not replace the newer one, got %+v", day.Phones)
+	}
+	if got := day.Phones["stay"].Last; !got.Equal(time.Date(2026, 10, 13, 23, 59, 59, 999999999, time.UTC)) {
+		t.Fatalf("the connected phone must be seen until the end of the day, got %v", got)
+	}
+}
+
+func TestPhonesSeen_AFailedUploadOfTodayIsRetriedInTheSameQuarterHour(t *testing.T) {
+	t.Parallel()
+	up := newFakeSeenUploader()
+	p, _ := newSeenWithoutWorkers(t, time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), up, &seenFS{})
+	p.PhoneOpen("abc")
+	p.save(false)
+	up.setErr(errors.New("bucket down"))
+	p.upload(false)
+	up.setErr(nil)
+	p.upload(false)
+	if got := up.versions(seenKey("2026/10/13")); len(got) != 1 {
+		t.Fatalf("today's list must be uploaded again as soon as the bucket answers, got %d uploads", len(got))
+	}
 }
 
 func TestPhonesSeen_SavesGoOnWhileAnUploadHangs(t *testing.T) {
