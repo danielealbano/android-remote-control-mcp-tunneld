@@ -174,8 +174,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   window, or per 16 MiB, then deletes it locally),
   rejected-enrollment evidence (`rejected-enroll/…`), the lists of phones seen (one object per node process per
   UTC day, `phones-seen/<yyyy>/<mm>/<dd>/<node-id>.json`: each phone with a control connection on that node that
-  day and its first and last time seen, uploaded every 15 minutes, at the end of the day and at shutdown, for the
-  active-users count, §6), and the attestation history
+  day and its first and last time seen, uploaded every 15 minutes, within a minute of the end of the day and at
+  shutdown, for the active-users count, §6), and the attestation history
   (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
   and certificate request of the name, with the device the phone reported when it sent one, the last 10 kept — after each certificate request tunneld lists the name's
   history and deletes the older ones; the answer waits for the write, at most 5 s, and a failed write is logged and
@@ -234,7 +234,8 @@ They expect every Prometheus target to carry a `node` label (and `service="valke
 exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timestamp_seconds`,
 `wireguard_peer_{receive,transmit}_bytes_total`, `banlist_file_mtime_timestamp_seconds{file}` and
 `arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}` and
-`arc_registered_phones` / `arc_registered_phones_counted_timestamp_seconds`, and — for
+`arc_registered_phones` / `arc_registered_phones_counted_timestamp_seconds` and
+`arc_active_users{window}` / `arc_active_users_counted_timestamp_seconds`, and — for
 Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
 for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.

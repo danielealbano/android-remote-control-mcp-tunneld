@@ -33,7 +33,7 @@ flowchart TD
   ca["ca: internal CA (identity + mesh-role certs)"]
   router["router: Valkey route + node registry"]
   limit["limit: rate / traffic / concurrency / ACME cooldown"]
-  store["store: durable S3 registry + logs + evidence + attestation history"]
+  store["store: durable S3 registry + logs + evidence + attestation history + phones seen"]
   metrics["metrics: internal listener + PromRecorder"]
   acmehttp[":80 plain listener (http-01 answers; plain dial-backs)"]
 
@@ -284,10 +284,12 @@ UTC day of the phones that had a control connection on it, each with the first a
 phone manager reports every control connection that opens and closes, and the last time of a phone still connected
 is refreshed every minute; a phone still connected at midnight is seen until the end of the day and from midnight
 on. The list is saved in `<--conn-log-dir>/phones-seen/` (`<yyyymmdd>-<node-id>.json`, locked by one process) at
-most a second after a change and every minute, and uploaded every 15 minutes, at the end of its day and at
-shutdown. The node id is new at every start, so each process has its own lists; a list another process left is
-uploaded at the next start and then deleted locally, as is an ended day's list once uploaded. A failed save or
-upload is logged and tried again within a minute; the phone control plane never waits for it.
+most a second after a change and every minute. A separate uploader runs every minute: it uploads today's list once
+per quarter hour and every other list it finds (an ended day's, or one another process left — the node id is new at
+every start, so each process has its own lists), then deletes that one locally unless it was saved again meanwhile.
+Shutdown saves and uploads everything once more. A failed save or upload is tried again within a minute and warned
+about at most once a minute, the held-back warnings summed up at shutdown; neither the phone control plane nor the
+saves wait for an upload.
 
 ## 7. Ban engine
 
