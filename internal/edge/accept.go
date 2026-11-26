@@ -101,8 +101,7 @@ func peekClientHello(conn net.Conn, deadline time.Duration) (info ClientHelloInf
 	return parsed, &peekConn{Conn: conn, prefix: record}, nil
 }
 
-// acceptLoop accepts raw TCP connections and hands each to handleConn (which applies the accept-time
-// checks in the documented order). It runs until ctx is done or the listener closes.
+// acceptLoop accepts raw TCP connections. It runs until ctx is done or the listener closes.
 func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener) {
 	var delay time.Duration
 	for {
