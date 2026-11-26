@@ -287,8 +287,9 @@ on. The list is saved in `<--conn-log-dir>/phones-seen/` (`<yyyymmdd>-<node-id>.
 most a second after a change and every minute. A separate uploader runs every minute: it uploads today's list once
 per quarter hour and every other list it finds (an ended day's, or one another process left — the node id is new at
 every start, so each process has its own lists), then deletes that one locally unless it was saved again meanwhile.
-Shutdown saves and uploads everything once more. A failed save or upload is tried again within a minute and warned
-about at most once a minute, the held-back warnings summed up at shutdown; neither the phone control plane nor the
+Shutdown saves and uploads everything once more: a list that does not upload stays on disk for the next start, and
+a failed final save loses what changed since the list's last save. Otherwise a failed save or upload is tried again
+within a minute and warned about at most once a minute, the held-back warnings summed up at shutdown; neither the phone control plane nor the
 saves wait for an upload.
 
 ## 7. Ban engine
