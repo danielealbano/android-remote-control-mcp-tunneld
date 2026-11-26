@@ -465,21 +465,24 @@ func TestPhonesSeen_RemovesAnUploadedListOnlyIfItWasNotReplaced(t *testing.T) {
 	if err := saveFileSynced(path, []byte("saved after the upload")); err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := env.p.removeUploaded(path, uploaded); removed || err != nil {
-		t.Fatalf("a list replaced after its upload must be kept for the next upload, got removed=%v err=%v", removed, err)
+	if err := env.p.removeUploaded(path, uploaded); err != nil {
+		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "saved after the upload" {
-		t.Fatalf("the replacing list must stay on disk, got %q, %v", got, err)
+		t.Fatalf("a list saved again after its upload must stay on disk for the next upload, got %q, %v", got, err)
 	}
 	same, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed, err := env.p.removeUploaded(path, same); !removed || err != nil {
-		t.Fatalf("the uploaded list itself must be removed, got removed=%v err=%v", removed, err)
+	if err := env.p.removeUploaded(path, same); err != nil {
+		t.Fatal(err)
 	}
-	if removed, err := env.p.removeUploaded(path, same); !removed || err != nil {
-		t.Fatalf("a list already gone counts as removed, got removed=%v err=%v", removed, err)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the uploaded list itself must be removed, stat err = %v", err)
+	}
+	if err := env.p.removeUploaded(path, same); err != nil {
+		t.Fatalf("a list already gone is no error, got %v", err)
 	}
 }
 
@@ -523,7 +526,7 @@ func TestPhonesSeen_DrainLogsWhatIsLeftOnDisk(t *testing.T) {
 	up.setErr(errors.New("bucket down"))
 	env.p.PhoneOpen("abc")
 	drainSeenWithin(env.p, 5*time.Second)
-	if !strings.Contains(env.log.String(), `msg="could not save or upload every list of phones seen before stopping; what is on disk is uploaded after the next start"`) {
+	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="bucket down"`) {
 		t.Fatalf("a failed final upload must be logged; log = %q", env.log.String())
 	}
 	if _, ok := readSeenFile(t, localSeen(env.dir, "20261013")); !ok {
@@ -550,6 +553,62 @@ func TestPhonesSeen_DrainIsBoundedByItsContext(t *testing.T) {
 	if _, ok := readSeenFile(t, localSeen(env.dir, "20261013")); !ok {
 		t.Fatal("the list whose upload was cut short must stay on disk for the next start")
 	}
+	if !strings.Contains(env.log.String(), `msg="could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start" files=1 err="context canceled"`) {
+		t.Fatalf("an upload cut short at shutdown must be logged; log = %q", env.log.String())
+	}
+}
+
+func TestPhonesSeen_DrainSaysAFailedFinalSaveLosesItsChanges(t *testing.T) {
+	t.Parallel()
+	fs := &seenFS{}
+	fs.set(failAll(errors.New("disk full")), nil)
+	env := newSeenWithFS(t, t.TempDir(), time.Date(2026, 10, 13, 10, 2, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	env.p.PhoneOpen("abc")
+	drainSeenWithin(env.p, 5*time.Second)
+	if !strings.Contains(env.log.String(), `msg="could not save the list of phones seen today before stopping, so what changed since its last save is lost" day=2026-10-13 dir=`+env.dir+` err="disk full"`) {
+		t.Fatalf("a failed final save must say what is lost; log = %q", env.log.String())
+	}
+}
+
+func TestPhonesSeen_FailedSaveOfADayThatEndsMeanwhileIsKept(t *testing.T) {
+	t.Parallel()
+	fs := &seenFS{}
+	env := newSeenWithFS(t, t.TempDir(), time.Date(2026, 10, 13, 23, 59, 0, 0, time.UTC), newFakeSeenUploader(), fs)
+	var once sync.Once
+	fs.set(func(path string) error {
+		if !strings.HasSuffix(path, "20261013-"+testNode+".json") {
+			return nil
+		}
+		fired := false
+		once.Do(func() {
+			env.clock.set(time.Date(2026, 10, 14, 0, 0, 5, 0, time.UTC))
+			env.p.PhoneOpen("new")
+			env.p.PhoneClose("new")
+			fired = true
+		})
+		if fired {
+			return errors.New("disk full")
+		}
+		return nil
+	}, nil)
+	env.p.PhoneOpen("old")
+	env.p.PhoneClose("old")
+	waitFor(t, "the ended day uploaded after its failed save", func() bool {
+		v := env.up.versions(seenKey("2026/10/13"))
+		if len(v) == 0 {
+			return false
+		}
+		_, ok := v[len(v)-1].Phones["old"]
+		return ok
+	})
+	waitFor(t, "the new day uploaded", func() bool {
+		v := env.up.versions(seenKey("2026/10/14"))
+		if len(v) == 0 {
+			return false
+		}
+		_, ok := v[len(v)-1].Phones["new"]
+		return ok
+	})
 }
 
 func TestPhonesSeen_HeldDirectoryFailsFast(t *testing.T) {

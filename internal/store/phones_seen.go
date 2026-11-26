@@ -272,9 +272,9 @@ func (p *PhonesSeen) saver() {
 			}
 		case <-pending:
 			pending = nil
-			p.save()
+			p.save(false)
 		case <-t.C:
-			p.save()
+			p.save(false)
 		case <-p.stop:
 			return
 		}
@@ -296,28 +296,39 @@ func (p *PhonesSeen) uploader() {
 	}
 }
 
-func (p *PhonesSeen) save() bool {
+func (p *PhonesSeen) save(final bool) {
 	ended, current := p.snapshot(p.now().UTC())
-	clean := true
 	for _, f := range ended {
 		if err := p.writeLocal(f); err != nil {
-			p.warn("could not save the list of phones seen on a day that has ended; it is tried again within a minute", err, "day", f.Day, "dir", p.dir)
-			p.mu.Lock()
-			p.ended = append(p.ended, f)
-			p.mu.Unlock()
-			clean = false
+			p.problem(final, "could not save the list of phones seen on a day that has ended; it is tried again within a minute",
+				"could not save the list of phones seen on a day that has ended before stopping, so what changed since its last save is lost",
+				err, "day", f.Day, "dir", p.dir)
+			p.retry(f)
 		}
 	}
 	if current != nil {
 		if err := p.writeLocal(*current); err != nil {
-			p.warn("could not save the list of phones seen today; it is tried again within a minute", err, "day", current.Day, "dir", p.dir)
-			p.mu.Lock()
-			p.dirty = true
-			p.mu.Unlock()
-			clean = false
+			p.problem(final, "could not save the list of phones seen today; it is tried again within a minute",
+				"could not save the list of phones seen today before stopping, so what changed since its last save is lost",
+				err, "day", current.Day, "dir", p.dir)
+			p.retry(*current)
 		}
 	}
-	return clean
+}
+
+func (p *PhonesSeen) retry(f PhonesSeenFile) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if f.Day == p.day.Format(phonesSeenDay) {
+		p.dirty = true
+		return
+	}
+	for _, queued := range p.ended {
+		if queued.Day == f.Day {
+			return
+		}
+	}
+	p.ended = append(p.ended, f)
 }
 
 func (p *PhonesSeen) snapshot(now time.Time) ([]PhonesSeenFile, *PhonesSeenFile) {
@@ -366,17 +377,18 @@ func (p *PhonesSeen) currentName() string {
 	return phonesSeenFileName(p.day, p.nodeID)
 }
 
-func (p *PhonesSeen) upload(final bool) bool {
+func (p *PhonesSeen) upload(final bool) {
 	entries, err := os.ReadDir(p.dir)
 	if err != nil {
-		p.warn("could not list the saved lists of phones seen to upload them; it is tried again within a minute", err, "dir", p.dir)
-		return false
+		p.problem(final, "could not list the saved lists of phones seen to upload them; it is tried again within a minute",
+			"could not list the saved lists of phones seen to upload them before stopping; they are uploaded after the next start", err, "dir", p.dir)
+		return
 	}
 	currentName := p.currentName()
 	slot := p.now().UTC().Truncate(phonesSeenUploadEvery)
 	var (
-		failed, unremoved int
-		lastErr           error
+		failed  int
+		lastErr error
 	)
 	for _, e := range entries {
 		m := phonesSeenName.FindStringSubmatch(e.Name())
@@ -399,37 +411,32 @@ func (p *PhonesSeen) upload(final bool) bool {
 			p.uploadedName, p.uploadedSlot = e.Name(), slot
 			continue
 		}
-		removed, err := p.removeUploaded(path, uploaded)
-		if err != nil {
-			p.warn("could not remove an uploaded list of phones seen; it is uploaded again within a minute, replacing the same object", err, "file", path)
-		}
-		if !removed {
-			unremoved++
+		if err := p.removeUploaded(path, uploaded); err != nil {
+			p.problem(final, "could not remove an uploaded list of phones seen; it is uploaded again within a minute, replacing the same object",
+				"could not remove an uploaded list of phones seen before stopping; it is uploaded again after the next start, replacing the same object",
+				err, "file", path)
 		}
 	}
-	if lastErr != nil && p.upCtx.Err() == nil {
-		p.warn("could not upload the lists of phones seen; they stay on disk and are tried again within a minute", lastErr, "files", failed)
+	if lastErr != nil && (final || p.upCtx.Err() == nil) {
+		p.problem(final, "could not upload the lists of phones seen; they stay on disk and are tried again within a minute",
+			"could not upload the lists of phones seen before stopping; they stay on disk and are uploaded after the next start", lastErr, "files", failed)
 	}
-	return failed == 0 && unremoved == 0
 }
 
-func (p *PhonesSeen) removeUploaded(path string, uploaded os.FileInfo) (bool, error) {
+func (p *PhonesSeen) removeUploaded(path string, uploaded os.FileInfo) error {
 	p.fileMu.Lock()
 	defer p.fileMu.Unlock()
 	cur, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
+		return nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("check %s before removing it: %w", path, err)
+		return fmt.Errorf("check %s before removing it: %w", path, err)
 	}
 	if !os.SameFile(uploaded, cur) {
-		return false, nil
+		return nil
 	}
-	if err := p.remove(path); err != nil {
-		return false, err
-	}
-	return true, nil
+	return p.remove(path)
 }
 
 func (p *PhonesSeen) put(path, key string) (os.FileInfo, error) {
@@ -452,6 +459,14 @@ func (p *PhonesSeen) put(path, key string) (os.FileInfo, error) {
 		return nil, err
 	}
 	return info, nil
+}
+
+func (p *PhonesSeen) problem(final bool, msg, finalMsg string, err error, args ...any) {
+	if final {
+		p.logger.Warn(finalMsg, append(args, "err", err)...)
+		return
+	}
+	p.warn(msg, err, args...)
 }
 
 func (p *PhonesSeen) warn(msg string, err error, args ...any) {
@@ -485,12 +500,9 @@ func (p *PhonesSeen) Drain(ctx context.Context) {
 		close(p.stop)
 		<-p.saverDone
 		<-p.uploaderDone
-		saved := p.save()
-		uploaded := p.upload(true)
+		p.save(true)
+		p.upload(true)
 		p.upCancel()
-		if !saved || !uploaded {
-			p.logger.Warn("could not save or upload every list of phones seen before stopping; what is on disk is uploaded after the next start", "dir", p.dir)
-		}
 		p.flushWarns()
 		if err := p.lock.Close(); err != nil {
 			p.logger.Warn("could not release the phones-seen directory lock cleanly; the system releases it at the latest when tunneld exits", "dir", p.dir, "err", err)
