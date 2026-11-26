@@ -413,24 +413,48 @@ func TestJob_TimeoutNamesTheLimit(t *testing.T) {
 	}
 }
 
-func TestJob_CacheThatCannotBeSavedStillUpdatesTheDashboard(t *testing.T) {
+func TestJob_CacheSaveProblemsStillUpdateTheDashboard(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	e.st.putList(t, listKeyFor("2026/11/26", "aa"), `"1"`, map[string]time.Time{"x": testNow.Add(-time.Hour)})
-	write := func(path string, data []byte, mode os.FileMode) error {
-		if path == e.cache {
-			return errors.New("disk full")
-		}
-		return atomicfile.Write(path, data, mode)
+	tests := []struct {
+		name    string
+		write   func(path string, data []byte, mode os.FileMode) error
+		wantLog string
+		saved   bool
+	}{
+		{name: "not saved", write: func(string, []byte, os.FileMode) error { return errors.New("disk full") },
+			wantLog: `level=WARN msg="could not save this node's cache, so the next run reads the lists again" cache_file=%s err="disk full"`},
+		{name: "saved but not flushed", write: func(path string, data []byte, mode os.FileMode) error {
+			if err := atomicfile.Write(path, data, mode); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: sync", atomicfile.ErrNotFlushed)
+		}, saved: true,
+			wantLog: `level=WARN msg="saved this node's cache but could not flush it to disk, so a crash could lose it and the next run would then read the lists again" cache_file=%s`},
 	}
-	if err := e.run(t, withWriter(write)); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(e.log.String(), `level=WARN msg="could not save this node's cache, so the next run reads the lists again" cache_file=`+e.cache+` err="disk full"`) {
-		t.Fatalf("the failed cache save must be logged; log = %q", e.log.String())
-	}
-	if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
-		t.Fatalf("textfile = %q, want %q", got, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.st.putList(t, listKeyFor("2026/11/26", "aa"), `"1"`, map[string]time.Time{"x": testNow.Add(-time.Hour)})
+			write := func(path string, data []byte, mode os.FileMode) error {
+				if path == e.cache {
+					return tc.write(path, data, mode)
+				}
+				return atomicfile.Write(path, data, mode)
+			}
+			if err := e.run(t, withWriter(write)); err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf(tc.wantLog, e.cache); !strings.Contains(e.log.String(), want) {
+				t.Fatalf("log must contain %q; log = %q", want, e.log.String())
+			}
+			if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+				t.Fatalf("textfile = %q, want %q", got, want)
+			}
+			if _, err := os.Stat(e.cache); (err == nil) != tc.saved {
+				t.Fatalf("cache saved = %v, want %v", err == nil, tc.saved)
+			}
+		})
 	}
 }
 

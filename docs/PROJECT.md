@@ -311,7 +311,8 @@ always read); a list no longer in the bucket drops out of the cache, and a missi
 only means every list is read again (logged). An object under `phones-seen/` that is not a list, a list whose folder
 is not a real day, a list that cannot be decoded (not cached, so read and warned about again at the next run) and a
 list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
-failed save is logged and only makes the next run read the lists again) and rewrites the node_exporter textfile
+failed save is logged and only makes the next run read the lists again; a save not flushed to disk is logged too,
+as a crash could then lose it) and rewrites the node_exporter textfile
 `arc_active_users.prom` with `arc_active_users{window="24h"|"7d"|"30d"}` and the time of the count
 (`arc_active_users_counted_timestamp_seconds`). A run that cannot list or read the bucket, or does not finish
 within 100 s, logs why and leaves the cache and the textfile as they were. The boxes and the chart show the largest

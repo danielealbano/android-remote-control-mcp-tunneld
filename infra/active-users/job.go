@@ -131,7 +131,11 @@ func (j *job) update(ctx context.Context) error {
 	}
 	counts := count(next, now)
 	if err := j.saveCache(next); err != nil {
-		j.Logger.Warn("could not save this node's cache, so the next run reads the lists again", "cache_file", j.CacheFile, "err", err)
+		if errors.Is(err, atomicfile.ErrNotFlushed) {
+			j.Logger.Warn("saved this node's cache but could not flush it to disk, so a crash could lose it and the next run would then read the lists again", "cache_file", j.CacheFile, "err", err)
+		} else {
+			j.Logger.Warn("could not save this node's cache, so the next run reads the lists again", "cache_file", j.CacheFile, "err", err)
+		}
 	}
 	if err := writeTextfile(j.write, j.Textfile, counts, j.now()); err != nil {
 		if !errors.Is(err, atomicfile.ErrNotFlushed) {
