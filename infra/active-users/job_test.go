@@ -449,7 +449,7 @@ func TestJob_DashboardFileErrors(t *testing.T) {
 
 func TestNewJob_RejectsMissingSettings(t *testing.T) {
 	t.Parallel()
-	logger := slog.New(slog.DiscardHandler)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	full := jobConfig{Store: newFakeStore(), CacheFile: "c", Textfile: "t", Logger: logger}
 	tests := []struct {
 		name string
