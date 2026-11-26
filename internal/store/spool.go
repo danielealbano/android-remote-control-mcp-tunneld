@@ -174,7 +174,7 @@ func NewConnLogSpool(ctx context.Context, dir, nodeID string, up ConnLogUploader
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("store: create conn-log spool directory: %w", err)
 	}
-	lock, err := lockDir(dir)
+	lock, err := lockDir(dir, "conn-log spool")
 	if err != nil {
 		return nil, err
 	}
@@ -196,26 +196,26 @@ func NewConnLogSpool(ctx context.Context, dir, nodeID string, up ConnLogUploader
 	return s, nil
 }
 
-func lockDir(dir string) (*os.File, error) {
+func lockDir(dir, what string) (*os.File, error) {
 	f, err := os.OpenFile(filepath.Join(dir, spoolLockName), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("store: open conn-log spool lock: %w", err)
+		return nil, fmt.Errorf("store: open %s lock: %w", what, err)
 	}
 	raw, err := f.SyscallConn()
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("store: conn-log spool lock fd: %w", err), f.Close())
+		return nil, errors.Join(fmt.Errorf("store: %s lock fd: %w", what, err), f.Close())
 	}
 	var lockErr error
 	if err := raw.Control(func(fd uintptr) {
 		lockErr = syscall.Flock(int(fd), syscall.LOCK_EX|syscall.LOCK_NB)
 	}); err != nil {
-		return nil, errors.Join(fmt.Errorf("store: conn-log spool lock fd: %w", err), f.Close())
+		return nil, errors.Join(fmt.Errorf("store: %s lock fd: %w", what, err), f.Close())
 	}
 	if errors.Is(lockErr, syscall.EWOULDBLOCK) {
-		return nil, errors.Join(fmt.Errorf("store: conn-log spool directory %s is in use by another process", dir), f.Close())
+		return nil, errors.Join(fmt.Errorf("store: %s directory %s is in use by another process", what, dir), f.Close())
 	}
 	if lockErr != nil {
-		return nil, errors.Join(fmt.Errorf("store: lock conn-log spool directory: %w", lockErr), f.Close())
+		return nil, errors.Join(fmt.Errorf("store: lock %s directory: %w", what, lockErr), f.Close())
 	}
 	return f, nil
 }
