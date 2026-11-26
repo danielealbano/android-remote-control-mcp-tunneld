@@ -166,7 +166,7 @@ type ServeCmd struct {
 	LimitEnrollBody   string `name:"limit-enroll-body" default:"16kb" help:"Max enrollment (CSR) request body."`
 
 	PredrainWait  time.Duration `name:"predrain-wait" default:"0s" help:"On a stop signal, how long GET /api/v1/health answers 503 while everything else is still served, before the drain starts (lets a health-checking DNS load balancer drop this node first; 0 = no wait)."`
-	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Deadline of the final shutdown after the drain (servers, public handlers, conn-log upload)."`
+	ShutdownGrace time.Duration `name:"shutdown-grace" default:"15s" help:"Deadline of the final shutdown after the drain (servers, public handlers, conn-log upload, the lists of phones seen)."`
 
 	Log []string `name:"log" default:"output=std;level=info" help:"Repeatable composite log sink (output=std|/path;level=…;format=…;maxsize=…;maxfiles=…)."`
 
