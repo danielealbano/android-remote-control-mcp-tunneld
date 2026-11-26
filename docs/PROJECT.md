@@ -174,8 +174,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   window, or per 16 MiB, then deletes it locally),
   rejected-enrollment evidence (`rejected-enroll/…`), the lists of phones seen (one object per node process per
   UTC day, `phones-seen/<yyyy>/<mm>/<dd>/<node-id>.json`: each phone with a control connection on that node that
-  day and its first and last time seen, uploaded every 15 minutes, within a minute of the end of the day and at
-  shutdown, for the active-users count, §6), and the attestation history
+  day and its first and last time seen, uploaded every 15 minutes, within about two minutes of the end of the day
+  and at shutdown, for the active-users count, §6), and the attestation history
   (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
   and certificate request of the name, with the device the phone reported when it sent one, the last 10 kept — after each certificate request tunneld lists the name's
   history and deletes the older ones; the answer waits for the write, at most 5 s, and a failed write is logged and
