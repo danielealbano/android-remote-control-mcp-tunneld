@@ -23,7 +23,7 @@ internal mTLS HTTP/2 **mesh**, and the phone dials back to the node where a publ
 tunnel data crosses nodes.
 **Valkey** holds transient control state (routing/rate-limit/concurrency — everything TTL'd); a plain
 **S3** bucket (any provider; MinIO locally) holds the durable state (name registry, connection logs,
-rejected-enrollment evidence, attestation history).
+rejected-enrollment evidence, attestation history, lists of phones seen).
 
 ```mermaid
 flowchart LR
@@ -172,7 +172,10 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed — every line carries its
   `tunnel`; each node spools events in `--conn-log-dir` and uploads one object per clock-aligned 5-minute
   window, or per 16 MiB, then deletes it locally),
-  rejected-enrollment evidence (`rejected-enroll/…`), and the attestation history
+  rejected-enrollment evidence (`rejected-enroll/…`), the lists of phones seen (one object per node process per
+  UTC day, `phones-seen/<yyyy>/<mm>/<dd>/<node-id>.json`: each phone with a control connection on that node that
+  day and its first and last time seen, uploaded every 15 minutes, at the end of the day and at shutdown, for the
+  active-users count, §6), and the attestation history
   (`attestations/<name>/<time>-<rand>.json`: the submitted attestation chain of each successful enrollment
   and certificate request of the name, with the device the phone reported when it sent one, the last 10 kept — after each certificate request tunneld lists the name's
   history and deletes the older ones; the answer waits for the write, at most 5 s, and a failed write is logged and
@@ -184,13 +187,17 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `NoSuchKey`).
 - **Connection-log spool (local, transient):** `--conn-log-dir` (a persistent volume, locked by one process)
   holds the not-yet-uploaded files; an S3 outage loses nothing below its 1 GiB cap, and leftover files are
-  uploaded at the next start.
+  uploaded at the next start. Its `phones-seen/` subdirectory holds the lists of phones seen: the current day's
+  list stays there, every other one is deleted once uploaded, and a list another process left is uploaded at the
+  next start.
 - **Retention** (a one-time lifecycle setup on the bucket by the operator; tunneld never reads or writes
   bucket configuration, so its S3 credential needs only read, write and delete on the objects plus list on
   the bucket — on AWS-style IAM `s3:GetObject` / `s3:PutObject` / `s3:DeleteObject` on the objects and
   `s3:ListBucket` on the bucket, without which a missing key answers 403 instead of 404): name registry
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
-  rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the
+  rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the lists
+  of phones seen **35 days** (rule `phones-seen-expire`, prefix `phones-seen/`: the active-users count reads the
+  last 31 days, and the extra days cover a list uploaded late), the
   attestation history **the last 10 per name** (tunneld deletes the older ones; no rule), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
   refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, the
@@ -290,6 +297,27 @@ own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is refused), the fi
 first checks the whole config file (a bad line, no node, or two run minutes less than 30 minutes apart installs
 nothing), then checks on each node that the day is a real calendar day, installs it there with its run minute and
 runs it once (`--help` lists its settings).
+
+The active-users count (`infra/active-users/`, built with `make active-users`) fills the DAU, WAU and MAU boxes and
+the Active users chart of the tunneld overview: the phones (one per tunnel name) with a control connection in the
+last 24 hours, 7 days and 30 days, rolling. It reads tunneld's lists of phones seen (§5) and takes each phone's
+latest last-seen time across all of them. A systemd timer runs it every 15 minutes, at minutes 05, 20, 35 and 50, a
+few minutes after tunneld's quarter-hour uploads, on one or two nodes; the runs share no state, so the nodes may
+run at the same minutes. Each node keeps a cache, `/var/lib/arc-active-users/cache.json` (mode 0600): the last time
+seen of every phone in each list it read, with the list's ETag. A run lists `phones-seen/` and reads, 16 at a time,
+only the lists whose day is at most 31 days back and that are new or whose ETag changed (a list without an ETag is
+always read); a list no longer in the bucket drops out of the cache, and a missing, unreadable or undecodable cache
+only means every list is read again (logged). An object under `phones-seen/` that is not a list, a list whose folder
+is not a real day, a list that cannot be decoded (not cached, so read and warned about again at the next run) and a
+list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
+failed save is logged and only makes the next run read the lists again) and rewrites the node_exporter textfile
+`arc_active_users.prom` with `arc_active_users{window="24h"|"7d"|"30d"}` and the time of the count
+(`arc_active_users_counted_timestamp_seconds`). A run that cannot list or read the bucket, or does not finish
+within 100 s, logs why and leaves the cache and the textfile as they were. The boxes and the chart show the largest
+count across the nodes whose count is less than an hour old, so a count that stops being renewed drops off within an
+hour. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is
+refused). `infra/active-users/install.sh` first checks the whole config file (a bad line or no node installs
+nothing), then installs it on each node and runs it once (`--help` lists its settings).
 
 The busy-clients check (`infra/busy-clients/`, built with `make busy-clients`) sends a Telegram alert for each client
 address with unusually many public connections, once per address, so the operator can look at it and decide whether to

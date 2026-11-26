@@ -69,7 +69,7 @@ flowchart TD
 | `internal/mesh` | replica↔replica mTLS HTTP/2 control RPCs (renew, terminate, open, evict, slot-candidate, free-slot), per-pair pools |
 | `internal/router` | Valkey routing registry (bind/heartbeat/unbind/lookup) + node registry |
 | `internal/limit` | rate windows, enroll quota, global stream counter, per-second bandwidth + packet windows, ACME issuance budgets + wait-until |
-| `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence, attestation history |
+| `internal/store` | durable S3 name registry, connection logs, rejected-enroll evidence, attestation history, lists of phones seen |
 | `internal/ban` | ban/geo LPM engine, DB-IP expansion, file watcher |
 | `internal/config` | kong flag surface + `TUNNELD_*` env twins + `Validate()` |
 | `internal/wire` | control-frame codec + dial-back constants + the ChunkSize pacing constant |
@@ -262,7 +262,7 @@ tokens are `crypto/rand.Text` (26 base32 chars, 128 bits).
 writes): the name registry (`names/<name>`), connection logs (per-node JSONL objects
 `tunnel-logs/<yyyy>/<mm>/<dd>/<file-start>-<node-id>.jsonl`, all tunnels mixed; a connection's start and
 end may land in different objects), rejected-enroll evidence
-(`rejected-enroll/…`), and the attestation history (`attestations/<name>/<time>-<rand>.json`). The enroll
+(`rejected-enroll/…`), the lists of phones seen (`phones-seen/<yyyy>/<mm>/<dd>/<node-id>.json`), and the attestation history (`attestations/<name>/<time>-<rand>.json`). The enroll
 service PUTs the submitted chain, with the device the phone reported when it sent one, after a successful enrollment and after each successful certificate request
 (the same request that refreshes the name record; never in the test-only optional-attestation mode, which
 verifies no chain), then — after a certificate request — LISTs the name's
@@ -276,8 +276,18 @@ answer waits for whichever of the two finishes last. Name uniqueness: a candidat
 PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
 deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is
 never released and lives `--registry-claim-settle` (strictly > that deadline), so a timed-out PUT has landed or
-died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d) is a one-time lifecycle setup on the bucket
+died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d, phones seen 35d) is a one-time lifecycle setup on the bucket
 (`docs/PROJECT.md` §5); tunneld only gets, puts, lists and deletes objects.
+
+The lists of phones seen feed the active-users count (`docs/PROJECT.md` §6). Each node process keeps one list per
+UTC day of the phones that had a control connection on it, each with the first and last time it was seen: the
+phone manager reports every control connection that opens and closes, and the last time of a phone still connected
+is refreshed every minute; a phone still connected at midnight is seen until the end of the day and from midnight
+on. The list is saved in `<--conn-log-dir>/phones-seen/` (`<yyyymmdd>-<node-id>.json`, locked by one process) at
+most a second after a change and every minute, and uploaded every 15 minutes, at the end of its day and at
+shutdown. The node id is new at every start, so each process has its own lists; a list another process left is
+uploaded at the next start and then deleted locally, as is an ended day's list once uploaded. A failed save or
+upload is logged and tried again within a minute; the phone control plane never waits for it.
 
 ## 7. Ban engine
 
@@ -441,7 +451,8 @@ flowchart LR
   join --> group["errgroup unwinds: schedulers + watchers on the serving ctx"]
   group --> queue["rotate + upload the conn-log spool: server-shutdown end events land"]
   queue --> flush["final admin flush + cap-log flush"]
-  flush --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
+  flush --> seen["save + upload the lists of phones seen"]
+  seen --> dereg["Node explicitly deregistered (TTL = crash backstop)"]
   dereg --> evictjoin["join, then cancel, the splice-eviction broadcasts"]
 ```
 
@@ -468,7 +479,8 @@ the pre-drain or the drain cancels the serving context at once.
 terminate). The ordering is load-bearing:
 the public handlers are joined (`Edge.Wait`) so every end event is ENQUEUED, then the conn-log spool is
 rotated and uploaded (what does not upload within `--shutdown-grace` stays on disk for the next start), and
-only then the admin/cap-log final flush runs — so no end event or counter delta is lost. A service manager must
+only then the admin/cap-log final flush runs — so no end event or counter delta is lost. The lists of phones seen
+are then saved and uploaded within the same `--shutdown-grace`; what does not upload stays on disk for the next start. A service manager must
 allow `--predrain-wait` + `--limit-conn-idle` + 5 s + `--shutdown-grace` (+ 5 s with `--sentry-dsn`: `Run` flushes
 the last Sentry events for at most 2 s and closes the client for at most 3 s) (plus a margin) before it kills the process.
 
@@ -477,8 +489,8 @@ the last Sentry events for at most 2 s and closes the client for at most 3 s) (p
 Config is a kong flag surface with `TUNNELD_*` env twins (`TUNNELD_` + the upper-cased flag name, `-` → `_`: `--s3-bucket` → `TUNNELD_S3_BUCKET`), validated
 fail-fast in `Validate()`. Byte sizes are BINARY (`1mb` = 1048576); bitrates are DECIMAL bits
 (`1mbit` = 125000 B/s). Full flag list: `tunneld serve --help`. `--conn-log-dir` (required) is the
-connection-log spool directory; `Validate()` rejects a path that exists but is not a directory, and startup
-creates and locks it. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected; the go-redis pool options such as `pool_size` and `conn_max_idle_time` pass through — the pool size is a ceiling, connections open on demand and idle ones close after `conn_max_idle_time`), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a `net/url` / go-redis parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) AND every delimiter character (space, quote, `:`, `,`, brackets, parentheses) that occurs in the URL replaced by `[redacted]`, adjacent replacements merged into one — so no part of a credential, not even its punctuation, can reach the log, at the cost of also hiding non-secret URL parts and some message punctuation; tunneld's own Sentinel-option errors are emitted verbatim. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01` or `--dialback-https=false`). The
+connection-log spool directory, and its `phones-seen/` subdirectory holds the lists of phones seen (§6); `Validate()` rejects a path that exists but is not a directory, and startup
+creates and locks both. `--redis-url` selects the Valkey client: a URL whose query carries `master_name=` uses the Sentinel failover client (the URL host plus repeated `addr=` are the sentinels; the URL `user:password@` authenticates to the sentinels, `username=` / `password=` to the master; `route_by_latency`, `route_randomly` and `replica_only` are rejected; the go-redis pool options such as `pool_size` and `conn_max_idle_time` pass through — the pool size is a ceiling, connections open on demand and idle ones close after `conn_max_idle_time`), any other URL a single-node client — both forms are parsed by the same function in `Validate()` and at startup. A malformed query (e.g. a bad `%`-escape) is rejected for either form, and a `net/url` / go-redis parse error is emitted with every token that appears in the URL (raw, percent-decoded or Go-quoted) AND every delimiter character (space, quote, `:`, `,`, brackets, parentheses) that occurs in the URL replaced by `[redacted]`, adjacent replacements merged into one — so no part of a credential, not even its punctuation, can reach the log, at the cost of also hiding non-secret URL parts and some message punctuation; tunneld's own Sentinel-option errors are emitted verbatim. The ACME validation flags are `--acme-challenge-le` / `--acme-challenge-gts` (`dns-01` | `http-01` | `tls-alpn-01`, default `tls-alpn-01`), `--acme-challenge-zerossl` (`dns-01` | `http-01`, default `http-01`) and `--acme-http-listen` (default `:80`, bound only when a CA uses `http-01` or `--dialback-https=false`). The
 public-address and dial-back flags are `--public-ip` (required: this node's own public IP address, never a shared
 or round-robin one; the phones dial back to it on the `--listen` port, or on the `--acme-http-listen` port when
 `--dialback-https=false`, and a `MOVE` points them to it on the `--listen` port, so each public port must equal its

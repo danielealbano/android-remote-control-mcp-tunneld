@@ -8,7 +8,7 @@ it peeks each ClientHello (SNI/ALPN/version/JA4), routes on SNI, and splices the
 stream** to a connection the phone dials back to the entry node (the replicas' mTLS **mesh** carries
 control RPCs only) — it can NEVER read tunnel traffic. Run **one
 replica per host**; **Valkey** holds transient control state (TTL'd), a plain **S3** bucket holds the
-durable state (name registry, connection logs, rejected-enroll evidence, attestation history). Identity is earned by
+durable state (name registry, connection logs, rejected-enroll evidence, attestation history, phones-seen lists). Identity is earned by
 **two-phase attested enrollment** (Android hardware key attestation → identity mTLS cert → server-run
 ACME public cert). Abuse is contained by layered caps and a hot-reloadable ban/geo engine.
 
@@ -59,7 +59,7 @@ does NOT duplicate them.
 | CLI / env config | `github.com/alecthomas/kong` | One `tunneld` binary: `serve` / `version`; every flag has a `TUNNELD_*` env twin (`config.EnvTwins`: `TUNNELD_` + the upper-cased flag name, `-` → `_`, so `--s3-*` → `TUNNELD_S3_*`); `Validate()` enforces every cross-field invariant at startup. |
 | Phone control + replica mesh | `net/http` built-in HTTP/2 (mTLS) | Phone control plane (`/api/v1/control`, `/api/v1/issue`) + replica↔replica mesh control RPCs; binary control frames per `docs/PROTOCOL.md`; the data path is an HTTP/1.1-upgraded dial-back connection (`/api/v1/data`) carrying an opaque splice. |
 | Control plane (transient) | Valkey via `github.com/redis/go-redis/v9` | Routing `tunnel:{name}` + node registry + rate/concurrency/nonce/ACME-cooldown. **TTL'd transient state ONLY** — see invariants. |
-| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete/List only (no conditional writes); name registry + conn logs + rejected-enroll evidence + per-name attestation history (last 10); Valkey-locked name claim. |
+| Durable store | AWS S3 SDK v2 (`github.com/aws/aws-sdk-go-v2`) / MinIO stand-in (PGSTY Silo build) | Plain Get/Put/Delete/List only (no conditional writes); name registry + conn logs + rejected-enroll evidence + per-name attestation history (last 10) + per-node daily phones-seen lists; Valkey-locked name claim. |
 | ACME issuance | `github.com/go-acme/lego/v5` | LE→GTS→ZeroSSL chain, DNS-01 / HTTP-01 / TLS-ALPN-01 per CA (answered by tunneld's own listeners from Valkey-shared challenge state), spillover, optional CAs, per-account Valkey issuance budgets + wait-until/backoff, several GTS accounts looked up by key, self-heal. |
 | Attestation | Android hardware key attestation (`internal/attest`) | Seven-point predicate + key binding; roots/status refreshers; signer-digest allowlist. |
 | Ban/geo LPM table | `github.com/gaissmai/bart` + `go4.org/netipx` | Longest-prefix-match over `netip`; atomic snapshot swap on reload; DB-IP Country Lite CSV range→prefix expansion. |
@@ -149,14 +149,16 @@ MUST NOT be relaxed without explicit user direction.
   reset its quota just by reconnecting.
 - **The ONLY durable server-side state is S3** (`internal/store`): the name registry, connection logs,
   rejected-enroll evidence, and the attestation history (the submitted chains of each name's last 10 successful
-  enrollments/certificate requests, pruned by tunneld), via plain Get/Put/Delete/List (NO conditional writes —
+  enrollments/certificate requests, pruned by tunneld), and the per-node daily lists of phones seen behind the
+  active-users count, via plain Get/Put/Delete/List (NO conditional writes —
   runs on any plain S3).
   Name uniqueness is the **Valkey claim lock**: `SET lock:claim:{name} NX EX` (taken → new name; never
   released; TTL `--registry-claim-settle` > the claim deadline) → GET-absent → PUT the record, all under one
   `--registry-claim-timeout` deadline started before the lock, SDK retries disabled. Retention (logs 90d, rejected-enroll
-  30d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
+  30d, phones seen 35d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
   `docs/PROJECT.md` §5). Connection logs are only SPOOLED on the node
-  (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store.
+  (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store; so are the
+  lists of phones seen in its `phones-seen/` subdirectory.
 
 ### Wire protocol — FROZEN BY `docs/PROTOCOL.md`
 - Control frames: `[type:1][payloadLen:4 BE][payload JSON]` (OPEN/PING/PONG/RENEW_NUDGE/MOVE — the type
@@ -257,7 +259,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `limit` | `internal/limit`: rate windows, enroll quota, global stream counter, per-second bandwidth+packet windows, ACME issuance budgets + wait-until |
 | `ca` | `internal/ca`: CA loader, identity + mesh-role signing, name generation, fingerprint |
 | `router` | `internal/router`: Valkey routing registry (route bind/heartbeat/unbind/lookup) + node registry |
-| `store` | `internal/store`: durable S3/MinIO name registry, connection logs, rejected-enroll evidence, attestation history |
+| `store` | `internal/store`: durable S3/MinIO name registry, connection logs, rejected-enroll evidence, attestation history, phones-seen lists |
 | `attest` | `internal/attest`: Android key-attestation verifier (KeyDescription parse, roots/status refreshers, signer allowlist) |
 | `acme` | `internal/acme`: LE→GTS→ZeroSSL issuance chain (lego clients, DNS-01 / HTTP-01 / TLS-ALPN-01, challenge store, per-account issuance budgets + wait-until/backoff, budgeted HTTP transport, several GTS accounts looked up by key) |
 | `enroll` | `internal/enroll`: attested enrollment service + HTTP handler, single-use nonce |
@@ -276,7 +278,7 @@ All commits MUST use one of the scopes below. A commit spanning multiple scopes 
 | `e2e` | `e2e/`: testcontainers harness + scenarios; the `support/` test apps + `fixtures/` they drive |
 | `staging` | `staging/`: real-CA staging tier (LE / GTS staging through the reverse SSH tunnel) |
 | `deploy` | `deploy/`: compose, MinIO/Valkey, observability provisioning, fetcher |
-| `scripts` | `deploy/scripts/` + `scripts/` + `infra/`: fetch/gen-ca/dev-tooling scripts, the status-board reporter, the refused-apps report, the registered-phones count, the busy-clients check, the shared Telegram sender |
+| `scripts` | `deploy/scripts/` + `scripts/` + `infra/`: fetch/gen-ca/dev-tooling scripts, the status-board reporter, the refused-apps report, the registered-phones count, the busy-clients check, the active-users count, the shared Telegram sender |
 | `ci` | `.github/workflows/` |
 | `make` | `Makefile` |
 | `docs` | `docs/` (PROJECT, ARCHITECTURE, PROTOCOL, plans) + `README.md` |
@@ -303,7 +305,7 @@ The `Makefile` is the authoritative command surface:
 - `make test-soak-app` — the adb-gated soak-app tests (`-tags=e2e,soak`, `-run '^TestE2E_SoakApp'`; needs Docker + one adb device); NOT a default gate — never run by `test-e2e`, `test-all` or CI
 - `make test-staging` — `-tags=staging` suite (`-race`; real `server.Run` against Let's Encrypt staging + GTS staging through a reverse SSH tunnel; skips without `TUNNELD_STAGING_SSH_KEY`; needs Docker)
 - `make test-all` — `test-unit` + `test-integration` + `test-e2e` + `test-staging`
-- `make test-scripts` — POSIX harnesses for the `deploy/scripts/` fetch/gen-ca scripts, the `scripts/` generator, the `infra/status-report/` reporter and the `infra/refused-apps/`, `infra/registered-phones/` and `infra/busy-clients/` installers
+- `make test-scripts` — POSIX harnesses for the `deploy/scripts/` fetch/gen-ca scripts, the `scripts/` generator, the `infra/status-report/` reporter and the `infra/refused-apps/`, `infra/registered-phones/`, `infra/busy-clients/` and `infra/active-users/` installers
 - `make compose-config` — validates `deploy/docker-compose.yml` (placeholder env from
   `deploy/.env.example`)
 - `make mermaid-check` — validate all Mermaid blocks in `README.md` + `docs/` via `mmdc`
@@ -312,6 +314,7 @@ The `Makefile` is the authoritative command surface:
 - `make refused-apps` — `bin/arc-refused-apps`, the daily refused-apps report (`docs/PROJECT.md` §6)
 - `make registered-phones` — `bin/arc-registered-phones`, the hourly count behind the overview's Phones registered box (`docs/PROJECT.md` §6)
 - `make busy-clients` — `bin/arc-busy-clients`, the hourly Telegram alert on client addresses with unusually many connections (`docs/PROJECT.md` §6)
+- `make active-users` — `bin/arc-active-users`, the 15-minute count behind the overview's DAU / WAU / MAU boxes (`docs/PROJECT.md` §6)
 - `make tunnel-app` / `make soak-app` — run the app's JVM unit tests (`testDebugUnitTest`) and build its APK fixture (into `fixtures/tunnel-app/` / `fixtures/soak-app/`); `make soak-client` — the soak load client (`docs/PROJECT.md` §7)
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
