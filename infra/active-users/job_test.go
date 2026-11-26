@@ -293,6 +293,29 @@ func TestJob_ABrokenCacheIsRebuiltFromTheBucket(t *testing.T) {
 	}
 }
 
+func TestJob_AnUnreadableCacheIsRebuiltFromTheBucket(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	if err := os.MkdirAll(e.cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e.st.putList(t, listKeyFor("2026/11/26", "aa"), `"1"`, map[string]time.Time{"x": testNow.Add(-time.Hour)})
+	if err := e.run(t); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`level=WARN msg="could not read this node's cache, so every list of phones seen is read from the bucket again" cache_file=` + e.cache,
+		`level=WARN msg="could not save this node's cache, so the next run reads the lists again" cache_file=` + e.cache,
+	} {
+		if !strings.Contains(e.log.String(), want) {
+			t.Fatalf("log must contain %q; log = %q", want, e.log.String())
+		}
+	}
+	if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+		t.Fatalf("textfile = %q, want %q", got, want)
+	}
+}
+
 func TestJob_FirstRunSaysItHasNoCache(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
