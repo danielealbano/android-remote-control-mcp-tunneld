@@ -153,6 +153,10 @@ type nopSeen struct{}
 func (nopSeen) PhoneOpen(string)  {}
 func (nopSeen) PhoneClose(string) {}
 
+type panicCloseRec struct{ fakeRec }
+
+func (*panicCloseRec) PhoneConnClose(string) { panic("gauge boom") }
+
 type recSeen struct {
 	mu    sync.Mutex
 	calls []string
@@ -298,6 +302,43 @@ func TestRegister_SeenTrackerGetsOneCloseForEveryOpen(t *testing.T) {
 		}
 		if got := seen.got(); len(got) != 0 {
 			t.Fatalf("a phone whose bind failed was never connected, got %v", got)
+		}
+	})
+	t.Run("a teardown that panics still reports the close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &panicCloseRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+		teardown := start(t, m)
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("the teardown must panic in the gauge")
+				}
+			}()
+			teardown()
+		}()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "close abc"}) {
+			t.Fatalf("a panicking teardown must still report the phone as gone, got %v", got)
+		}
+	})
+	t.Run("an undone registration that panics still reports the close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := NewManager(Config{Router: newFakeRouter(), Logs: panicConnLogs{}, Recorder: &panicCloseRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("the registration must panic")
+				}
+			}()
+			if _, err := m.register(context.Background(), newConn("abc")); err != nil {
+				t.Errorf("register = %v", err)
+			}
+		}()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "close abc"}) {
+			t.Fatalf("an undone registration whose gauge panics must still report the phone as gone, got %v", got)
 		}
 	})
 	t.Run("a superseded connection still reports its close", func(t *testing.T) {
