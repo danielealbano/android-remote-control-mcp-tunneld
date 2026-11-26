@@ -189,6 +189,7 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 	m.writeEvent(ctx, c, "start", "")
 
 	teardown := func() {
+		defer m.seen.PhoneClose(c.name)
 		c.close("phone-close") // cancel the conn ctx FIRST: no further heartbeat/self-heal can run
 		<-c.hbDone             // wait for the heartbeat loop (incl. an in-flight self-heal) to exit
 		m.mu.Lock()
@@ -204,7 +205,6 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 		}
 		m.writeEvent(tctx, c, "end", c.closeReason())
 		m.rec.PhoneConnClose(c.closeReason())
-		m.seen.PhoneClose(c.name)
 		m.closed.PhoneConnClosed(tctx, c.name, c.connID, c.closeReason())
 	}
 	registered = true
@@ -212,6 +212,9 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 }
 
 func (m *Manager) abandon(ctx context.Context, c *conn, opened bool) {
+	if opened {
+		defer m.seen.PhoneClose(c.name)
+	}
 	c.close(store.CloseError)
 	m.mu.Lock()
 	if m.conns[c.name] == c {
@@ -225,7 +228,6 @@ func (m *Manager) abandon(ctx context.Context, c *conn, opened bool) {
 	}
 	if opened {
 		m.rec.PhoneConnClose(store.CloseError)
-		m.seen.PhoneClose(c.name)
 	}
 }
 

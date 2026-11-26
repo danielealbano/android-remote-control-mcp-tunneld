@@ -271,6 +271,49 @@ func TestRegister_TellsTheSeenTrackerWhenThePhoneConnectsAndLeaves(t *testing.T)
 	}
 }
 
+func TestRegister_SeenTrackerGetsOneCloseForEveryOpen(t *testing.T) {
+	t.Parallel()
+	newManager := func(fr *fakeRouter, seen *recSeen) *Manager {
+		return NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+	}
+	start := func(t *testing.T, m *Manager) func() {
+		t.Helper()
+		c := newConn("abc")
+		ctx, cancel := context.WithCancel(context.Background())
+		c.cancel = cancel
+		teardown, err := m.register(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go m.heartbeatLoop(ctx, c)
+		return teardown
+	}
+	t.Run("a failed bind reports nothing", func(t *testing.T) {
+		t.Parallel()
+		fr, seen := newFakeRouter(), &recSeen{}
+		fr.bindErr = errors.New("valkey down")
+		if _, err := newManager(fr, seen).register(context.Background(), newConn("abc")); err == nil {
+			t.Fatal("register must fail when the bind fails")
+		}
+		if got := seen.got(); len(got) != 0 {
+			t.Fatalf("a phone whose bind failed was never connected, got %v", got)
+		}
+	})
+	t.Run("a superseded connection still reports its close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := newManager(newFakeRouter(), seen)
+		first := start(t, m)
+		second := start(t, m)
+		first()
+		second()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "open abc", "close abc", "close abc"}) {
+			t.Fatalf("every connection must be reported open and closed once, got %v", got)
+		}
+	})
+}
+
 type teardownCtxKey struct{}
 
 type closedCtxState struct {
