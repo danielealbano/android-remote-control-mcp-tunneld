@@ -106,7 +106,9 @@ type Edge struct {
 	routed  atomic.Int64
 	now     func() time.Time
 
-	wg sync.WaitGroup
+	wgMu     sync.Mutex
+	stopping bool
+	wg       sync.WaitGroup
 
 	smu     sync.Mutex
 	streams map[*activeStream]struct{}
@@ -115,6 +117,9 @@ type Edge struct {
 // Wait blocks until every in-flight public-connection handler has returned or ctx expires (end events
 // must be enqueued before the conn-log queue is flushed).
 func (e *Edge) Wait(ctx context.Context) {
+	e.wgMu.Lock()
+	e.stopping = true
+	e.wgMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		defer report.Crash(ctx, e.cfg.Logger, "public handlers drain")
