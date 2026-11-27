@@ -34,7 +34,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.URL.Query().Get("continuation-token") == "" {
-			write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>rejected-enroll/a.json</Key><LastModified>2026-11-06T10:00:00.000Z</LastModified></Contents></ListBucketResult>`)
+			write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>rejected-enroll/a.json</Key><LastModified>2026-11-06T10:00:00.000Z</LastModified><ETag>&quot;etag-a&quot;</ETag></Contents></ListBucketResult>`)
 			return
 		}
 		write(http.StatusOK, `<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>rejected-enroll/b.json</Key></Contents></ListBucketResult>`)
@@ -79,7 +79,7 @@ func TestS3_ListFollowsEveryPage(t *testing.T) {
 	}
 }
 
-func TestS3_ListObjectsCarriesTheLastWriteTime(t *testing.T) {
+func TestS3_ListObjectsCarriesTheLastWriteTimeAndETag(t *testing.T) {
 	t.Parallel()
 	b, _ := newTestBucket(t)
 	objs, err := b.ListObjects(context.Background(), "rejected-enroll/")
@@ -87,14 +87,14 @@ func TestS3_ListObjectsCarriesTheLastWriteTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []bucket.Object{
-		{Key: "rejected-enroll/a.json", LastModified: time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)},
+		{Key: "rejected-enroll/a.json", LastModified: time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC), ETag: `"etag-a"`},
 		{Key: "rejected-enroll/b.json"},
 	}
 	if len(objs) != len(want) {
 		t.Fatalf("objects = %v, want %v", objs, want)
 	}
 	for i := range want {
-		if objs[i].Key != want[i].Key || !objs[i].LastModified.Equal(want[i].LastModified) {
+		if objs[i].Key != want[i].Key || !objs[i].LastModified.Equal(want[i].LastModified) || objs[i].ETag != want[i].ETag {
 			t.Fatalf("objects = %v, want %v", objs, want)
 		}
 	}

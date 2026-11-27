@@ -1,0 +1,13 @@
+[Unit]
+Description=Count the active users for the dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tunneld/tunneld.env
+ExecStart=/usr/local/sbin/arc-active-users
+StateDirectory=arc-active-users
+StateDirectoryMode=0700
+TimeoutStartSec=120
+NoNewPrivileges=yes

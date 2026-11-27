@@ -59,6 +59,7 @@ func New(cfg Config) *S3 {
 type Object struct {
 	Key          string
 	LastModified time.Time
+	ETag         string
 }
 
 func (b *S3) List(ctx context.Context, prefix string) ([]string, error) {
@@ -82,7 +83,7 @@ func (b *S3) ListObjects(ctx context.Context, prefix string) ([]Object, error) {
 			return nil, fmt.Errorf("list %s: %w", prefix, err)
 		}
 		for _, obj := range page.Contents {
-			objs = append(objs, Object{Key: aws.ToString(obj.Key), LastModified: aws.ToTime(obj.LastModified)})
+			objs = append(objs, Object{Key: aws.ToString(obj.Key), LastModified: aws.ToTime(obj.LastModified), ETag: aws.ToString(obj.ETag)})
 		}
 	}
 	return objs, nil

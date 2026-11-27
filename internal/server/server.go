@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -163,6 +164,15 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 		defer dcancel()
 		connLogs.Drain(dctx)
 	}()
+	phonesSeen, err := store.NewPhonesSeen(ctx, filepath.Join(cfg.ConnLogDir, "phones-seen"), nodeID, st, logger)
+	if err != nil {
+		return fmt.Errorf("phones-seen list: %w", err)
+	}
+	defer func() {
+		dctx, dcancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+		defer dcancel()
+		phonesSeen.Drain(dctx)
+	}()
 
 	// Attestation verifier (fail-closed until the roots/status refreshers succeed; refreshers started
 	// on the errgroup below). A signer-allowlist load failure is a fatal configuration error.
@@ -217,7 +227,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	dialBacks := phoneconn.NewDialBacks(logger)
 	evictor := newSpliceEvictor(ctx, nodeID, reg, meshClient, logger)
 	phoneMgr := phoneconn.NewManager(phoneconn.Config{
-		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger, Closed: evictor,
+		Router: reg, Logs: connLogs, Recorder: rec, Logger: logger, Closed: evictor, Seen: phonesSeen,
 		NodeID: nodeID, NodeHost: nodeHost, NodeStart: nodeStart,
 		RouteTTL: cfg.RouteTTL,
 	})
@@ -457,6 +467,7 @@ func Run(ctx context.Context, cfg config.ServeCmd, logger *slog.Logger, version 
 	connLogs.Drain(sctx) // queued conn-log events (incl. server-shutdown end events) land
 	rec.FinalFlush()     // after ALL producers stopped — no late deltas lost (self-bounded)
 	rec.FlushCapLog()    // pending cap-hit summaries
+	phonesSeen.Drain(sctx)
 	if err := reg.DeregisterNode(sctx, nodeID); err != nil {
 		logger.Warn("could not remove this node from the node list; its entry expires on its own", "err", err)
 	}

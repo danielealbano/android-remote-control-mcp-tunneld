@@ -154,17 +154,17 @@
    }
   },
   {
-   "id": 3,
+   "id": 31,
    "type": "stat",
-   "title": "Public connections (total)",
-   "description": "",
+   "title": "Daily active users",
+   "description": "Phones (one per tunnel name) with a control connection in the last 24 hours, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 4,
-    "w": 6,
+    "w": 4,
     "x": 12,
     "y": 1
    },
@@ -175,8 +175,8 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(tunneld_public_connections{node=~\"$node\"})",
-     "legendFormat": "public",
+     "expr": "max(arc_active_users{window=\"24h\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "DAU",
      "instant": true,
      "range": false
     }
@@ -203,18 +203,18 @@
    }
   },
   {
-   "id": 4,
+   "id": 32,
    "type": "stat",
-   "title": "Active data streams (total)",
-   "description": "",
+   "title": "Weekly active users",
+   "description": "Phones (one per tunnel name) with a control connection in the last 7 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 4,
-    "w": 6,
-    "x": 18,
+    "w": 4,
+    "x": 16,
     "y": 1
    },
    "targets": [
@@ -224,8 +224,57 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "sum(tunneld_streams_active{node=~\"$node\"})",
-     "legendFormat": "streams",
+     "expr": "max(arc_active_users{window=\"7d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "WAU",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value_and_name",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 33,
+   "type": "stat",
+   "title": "Monthly active users",
+   "description": "Phones (one per tunnel name) with a control connection in the last 30 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_active_users{window=\"30d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "MAU",
      "instant": true,
      "range": false
     }
@@ -359,6 +408,132 @@
    }
   },
   {
+   "id": 34,
+   "type": "timeseries",
+   "title": "Active users",
+   "description": "DAU, WAU and MAU from the boxes over time: phones (one per tunnel name) with a control connection in the last 24 hours, 7 days and 30 days, rolling. Counted every 15 minutes; a gap means no node had a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 5
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_active_users{window=\"24h\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "DAU"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_active_users{window=\"7d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "WAU"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_active_users{window=\"30d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "MAU"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "Bandwidth per node (in + out)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 13
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum by (node) (rate(tunneld_bytes_total{node=~\"$node\"}[5m])) * 8",
+     "legendFormat": "{{node}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bps",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
    "id": 6,
    "type": "timeseries",
    "title": "Public connections",
@@ -371,7 +546,7 @@
     "h": 8,
     "w": 6,
     "x": 12,
-    "y": 5
+    "y": 13
    },
    "targets": [
     {
@@ -425,7 +600,7 @@
     "h": 8,
     "w": 6,
     "x": 18,
-    "y": 5
+    "y": 13
    },
    "targets": [
     {
@@ -441,60 +616,6 @@
    "fieldConfig": {
     "defaults": {
      "unit": "short",
-     "custom": {
-      "drawStyle": "line",
-      "lineWidth": 1,
-      "fillOpacity": 10,
-      "stacking": {
-       "mode": "none"
-      },
-      "showPoints": "never"
-     },
-     "min": 0
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom",
-     "showLegend": true
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   }
-  },
-  {
-   "id": 8,
-   "type": "timeseries",
-   "title": "Bandwidth per node (in + out)",
-   "description": "",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "prometheus"
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 24,
-    "x": 0,
-    "y": 13
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "prometheus"
-     },
-     "expr": "sum by (node) (rate(tunneld_bytes_total{node=~\"$node\"}[5m])) * 8",
-     "legendFormat": "{{node}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "bps",
      "custom": {
       "drawStyle": "line",
       "lineWidth": 1,

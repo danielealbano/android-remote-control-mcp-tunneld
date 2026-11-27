@@ -77,8 +77,8 @@ Run **one replica per host** (this single-host compose runs one). Durable state 
    `TUNNELD_S3_ENDPOINT` in `deploy/docker-compose.yml` (set to the local MinIO, `http://minio:9000`) at its
    endpoint, put its credentials and bucket in those three `.env` values, and **run a pre-go-live read-after-write probe**
    (PUT → GET → overwrite-PUT → GET returns the newest body; a GET of a missing key returns 404
-   `NoSuchKey`) — the name-claim protocol relies on it. Also set the two retention rules on that bucket once
-   (`tunnel-logs/` 90 days, `rejected-enroll/` 30 days); tunneld's credential needs only read, write and
+   `NoSuchKey`) — the name-claim protocol relies on it. Also set the three retention rules on that bucket once
+   (`tunnel-logs/` 90 days, `rejected-enroll/` 30 days, `phones-seen/` 35 days); tunneld's credential needs only read, write and
    delete on the objects plus list on the bucket (see `docs/PROJECT.md` §5). The local MinIO stays without
    rules.
 6. **Start**: `docker compose -f deploy/docker-compose.yml up -d`.

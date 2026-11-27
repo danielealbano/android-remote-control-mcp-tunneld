@@ -128,6 +128,59 @@ func TestS3Store_PutConnLogFile_UsesUncappedLogClient(t *testing.T) {
 	}
 }
 
+func TestS3Store_PutPhonesSeenFile(t *testing.T) {
+	t.Parallel()
+	const key = "phones-seen/2026/10/13/00000000000000aa.json"
+	payload := `{"schema":1,"node":"00000000000000aa","day":"2026-10-13","phones":{}}`
+	tests := []struct {
+		name    string
+		status  int
+		wantErr string
+	}{
+		{name: "uploaded through the uncapped log client", status: http.StatusOK},
+		{name: "refused by S3", status: http.StatusForbidden, wantErr: `store: put phones-seen file "` + key + `"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := newFakeS3Store(t, func(*http.Request, []byte) s3Reply {
+				t.Error("the capped general client must not carry phones-seen uploads")
+				return s3Reply{status: http.StatusInternalServerError}
+			})
+			var req *http.Request
+			var body []byte
+			st.logHTTP = doerFunc(func(r *http.Request) (*http.Response, error) {
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				req, body = r, raw
+				reply := ""
+				if tc.status != http.StatusOK {
+					reply = s3ErrorXML("AccessDenied")
+				}
+				return &http.Response{StatusCode: tc.status, Header: http.Header{"Content-Type": {"application/xml"}},
+					Body: io.NopCloser(strings.NewReader(reply)), Request: r}, nil
+			})
+			err := st.PutPhonesSeenFile(context.Background(), key, strings.NewReader(payload), int64(len(payload)))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("PutPhonesSeenFile error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if req.Method != http.MethodPut || req.URL.Path != "/test/"+key || req.ContentLength != int64(len(payload)) ||
+				req.Header.Get("Content-Type") != "application/json" || string(body) != payload {
+				t.Fatalf("PUT %s cl=%d type=%q body=%q, want PUT /test/%s cl=%d type=application/json body=%q",
+					req.URL.Path, req.ContentLength, req.Header.Get("Content-Type"), body, key, len(payload), payload)
+			}
+		})
+	}
+}
+
 type s3Reply struct {
 	status int
 	body   string

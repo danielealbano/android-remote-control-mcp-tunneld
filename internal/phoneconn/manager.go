@@ -41,6 +41,11 @@ type ConnClosedHook interface {
 	PhoneConnClosed(ctx context.Context, name, connID, reason string)
 }
 
+type SeenTracker interface {
+	PhoneOpen(name string)
+	PhoneClose(name string)
+}
+
 // conn is one live phone control connection.
 type conn struct {
 	name         string
@@ -74,6 +79,7 @@ type Manager struct {
 	logs      ConnLogStore
 	rec       Recorder
 	closed    ConnClosedHook
+	seen      SeenTracker
 	logger    *slog.Logger
 	nodeID    string
 	nodeHost  string
@@ -105,6 +111,7 @@ type Config struct {
 	Logs      ConnLogStore
 	Recorder  Recorder
 	Closed    ConnClosedHook
+	Seen      SeenTracker
 	Logger    *slog.Logger
 	NodeID    string
 	NodeHost  string
@@ -119,7 +126,7 @@ func NewManager(cfg Config) *Manager {
 		logger = slog.Default()
 	}
 	return &Manager{
-		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, closed: cfg.Closed, logger: logger,
+		router: cfg.Router, logs: cfg.Logs, rec: cfg.Recorder, closed: cfg.Closed, seen: cfg.Seen, logger: logger,
 		nodeID: cfg.NodeID, nodeHost: cfg.NodeHost, nodeStart: cfg.NodeStart, routeTTL: cfg.RouteTTL,
 		conns: map[string]*conn{}, now: time.Now,
 	}
@@ -177,10 +184,12 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 	}
 
 	m.rec.PhoneConnOpen()
+	m.seen.PhoneOpen(c.name)
 	opened = true
 	m.writeEvent(ctx, c, "start", "")
 
 	teardown := func() {
+		defer m.seen.PhoneClose(c.name)
 		c.close("phone-close") // cancel the conn ctx FIRST: no further heartbeat/self-heal can run
 		<-c.hbDone             // wait for the heartbeat loop (incl. an in-flight self-heal) to exit
 		m.mu.Lock()
@@ -203,6 +212,9 @@ func (m *Manager) register(ctx context.Context, c *conn) (func(), error) {
 }
 
 func (m *Manager) abandon(ctx context.Context, c *conn, opened bool) {
+	if opened {
+		defer m.seen.PhoneClose(c.name)
+	}
 	c.close(store.CloseError)
 	m.mu.Lock()
 	if m.conns[c.name] == c {

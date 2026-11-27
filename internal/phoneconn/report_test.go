@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func (panicHeaderWriter) WriteHeader(int) { panic("write header boom") }
 func newClosedHookManager(t *testing.T, fr *fakeRouter, routeTTL time.Duration) (*Handler, *Manager, *recordingClosedHook) {
 	t.Helper()
 	hook := &recordingClosedHook{fr: fr}
-	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, NodeID: "nodeA",
+	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, Seen: nopSeen{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: routeTTL})
 	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})
 	return h, m, hook
@@ -102,7 +103,7 @@ func TestServeControl_ReaderPanicClosesOnlyThatPhone(t *testing.T) {
 	t.Parallel()
 	fr := newFakeRouter()
 	hook := &recordingClosedHook{fr: fr}
-	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, NodeID: "nodeA",
+	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, Seen: nopSeen{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	h := NewHandler(HandlerConfig{DialBacks: NewDialBacks(tunneltest.Logger()), Manager: m, PingInterval: time.Hour, StreamPending: 4})
 	rep, tr := tunneltest.NewReporter(t, 0)
@@ -143,7 +144,8 @@ func TestRegister_PanicUndoesTheRegistration(t *testing.T) {
 	t.Parallel()
 	fr := newFakeRouter()
 	rec := &fakeRec{}
-	m := NewManager(Config{Router: fr, Logs: panicConnLogs{}, Recorder: rec, Closed: nopClosedHook{}, NodeID: "nodeA",
+	seen := &recSeen{}
+	m := NewManager(Config{Router: fr, Logs: panicConnLogs{}, Recorder: rec, Closed: nopClosedHook{}, Seen: seen, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	c := newConn("abcdef234567")
 	func() {
@@ -165,6 +167,9 @@ func TestRegister_PanicUndoesTheRegistration(t *testing.T) {
 	}
 	if rec.opens.Load() != rec.closes.Load() {
 		t.Fatalf("phone connection gauge opens = %d, closes = %d: want them balanced", rec.opens.Load(), rec.closes.Load())
+	}
+	if got := seen.got(); !slices.Equal(got, []string{"open abcdef234567", "close abcdef234567"}) {
+		t.Fatalf("an undone registration must report the phone as gone, got %v", got)
 	}
 }
 

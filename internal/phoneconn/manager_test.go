@@ -47,7 +47,7 @@ func TestHeartbeatLoop_LogsPersistentError(t *testing.T) {
 	fr.hbErr = errors.New("valkey unreachable")
 	buf := &syncBuf{}
 	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
+	m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: nopSeen{},
 		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 		RouteTTL: 30 * time.Millisecond, Logger: logger})
 	c := newConn("abc")
@@ -148,6 +148,35 @@ type nopClosedHook struct{}
 
 func (nopClosedHook) PhoneConnClosed(context.Context, string, string, string) {}
 
+type nopSeen struct{}
+
+func (nopSeen) PhoneOpen(string)  {}
+func (nopSeen) PhoneClose(string) {}
+
+type panicCloseRec struct{ fakeRec }
+
+func (*panicCloseRec) PhoneConnClose(string) { panic("gauge boom") }
+
+type recSeen struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *recSeen) PhoneOpen(name string)  { s.add("open " + name) }
+func (s *recSeen) PhoneClose(name string) { s.add("close " + name) }
+
+func (s *recSeen) add(call string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, call)
+}
+
+func (s *recSeen) got() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.calls)
+}
+
 type closedCall struct{ name, connID, reason string }
 
 type recordingClosedHook struct {
@@ -173,7 +202,7 @@ func newMgr(t *testing.T) (*Manager, *fakeRouter, *tunneltest.Store, *fakeRec) {
 	fr := newFakeRouter()
 	st := tunneltest.NewStore()
 	rec := &fakeRec{}
-	m := NewManager(Config{Router: fr, Logs: st, Recorder: rec, Closed: nopClosedHook{}, NodeID: "nodeA", NodeHost: "host-a",
+	m := NewManager(Config{Router: fr, Logs: st, Recorder: rec, Closed: nopClosedHook{}, Seen: nopSeen{}, NodeID: "nodeA", NodeHost: "host-a",
 		NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	return m, fr, st, rec
 }
@@ -224,6 +253,108 @@ func TestRegisterBindsAndLogsStart(t *testing.T) {
 	}
 }
 
+func TestRegister_TellsTheSeenTrackerWhenThePhoneConnectsAndLeaves(t *testing.T) {
+	t.Parallel()
+	seen := &recSeen{}
+	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: seen,
+		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+	c := newConn("abc")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	teardown, err := m.register(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seen.got(); !slices.Equal(got, []string{"open abc"}) {
+		t.Fatalf("a registered phone must be reported as connected, got %v", got)
+	}
+	go m.heartbeatLoop(ctx, c)
+	teardown()
+	if got := seen.got(); !slices.Equal(got, []string{"open abc", "close abc"}) {
+		t.Fatalf("the teardown must report the phone as gone, got %v", got)
+	}
+}
+
+func TestRegister_SeenTrackerGetsOneCloseForEveryOpen(t *testing.T) {
+	t.Parallel()
+	newManager := func(fr *fakeRouter, seen *recSeen) *Manager {
+		return NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+	}
+	start := func(t *testing.T, m *Manager) func() {
+		t.Helper()
+		c := newConn("abc")
+		ctx, cancel := context.WithCancel(context.Background())
+		c.cancel = cancel
+		teardown, err := m.register(ctx, c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go m.heartbeatLoop(ctx, c)
+		return teardown
+	}
+	t.Run("a failed bind reports nothing", func(t *testing.T) {
+		t.Parallel()
+		fr, seen := newFakeRouter(), &recSeen{}
+		fr.bindErr = errors.New("valkey down")
+		if _, err := newManager(fr, seen).register(context.Background(), newConn("abc")); err == nil {
+			t.Fatal("register must fail when the bind fails")
+		}
+		if got := seen.got(); len(got) != 0 {
+			t.Fatalf("a phone whose bind failed was never connected, got %v", got)
+		}
+	})
+	t.Run("a teardown that panics still reports the close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &panicCloseRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+		teardown := start(t, m)
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("the teardown must panic in the gauge")
+				}
+			}()
+			teardown()
+		}()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "close abc"}) {
+			t.Fatalf("a panicking teardown must still report the phone as gone, got %v", got)
+		}
+	})
+	t.Run("an undone registration that panics still reports the close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := NewManager(Config{Router: newFakeRouter(), Logs: panicConnLogs{}, Recorder: &panicCloseRec{}, Closed: nopClosedHook{}, Seen: seen,
+			NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("the registration must panic")
+				}
+			}()
+			if _, err := m.register(context.Background(), newConn("abc")); err != nil {
+				t.Errorf("register = %v", err)
+			}
+		}()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "close abc"}) {
+			t.Fatalf("an undone registration whose gauge panics must still report the phone as gone, got %v", got)
+		}
+	})
+	t.Run("a superseded connection still reports its close", func(t *testing.T) {
+		t.Parallel()
+		seen := &recSeen{}
+		m := newManager(newFakeRouter(), seen)
+		first := start(t, m)
+		second := start(t, m)
+		first()
+		second()
+		if got := seen.got(); !slices.Equal(got, []string{"open abc", "open abc", "close abc", "close abc"}) {
+			t.Fatalf("every connection must be reported open and closed once, got %v", got)
+		}
+	})
+}
+
 type teardownCtxKey struct{}
 
 type closedCtxState struct {
@@ -242,7 +373,7 @@ func (h ctxClosedHook) PhoneConnClosed(ctx context.Context, _, _, _ string) {
 func TestManager_TeardownRunsOnTheRequestContext(t *testing.T) {
 	t.Parallel()
 	hook := ctxClosedHook{got: make(chan closedCtxState, 1)}
-	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook,
+	m := NewManager(Config{Router: newFakeRouter(), Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, Seen: nopSeen{},
 		NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 	c := newConn("abc")
 	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), teardownCtxKey{}, "control request"))
@@ -459,7 +590,7 @@ func TestManager_ConcurrentSameNameBind_LocalMatchesValkey(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := tunneltest.NewStore()
-	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, Closed: nopClosedHook{}, NodeID: "nodeA",
+	m := NewManager(Config{Router: reg, Logs: st, Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: nopSeen{}, NodeID: "nodeA",
 		NodeHost: "host-a", NodeStart: "2026-08-19T00:00:00Z", RouteTTL: 30 * time.Second})
 
 	const name = "concurrent01"
@@ -558,7 +689,7 @@ func TestHeartbeatLoop_FailureLogging(t *testing.T) {
 				r.heal = tc.heal(cancel)
 			}
 			buf := &syncBuf{}
-			m := NewManager(Config{Router: r, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{},
+			m := NewManager(Config{Router: r, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: nopClosedHook{}, Seen: nopSeen{},
 				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z",
 				RouteTTL: 30 * time.Millisecond, Logger: slog.New(slog.NewTextHandler(buf, nil))})
 			c := newConn("abc")
@@ -686,7 +817,7 @@ func TestManager_Teardown_NotifiesClosedHook(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fr := newFakeRouter()
 			hook := &recordingClosedHook{fr: fr}
-			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook,
+			m := NewManager(Config{Router: fr, Logs: tunneltest.NewStore(), Recorder: &fakeRec{}, Closed: hook, Seen: nopSeen{},
 				NodeID: "nodeA", NodeHost: "host-a", NodeStart: "2026-08-18T00:00:00Z", RouteTTL: 30 * time.Second})
 			c := newConn("abc")
 			close(c.hbDone)

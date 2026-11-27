@@ -123,6 +123,20 @@ func (s *S3Store) PutConnLogFile(ctx context.Context, key string, body io.ReadSe
 	return nil
 }
 
+func (s *S3Store) PutPhonesSeenFile(ctx context.Context, key string, body io.ReadSeeker, size int64) error {
+	_, err := s.cli.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        &s.bucket,
+		Key:           aws.String(key),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String("application/json"),
+	}, func(o *s3.Options) { o.HTTPClient = s.logHTTP })
+	if err != nil {
+		return fmt.Errorf("store: put phones-seen file %q: %w", key, err)
+	}
+	return nil
+}
+
 // PutRejectedEnrollment writes one rejected-enrollment evidence object.
 func (s *S3Store) PutRejectedEnrollment(ctx context.Context, ev RejectedEnrollment) error {
 	body, err := json.Marshal(ev)

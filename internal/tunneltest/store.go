@@ -97,6 +97,18 @@ func (s *Store) PutConnLogFile(_ context.Context, _ string, body io.ReadSeeker, 
 	return nil
 }
 
+func (s *Store) PutPhonesSeenFile(_ context.Context, key string, body io.ReadSeeker, _ int64) error {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	var f store.PhonesSeenFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return fmt.Errorf("phones-seen file %s: %w", key, err)
+	}
+	return nil
+}
+
 // PutConnLog captures a connection-log event.
 func (s *Store) PutConnLog(_ context.Context, ev store.Event) error {
 	s.mu.Lock()
