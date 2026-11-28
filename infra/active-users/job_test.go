@@ -281,17 +281,15 @@ func TestJob_ListsWithoutAnETagAreAlwaysRead(t *testing.T) {
 func TestJob_NeverReadsListsOlderThanTheWindowBeforeTheLongest(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.st.putList(t, listKeyFor("2026/09/25", "aa"), `"old"`, map[string]time.Time{"gone": testNow.Add(-62 * 24 * time.Hour)})
-	edge := listKeyFor("2026/09/26", "aa")
-	e.st.putList(t, edge, `"edge"`, map[string]time.Time{"late": time.Date(2026, 9, 27, 0, 0, 30, 0, time.UTC)})
-	in := listKeyFor("2026/09/27", "aa")
-	e.st.putList(t, in, `"in"`, map[string]time.Time{"inside": testNow.Add(-60*24*time.Hour + time.Second)})
+	e.st.putList(t, listKeyFor("2026/09/26", "aa"), `"old"`, map[string]time.Time{"gone": testNow.Add(-61 * 24 * time.Hour)})
+	edge := listKeyFor("2026/09/27", "aa")
+	e.st.putList(t, edge, `"edge"`, map[string]time.Time{"early": testNow.Add(-60*24*time.Hour - time.Hour), "inside": testNow.Add(-60*24*time.Hour + time.Second)})
 	today := listKeyFor("2026/11/26", "aa")
 	e.st.putList(t, today, `"today"`, map[string]time.Time{"inside": testNow.Add(-time.Hour), "gone": testNow.Add(-time.Hour)})
 	if err := e.run(t); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.st.takeReads(); !slices.Equal(got, []string{edge, in, today}) {
+	if got := e.st.takeReads(); !slices.Equal(got, []string{edge, today}) {
 		t.Fatalf("only lists that can still hold a time in the last 60 days may be read, read %v", got)
 	}
 	if got, want := e.counts(t), wantCounts(2, 2, 2, 0, 0, 1); got != want {
@@ -405,6 +403,51 @@ func TestJob_SkipsWhatCannotBeCountedAndSaysSo(t *testing.T) {
 	}
 	if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
 		t.Fatalf("textfile = %q, want %q", got, want)
+	}
+}
+
+func TestJob_SkipsAListInAnotherFormatOrWithBadTimes(t *testing.T) {
+	t.Parallel()
+	const meta = `"node":"0a1b","day":"2026-11-26"`
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "another format", body: `{"schema":2,` + meta + `,"phones":{"bad":{"first":"2026-11-26T10:00:00Z","last":"2026-11-26T11:00:00Z"}}}`,
+			want: `msg="found a list of phones seen in another format, so it is not counted; it is read again on the next run" key=%s schema=2`},
+		{name: "no first time", body: `{"schema":1,` + meta + `,"phones":{"bad":{"last":"2026-11-26T11:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+		{name: "no last time", body: `{"schema":1,` + meta + `,"phones":{"bad":{"first":"2026-11-26T10:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+		{name: "last before first", body: `{"schema":1,` + meta + `,"phones":{"bad":{"first":"2026-11-26T11:00:00Z","last":"2026-11-26T10:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			bad := listKeyFor("2026/11/26", "aa")
+			e.st.mu.Lock()
+			e.st.objects[bad] = object{body: []byte(tc.body), etag: `"bad"`}
+			e.st.mu.Unlock()
+			e.st.putList(t, listKeyFor("2026/11/26", "bb"), `"ok"`, map[string]time.Time{"x": testNow.Add(-time.Hour)})
+			for range 2 {
+				if err := e.run(t); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := `level=WARN ` + fmt.Sprintf(tc.want, bad)
+			if got := strings.Count(e.log.String(), want); got != 2 {
+				t.Fatalf("the list must be warned about and not cached, so each run warns again; warned %d times; log = %q", got, e.log.String())
+			}
+			if !strings.Contains(e.log.String(), `lists_listed=2 lists_read=0 lists_skipped=1`) {
+				t.Fatalf("the second run must skip the list again and take the other from the cache; log = %q", e.log.String())
+			}
+			if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
+				t.Fatalf("textfile = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

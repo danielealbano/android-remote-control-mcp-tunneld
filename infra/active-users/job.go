@@ -22,6 +22,7 @@ import (
 const crashedMsg = "reading a list of phones seen crashed, so this run stops and neither the cache nor the dashboard file is updated"
 
 const (
+	listSchema     = 1
 	parallelReads  = 16
 	defaultTimeout = 100 * time.Second
 	day            = 24 * time.Hour
@@ -155,7 +156,7 @@ func (j *job) refresh(ctx context.Context, c cache, now time.Time) (cache, tally
 	if err != nil {
 		return cache{}, tally{}, fmt.Errorf("list the lists of phones seen: %w", err)
 	}
-	oldest := now.Truncate(day).Add(-2*windows[len(windows)-1].span - day)
+	oldest := now.Truncate(day).Add(-2 * windows[len(windows)-1].span)
 	next := cache{Schema: cacheSchema, Lists: map[string]cachedList{}}
 	var (
 		toRead []bucket.Object
@@ -239,6 +240,16 @@ func (j *job) read(ctx context.Context, o bucket.Object) (cachedList, bool, erro
 	if err := json.Unmarshal(body, &f); err != nil {
 		j.Logger.Warn("could not decode a list of phones seen, so it is not counted; it is read again on the next run", "key", o.Key, "err", err)
 		return cachedList{}, false, nil
+	}
+	if f.Schema != listSchema {
+		j.Logger.Warn("found a list of phones seen in another format, so it is not counted; it is read again on the next run", "key", o.Key, "schema", f.Schema)
+		return cachedList{}, false, nil
+	}
+	for name, s := range f.Phones {
+		if s.First.IsZero() || s.Last.Before(s.First) {
+			j.Logger.Warn("found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run", "key", o.Key, "phone", name)
+			return cachedList{}, false, nil
+		}
 	}
 	return cachedList{ETag: o.ETag, Phones: f.Phones}, true, nil
 }
