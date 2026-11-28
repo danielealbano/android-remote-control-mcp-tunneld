@@ -197,7 +197,7 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the lists
   of phones seen **63 days** (rule `phones-seen-expire`, prefix `phones-seen/`: the active-users count reads the
-  last 61 days and the rest is a margin; R2 counts the age from each list's last upload), the
+  last 60 days and the rest is a margin; R2 counts the age from each list's last upload), the
   attestation history **the last 10 per name** (tunneld deletes the older ones; no rule), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
   refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, the
@@ -308,11 +308,11 @@ node; a phone still connected across the start of a window counts in both window
 few minutes after tunneld's quarter-hour uploads, on one or two nodes; the runs share no state, so the nodes may
 run at the same minutes. Each node keeps a cache, `/var/lib/arc-active-users/cache.json` (mode 0600): the first and
 last time seen of every phone in each list it read, with the list's ETag. A run lists `phones-seen/` and reads, 16 at
-a time, only the lists whose day is at most 61 days back and that are new or whose ETag changed (a list without an
+a time, only the lists whose day is at most 60 days back and that are new or whose ETag changed (a list without an
 ETag is always read); a list no longer in the bucket drops out of the cache, and a missing, unreadable or undecodable
 cache, or one in another format, only means every list is read again (logged). An object under `phones-seen/` that is not a list, a list whose folder
-is not a real day, a list that cannot be decoded (not cached, so read and warned about again at the next run) and a
-list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
+is not a real day, a list that cannot be decoded, is in another format or has a phone whose first or last time is
+missing or out of order (not cached, so read and warned about again at the next run) and a list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
 failed save is logged and only makes the next run read the lists again; a save not flushed to disk is logged too,
 as a crash could then lose it) and rewrites the node_exporter textfile
 `arc_active_users.prom` with `arc_active_users{window="24h"|"7d"|"30d"}`,
