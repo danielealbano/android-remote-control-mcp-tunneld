@@ -155,7 +155,7 @@ MUST NOT be relaxed without explicit user direction.
   Name uniqueness is the **Valkey claim lock**: `SET lock:claim:{name} NX EX` (taken → new name; never
   released; TTL `--registry-claim-settle` > the claim deadline) → GET-absent → PUT the record, all under one
   `--registry-claim-timeout` deadline started before the lock, SDK retries disabled. Retention (logs 90d, rejected-enroll
-  30d, phones seen 35d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
+  30d, phones seen 63d) is a one-time lifecycle setup on the bucket — tunneld never touches bucket configuration (see
   `docs/PROJECT.md` §5). Connection logs are only SPOOLED on the node
   (`--conn-log-dir`, one process per directory) until uploaded — a transient buffer, not a store; so are the
   lists of phones seen in its `phones-seen/` subdirectory.
@@ -314,7 +314,7 @@ The `Makefile` is the authoritative command surface:
 - `make refused-apps` — `bin/arc-refused-apps`, the daily refused-apps report (`docs/PROJECT.md` §6)
 - `make registered-phones` — `bin/arc-registered-phones`, the hourly count behind the overview's Phones registered box (`docs/PROJECT.md` §6)
 - `make busy-clients` — `bin/arc-busy-clients`, the hourly Telegram alert on client addresses with unusually many connections (`docs/PROJECT.md` §6)
-- `make active-users` — `bin/arc-active-users`, the 15-minute count behind the overview's DAU / WAU / MAU boxes (`docs/PROJECT.md` §6)
+- `make active-users` — `bin/arc-active-users`, the 15-minute count behind the overview's DAU / WAU / MAU and RDAU / RWAU / RMAU boxes (`docs/PROJECT.md` §6)
 - `make tunnel-app` / `make soak-app` — run the app's JVM unit tests (`testDebugUnitTest`) and build its APK fixture (into `fixtures/tunnel-app/` / `fixtures/soak-app/`); `make soak-client` — the soak load client (`docs/PROJECT.md` §7)
 
 There is NO dotenv convention for tests in this repo: unit tests are self-contained (miniredis,
