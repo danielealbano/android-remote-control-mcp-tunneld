@@ -104,11 +104,16 @@ func (f *fakeStore) Get(ctx context.Context, key string) ([]byte, error) {
 
 func (f *fakeStore) putList(t *testing.T, key, etag string, last map[string]time.Time) {
 	t.Helper()
-	pf := store.PhonesSeenFile{Schema: 1, Node: "0a1b", Day: "2026-11-26", Phones: map[string]store.PhoneSeen{}}
+	phones := map[string]store.PhoneSeen{}
 	for name, at := range last {
-		pf.Phones[name] = store.PhoneSeen{First: at.Add(-time.Minute), Last: at}
+		phones[name] = store.PhoneSeen{First: at.Add(-time.Minute), Last: at}
 	}
-	body, err := json.Marshal(pf)
+	f.putSpans(t, key, etag, phones)
+}
+
+func (f *fakeStore) putSpans(t *testing.T, key, etag string, phones map[string]store.PhoneSeen) {
+	t.Helper()
+	body, err := json.Marshal(store.PhonesSeenFile{Schema: 1, Node: "0a1b", Day: "2026-11-26", Phones: phones})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,8 +164,11 @@ func (e env) counts(t *testing.T) string {
 	return string(got)
 }
 
-func wantCounts(dau, wau, mau int) string {
-	return metrics(map[string]int{"24h": dau, "7d": wau, "30d": mau}, testNow)
+func wantCounts(dau, wau, mau, rdau, rwau, rmau int) string {
+	return metrics(counts{
+		active:    map[string]int{"24h": dau, "7d": wau, "30d": mau},
+		recurring: map[string]int{"24h": rdau, "7d": rwau, "30d": rmau},
+	}, testNow)
 }
 
 func listKeyFor(day, node string) string {
@@ -178,11 +186,39 @@ func TestJob_CountsEachUserOnceInEachRollingWindow(t *testing.T) {
 	if err := e.run(t); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := e.counts(t), wantCounts(3, 5, 6); got != want {
+	if got, want := e.counts(t), wantCounts(3, 5, 6, 2, 0, 0); got != want {
 		t.Fatalf("textfile = %q, want %q (each user once, the window start excluded)", got, want)
 	}
-	if !strings.Contains(e.log.String(), `msg="counted the active users for the dashboard" dau=3 wau=5 mau=6 lists_listed=5 lists_read=5 lists_skipped=0`) {
+	if !strings.Contains(e.log.String(), `msg="counted the active users for the dashboard" dau=3 wau=5 mau=6 rdau=2 rwau=0 rmau=0 lists_listed=5 lists_read=5 lists_skipped=0`) {
 		t.Fatalf("the count must be logged; log = %q", e.log.String())
+	}
+}
+
+func TestJob_CountsRecurringUsersSeenInTheWindowAndTheOneBefore(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ago := func(d time.Duration) store.PhoneSeen {
+		return store.PhoneSeen{First: testNow.Add(-d - time.Minute), Last: testNow.Add(-d)}
+	}
+	e.st.putSpans(t, listKeyFor("2026/11/26", "aa"), `"1"`, map[string]store.PhoneSeen{
+		"daily": ago(time.Hour), "weekly": ago(time.Hour), "edgeIn": ago(time.Hour), "edgeOut": ago(time.Hour), "nodes": ago(time.Hour), "new": ago(time.Hour),
+	})
+	e.st.putSpans(t, listKeyFor("2026/11/25", "aa"), `"2"`, map[string]store.PhoneSeen{
+		"daily":    ago(30 * time.Hour),
+		"left":     ago(30 * time.Hour),
+		"edgeIn":   {First: testNow.Add(-24 * time.Hour), Last: testNow.Add(-24 * time.Hour)},
+		"spanning": {First: time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC), Last: time.Date(2026, 11, 25, 23, 59, 59, 0, time.UTC)},
+	})
+	e.st.putSpans(t, listKeyFor("2026/11/24", "aa"), `"3"`, map[string]store.PhoneSeen{"edgeOut": {First: testNow.Add(-49 * time.Hour), Last: testNow.Add(-48 * time.Hour)}})
+	e.st.putSpans(t, listKeyFor("2026/11/24", "bb"), `"4"`, map[string]store.PhoneSeen{"nodes": ago(40 * time.Hour)})
+	e.st.putSpans(t, listKeyFor("2026/11/16", "aa"), `"5"`, map[string]store.PhoneSeen{"weekly": ago(10 * 24 * time.Hour)})
+	e.st.putSpans(t, listKeyFor("2026/11/06", "aa"), `"6"`, map[string]store.PhoneSeen{"monthly": ago(20 * 24 * time.Hour)})
+	e.st.putSpans(t, listKeyFor("2026/10/12", "aa"), `"7"`, map[string]store.PhoneSeen{"monthly": ago(45 * 24 * time.Hour)})
+	if err := e.run(t); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := e.counts(t), wantCounts(7, 8, 9, 4, 1, 1); got != want {
+		t.Fatalf("textfile = %q, want %q (recurring = seen in the window and in the window of the same length before it, on any node; the earlier window ends at the later one's start)", got, want)
 	}
 }
 
@@ -214,7 +250,7 @@ func TestJob_ReadsOnlyNewOrChangedListsAndForgetsRemovedOnes(t *testing.T) {
 	if got := e.st.takeReads(); !slices.Equal(got, []string{a}) {
 		t.Fatalf("only the changed list may be read, read %v", got)
 	}
-	if got, want := e.counts(t), wantCounts(2, 2, 2); got != want {
+	if got, want := e.counts(t), wantCounts(2, 2, 2, 0, 0, 0); got != want {
 		t.Fatalf("a list gone from the bucket must stop counting: textfile = %q, want %q", got, want)
 	}
 	raw, err := os.ReadFile(e.cache)
@@ -242,21 +278,21 @@ func TestJob_ListsWithoutAnETagAreAlwaysRead(t *testing.T) {
 	}
 }
 
-func TestJob_NeverReadsListsOlderThanTheLongestWindow(t *testing.T) {
+func TestJob_NeverReadsListsOlderThanTheWindowBeforeTheLongest(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.st.putList(t, listKeyFor("2026/10/25", "aa"), `"old"`, map[string]time.Time{"gone": testNow.Add(-32 * 24 * time.Hour)})
-	edge := listKeyFor("2026/10/26", "aa")
-	e.st.putList(t, edge, `"edge"`, map[string]time.Time{"late": time.Date(2026, 10, 27, 0, 0, 30, 0, time.UTC)})
-	in := listKeyFor("2026/10/27", "aa")
-	e.st.putList(t, in, `"in"`, map[string]time.Time{"inside": testNow.Add(-30*24*time.Hour + time.Second)})
+	e.st.putList(t, listKeyFor("2026/09/26", "aa"), `"old"`, map[string]time.Time{"gone": testNow.Add(-61 * 24 * time.Hour)})
+	edge := listKeyFor("2026/09/27", "aa")
+	e.st.putList(t, edge, `"edge"`, map[string]time.Time{"early": testNow.Add(-60*24*time.Hour - time.Hour), "inside": testNow.Add(-60*24*time.Hour + time.Second)})
+	today := listKeyFor("2026/11/26", "aa")
+	e.st.putList(t, today, `"today"`, map[string]time.Time{"inside": testNow.Add(-time.Hour), "gone": testNow.Add(-time.Hour)})
 	if err := e.run(t); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.st.takeReads(); !slices.Equal(got, []string{edge, in}) {
-		t.Fatalf("only lists that can still hold a time in the last 30 days may be read, read %v", got)
+	if got := e.st.takeReads(); !slices.Equal(got, []string{edge, today}) {
+		t.Fatalf("only lists that can still hold a time in the last 60 days may be read, read %v", got)
 	}
-	if got, want := e.counts(t), wantCounts(0, 0, 1); got != want {
+	if got, want := e.counts(t), wantCounts(2, 2, 2, 0, 0, 1); got != want {
 		t.Fatalf("textfile = %q, want %q", got, want)
 	}
 }
@@ -270,7 +306,9 @@ func TestJob_ABrokenCacheIsRebuiltFromTheBucket(t *testing.T) {
 	}{
 		{name: "not JSON", cache: "{", want: `msg="could not decode this node's cache, so every list of phones seen is read from the bucket again"`},
 		{name: "another format", cache: `{"schema":9,"lists":{}}`, want: `msg="this node's cache has another format, so every list of phones seen is read from the bucket again" cache_file=`},
-		{name: "no lists", cache: `{"schema":1}`, want: `msg="this node's cache has another format, so every list of phones seen is read from the bucket again" cache_file=`},
+		{name: "no lists", cache: `{"schema":2}`, want: `msg="this node's cache has another format, so every list of phones seen is read from the bucket again" cache_file=`},
+		{name: "the format without first-seen times", cache: `{"schema":1,"lists":{"` + listKeyFor("2026/11/26", "aa") + `":{"etag":"\"1\"","last":{"x":"2026-11-26T11:00:00Z"}}}}`,
+			want: `msg="this node's cache has another format, so every list of phones seen is read from the bucket again" cache_file=`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,7 +324,7 @@ func TestJob_ABrokenCacheIsRebuiltFromTheBucket(t *testing.T) {
 			if !strings.Contains(e.log.String(), tc.want) {
 				t.Fatalf("the broken cache must be logged; log = %q", e.log.String())
 			}
-			if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+			if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
 				t.Fatalf("textfile = %q, want %q", got, want)
 			}
 		})
@@ -311,7 +349,7 @@ func TestJob_AnUnreadableCacheIsRebuiltFromTheBucket(t *testing.T) {
 			t.Fatalf("log must contain %q; log = %q", want, e.log.String())
 		}
 	}
-	if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+	if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
 		t.Fatalf("textfile = %q, want %q", got, want)
 	}
 }
@@ -325,7 +363,7 @@ func TestJob_FirstRunSaysItHasNoCache(t *testing.T) {
 	if !strings.Contains(e.log.String(), `level=INFO msg="this node has no cache yet, so every list of phones seen is read from the bucket"`) {
 		t.Fatalf("the first run must say why it reads everything; log = %q", e.log.String())
 	}
-	if got, want := e.counts(t), wantCounts(0, 0, 0); got != want {
+	if got, want := e.counts(t), wantCounts(0, 0, 0, 0, 0, 0); got != want {
 		t.Fatalf("no lists must count zero users: textfile = %q, want %q", got, want)
 	}
 }
@@ -363,8 +401,53 @@ func TestJob_SkipsWhatCannotBeCountedAndSaysSo(t *testing.T) {
 	if got := strings.Count(log, `msg="could not decode a list of phones seen`); got != 2 {
 		t.Fatalf("an undecodable list must not be cached, so each run warns again; warned %d times", got)
 	}
-	if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+	if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
 		t.Fatalf("textfile = %q, want %q", got, want)
+	}
+}
+
+func TestJob_SkipsAListInAnotherFormatOrWithBadTimes(t *testing.T) {
+	t.Parallel()
+	const meta = `"node":"0a1b","day":"2026-11-26"`
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "another format", body: `{"schema":2,` + meta + `,"phones":{"bad":{"first":"2026-11-26T10:00:00Z","last":"2026-11-26T11:00:00Z"}}}`,
+			want: `msg="found a list of phones seen in another format, so it is not counted; it is read again on the next run" key=%s schema=2`},
+		{name: "no first time", body: `{"schema":1,` + meta + `,"phones":{"bad":{"last":"2026-11-26T11:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+		{name: "no last time", body: `{"schema":1,` + meta + `,"phones":{"bad":{"first":"2026-11-26T10:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+		{name: "last before first", body: `{"schema":1,` + meta + `,"phones":{"bad":{"first":"2026-11-26T11:00:00Z","last":"2026-11-26T10:00:00Z"}}}`,
+			want: `msg="found a list of phones seen with a phone whose first or last time is missing or out of order, so the list is not counted; it is read again on the next run" key=%s phone=bad`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			bad := listKeyFor("2026/11/26", "aa")
+			e.st.mu.Lock()
+			e.st.objects[bad] = object{body: []byte(tc.body), etag: `"bad"`}
+			e.st.mu.Unlock()
+			e.st.putList(t, listKeyFor("2026/11/26", "bb"), `"ok"`, map[string]time.Time{"x": testNow.Add(-time.Hour)})
+			for range 2 {
+				if err := e.run(t); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := `level=WARN ` + fmt.Sprintf(tc.want, bad)
+			if got := strings.Count(e.log.String(), want); got != 2 {
+				t.Fatalf("the list must be warned about and not cached, so each run warns again; warned %d times; log = %q", got, e.log.String())
+			}
+			if !strings.Contains(e.log.String(), `lists_listed=2 lists_read=0 lists_skipped=1`) {
+				t.Fatalf("the second run must skip the list again and take the other from the cache; log = %q", e.log.String())
+			}
+			if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
+				t.Fatalf("textfile = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -448,7 +531,7 @@ func TestJob_CacheSaveProblemsStillUpdateTheDashboard(t *testing.T) {
 			if want := fmt.Sprintf(tc.wantLog, e.cache); !strings.Contains(e.log.String(), want) {
 				t.Fatalf("log must contain %q; log = %q", want, e.log.String())
 			}
-			if got, want := e.counts(t), wantCounts(1, 1, 1); got != want {
+			if got, want := e.counts(t), wantCounts(1, 1, 1, 0, 0, 0); got != want {
 				t.Fatalf("textfile = %q, want %q", got, want)
 			}
 			if _, err := os.Stat(e.cache); (err == nil) != tc.saved {

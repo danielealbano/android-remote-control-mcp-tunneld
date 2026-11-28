@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
+
+	"github.com/danielealbano/android-remote-control-mcp-tunneld/internal/store"
 )
 
-const cacheSchema = 1
+const cacheSchema = 2
 
 type cache struct {
 	Schema int                   `json:"schema"`
@@ -16,8 +17,8 @@ type cache struct {
 }
 
 type cachedList struct {
-	ETag string               `json:"etag"`
-	Last map[string]time.Time `json:"last"`
+	ETag   string                     `json:"etag"`
+	Phones map[string]store.PhoneSeen `json:"phones"`
 }
 
 func (j *job) loadCache() cache {

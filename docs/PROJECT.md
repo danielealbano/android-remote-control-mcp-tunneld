@@ -196,8 +196,8 @@ DROP-derived ban file and the DB-IP CSV fresh (atomic `mv` handoff).
   `s3:ListBucket` on the bucket, without which a missing key answers 403 instead of 404): name registry
   **indefinite**, connection logs **90 days** (rule `tunnel-logs-expire`, prefix `tunnel-logs/`),
   rejected-enrollment evidence **30 days** (rule `rejected-enroll-expire`, prefix `rejected-enroll/`), the lists
-  of phones seen **35 days** (rule `phones-seen-expire`, prefix `phones-seen/`: the active-users count reads the
-  last 31 days and the rest is a margin; R2 counts the age from each list's last upload), the
+  of phones seen **63 days** (rule `phones-seen-expire`, prefix `phones-seen/`: the active-users count reads the
+  last 60 days and the rest is a margin; R2 counts the age from each list's last upload), the
   attestation history **the last 10 per name** (tunneld deletes the older ones; no rule), tunnel
   content **never** (it is opaque and never stored). The bundled compose stack (local dev) sets no rules. The
   refused-apps report (§6) keeps its permanent list in the same bucket as `refused-apps/attempts.json`, the
@@ -235,7 +235,7 @@ exporter targets), host textfile metrics `wireguard_peer_latest_handshake_timest
 `wireguard_peer_{receive,transmit}_bytes_total`, `banlist_file_mtime_timestamp_seconds{file}` and
 `arc_refused_app_attempts` / `arc_refused_app_{first,last}_seen_timestamp_seconds{app,key,version,ip}` and
 `arc_registered_phones` / `arc_registered_phones_counted_timestamp_seconds` and
-`arc_active_users{window}` / `arc_active_users_counted_timestamp_seconds`, and — for
+`arc_active_users{window}` / `arc_recurring_active_users{window}` / `arc_active_users_counted_timestamp_seconds`, and — for
 Health — blackbox-exporter jobs `blackbox-enroll` / `blackbox-connect` (TLS probe of each node's public `:443`
 for the enroll / control host) and `blackbox-healthz` (each node's internal `/healthz`). `deploy/prometheus/` holds the scrape config and alert rules; the compose stack does not run
 Prometheus or Grafana.
@@ -301,21 +301,24 @@ runs it once (`--help` lists its settings).
 
 The active-users count (`infra/active-users/`, built with `make active-users`) fills the DAU, WAU and MAU boxes and
 the Active users chart of the tunneld overview: the phones (one per tunnel name) with a control connection in the
-last 24 hours, 7 days and 30 days, rolling. It reads tunneld's lists of phones seen (§5) and takes each phone's
-latest last-seen time across all of them. A systemd timer runs it every 15 minutes, at minutes 05, 20, 35 and 50, a
+last 24 hours, 7 days and 30 days, rolling. It also fills the RDAU, RWAU and RMAU boxes and the Recurring active users
+chart: the phones among those that also had one in the 24 hours, 7 days or 30 days before that window. It reads
+tunneld's lists of phones seen (§5) and takes the first and last time each phone was seen in each of them, on any
+node; a phone still connected across the start of a window counts in both windows. A systemd timer runs it every 15 minutes, at minutes 05, 20, 35 and 50, a
 few minutes after tunneld's quarter-hour uploads, on one or two nodes; the runs share no state, so the nodes may
-run at the same minutes. Each node keeps a cache, `/var/lib/arc-active-users/cache.json` (mode 0600): the last time
-seen of every phone in each list it read, with the list's ETag. A run lists `phones-seen/` and reads, 16 at a time,
-only the lists whose day is at most 31 days back and that are new or whose ETag changed (a list without an ETag is
-always read); a list no longer in the bucket drops out of the cache, and a missing, unreadable or undecodable cache
-only means every list is read again (logged). An object under `phones-seen/` that is not a list, a list whose folder
-is not a real day, a list that cannot be decoded (not cached, so read and warned about again at the next run) and a
-list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
+run at the same minutes. Each node keeps a cache, `/var/lib/arc-active-users/cache.json` (mode 0600): the first and
+last time seen of every phone in each list it read, with the list's ETag. A run lists `phones-seen/` and reads, 16 at
+a time, only the lists whose day is at most 60 days back and that are new or whose ETag changed (a list without an
+ETag is always read); a list no longer in the bucket drops out of the cache, and a missing, unreadable or undecodable
+cache, or one in another format, only means every list is read again (logged). An object under `phones-seen/` that is not a list, a list whose folder
+is not a real day, a list that cannot be decoded, is in another format or has a phone whose first or last time is
+missing or out of order (not cached, so read and warned about again at the next run) and a list removed between the listing and the read are not counted, and the run goes on. The run then saves the cache (a
 failed save is logged and only makes the next run read the lists again; a save not flushed to disk is logged too,
 as a crash could then lose it) and rewrites the node_exporter textfile
-`arc_active_users.prom` with `arc_active_users{window="24h"|"7d"|"30d"}` and the time of the count
+`arc_active_users.prom` with `arc_active_users{window="24h"|"7d"|"30d"}`,
+`arc_recurring_active_users{window="24h"|"7d"|"30d"}` and the time of the count
 (`arc_active_users_counted_timestamp_seconds`). A run that cannot list or read the bucket, or does not finish
-within 100 s, logs why and leaves the cache and the textfile as they were. The boxes and the chart show the largest
+within 100 s, logs why and leaves the cache and the textfile as they were. The boxes and the charts show the largest
 count across the nodes whose count is less than an hour old, so a count that stops being renewed drops off within an
 hour. The bucket settings come from tunneld's own `/etc/tunneld/tunneld.env` (`TUNNELD_S3_*`, an empty one is
 refused). `infra/active-users/install.sh` first checks the whole config file (a bad line or no node installs

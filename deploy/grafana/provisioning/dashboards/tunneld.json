@@ -156,15 +156,15 @@
   {
    "id": 31,
    "type": "stat",
-   "title": "Daily active users",
-   "description": "Phones (one per tunnel name) with a control connection in the last 24 hours, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "title": "DAU",
+   "description": "Daily active users: phones (one per tunnel name) with a control connection in the last 24 hours, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 4,
-    "w": 4,
+    "w": 2,
     "x": 12,
     "y": 1
    },
@@ -197,7 +197,7 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value_and_name",
+    "textMode": "value",
     "justifyMode": "auto",
     "orientation": "auto"
    }
@@ -205,16 +205,16 @@
   {
    "id": 32,
    "type": "stat",
-   "title": "Weekly active users",
-   "description": "Phones (one per tunnel name) with a control connection in the last 7 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "title": "WAU",
+   "description": "Weekly active users: phones (one per tunnel name) with a control connection in the last 7 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 4,
-    "w": 4,
-    "x": 16,
+    "w": 2,
+    "x": 14,
     "y": 1
    },
    "targets": [
@@ -246,7 +246,7 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value_and_name",
+    "textMode": "value",
     "justifyMode": "auto",
     "orientation": "auto"
    }
@@ -254,16 +254,16 @@
   {
    "id": 33,
    "type": "stat",
-   "title": "Monthly active users",
-   "description": "Phones (one per tunnel name) with a control connection in the last 30 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "title": "MAU",
+   "description": "Monthly active users: phones (one per tunnel name) with a control connection in the last 30 days, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
    },
    "gridPos": {
     "h": 4,
-    "w": 4,
-    "x": 20,
+    "w": 2,
+    "x": 16,
     "y": 1
    },
    "targets": [
@@ -295,7 +295,154 @@
     },
     "colorMode": "value",
     "graphMode": "none",
-    "textMode": "value_and_name",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 35,
+   "type": "stat",
+   "title": "RDAU",
+   "description": "Recurring daily active users: phones (one per tunnel name) with a control connection in the last 24 hours and in the 24 hours before them, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 2,
+    "x": 18,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"24h\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RDAU",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 36,
+   "type": "stat",
+   "title": "RWAU",
+   "description": "Recurring weekly active users: phones (one per tunnel name) with a control connection in the last 7 days and in the 7 days before them, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 2,
+    "x": 20,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"7d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RWAU",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
+    "justifyMode": "auto",
+    "orientation": "auto"
+   }
+  },
+  {
+   "id": 37,
+   "type": "stat",
+   "title": "RMAU",
+   "description": "Recurring monthly active users: phones (one per tunnel name) with a control connection in the last 30 days and in the 30 days before them, rolling. Counted every 15 minutes from tunneld's lists of phones seen by the active-users job (infra/active-users); empty when no node has a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 2,
+    "x": 22,
+    "y": 1
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"30d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RMAU",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "colorMode": "value",
+    "graphMode": "none",
+    "textMode": "value",
     "justifyMode": "auto",
     "orientation": "auto"
    }
@@ -418,7 +565,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 6,
     "x": 12,
     "y": 5
    },
@@ -449,6 +596,78 @@
      },
      "expr": "max(arc_active_users{window=\"30d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
      "legendFormat": "MAU"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 1,
+      "fillOpacity": 10,
+      "stacking": {
+       "mode": "none"
+      },
+      "showPoints": "never"
+     },
+     "min": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   }
+  },
+  {
+   "id": 38,
+   "type": "timeseries",
+   "title": "Recurring active users",
+   "description": "RDAU, RWAU and RMAU from the boxes over time: phones (one per tunnel name) with a control connection in the last 24 hours, 7 days and 30 days and in the window of the same length before it, rolling. Counted every 15 minutes; a gap means no node had a count newer than an hour. The node filter does not apply.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 5
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"24h\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RDAU"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"7d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RWAU"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "max(arc_recurring_active_users{window=\"30d\"} and on(instance) (time() - arc_active_users_counted_timestamp_seconds < 3600))",
+     "legendFormat": "RMAU"
     }
    ],
    "fieldConfig": {

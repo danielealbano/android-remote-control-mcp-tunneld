@@ -48,7 +48,7 @@ func execute(ctx context.Context, args []string, logger *slog.Logger, opts ...jo
 func parseArgs(c *cli, args []string) error {
 	p, err := kong.New(c,
 		kong.Name("arc-active-users"),
-		kong.Description("Counts the phones seen in the last 24 hours, 7 days and 30 days from tunneld's lists, for the dashboard."),
+		kong.Description("Counts the phones seen in the last 24 hours, 7 days and 30 days, and those also seen in the window of the same length before it, from tunneld's lists, for the dashboard."),
 	)
 	if err != nil {
 		return err

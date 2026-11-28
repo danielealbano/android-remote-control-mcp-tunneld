@@ -276,7 +276,7 @@ answer waits for whichever of the two finishes last. Name uniqueness: a candidat
 PUT the full record; the lock, the GET and the PUT run under one `--registry-claim-timeout`
 deadline started before the lock (SDK retries disabled; a failed or timed-out PUT abandons the name). The lock is
 never released and lives `--registry-claim-settle` (strictly > that deadline), so a timed-out PUT has landed or
-died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d, phones seen 35d) is a one-time lifecycle setup on the bucket
+died before the name can be claimed again. Retention (logs 90d, rejected-enroll 30d, phones seen 63d) is a one-time lifecycle setup on the bucket
 (`docs/PROJECT.md` §5); tunneld only gets, puts, lists and deletes objects.
 
 The lists of phones seen feed the active-users count (`docs/PROJECT.md` §6). Each node process keeps one list per
