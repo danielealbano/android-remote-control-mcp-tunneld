@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"sync"
 	"time"
 
@@ -129,7 +130,7 @@ func (j *job) update(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	counts := count(next, now)
+	n := count(next, now)
 	if err := j.saveCache(next); err != nil {
 		if errors.Is(err, atomicfile.ErrNotFlushed) {
 			j.Logger.Warn("saved this node's cache but could not flush it to disk, so a crash could lose it and the next run would then read the lists again", "cache_file", j.CacheFile, "err", err)
@@ -137,13 +138,14 @@ func (j *job) update(ctx context.Context) error {
 			j.Logger.Warn("could not save this node's cache, so the next run reads the lists again", "cache_file", j.CacheFile, "err", err)
 		}
 	}
-	if err := writeTextfile(j.write, j.Textfile, counts, j.now()); err != nil {
+	if err := writeTextfile(j.write, j.Textfile, n, j.now()); err != nil {
 		if !errors.Is(err, atomicfile.ErrNotFlushed) {
 			return fmt.Errorf("write the dashboard file: %w", err)
 		}
 		j.Logger.Warn("wrote this node's dashboard file but could not flush it to disk, so a crash could lose it until the next run", "textfile", j.Textfile, "err", err)
 	}
-	j.Logger.Info("counted the active users for the dashboard", "dau", counts["24h"], "wau", counts["7d"], "mau", counts["30d"],
+	j.Logger.Info("counted the active users for the dashboard", "dau", n.active["24h"], "wau", n.active["7d"], "mau", n.active["30d"],
+		"rdau", n.recurring["24h"], "rwau", n.recurring["7d"], "rmau", n.recurring["30d"],
 		"lists_listed", t.listed, "lists_read", t.read, "lists_skipped", t.skipped, "textfile", j.Textfile)
 	return nil
 }
@@ -153,7 +155,7 @@ func (j *job) refresh(ctx context.Context, c cache, now time.Time) (cache, tally
 	if err != nil {
 		return cache{}, tally{}, fmt.Errorf("list the lists of phones seen: %w", err)
 	}
-	oldest := now.Truncate(day).Add(-windows[len(windows)-1].span - day)
+	oldest := now.Truncate(day).Add(-2*windows[len(windows)-1].span - day)
 	next := cache{Schema: cacheSchema, Lists: map[string]cachedList{}}
 	var (
 		toRead []bucket.Object
@@ -238,32 +240,32 @@ func (j *job) read(ctx context.Context, o bucket.Object) (cachedList, bool, erro
 		j.Logger.Warn("could not decode a list of phones seen, so it is not counted; it is read again on the next run", "key", o.Key, "err", err)
 		return cachedList{}, false, nil
 	}
-	list := cachedList{ETag: o.ETag, Last: make(map[string]time.Time, len(f.Phones))}
-	for name, seen := range f.Phones {
-		list.Last[name] = seen.Last
-	}
-	return list, true, nil
+	return cachedList{ETag: o.ETag, Phones: f.Phones}, true, nil
 }
 
-func count(c cache, now time.Time) map[string]int {
-	latest := map[string]time.Time{}
+type counts struct {
+	active, recurring map[string]int
+}
+
+func count(c cache, now time.Time) counts {
+	seen := map[string][]store.PhoneSeen{}
 	for _, list := range c.Lists {
-		for name, last := range list.Last {
-			if last.After(latest[name]) {
-				latest[name] = last
-			}
+		for name, s := range list.Phones {
+			seen[name] = append(seen[name], s)
 		}
 	}
-	counts := make(map[string]int, len(windows))
+	n := counts{active: make(map[string]int, len(windows)), recurring: make(map[string]int, len(windows))}
 	for _, w := range windows {
-		from := now.Add(-w.span)
-		n := 0
-		for _, last := range latest {
-			if last.After(from) {
-				n++
+		from, before := now.Add(-w.span), now.Add(-2*w.span)
+		for _, spans := range seen {
+			if !slices.ContainsFunc(spans, func(s store.PhoneSeen) bool { return s.Last.After(from) }) {
+				continue
+			}
+			n.active[w.label]++
+			if slices.ContainsFunc(spans, func(s store.PhoneSeen) bool { return s.Last.After(before) && !s.First.After(from) }) {
+				n.recurring[w.label]++
 			}
 		}
-		counts[w.label] = n
 	}
-	return counts
+	return n
 }

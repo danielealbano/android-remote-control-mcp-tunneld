@@ -95,7 +95,7 @@ func TestExecute_CountsTheListsInTheBucket(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; logs %s", code, logs.String())
 	}
-	if got, err := os.ReadFile(textfile); err != nil || string(got) != wantCounts(1, 1, 1) {
+	if got, err := os.ReadFile(textfile); err != nil || string(got) != wantCounts(1, 1, 1, 0, 0, 0) {
 		t.Fatalf("textfile = %q, %v", got, err)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(textfile), "cache.json")); err != nil {
@@ -128,7 +128,7 @@ func TestExecute_AFailureLogsAndLeavesTheDashboardFileAsItWas(t *testing.T) {
 				t.Setenv(k, v)
 			}
 			textfile := filepath.Join(t.TempDir(), "arc_active_users.prom")
-			before := wantCounts(5, 6, 7)
+			before := wantCounts(5, 6, 7, 1, 2, 3)
 			if err := os.WriteFile(textfile, []byte(before), 0o644); err != nil {
 				t.Fatal(err)
 			}
